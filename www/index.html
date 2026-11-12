@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web-os</title>
+<style>
+  :root { color-scheme: dark; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #0b1016; color: #c7d3e0; }
+  main { width: min(52rem, 90vw); }
+  h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+       color: #74b8fc; margin: 0 0 1.5rem; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: .35rem .75rem .35rem 0; vertical-align: top; }
+  td:first-child { color: #7d8da0; white-space: nowrap; }
+  .ok   { color: #7ddc8a; }
+  .bad  { color: #ff7b72; }
+  .note { margin-top: 1.5rem; color: #7d8da0; max-width: 46rem; }
+  code { color: #e0c06a; }
+</style>
+</head>
+<body>
+<main>
+  <h1>web-os &mdash; boot preflight</h1>
+  <table id="checks"></table>
+  <p class="note" id="verdict"></p>
+</main>
+
+<script type="module">
+/* The boot gate.
+ *
+ * Nothing is loaded until the environment is proven. A kernel that silently degrades to a
+ * non-isolated context is the worst outcome available, because every benchmark downstream
+ * still reports a number — it just reports it about a different system.
+ *
+ * docs/CONSTRAINTS.md constraints 1-13 and 30-33 are what this screen enforces.
+ */
+
+const CHECKS = [
+  ['crossOriginIsolated', () => self.crossOriginIsolated === true,
+   'needs COOP: same-origin + COEP: require-corp. Run scripts/serve.py, not python -m http.server.'],
+  ['SharedArrayBuffer', () => typeof SharedArrayBuffer === 'function',
+   'the syscall channel is a SAB. Without it there is no kernel.'],
+  ['Atomics.wait', () => typeof Atomics?.wait === 'function',
+   'how a process parks. Note it throws on this thread by design — a window agent cannot block.'],
+  ['dedicated Worker', () => typeof Worker === 'function',
+   'a process is a Worker. Also the kernel.'],
+  ['OPFS', () => typeof navigator?.storage?.getDirectory === 'function',
+   'the filesystem backing store.'],
+  ['OffscreenCanvas', () => typeof OffscreenCanvas === 'function',
+   'transferred to a process as its window surface.'],
+  ['backdrop-filter', () => CSS.supports('backdrop-filter', 'blur(9px)'),
+   'Aero glass. Cosmetic — the kernel does not care.'],
+]
+
+const table = document.getElementById('checks')
+let fatal = 0
+
+for (const [name, probe, why] of CHECKS) {
+  let pass = false
+  try { pass = probe() === true } catch { pass = false }
+  const required = name !== 'backdrop-filter'
+  if (!pass && required) fatal++
+  const tr = table.insertRow()
+  tr.insertCell().textContent = name
+  const v = tr.insertCell()
+  v.textContent = pass ? 'present' : (required ? 'MISSING' : 'absent')
+  v.className = pass ? 'ok' : (required ? 'bad' : '')
+  tr.insertCell().textContent = pass ? '' : why
+}
+
+/* A sync access handle is the only synchronous storage on the web and only exists inside a
+ * dedicated worker, so it cannot be probed from here. Probe it where it has to work. */
+const workerProbe = await new Promise((resolve) => {
+  const src = `
+    self.onmessage = async () => {
+      const out = { isolated: self.crossOriginIsolated === true, sync: false, blocks: false }
+      try {
+        const root = await navigator.storage.getDirectory()
+        const fh = await root.getFileHandle('.preflight', { create: true })
+        const h = await fh.createSyncAccessHandle()
+        h.close(); await root.removeEntry('.preflight')
+        out.sync = true
+      } catch (e) { out.syncError = String(e && e.name || e) }
+      try {
+        const sab = new SharedArrayBuffer(8)
+        Atomics.wait(new Int32Array(sab), 0, 1, 0)   // 1 != 0, returns immediately
+        out.blocks = true
+      } catch (e) { out.blocksError = String(e && e.name || e) }
+      self.postMessage(out)
+    }`
+  const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }))
+  const w = new Worker(url, { type: 'module' })
+  const t = setTimeout(() => { w.terminate(); resolve({ timeout: true }) }, 4000)
+  w.onmessage = (e) => { clearTimeout(t); w.terminate(); URL.revokeObjectURL(url); resolve(e.data) }
+  w.onerror = () => { clearTimeout(t); w.terminate(); resolve({ error: true }) }
+  w.postMessage(0)
+})
+
+for (const [name, ok, why] of [
+  ['worker is isolated', workerProbe.isolated === true,
+   'a worker in a different agent cluster cannot share the kernel SAB.'],
+  ['OPFS sync handle', workerProbe.sync === true,
+   workerProbe.syncError || 'createSyncAccessHandle failed in a dedicated worker.'],
+  ['worker can block', workerProbe.blocks === true,
+   workerProbe.blocksError || 'Atomics.wait is unavailable where a process needs it.'],
+]) {
+  if (!ok) fatal++
+  const tr = table.insertRow()
+  tr.insertCell().textContent = name
+  const v = tr.insertCell()
+  v.textContent = ok ? 'present' : 'MISSING'
+  v.className = ok ? 'ok' : 'bad'
+  tr.insertCell().textContent = ok ? '' : why
+}
+
+const verdict = document.getElementById('verdict')
+if (fatal === 0) {
+  verdict.innerHTML = '<span class="ok">Environment is sufficient.</span> No kernel yet &mdash; '
+    + 'see <code>MILESTONES.md</code>. M0 is the next thing to build and the one that can '
+    + 'invalidate the plan.'
+} else {
+  verdict.innerHTML = `<span class="bad">${fatal} required capabilit${fatal === 1 ? 'y' : 'ies'} `
+    + 'missing. The kernel cannot boot.</span> This screen refusing to proceed is correct '
+    + 'behaviour: see <code>docs/CONSTRAINTS.md</code>, and the harness-honesty rule in '
+    + '<code>CLAUDE.md</code>.'
+}
+document.documentElement.dataset.preflight = fatal === 0 ? 'ok' : 'fail'
+</script>
+</body>
+</html>

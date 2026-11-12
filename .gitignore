@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+build/
+node_modules/
+.DS_Store
+
+# bench output: numbers belong in docs/ with their harness named, not committed raw
+bench/**/shot.png
+bench/**/results*.json
+*.log
