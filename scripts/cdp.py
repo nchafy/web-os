@@ -282,6 +282,19 @@ class Browser:
         chrome = find_chrome()
         if not chrome:
             raise CDPError("no Chrome or Chromium found")
+        try:
+            self._launch(chrome)
+        except BaseException as error:
+            # _await_port raises when Chrome dies before listening or never writes
+            # DevToolsActivePort. If that escapes __enter__, `with` never binds, __exit__ never
+            # runs, and the Chrome started here plus its temp profile are orphaned - measured as
+            # 12 showup-chrome processes at ppid 1 on this machine. Tear down what was already
+            # started, then re-raise unchanged.
+            self.__exit__(type(error), error, error.__traceback__)
+            raise
+        return self
+
+    def _launch(self, chrome: str) -> None:
         self._profile = Path(tempfile.mkdtemp(prefix="showup-chrome-"))
         self._process = subprocess.Popen(
             [
@@ -311,7 +324,6 @@ class Browser:
             stderr=subprocess.DEVNULL,
         )
         self.port = self._await_port()
-        return self
 
     def _await_port(self) -> int:
         """Read the debugging port Chrome writes to `DevToolsActivePort` once listening."""
