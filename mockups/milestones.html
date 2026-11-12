@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web-os — what's on screen at each milestone</title>
+<style>
+  :root { --ink:#1a2430; --dim:#6b7c8f; --line:#c3d0de; --bg:#eef3f8;
+          font: 13px/1.55 "Segoe UI", Selawik, system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin:0; display:grid; grid-template-columns:236px 1fr; height:100vh;
+         color:var(--ink); background:var(--bg); }
+  nav { background:#fff; border-right:1px solid var(--line); overflow-y:auto; padding:14px 0 40px; }
+  nav h1 { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim);
+           margin:0 16px 10px; font-weight:600; }
+  nav .grp { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:#9aabbd;
+             margin:16px 16px 6px; font-weight:600; }
+  nav button { display:block; width:100%; text-align:left; border:0; background:none;
+               padding:5px 16px; font:inherit; color:var(--ink); cursor:pointer;
+               border-left:3px solid transparent; }
+  nav button:hover { background:#f2f7fc; }
+  nav button[aria-current="true"] { background:#e3eefb; border-left-color:#2f7fd4; font-weight:600; }
+  nav button .d { display:block; font-size:11px; color:var(--dim); font-weight:400; }
+  main { overflow-y:auto; padding:22px 28px 60px; }
+  .head { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
+  .head h2 { margin:0; font-size:18px; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:9px; background:#d9e6f5; color:#2c5d8f; }
+  .tag.none { background:#e6e9ed; color:#6b7c8f; }
+  .lede { color:var(--dim); max-width:66ch; margin:7px 0 16px; }
+  .screen { border:1px solid #8fa4ba; border-radius:3px; overflow:hidden; position:relative;
+            height:384px; background:#1b2b1b; box-shadow:0 2px 10px rgba(20,40,70,.16); }
+  .screen.noui { background:#0d1117; }
+  .screen.desk { background:linear-gradient(170deg,#2d5c8a,#16324f 60%,#0e2338); }
+  .screen.aero { background:linear-gradient(168deg,#3a74ab,#1b4a78 52%,#0d2944); }
+  .screen.aero::before { content:''; position:absolute; width:330px; height:130px; right:-30px; top:28px;
+      background:radial-gradient(ellipse,#4f96cc 0%,transparent 70%); opacity:.5; }
+  .screen.aero::after { content:''; position:absolute; width:360px; height:150px; left:-50px; bottom:-10px;
+      background:radial-gradient(ellipse,#0a2038 0%,transparent 70%); opacity:.6; }
+  pre.term { margin:0; padding:10px 12px; color:#c9d6c9; background:transparent;
+             font:12px/1.5 ui-monospace,Menlo,monospace; white-space:pre-wrap; height:100%; overflow:auto; }
+  pre.term i { color:#7d8da0; font-style:normal; }
+  pre.term u { color:#ffd479; text-decoration:none; }
+  pre.term b { color:#8fe08f; }
+  .win { position:absolute; border-radius:6px 6px 3px 3px; overflow:hidden;
+         box-shadow:0 10px 26px rgba(0,0,0,.42), 0 0 0 1px rgba(255,255,255,.18); }
+  .win.plain { border-radius:2px; box-shadow:0 4px 14px rgba(0,0,0,.4), 0 0 0 1px #6a7f96; }
+  .cap { height:29px; display:flex; align-items:center; gap:7px; padding:0 5px 0 9px;
+         font-size:12px; color:#fff; text-shadow:0 1px 2px rgba(0,20,45,.75); }
+  .win.plain .cap { background:linear-gradient(#5a7fa8,#3f5f82); height:24px; text-shadow:none; }
+  .win.glass .cap { background:rgba(116,184,252,.30); backdrop-filter:blur(9px) saturate(1.3);
+                    border-bottom:1px solid rgba(255,255,255,.3); position:relative; }
+  .win.glass .cap::after { content:''; position:absolute; inset:0;
+      background:linear-gradient(rgba(255,255,255,.42),rgba(255,255,255,.04) 48%,rgba(255,255,255,0));
+      mix-blend-mode:plus-lighter; pointer-events:none; }
+  .cap .t { flex:1; font-weight:500; overflow:hidden; white-space:nowrap; }
+  .cap .bx { width:24px; height:17px; border-radius:3px; display:grid; place-items:center;
+             font-size:10px; background:rgba(255,255,255,.22); border:1px solid rgba(255,255,255,.4); }
+  .cap .bx.x { background:rgba(214,78,60,.85); }
+  .body { background:#f6f9fc; height:calc(100% - 29px); font-size:12px; overflow:hidden; position:relative; }
+  .win.plain .body { height:calc(100% - 24px); }
+  .body pre { margin:0; padding:8px 10px; font:11.5px/1.5 ui-monospace,Menlo,monospace;
+              color:#1f2b38; white-space:pre-wrap; }
+  .flat { position:absolute; inset:0; background:#22425f; opacity:.92; }
+  .tb { position:absolute; left:0; right:0; bottom:0; height:34px; display:flex; align-items:center;
+        gap:5px; padding:0 7px; background:rgba(20,46,74,.55); backdrop-filter:blur(11px) saturate(1.25);
+        border-top:1px solid rgba(255,255,255,.26); }
+  .orb { width:26px; height:26px; border-radius:50%; flex:none;
+         background:radial-gradient(circle at 34% 30%,#bfe4ff,#3f93d8 55%,#14507f);
+         box-shadow:0 0 0 1px rgba(255,255,255,.5), 0 1px 5px rgba(0,0,0,.5); }
+  .tbb { height:25px; border-radius:3px; display:grid; place-items:center; font-size:11px;
+         color:#eaf3fb; padding:0 9px; background:rgba(255,255,255,.14);
+         border:1px solid rgba(255,255,255,.26); }
+  .tbb.on { background:rgba(255,255,255,.3); }
+  .tbb.prog { background:linear-gradient(90deg,rgba(90,200,110,.75) 62%,rgba(255,255,255,.14) 62%); }
+  .tray { margin-left:auto; font-size:11px; color:#d6e6f5; }
+  .snap { position:absolute; left:0; top:0; width:50%; height:calc(100% - 34px);
+          background:rgba(140,200,255,.22); border:2px solid rgba(190,225,255,.75); border-radius:3px; }
+  .jump { position:absolute; bottom:36px; left:46px; width:182px; border-radius:6px;
+          background:rgba(28,56,86,.84); backdrop-filter:blur(12px);
+          border:1px solid rgba(255,255,255,.26); padding:5px 0; color:#e8f2fb; font-size:11.5px; }
+  .jump .h { font-size:10px; letter-spacing:.07em; text-transform:uppercase; color:#9cc0e0; padding:4px 11px; }
+  .jump .i { padding:4px 11px; }
+  .notes { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:16px; align-items:start; }
+  .card { background:#fff; border:1px solid var(--line); border-radius:4px; padding:11px 13px; }
+  .card h3 { margin:0 0 7px; font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--dim); }
+  .card ul { margin:0; padding-left:17px; }
+  .card li { margin-bottom:4px; }
+  .card.proof { border-left:3px solid #4a9b5e; }
+  .card.neg { border-left:3px solid #c7694f; }
+  code { font:11.5px ui-monospace,Menlo,monospace; background:#eaf0f7; padding:1px 4px; border-radius:3px; }
+  .foot { margin-top:20px; color:var(--dim); font-size:11.5px; max-width:74ch; }
+</style>
+</head>
+<body>
+<nav id="nav"><h1>web-os milestones</h1></nav>
+<main id="main"></main>
+<script type="module">
+/* Mockups of what is actually on screen at each milestone.
+ *
+ * The honest part: M0 through M4 have NO user interface. Five milestones, ~20 working days,
+ * and nothing to look at but harness output. That is exactly why M4a exists.
+ */
+const T = (s) => s.replace(/^\n/, '').replace(/\n\s*$/, '')
+const M = [
+ { id:'M0', grp:'Spine', t:'Prove the channel', d:'1 d · no UI', tag:'no UI',
+  lede:'A kernel worker, N process workers, three syscalls. The deliverable is a number, and that number decides whether the project is viable at all.',
+  screen:{kind:'noui',body:T(`
+$ bench/feasibility/run.py
+
+  crossOriginIsolated: true   hardwareConcurrency: 12
+  closed-loop saturation, no offered rate
+
+   N      p50      p95      p99     achieved concurrency
+   1    10.0us   25.0us   30.0us    1.00
+   4    11.2us   28.0us   41.0us    3.98
+  16    14.8us   38.0us  112.0us   15.91
+  64    47.0us  190.0us  410.0us   63.4
+ 128    96.0us  380.0us  870.0us  126.8
+
+  ACCEPT   p99 at N=16 is 112us   (bar: 500us)
+  negative control: +2ms kernel stall -> p99 2.1ms  FAILS as required`)},
+  real:['Kernel in a dedicated Worker','Process workers spawned <i>by the kernel</i> (nested)','SAB control words, futex handshake','getpid / write / nanosleep'],
+  proof:'Closed-loop at N ∈ {1,4,16,64,128}, achieved concurrency asserted — not just process count. Accept if p99 at N=16 &lt; 500 µs.',
+  neg:'Insert a 2 ms synchronous stall in the kernel handler — p99 must blow past the bar.',
+  warn:'Measured already on this machine: a nested-worker futex round trip is p50 10 µs / p95 25 / p99 30, max 840. See <code>bench/feasibility/</code>. What is unmeasured is contention, which is the whole point of M0.' },
+
+ { id:'M1', grp:'Spine', t:'Processes, signals, kill', d:'4 d · no UI', tag:'no UI',
+  lede:'The headline capability: a process spinning in an infinite loop with no syscalls dies when you end it. Still nothing on screen.',
+  screen:{kind:'noui',body:T(`
+$ scripts/check.py --only process
+
+  spawn/exit/waitpid/kill/sigaction/setpgid ....... ok
+  pid monotonic, never reused ..................... ok
+  129th spawn returns -EAGAIN ..................... ok
+  compute-bound process dies on End Process ...... ok   (2.04s drain)
+  kernel killed -> 30 parked procs return EIO .... ok   (no page reload)
+
+  negative control: SIGPEND check removed at syscall entry
+    ctrl-c during sleep ........................... FAILED as required`)},
+  real:['Process table, monotonic never-reused pids','Signals via the SAB control word','Finite re-arm interval + kernel heartbeat','Teardown split from reap (~2.2 s quarantine)'],
+  proof:'Four assertions. The subtle one: kill the kernel worker and every parked process returns <code>EIO</code> — <i>without</i> reloading the page, because a reload would hide the defect.',
+  neg:'Remove the SIGPEND check at syscall entry. Ctrl-C must stop working.' },
+
+ { id:'M2', grp:'Spine', t:'Filesystem on OPFS', d:'8 d · no UI', tag:'no UI',
+  lede:'The biggest milestone in the spine and the one where the most can silently go wrong. Journalled, with an fsck that refuses to reseed.',
+  screen:{kind:'noui',body:T(`
+$ scripts/check.py --only fs
+
+  10k files written, reload, bytes+modes intact ... ok   (boot 7.2ms)
+  two concurrent opens of one file ................ ok   (refcount 2)
+  fsync separate from write ....................... ok   (5us / 260us)
+
+  journal truncated mid-record:
+    fsck: superblock gen 412 slot 0, crc ok
+    fsck: replayed 1847 records, stopped at 1848 (bad crc)
+    fsck: DISCARDED TAIL: 3 records after 14:32:06
+    mounted rw                                      ok
+
+  superblock crc corrupted:
+    fsck: BAD SUPERBLOCK. mounting READ-ONLY.       ok   (did not reseed)
+
+  negative control: data-before-metadata ordering dropped
+    fsck reports corruption ....................... FAILED as required`)},
+  real:['In-memory inode table (stat 27 ns)','OPFS superblock + append-only journal','Flat blob dir, named by inode','inode→{handle,refcount} table','Boot-lock retry &gt; the 2.05 s abort grace'],
+  proof:'10k files survive reload. A torn journal <b>reports its discarded tail</b> rather than reseeding. Two concurrent opens of one file both succeed.',
+  neg:'Two stages. Drop the write ordering — fsck must report corruption. Then break the CRC check and confirm the torn-journal test <i>starts passing</i>; if it passes either way it was testing nothing.' },
+
+ { id:'M3', grp:'Spine', t:'/proc, /dev, mounts', d:'2 d · no UI', tag:'no UI',
+  lede:'About 120 lines, and the clearest demonstration that a process is a first-class object. Also where /dev/trace lands — measured at 4 ns a record, so always-on tracing costs 0.03% of a syscall.',
+  screen:{kind:'noui',body:T(`
+$ cat /proc/4/status
+Name:   sleep
+Pid:    4
+PPid:   2
+Pgid:   2
+State:  S (parked in Atomics.wait, syscall=nanosleep)
+Cred:   uid=1000 gid=1000
+FDs:    3
+Cwd:    /home/user
+
+$ ls /proc
+1  2  4  self
+$ kill 4 ; ls /proc
+1  2  self
+
+$ mount
+/       opfs     rw
+/usr    httpimg  ro
+/tmp    tmpfs    rw
+/proc   genfs    ro   (generated on read)
+/dev    genfs    rw
+
+$ strace -p 2
+  write(1, "hi\\n", 3)            = 3      <i>12us</i>
+  nanosleep(1000000000)          = 0      <i>1.0s</i>`)},
+  real:['Longest-prefix mount table','<code>/proc/&lt;pid&gt;/{status,cmdline,cwd,fd}</code>','/dev/{null,zero,random,trace}','<code>/dev/trace</code> ring — 4 ns/record, measured'],
+  proof:'<code>ls /proc</code> enumerates live pids; kill one and its directory vanishes.',
+  neg:'Serve a cached <code>/proc</code> listing instead of regenerating — the killed pid must linger and the check must fail.',
+  warn:'The trace ring needs a dropped-record counter, displayed. A 1 MiB ring holds 32,768 records and wraps every 0.5 s at full syscall rate — a view that silently drops records shows a clean picture of a broken system.' },
+
+ { id:'M4', grp:'Spine', t:'Pipes, pty, line discipline', d:'5 d · no UI', tag:'no UI',
+  lede:'The line discipline goes in the kernel, not the terminal widget — so Ctrl-C works when the UI is wedged, which is exactly when you need it.',
+  screen:{kind:'noui',body:T(`
+$ scripts/check.py --only ipc
+
+  yes | head -1 terminates ........................ ok
+    (head exits; yes gets EPIPE + SIGPIPE)
+  reader blocked, last writer -9'd -> returns 0 ... ok
+    (EOF, NOT an errno — the two directions differ)
+  ctrl-c during 'sleep 100 | cat' kills both ...... ok
+    (SIGINT to the foreground pgrp, raised by the kernel)
+  termios: ICANON off -> per-keystroke delivery ... ok
+  winsize set on master -> SIGWINCH on slave ...... ok
+
+  negative control: SIGPIPE delivery removed
+    yes | head -1 hangs ........................... FAILED as required`)},
+  real:['pipe2, dup2, process groups','Kernel-side line discipline (ICANON/ECHO/ISIG)','EOF for readers, EPIPE for writers','pty master/slave pair'],
+  proof:'<code>yes | head -1</code> terminates. Ctrl-C during <code>sleep 100 | cat</code> kills both.',
+  neg:'Stop delivering SIGPIPE — <code>yes | head -1</code> must hang forever.',
+  warn:'Readers see EOF, writers see EPIPE. An earlier draft of the plan had this backwards, which would make <code>yes | head -1</code> either hang or report a spurious error.' },
+
+ { id:'M4a', grp:'Spine', t:'The first window', d:'2 d · first pixels', tag:'first UI',
+  lede:'Not in the original design. Added because 20 working days with nothing on screen is how solo projects die. Unstyled, special-cased, and M7 deletes it.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:38,y:30,w:430,h:250,title:'Terminal',body:T(`
+user@web-os:~$ echo hello
+hello
+user@web-os:~$ _`)}]},
+  real:['webxp <code>window.mjs</code> dropped in, unstyled','Drag, 8-edge resize, minimise, maximise, focus','Wired to the pty from M4'],
+  proof:'Type into the window; assert the pty echoed it.',
+  neg:'Detach the pty — the keystroke must not appear.',
+  warn:'This window is special-cased, <b>not an ABI</b>. Write that in the code, or it quietly becomes the architecture.' },
+
+ { id:'M5', grp:'Spine', t:'The shell and ten programs', d:'6 d', tag:'shell',
+  lede:'Three real processes in one pipeline. The programs are mostly new code — webxp contributes about 230 lines across six of them, and kill and ps have no equivalent at all because it had no process table.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:38,y:24,w:470,h:300,title:'Terminal — /bin/sh',body:T(`
+user@web-os:~$ ls /usr/bin | grep c | wc -l
+3
+user@web-os:~$ sleep 60 &
+[1] 7
+user@web-os:~$ ps
+  PID  PPID  STAT  CMD
+    1     0  S     /sbin/init
+    2     1  S     -sh
+    7     2  S     sleep 60
+    8     2  R     ps
+user@web-os:~$ kill %1
+[1]+  Terminated   sleep 60
+user@web-os:~$ _`)}]},
+  real:['Executor rewritten onto pipe2 + spawn','posix_spawn-shaped file actions','ls cat echo wc head grep sleep kill ps true','Job control: &amp;, fg, bg, kill %1, $(…)'],
+  proof:'<code>ls /usr/bin | grep c | wc -l</code> returns the right count through three genuinely separate processes.',
+  neg:'Make <code>spawn</code> return the parent\'s pid — <code>ps</code> must show one process and the check must fail.',
+  warn:'No fork. The real casualty is <code>f | g</code> with both sides shell functions: one Worker cannot run both and serialising deadlocks when the pipe buffer fills. Budget a second shell worker — constraint 20a.' },
+
+ { id:'M6', grp:'Spine', t:'Neuter the process realm', d:'2 d', tag:'the boundary',
+  lede:'The finding that nearly killed the premise. A same-origin worker has ambient OPFS access, so a program can write the kernel\'s own blob store. Until this closes, the boundary is decorative.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:28,y:20,w:500,h:310,title:'Terminal — the exploit, before and after',body:T(`
+user@web-os:~$ cat /usr/share/demo/escape.js
+const r = await navigator.storage.getDirectory()
+const b = await r.getDirectoryHandle('b')
+const h = await (await b.getFileHandle('17'))
+            .createSyncAccessHandle()
+h.write(new Uint8Array(4096))
+
+user@web-os:~$ LIBOS_LOCKDOWN=off run escape.js
+wrote 4096 bytes to inode 17        <-- kernel bypassed
+
+user@web-os:~$ run escape.js
+TypeError: navigator.storage is undefined
+[1]  7 faulted
+
+user@web-os:~$ grep State /proc/7/status
+State:  X (faulted: realm violation)`)}]},
+  real:['libos deletes navigator.storage…','…and fetch, XHR, importScripts, indexedDB, caches, WebSocket, Worker','A process holds only integers'],
+  proof:'The exploit snippet fails, and <code>/proc</code> shows the process faulted.',
+  neg:'Skip the lockdown — the same program must <b>succeed</b>. If it does not, the check is testing nothing.',
+  warn:'Hardening, not a security boundary. Same-origin is not a security boundary and never will be. Threat model is first-party only for v1.' },
+
+ { id:'M7', grp:'Window half (A)', t:'A window is a file descriptor', d:'4 d', tag:'option A',
+  lede:'Not a bare winid. A process has one futex word, so with a per-window poll a process holding two windows cannot wait on both. win_create returns an fd, and poll() becomes the single wait primitive for everything.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:26,y:18,w:300,h:170,title:'editor — notes.txt  (fd 4)',body:T(`
+The quick brown fox
+jumps over the lazy dog_`)},
+    {cls:'plain',x:252,y:128,w:300,h:160,title:'editor — todo.txt  (fd 5)',body:T(`
+- finish M7
+- delete the M4a special case_`)}],
+    extra:`<pre class="term" style="position:absolute;left:0;bottom:0;right:0;height:84px;background:rgba(8,18,30,.88)"><i>$ ls /proc/6/win</i>
+4  5
+<i>$ poll([4,5,6], -1) -> 2 ready</i>   <u>one process, two windows and a pipe</u></pre>`},
+  real:['win_create returns an fd','<code>/proc/&lt;pid&gt;/win/&lt;winid&gt;</code> is openable','poll() over fds, pipes and windows alike','M4a\'s special case deleted'],
+  proof:'One process opens two windows and a pipe; <code>poll()</code> wakes it for each in turn.',
+  neg:'Wake only on the first fd in the set — the two-window case must hang.' },
+
+ { id:'M8', grp:'Window half (A)', t:'The surface', d:'3 d', tag:'option A',
+  lede:'win_create returns a winid and a transferred OffscreenCanvas. Without it there is no syscall that puts a pixel inside a window — and every app that is not the terminal is a beautiful frame around nothing.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:30,y:24,w:360,h:230,title:'paint — surface demo',
+     bodyHtml:`<div style="height:100%;display:grid;place-items:center;background:#fff">
+      <svg width="200" height="130"><rect width="200" height="130" fill="#f3f7fb"/>
+      <circle cx="68" cy="58" r="30" fill="#4a9bd8"/>
+      <rect x="96" y="40" width="56" height="56" fill="#d87a4a"/>
+      <text x="100" y="120" font-size="9" fill="#6b7c8f" text-anchor="middle">OffscreenCanvas, drawn in-process</text></svg></div>`},
+    {cls:'plain',x:300,y:160,w:256,h:150,title:'Terminal',body:T(`
+$ check.py --only surface
+4x4 pattern at (8,8) ..... ok
+  rgba(74,155,216) exact`)}]},
+  real:['Transferred OffscreenCanvas per window','Process draws, kernel composites','File associations finally have somewhere to open <i>into</i>'],
+  proof:'A process draws a known 4×4 pattern; screenshot and assert the pixels.',
+  neg:'Draw nothing — the pattern assertion must fail.' },
+
+ { id:'M9', grp:'Window half (A)', t:'Owner, modality, close-request', d:'3 d', tag:'option A',
+  lede:'Three missing concepts users notice instantly: a dialog that falls behind its own parent, and a close button that discards unsaved work because the app was never asked.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:28,y:24,w:390,h:250,title:'editor — notes.txt *',body:T(`
+The quick brown fox jumps over
+the lazy dog
+
+(modified)`)},
+    {cls:'plain',x:150,y:122,w:310,h:132,title:'Save changes?',
+     bodyHtml:`<div style="padding:13px 15px">Save changes to <b>notes.txt</b> before closing?
+      <div style="margin-top:16px;display:flex;gap:7px;justify-content:flex-end">
+      <span style="padding:3px 13px;border:1px solid #8fa4ba;border-radius:3px;background:linear-gradient(#fdfefe,#e4ecf4)">Save</span>
+      <span style="padding:3px 13px;border:1px solid #8fa4ba;border-radius:3px;background:linear-gradient(#fdfefe,#e4ecf4)">Discard</span>
+      <span style="padding:3px 13px;border:2px solid #2f7fd4;border-radius:3px;background:linear-gradient(#fdfefe,#e4ecf4)">Cancel</span></div></div>`}],
+    extra:`<pre class="term" style="position:absolute;left:0;bottom:0;right:0;height:62px;background:rgba(8,18,30,.88)"><i>WIN_CLOSE_REQUEST -&gt; pid 6   (the X posted it; it destroyed nothing)</i>
+<i>owner=win4  modal=window</i>   <u>clicking the parent caption does not raise it</u></pre>`},
+  real:['owner:winid on win_create','modal ∈ {none, window, app, system}','WIN_CLOSE_REQUEST event','owner may name another process\'s window'],
+  proof:'Click the owner\'s caption behind a modal — it must not raise. Close with unsaved state — the app must get to refuse.',
+  neg:'Remove the owner chain — the dialog must fall behind, and the check must fail.' },
+
+ { id:'M10', grp:'Window half (A)', t:'Typed clipboard, drag-and-drop', d:'4 d', tag:'option A',
+  lede:'No candidate design had either. Four independent architectures, and all four forgot the two gestures that make a set of windows read as one system rather than several websites.',
+  screen:{kind:'desk',windows:[
+    {cls:'plain',x:22,y:20,w:250,h:250,title:'Explorer — ~/Pictures',
+     bodyHtml:`<div style="padding:9px">
+      <div style="display:flex;gap:8px;align-items:center;padding:4px 5px;background:#cfe3f8;border:1px dotted #2f7fd4">
+      <span style="width:22px;height:22px;background:linear-gradient(#7fc1ec,#3b7fb5);border-radius:2px"></span> photo.png</div>
+      <div style="display:flex;gap:8px;align-items:center;padding:4px 5px">
+      <span style="width:22px;height:22px;background:linear-gradient(#9fd4a8,#49924f);border-radius:2px"></span> chart.png</div></div>`},
+    {cls:'plain',x:292,y:118,w:262,h:170,title:'viewer — drop target',
+     bodyHtml:`<div style="height:100%;padding:7px"><div style="height:100%;display:grid;place-items:center;
+      background:#eef5fb;border:2px dashed #7fa8cf;border-radius:3px">
+      <span style="font:11px ui-monospace,monospace;color:#2c5d8f">image/png · 48213 B</span></div></div>`}],
+    extra:`<pre class="term" style="position:absolute;left:0;bottom:0;right:0;height:76px;background:rgba(8,18,30,.88)"><i>dataobj_create(['text/plain','text/uri-list','image/png']) -&gt; did 3</i>
+<i>dataobj_set(3, 'image/png', &lt;48213 B&gt;)</i>
+<u>the receiver asked for image/png and got bytes, not a file path</u></pre>`},
+  real:['dataobj_create / dataobj_set / dataobj_get','Seeded formats: text, file list, image','A drag is a data object plus a cursor','Kernel-owned, therefore cross-process'],
+  proof:'Drag a PNG from Explorer into a viewer and assert the bytes arrived <i>under the image format</i>.',
+  neg:'Offer only the text format — the image paste must fail <b>cleanly</b>, not silently paste a file path.' },
+
+ { id:'M11', grp:'Window half (A)', t:'Aero glass, frame-only', d:'5 d', tag:'the look',
+  lede:'Glass on the caption and border ring; the client area stays opaque. Both more faithful to Windows 7 — whose own rule allows glass only in small regions touching the frame without text — and about 11× cheaper.',
+  screen:{kind:'aero',windows:[
+    {cls:'glass',x:30,y:26,w:400,h:230,title:'Terminal',body:T(`
+user@web-os:~$ uname -a
+web-os 0.1 wasm32 web-os
+user@web-os:~$ _`)},
+    {cls:'glass',x:258,y:146,w:300,h:180,title:'notes.txt — editor',body:T(`
+Aero is an additive composite over
+a blurred backdrop:
+
+  blurBalance   0.49
+  afterglow     0.43
+  colorization  0.08
+  over rgb(116,184,252)`)}],
+   taskbar:[{l:'Terminal',on:true},{l:'editor'}]},
+  real:['backdrop-filter blur(9px) + plus-lighter tint','Monitor-anchored highlight, parallax 0.1','webxp chrome reskinned from XP Luna','Opaque client area'],
+  proof:'Sample a 16 px column across a black/white backdrop seam behind the caption and assert a <b>monotonic gradient</b>.',
+  neg:'Set <code>backdrop-filter: none</code> — the gradient assertion must fail.',
+  warn:'A flat backdrop cannot test glass: <code>blur(flat) == flat</code>, so the assertion passes with the blur switched off. Same defect class as webxp\'s contrast check that compared black against itself and passed on any stylesheet.' },
+
+ { id:'M12', grp:'Window half (A)', t:'The blur governor', d:'3 d', tag:'the look',
+  lede:'An admission controller over every area-changing event, not a drag hook — and it accounts the border box, not the visible ring. The gate is 52 glass terminals, not 5 maximized windows.',
+  screen:{kind:'aero',windows:(()=>{const w=[];for(let i=0;i<9;i++)w.push({cls:'glass',x:12+i*20,y:10+i*12,w:210,h:112,title:'term '+(i+1),body:'',flat:i<4});return w})(),
+   taskbar:[{l:'9 windows',on:true}],
+   extra:`<pre class="term" style="position:absolute;left:0;bottom:34px;right:0;height:88px;background:rgba(8,18,30,.9)"><i>governor: border-box accounting, degrade by z-order from the bottom</i>
+blurred area   48.2M / 55.0M device px        frame  8.1 ms  (119 fps)
+flattened      <u>4</u> windows (bottom of stack)
+admitted on    open, maximize, snap, restore, un-minimize, peek</pre>`},
+  real:['Border-box area accounting','Admission control on every area-changing event','Degrades by z-order from the bottom','Flat fill below the cap'],
+  proof:'Drive it <b>into its degrade branch</b>: 52 glass terminals at 640×440 = 53.7 M device px. Assert flatten count &gt; 0 <i>and</i> ≥ 110 fps.',
+  neg:'Disable the governor at the same geometry — frame rate must drop below 110 fps.',
+  warn:'A gate sized at five maximized windows passes by construction: five are 18.4 M device px, well under the 58–63 M wall. That 4× error was in the first draft of the plan; constraint 49 records the correction.' },
+
+ { id:'M13', grp:'Window half (A)', t:'The geometry harness', d:'5 d', tag:'checks',
+  lede:'The 23 new geometry checks — the only proof M7 through M12 have. New work rather than a port: webxp\'s are a template, but the Aero DOM differs enough that every selector and expected metric changes.',
+  screen:{kind:'noui',body:T(`
+$ scripts/check.py --prove-failure
+
+  INVERTED  drag is title-bar only ................ reported failure  ok
+  INVERTED  resize n at desktop edge .............. reported failure  ok
+  INVERTED  snap arms at 1px ...................... reported failure  ok
+  INVERTED  snap releases at 20px ................. reported failure  ok
+  INVERTED  glass gradient across a seam .......... reported failure  ok
+  INVERTED  governor degrade branch fires ......... reported failure  ok
+  INVERTED  modal stays above its owner ........... reported failure  ok
+  ...  23 of 23 inverted checks reported failure
+
+  A harness nobody has seen fail is a harness nobody has checked.
+
+$ scripts/check.py
+  105 checks ..................................... all pass`)},
+  real:['23 geometry checks driving real input via CDP','--prove-failure inverts every INVERTIBLE','Negative control: a drag in the window body moves nothing'],
+  proof:'<code>--prove-failure</code> inverts all 23 and the run must report failures.',
+  neg:'That <i>is</i> the negative control — the mode exists so the suite can be seen to fail.' },
+
+ { id:'M14', grp:'Window half (A)', t:'Snap, Superbar, jump lists', d:'6 d', tag:'the feel',
+  lede:'The behaviours that make it specifically Windows 7. Snap arms at 1 px of pointer-to-edge, releases at 20 px of drag-out, and a top-maximized window needs a 50 px sideways move to restore.',
+  screen:{kind:'aero',snap:true,windows:[
+    {cls:'glass',x:210,y:30,w:330,h:196,title:'notes.txt — editor',body:T(`
+Dragging left. The snap preview is
+armed at 1px of pointer-to-edge, and
+releases at 20px of drag-out.`)}],
+   taskbar:[{l:'Terminal'},{l:'editor',on:true},{l:'build 62%',prog:true}],
+   jump:true},
+  real:['Aero Snap with hysteresis: 1 px arm / 20 px release / 50 px restore','Superbar: pinned + running merged, icon-only','Jump lists','Taskbar progress, tray with hidden icons'],
+  proof:'Drag to 1 px and assert the snap. Drag out 19 px and assert it holds. 21 px and assert it releases.',
+  neg:'Remove the hysteresis band — the 19 px case must start failing.',
+  warn:'A threshold on a continuous input without hysteresis oscillates: the window snaps, unsnaps and snaps again as the hand trembles. Both edges get checked.' },
+]
+
+const nav = document.getElementById('nav'), main = document.getElementById('main')
+let lastGrp = ''
+M.forEach((m,i)=>{
+  if (m.grp!==lastGrp){lastGrp=m.grp
+    const g=document.createElement('div');g.className='grp';g.textContent=m.grp;nav.append(g)}
+  const b=document.createElement('button')
+  b.innerHTML=`<b>${m.id}</b> ${m.t}<span class="d">${m.d}</span>`
+  b.onclick=()=>show(i);nav.append(b)
+})
+function screenHtml(m){
+  const s=m.screen
+  if(s.kind==='noui') return `<div class="screen noui"><pre class="term">${s.body}</pre></div>`
+  let h=`<div class="screen ${s.kind}">`
+  if(s.snap) h+=`<div class="snap"></div>`
+  for(const w of (s.windows||[]))
+    h+=`<div class="win ${w.cls}" style="left:${w.x}px;top:${w.y}px;width:${w.w}px;height:${w.h}px">
+      <div class="cap"><span class="t">${w.title}</span>
+      <span class="bx">–</span><span class="bx">□</span><span class="bx x">×</span></div>
+      <div class="body">${w.bodyHtml||(w.body?`<pre>${w.body}</pre>`:'')}${w.flat?'<div class="flat"></div>':''}</div></div>`
+  if(s.jump) h+=`<div class="jump"><div class="h">Recent</div><div class="i">notes.txt</div>
+    <div class="i">todo.txt</div><div class="h">Tasks</div><div class="i">New window</div>
+    <div class="i">Unpin from taskbar</div></div>`
+  if(s.extra) h+=s.extra
+  if(s.taskbar){ h+=`<div class="tb"><div class="orb"></div>`
+    for(const t of s.taskbar) h+=`<div class="tbb ${t.on?'on':''} ${t.prog?'prog':''}">${t.l}</div>`
+    h+=`<div class="tray">⌃ ◰ ◼ &nbsp; 14:32</div></div>` }
+  return h+`</div>`
+}
+function show(i){
+  const m=M[i]
+  ;[...nav.querySelectorAll('button')].forEach((b,k)=>b.setAttribute('aria-current',k===i))
+  main.innerHTML=`
+    <div class="head"><h2>${m.id} — ${m.t}</h2>
+      <span class="tag ${m.tag==='no UI'?'none':''}">${m.tag}</span>
+      <span class="tag none">${m.d}</span></div>
+    <p class="lede">${m.lede}</p>
+    ${screenHtml(m)}
+    ${m.warn?`<div class="card neg" style="margin-top:14px"><h3>Watch out</h3>${m.warn}</div>`:''}
+    <div class="notes">
+      <div class="card"><h3>What is real at this point</h3><ul>${m.real.map(r=>`<li>${r}</li>`).join('')}</ul></div>
+      <div><div class="card proof"><h3>Proof</h3>${m.proof}</div>
+        <div class="card neg" style="margin-top:12px"><h3>Negative control</h3>${m.neg}</div></div>
+    </div>
+    <p class="foot">Mockup, not a screenshot — none of this is built yet. Milestones, proofs and
+    negative controls come from <code>MILESTONES.md</code>; measured figures from
+    <code>docs/research/gap-04.md</code> and <code>bench/feasibility/results.json</code>.
+    Five of the first six milestones have no user interface at all, which is the honest reason
+    M4a exists.</p>`
+  main.scrollTop=0
+}
+show(0)
+</script>
+</body>
+</html>

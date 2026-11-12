@@ -23,6 +23,7 @@ how you know it works.
 | [PLAN.md](PLAN.md) | Three options, the shared 30-day spine, and why the order is the order. |
 | [MILESTONES.md](MILESTONES.md) | The tracker. What is done, what is next, the proof each milestone owes. |
 | [CLAUDE.md](CLAUDE.md) | Working rules for this codebase. Architecture invariants, conventions, verification discipline. |
+| [docs/LEARNING-MODE.md](docs/LEARNING-MODE.md) | Option D — the learning mode: an interactive drill-down into every OS principle, and the RV32I teaching machine that makes virtual memory and preemption real. |
 | [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 51 numbered constraints. Normative — cite by number. |
 | [docs/designs/REVIEW-FINDINGS.md](docs/designs/REVIEW-FINDINGS.md) | 24 critiques that survived adversarial verification. |
 | `docs/designs/*.md` | Four long-form candidate architectures, ~900 lines each. |
@@ -60,6 +61,19 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 - **Map tiles survive cross-origin isolation.** `bench/coep-tiles/` loads OpenFreeMap vector tiles
   plus OpenStreetMap, OpenTopoMap and Esri raster tiles under `COEP: require-corp` with zero
   blocked requests — and carries a negative control that fires, so the zero means something.
+
+## Mockups
+
+Nothing is built yet, but the intended shape is drawn and rendered:
+
+- [`mockups/milestones.html`](mockups/milestones.html) — what is on screen at each milestone, M0
+  through M14. Honest about the first five having no user interface at all.
+- [`mockups/learning-mode.html`](mockups/learning-mode.html) — the three learning-page types
+  (live, absent, and the coverage matrix across 35 OS principles).
+
+`mockups/shoot.py` renders both in headless Chrome and **exits non-zero on a JS error** — a mockup
+with a broken script is worse than no mockup. `scripts/check_links.py` asserts every repo-relative
+path in an authored doc resolves.
 
 ## Requirements
 

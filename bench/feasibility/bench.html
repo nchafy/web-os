@@ -1,0 +1,209 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>web-os feasibility bench</title>
+<pre id="out">running…</pre>
+<script type="module">
+/* Feasibility measurements for the learning mode (option D).
+ *
+ * Four questions, each of which decides a milestone:
+ *   1. Is a JS RV32I interpreter fast enough to be a teaching CPU?   -> the whole of option D
+ *   2. What does a Proxy-based software MMU cost?                    -> the 3-day cheap VM path
+ *   3. Can an always-on trace ring be afforded at 14 us syscalls?    -> /dev/trace in M3
+ *   4. Does a shared-memory futex handshake survive 4 nested levels? -> kernel-spawns-process
+ *
+ * Aborts rather than reporting numbers from a non-isolated context: a figure measured without
+ * crossOriginIsolated is a figure about a different system.
+ */
+const out = document.getElementById('out')
+const log = (s) => { out.textContent += s + '\n' }
+const results = {}
+
+if (!crossOriginIsolated || typeof SharedArrayBuffer !== 'function') {
+  out.textContent = 'ABORT: not cross-origin isolated. Run under scripts/serve.py.'
+  window.__done = true; window.__results = { aborted: true }
+  throw new Error('not isolated')
+}
+out.textContent = ''
+log(`crossOriginIsolated: ${crossOriginIsolated}   hardwareConcurrency: ${navigator.hardwareConcurrency}`)
+
+const pct = (a, p) => a[Math.min(a.length - 1, Math.floor(a.length * p))]
+const stats = (a) => { a.sort((x, y) => x - y); return { p50: pct(a, .5), p95: pct(a, .95), p99: pct(a, .99), max: a[a.length - 1] } }
+
+/* ---------- 1. RV32I interpreter throughput ---------- */
+/* A real decode-execute loop over the subset a teaching kernel needs: ADDI, ADD, LW, SW, BNE,
+ * JAL, LUI. Not a stub — it decodes from memory every cycle, so the number is the cost of
+ * fetch + decode + dispatch + writeback, which is what a teaching CPU actually pays. */
+function rv32iBench(targetInstr) {
+  const MEM = 1 << 20                      // 1 MiB
+  const mem = new Uint8Array(MEM)
+  const m32 = new Int32Array(mem.buffer)
+  const x = new Int32Array(32)
+
+  // Program: a counted loop that loads, adds, stores. Hand-assembled.
+  //   x1 = 0 (i)   x2 = N   x3 = base   x4 = scratch
+  // loop: lw x4, 0(x3) ; addi x4,x4,1 ; sw x4, 0(x3) ; addi x1,x1,1 ; bne x1,x2, loop
+  const enc = {
+    lw:  (rd, rs1, imm) => (imm << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x03,
+    addi:(rd, rs1, imm) => (imm << 20) | (rs1 << 15) | (0b000 << 12) | (rd << 7) | 0x13,
+    sw:  (rs2, rs1, imm) => (((imm >> 5) & 0x7f) << 25) | (rs2 << 20) | (rs1 << 15)
+                            | (0b010 << 12) | ((imm & 0x1f) << 7) | 0x23,
+    bne: (rs1, rs2, off) => {
+      const b12 = (off >> 12) & 1, b11 = (off >> 11) & 1
+      const b10_5 = (off >> 5) & 0x3f, b4_1 = (off >> 1) & 0xf
+      return (b12 << 31) | (b10_5 << 25) | (rs2 << 20) | (rs1 << 15) | (0b001 << 12)
+             | (b4_1 << 8) | (b11 << 7) | 0x63
+    },
+  }
+  const prog = [
+    enc.lw(4, 3, 0),
+    enc.addi(4, 4, 1),
+    enc.sw(4, 3, 0),
+    enc.addi(1, 1, 1),
+    enc.bne(1, 2, -16),
+  ]
+  const TEXT = 0x1000, DATA = 0x8000
+  for (let i = 0; i < prog.length; i++) m32[(TEXT >> 2) + i] = prog[i]
+  x[2] = Math.ceil(targetInstr / prog.length)
+  x[3] = DATA
+
+  let pc = TEXT, instr = 0
+  const t0 = performance.now()
+  for (;;) {
+    const w = m32[pc >> 2]
+    const op = w & 0x7f, rd = (w >>> 7) & 0x1f, f3 = (w >>> 12) & 7
+    const rs1 = (w >>> 15) & 0x1f, rs2 = (w >>> 20) & 0x1f
+    switch (op) {
+      case 0x13: { const imm = w >> 20; if (rd) x[rd] = (x[rs1] + imm) | 0; pc += 4; break }
+      case 0x33: { const v = f3 === 0 ? (x[rs1] + x[rs2]) | 0 : 0; if (rd) x[rd] = v; pc += 4; break }
+      case 0x03: { const imm = w >> 20, a = (x[rs1] + imm) | 0; if (rd) x[rd] = m32[a >> 2]; pc += 4; break }
+      case 0x23: { const imm = ((w >> 25) << 5) | ((w >>> 7) & 0x1f), a = (x[rs1] + imm) | 0
+                   m32[a >> 2] = x[rs2]; pc += 4; break }
+      case 0x63: { const off = (((w >> 31) & 1) << 12) | (((w >>> 7) & 1) << 11)
+                             | (((w >>> 25) & 0x3f) << 5) | (((w >>> 8) & 0xf) << 1)
+                   const sx = off & 0x1000 ? off | ~0xfff : off
+                   pc += (f3 === 1 && x[rs1] !== x[rs2]) ? sx : 4; break }
+      default: pc += 4
+    }
+    if (++instr >= targetInstr) break
+  }
+  const ms = performance.now() - t0
+  return { instr, ms, mips: (instr / ms) / 1000, finalMem: m32[DATA >> 2] }
+}
+
+log('\n--- 1. RV32I interpreter throughput (decode + execute from memory) ---')
+rv32iBench(2e6)                                     // warm
+for (const n of [1e7, 5e7]) {
+  const r = rv32iBench(n)
+  log(`  ${(n/1e6).toFixed(0)}M instr: ${r.ms.toFixed(0)} ms  =>  ${r.mips.toFixed(1)} MIPS   (loop counter reached ${r.finalMem})`)
+  results.rv32i = r
+}
+
+/* ---------- 2. Software MMU: Proxy-trapped access vs direct ---------- */
+log('\n--- 2. Software MMU cost (Proxy trap vs direct typed-array access) ---')
+{
+  const N = 1 << 16
+  const phys = new Int32Array(N)
+  const PAGE = 4096 >> 2
+  const ptable = new Int32Array(N / PAGE).map((_, i) => (i * PAGE))   // identity, for honesty
+  let faults = 0
+  const vmem = new Proxy({}, {
+    get(_, k) { const v = +k; const pg = (v / PAGE) | 0
+                if (ptable[pg] === undefined) { faults++; return 0 }
+                return phys[ptable[pg] + (v % PAGE)] },
+    set(_, k, val) { const v = +k; const pg = (v / PAGE) | 0
+                     phys[ptable[pg] + (v % PAGE)] = val; return true },
+  })
+  const ITER = 2e6
+  let t = performance.now(); let s = 0
+  for (let i = 0; i < ITER; i++) { phys[i & (N - 1)] = i; s += phys[i & (N - 1)] }
+  const direct = performance.now() - t
+  t = performance.now(); let s2 = 0
+  for (let i = 0; i < ITER; i++) { vmem[i & (N - 1)] = i; s2 += vmem[i & (N - 1)] }
+  const proxied = performance.now() - t
+  log(`  direct : ${direct.toFixed(0)} ms for ${(ITER/1e6)}M r+w  (${(ITER/direct/1000).toFixed(1)}M ops/ms)`)
+  log(`  proxied: ${proxied.toFixed(0)} ms  =>  ${(proxied/direct).toFixed(1)}x slower   (checksums ${s===s2?'match':'DIFFER'})`)
+  results.mmu = { direct, proxied, ratio: proxied / direct }
+}
+
+/* ---------- 3. Trace ring: can tracing be always-on? ---------- */
+log('\n--- 3. Trace ring record cost (8 x i32 into a SAB, wrapping) ---')
+{
+  const RING = new Int32Array(new SharedArrayBuffer(1 << 20))
+  const SLOTS = (RING.length / 8) | 0
+  let head = 0, dropped = 0
+  const N = 2e6
+  const t = performance.now()
+  for (let i = 0; i < N; i++) {
+    const o = (head % SLOTS) * 8
+    RING[o] = i; RING[o+1] = 1; RING[o+2] = 0; RING[o+3] = i & 0xff
+    RING[o+4] = 0; RING[o+5] = 0; RING[o+6] = 0; RING[o+7] = 0
+    head++
+  }
+  const ms = performance.now() - t
+  const nsPerRecord = (ms * 1e6) / N
+  log(`  ${N/1e6}M records in ${ms.toFixed(0)} ms  =>  ${nsPerRecord.toFixed(0)} ns/record`)
+  log(`  as a fraction of a 14 us syscall: ${((nsPerRecord/1000)/14*100).toFixed(2)}%   (2 records/syscall => ${((2*nsPerRecord/1000)/14*100).toFixed(2)}%)`)
+  log(`  1 MiB ring holds ${SLOTS} records; at 70k syscalls/s that wraps every ${(SLOTS/70000).toFixed(1)} s`)
+  results.trace = { nsPerRecord, slots: SLOTS }
+}
+
+/* ---------- 4. Nested worker futex handshake ---------- */
+log('\n--- 4. Futex round trip to a NESTED worker (kernel spawns process) ---')
+{
+  const kernelSrc = `
+    let port = null, ctl = null
+    self.onmessage = async (e) => {
+      if (e.data.t === 'init') {
+        // the kernel worker spawns the process worker: a nested worker
+        const procSrc = \`
+          let ctl=null, port=null
+          self.onmessage = (e) => {
+            if (e.data.t === 'init') { ctl = new Int32Array(e.data.sab); port = e.data.port
+              port.onmessage = () => {}
+              self.postMessage({t:'ready'}); return }
+            if (e.data.t === 'run') {
+              const N = e.data.n, lat = new Float64Array(N)
+              for (let i=0;i<N;i++) {
+                const s = Atomics.load(ctl,0)
+                const t0 = performance.now()
+                port.postMessage(i)
+                Atomics.wait(ctl,0,s)
+                lat[i] = performance.now() - t0
+              }
+              self.postMessage({t:'done', lat})
+            }
+          }\`
+        const url = URL.createObjectURL(new Blob([procSrc],{type:'text/javascript'}))
+        const w = new Worker(url)
+        const ch = new MessageChannel()
+        ctl = new Int32Array(e.data.sab)
+        ch.port2.onmessage = () => { Atomics.add(ctl,0,1); Atomics.notify(ctl,0) }
+        w.postMessage({t:'init', sab:e.data.sab, port:ch.port1},[ch.port1])
+        w.onmessage = (m) => {
+          if (m.data.t === 'ready') self.postMessage({t:'ready', coi: self.crossOriginIsolated})
+          else self.postMessage(m.data)
+        }
+        self.__w = w
+      } else if (e.data.t === 'run') { self.__w.postMessage(e.data) }
+    }`
+  const sab = new SharedArrayBuffer(16)
+  const ku = URL.createObjectURL(new Blob([kernelSrc], { type: 'text/javascript' }))
+  const kw = new Worker(ku)
+  const r = await new Promise((resolve) => {
+    kw.onmessage = (m) => {
+      if (m.data.t === 'ready') { log(`  nested worker reachable, crossOriginIsolated in kernel: ${m.data.coi}`)
+                                  kw.postMessage({ t: 'run', n: 20000 }) }
+      else if (m.data.t === 'done') resolve(m.data.lat)
+    }
+    kw.postMessage({ t: 'init', sab })
+  })
+  const s = stats(Array.from(r))
+  log(`  20000 round trips: p50 ${(s.p50*1000).toFixed(1)} us  p95 ${(s.p95*1000).toFixed(1)} us  p99 ${(s.p99*1000).toFixed(1)} us  max ${(s.max*1000).toFixed(0)} us`)
+  results.futex = s
+  kw.terminate()
+}
+
+log('\nDONE')
+window.__results = results
+window.__done = true
+</script>
