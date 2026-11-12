@@ -31,6 +31,14 @@ they changed.
 | **Gives up** | no real binaries; Peek is fake | 2× the time; still no live thumbnails | no WASM; abandons all of `webxp/src/*.mjs`; the least-verified assumption in the set |
 | **Riskiest assumption** | a single-threaded kernel stays fast under contention — **unmeasured** | a stock wasip1 binary runs unpatched over this ABI | the exact Aero composite is reachable from CSS |
 
+**Option D — the teaching machine (+57 d, standalone).** A learning mode: an interactive
+drill-down into every OS principle, against the running system rather than an animation. Adds a
+second tier — an RV32I emulated machine measured at **455 MIPS** — which supplies the MMU, timer
+interrupts and device bus the browser withholds, making virtual memory, preemption, `fork` and
+context switching genuine rather than simulated. Full writeup and the measured feasibility numbers
+in `docs/LEARNING-MODE.md`. **Follows the spine; must not precede M0.** 3 of its days fold into
+M3 and M5 and should be taken regardless.
+
 **Calendar, converted once.** 70 working days — 2.5 setup + 30 spine + 37 window half — is ~14
 weeks full-time, ~8 months at two days a week, ~16 months at one. Every other figure in this
 document is in **working days**; multiply once, using your own cadence, and write the answer at the
