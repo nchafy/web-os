@@ -18,7 +18,7 @@ checks is a wish.
 | | Milestone | Est | Actual | Status |
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
-| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 0.2 | 🟡 partial — driver and a worked example in, `check.py` not written |
+| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | **M0** | **Prove the syscall channel under contention** | 1 | | ⬜ **next** |
 | M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
@@ -51,20 +51,39 @@ Tree, `scripts/serve.py` (COOP/COEP, with `--no-isolation` to prove a check fail
 proceed when a required capability is missing.
 
 **Proof:** open `www/index.html` under `scripts/serve.py` — every required row reads `present`.
-**Negative control:** `scripts/serve.py --no-isolation` — `crossOriginIsolated`,
-`SharedArrayBuffer`, `OPFS sync handle` and `worker can block` must all go red and the verdict must
-refuse.
+**Negative control:** `scripts/check.py --negative no-isolation` — exactly four rows go red:
+`crossOriginIsolated`, `SharedArrayBuffer`, `worker is isolated` and `worker can block`, and the
+verdict refuses. `OPFS sync handle` stays `present`: `createSyncAccessHandle` in a dedicated worker
+does not require cross-origin isolation, so a control that expected it to go red would be expecting
+the wrong thing.
 
-## Harness — partial
+## Harness — done
 
-`scripts/cdp.py` is in (380 lines: `find_chrome`, `WebSocket`, `Session`, `Browser`).
-`bench/coep-tiles/probe.py` is a complete worked example of the discipline: it asserts isolation
-before timing anything, and carries a negative control that fires.
+`scripts/cdp.py` is the only CDP driver (392 lines). `scripts/serve.py` owns the server and the one
+declaration of COOP/COEP. `scripts/check.py` is the harness: one registry, one definition of
+inversion, and a module docstring whose failure-mode table is normative — **every row names a
+detector and an exit code, and a row whose detector cannot fire is the defect the table exists to
+forbid.** Add a mechanism, add its row.
 
-**Still owed:** `scripts/check.py` with the `INVERTIBLE` tuple and `--prove-failure`, and the ~6
-spine-relevant non-geometry checks adapted from the predecessor — `check_boot`, `check_mount`,
-`check_mount_index`, `check_filesystem`, `check_fs_persistence`, `check_terminal`. Do this before
-M2, which is the first milestone that needs somewhere to land.
+Inversion is not a tuple of names but a per-check declaration, because a list maintained beside the
+checks is a list that drifts: `Control.INVERT` is **mandatory**, and the opt-out needs a reason
+string that `audit()` reads. A check cannot be registered that nothing can invert, that declares a
+negative control nobody scores, that asserts fewer expectations than the committed floor in
+`scripts/check_floors.json`, or that lives in a file nothing imports.
+
+Four negative controls, each scored on **which** expectations moved rather than on the outcome enum
+alone — a control satisfied by any failure is a control that never verifies its own subject:
+`--negative no-isolation`, `empty-root`, `patched-required`, `patched-optional`.
+
+**A check whose measurement does not exist without a capability declares that**, with a reason, and
+the control is satisfied by the measurement going away. An *undeclared* unmeasurable check is still
+a stray and still fails the gate. This is what lets a kernel check — M0's reads a
+`SharedArrayBuffer`, which is not constructible without COOP/COEP — be registered at all.
+
+**Still owed:** the spine checks themselves, which land with the milestone that earns them —
+`check_mount`, `check_mount_index`, `check_filesystem`, `check_fs_persistence`, `check_terminal`.
+The predecessor's versions are a starting point, not a port: its filesystem was imported directly by
+its apps, so every check that reached the VFS reached it without a syscall.
 
 ---
 
