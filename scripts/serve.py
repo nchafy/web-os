@@ -44,6 +44,17 @@ EXTRA_TYPES = {
 class Handler(SimpleHTTPRequestHandler):
     isolate = True
 
+    def send_head(self):
+        # The default root is the repository root, which contains .git and .claude. Nothing
+        # dot-prefixed is ever part of the OS being served, so refuse it rather than rely on
+        # this only ever binding to loopback.
+        from urllib.parse import unquote, urlparse
+        path = unquote(urlparse(self.path).path)
+        if any(seg.startswith(".") and seg not in ("", ".") for seg in path.split("/")):
+            self.send_error(404, "Not Found")
+            return None
+        return super().send_head()
+
     def end_headers(self) -> None:
         if self.isolate:
             for name, value in ISOLATION_HEADERS:
@@ -62,10 +73,21 @@ class Handler(SimpleHTTPRequestHandler):
         sys.stderr.write("  %s\n" % (fmt % args))
 
 
+#: Resolved from this file's own location, not the caller's cwd. `serve.py` has to work from
+#: anywhere — running it from a parent directory used to fail with "no such directory: ./www",
+#: which blamed the user for the script's assumption.
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--port", type=int, default=8000)
-    ap.add_argument("--root", default="www")
+    ap.add_argument(
+        "--root",
+        default=REPO,
+        help="directory to serve. Defaults to the repository root, so /, /mockups/ and /bench/ "
+        "are all reachable from one server — the harnesses in bench/ already assume that.",
+    )
     ap.add_argument(
         "--no-isolation",
         action="store_true",
@@ -77,6 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     root = os.path.abspath(args.root)
     if not os.path.isdir(root):
         print(f"serve.py: no such directory: {root}", file=sys.stderr)
+        print(f"serve.py: the default is the repository root, {REPO}", file=sys.stderr)
         return 2
     os.chdir(root)
 
@@ -84,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     state = "ISOLATED" if Handler.isolate else "NOT ISOLATED (--no-isolation)"
     print(f"serve.py: {root}", file=sys.stderr)
     print(f"serve.py: http://127.0.0.1:{args.port}/  [{state}]", file=sys.stderr)
+    if os.path.isdir(os.path.join(root, "www")):
+        print(f"serve.py:   preflight  http://127.0.0.1:{args.port}/www/", file=sys.stderr)
+    if os.path.isdir(os.path.join(root, "mockups")):
+        print(f"serve.py:   mockups    http://127.0.0.1:{args.port}/mockups/", file=sys.stderr)
     if not Handler.isolate:
         print(
             "serve.py: SharedArrayBuffer will be undefined. The kernel cannot boot.",
