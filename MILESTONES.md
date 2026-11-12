@@ -38,6 +38,21 @@ checks is a wish.
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
 | | **Option A total** | **70** | | |
+| D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
+| D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
+| D2 | Traps, timer, real preemption | 2 | | ⬜ D |
+| D3 | Scheduler policies, swappable | 3 | | ⬜ D |
+| D4 | `fork`, copy-on-write, demand paging | 3 | | ⬜ D |
+| D5 | Device bus, providers, hot-unplug, RAID | 14 | | ⬜ D |
+| D6 | Two tabs, minimal NFS | 3 | | ⬜ D |
+| D7 | Page harness, scrubber, check runner | 6 | | ⬜ D |
+| D8 | 35 principle pages | 14 | | ⬜ D |
+| | **Option D total** | **54** | | |
+
+Option D is **54 days standalone**, plus the 3 that fold into M3 and M5 above = 57 total, which is
+the figure in `docs/LEARNING-MODE.md` §9. D0 is 6 rather than 4 because it carries the prebuilt
+binaries; D5 is 14 because it carries the device bus, the provider table, PIO-vs-DMA, the latency
+harness, hot-unplug and RAID.
 
 Options B (+65, WASI binaries) and C (+100, canvas compositor) are in `PLAN.md` §6. Option D
 (+57, the teaching machine and learning mode) is in `docs/LEARNING-MODE.md`. None are started and
@@ -235,6 +250,137 @@ Two traps recorded there and worth repeating:
   device px, comfortably under the 58–63 M wall, so a gate sized at five passes by construction.
   That error was in the first draft of the plan and `docs/CONSTRAINTS.md` constraint 49 records the
   correction.
+
+---
+
+## Option D — the teaching machine and learning mode
+
+Rationale, the honesty policy and the coverage matrix are in `docs/LEARNING-MODE.md`. The
+milestones live here, with the same contract as everything else: **a proof that can fail, and a
+negative control that breaks the thing the proof is about.**
+
+**Order is risk-first.** D0 re-measures the one figure option D rests on, against a real workload
+rather than the 5-instruction loop that produced 455 MIPS.
+
+### D0 — RV32I interpreter + one real binary · 4 d
+
+**Build.** RV32I base integer set, decode-and-execute from memory. One prebuilt binary committed
+to the repo (no toolchain dependency for a reader).
+
+**Proof.** The binary runs and produces its known output. Then **re-measure MIPS on that real
+workload** and record it beside the 455 MIPS synthetic figure — the benchmark that produced 455 was
+a 5-instruction loop with a hot dispatch path and good branch prediction, so a real program will be
+slower.
+
+**Negative control.** Corrupt one instruction's decode (swap `ADDI`'s immediate sign extension).
+The binary must produce wrong output or trap — if it still passes, the proof is not reading the
+interpreter.
+
+**Kill criterion.** Real-workload throughput below 20 MIPS → the tier is too slow to be a tier.
+Reconsider before D1.
+
+### D1 — Sv32 MMU · 3 d
+
+**Build.** Two-level page tables, 4 KiB pages, a TLB, page faults vectoring through the trap
+mechanism.
+
+**Proof.** Two processes write the *same virtual address* and read back different values — which is
+the entire point of translation and is inexpressible in tier 1. An unmapped access faults with the
+correct `mcause`, and the handler runs.
+
+**Negative control.** Make translation the identity map. The two processes must start seeing each
+other's data, and the first assertion must fail.
+
+### D2 — Traps, timer, real preemption · 2 d
+
+**Build.** `mtime`/`mtimecmp`, `mtvec`/`mcause`/`mepc`, a quantum expressed in instructions.
+
+**Proof.** A process that issues **no syscalls at all** is still switched away from. Count context
+switches over one second of two spinning processes and assert it is within tolerance of
+`elapsed / quantum`. This is the thing tier 1 cannot do.
+
+**Negative control.** Disable the timer. The switch count must collapse to the syscall-driven count
+(zero, for two spinning processes), and the check must fail.
+
+### D3 — Scheduler policies · 3 d
+
+**Build.** Round-robin, MLFQ, lottery and stride as swappable modules behind one interface.
+
+**Proof.** The *same* workload — one interactive and two batch processes — run under each policy
+produces different and *predicted* turnaround and response times. Assert the ordering: MLFQ gives
+the interactive process a lower mean response time than round-robin, and round-robin lower than
+FCFS. The convoy effect is reproducible on demand.
+
+**Negative control.** Make every policy return the same choice. The orderings must collapse and the
+assertion must fail — otherwise the test is measuring noise rather than policy.
+
+### D4 — `fork`, copy-on-write, demand paging · 3 d
+
+**Build.** Fork by copying the interpreter's state object; mark pages read-only and copy on write
+fault; page out to OPFS on pressure and fault back in.
+
+**Proof.** Child returns 0, parent returns the pid, and the child's writes are invisible to the
+parent. A COW page's **physical frame number is identical in both processes until one writes** —
+assert the frame id, not the contents. Demand paging: touch a paged-out page and assert the fault
+count incremented and the data is correct.
+
+**Negative control.** Eager-copy instead of COW. The shared-frame assertion must fail. Separately,
+pin all pages — the demand-paging fault count must drop to zero and that check must fail.
+
+### D5 — Device bus, providers, hot-unplug · 9 d
+
+**Build.** Device bus on the emulated machine; synthetic block device with a latency model that
+*replays a measured distribution*; provider table (`raw.githubusercontent.com`, `cdn.jsdelivr.net`
+free; one owned R2 bucket); buffer cache with swappable eviction; PIO and DMA as two
+implementations; RAID 0/1/5 across providers.
+
+**Proof.** Four, and the first is the one that keeps the rest honest:
+1. **A CI capability probe per provider** — ranged GET returns exactly the requested byte count with
+   `Content-Range`, and CORS is present. A provider that silently stops supporting `Range` must fail
+   the build, not degrade a page.
+2. A block read at a known LBA returns known bytes through the cache.
+3. Hot-unplug: kill connectivity mid-read and assert `EIO` propagates up through the cache to the
+   process, with a partially filled buffer discarded rather than returned.
+4. Eviction policy matters: the same access pattern under LRU and under clock produces different
+   measured hit rates, in the predicted direction.
+
+**Negative control.** Point a provider at a 404 URL — the synthetic fallback must engage *and the
+page must say it did*. A silent fallback is the failure mode this whole milestone is guarding
+against. Then set the latency model to 0 µs and confirm the eviction-policy assertion collapses,
+proving it was measuring cache behaviour and not scheduling noise.
+
+### D6 — Two tabs, minimal NFS · 3 d
+
+**Build.** `BroadcastChannel` as the link — no server, no signalling. Synthetic latency and loss
+model. A minimal NFS with whole-file caching.
+
+**Proof.** Tab A writes, tab B reads the new content. Then set loss to 20% and assert the
+retransmission path recovers. Then **cause a stale-cache read on demand** and assert the client
+detects it.
+
+**Negative control.** Disable cache invalidation — the stale read must go undetected and the check
+must fail.
+
+### D7 — Page harness, scrubber, check runner · 6 d
+
+**Build.** The page template, the trace scrubber over `/dev/trace`, and the runner that executes
+every page's check.
+
+**Proof.** The scrubber reconstructs a known syscall sequence from a recorded trace, and the
+reconstruction matches the sequence that was recorded. The dropped-record counter is visible and
+non-zero when the ring is deliberately undersized.
+
+**Negative control.** Undersize the ring to 64 KiB and run at full syscall rate. The dropped-record
+counter must become non-zero **and be displayed** — a trace view that silently drops records shows
+a clean picture of a broken system.
+
+### D8 — The 35 principle pages · 14 d
+
+**Proof.** Every page carries a check, and `--prove-failure` inverts all of them so the run must
+report failures.
+
+**Negative control.** That *is* the control — the mode exists so the lesson suite can be seen to
+fail. A page whose check cannot fail is not a page.
 
 ---
 

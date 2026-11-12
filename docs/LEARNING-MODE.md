@@ -228,7 +228,14 @@ establishes that the absences are specific rather than general.
 | Page harness, scrubber, check runner | 6 d |
 | 35 pages | 14 d |
 
-**Spine additions: 3 d. Option D: ~57 d.**
+**Spine additions: 3 d. Option D standalone: 54 d. Total: 57 d.**
+
+**The milestones themselves — D0 to D8, each with its proof and its negative control — are in
+`../MILESTONES.md`**, under *Option D*. They live there rather than here for the same reason the
+spine's do: this file carries the rationale, the tracker carries the contract. An earlier version
+of this document gave a cost table and no proofs at all, which is exactly the defect the critics
+caught in the first draft of `../PLAN.md` — 54 days of work with nothing that could be shown to
+fail.
 
 ## 10. Sequencing
 
