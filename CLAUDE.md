@@ -28,6 +28,7 @@ to start work.
 | 5 | `docs/DECISIONS.md` | 16 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
+| 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
 | 8 | `docs/GLOSSARY.md` | Lookup, not prose. Use it as you go. | — |
 
 Then as needed: `docs/research/gap-04.md` for the measurements everything is sized from,
@@ -63,6 +64,7 @@ docs/
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
+  LEARNING-MODE.md  option D: learning mode, the teaching CPU, device providers
   designs/        4 candidate architectures + REVIEW-FINDINGS.md
   research/       374 cited claims. Raw evidence, append-only.
 scripts/
@@ -70,6 +72,11 @@ scripts/
   cdp.py          Chrome DevTools Protocol driver, carried from webxp
 bench/
   coep-tiles/     worked example of the harness discipline, with a working negative control
+  feasibility/    option D feasibility: RV32I MIPS, Proxy-MMU cost, trace-ring cost
+mockups/
+  milestones.html   what is on screen at each milestone (M0-M14)
+  learning-mode.html the three learning-page types + the coverage matrix
+  shoot.py          renders both and fails on a JS error
 src/
   kernel/         the only privileged code          (empty until M0)
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
