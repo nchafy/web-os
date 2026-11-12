@@ -26,7 +26,7 @@ how you know it works.
 | [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 51 numbered constraints. Normative — cite by number. |
 | [docs/designs/REVIEW-FINDINGS.md](docs/designs/REVIEW-FINDINGS.md) | 24 critiques that survived adversarial verification. |
 | `docs/designs/*.md` | Four long-form candidate architectures, ~900 lines each. |
-| `docs/research/*.md` | 374 cited claims across 13 files. Raw evidence; append-only. |
+| `docs/research/*.md` | 507 cited claims across 15 files. Raw evidence; append-only. `09-hobbyist-os-actions.md` is the distilled proposal from the newest round. |
 
 ## The thesis
 

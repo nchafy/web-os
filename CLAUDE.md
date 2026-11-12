@@ -64,7 +64,7 @@ docs/
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
   designs/        4 candidate architectures + REVIEW-FINDINGS.md
-  research/       374 cited claims. Raw evidence, append-only.
+  research/       507 cited claims. Raw evidence, append-only.
 scripts/
   serve.py        COOP/COEP static server. --no-isolation to prove a check fails.
   cdp.py          Chrome DevTools Protocol driver, carried from webxp
