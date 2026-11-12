@@ -39,8 +39,21 @@ checks is a wish.
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
 | | **Option A total** | **70** | | |
 
-Options B (+65, WASI binaries) and C (+100, canvas compositor) are in `PLAN.md` §6. They are not
-started and should not be until the spine is done.
+Options B (+65, WASI binaries) and C (+100, canvas compositor) are in `PLAN.md` §6. Option D
+(+57, the teaching machine and learning mode) is in `docs/LEARNING-MODE.md`. None are started and
+none should be until the spine is done.
+
+**Three of option D's days fold into the spine and should be taken regardless**, because for the
+first 30 days they are the only visible thing:
+
+| | Folds into | Est | Why now |
+|---|---|---|---|
+| `/dev/trace` ring + dropped-record counter | M3 | 1 d | Measured at **4 ns/record** — 0.03% of a syscall. Tracing is free, and it is the debugger for everything after it. |
+| `top` and `strace` as real programs | M5 | 2 d | A live syscall histogram on day 3 is a better M0 deliverable than a number in a terminal. |
+
+The trace ring needs **≥16 MiB** and a visible dropped-record counter: a 1 MiB ring holds 32,768
+records and wraps every 0.5 s at full syscall rate, and a view that silently drops records shows a
+clean picture of a broken system.
 
 ---
 
