@@ -12,10 +12,10 @@ import {
   G_THINK_US, G_STALL_US, G_READY,
   G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
   K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
-  EINTR, EINVAL, ENOSYS, ABI_FINGERPRINT, packI64,
+  EINTR, EINVAL, ENOSYS, EIO, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE } from "./table.mjs";
-import { makeSink, installTruncateOverflow } from "./files.mjs";
+import { makeSink, installTruncateOverflow, openFile } from "./files.mjs";
 import { buildCalls, installStall, PENDING } from "./calls.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
@@ -26,6 +26,8 @@ let cfg = {};
 let globals = null;
 let g = null;
 let CALLS = null;
+let OPFS_ROOT = null;
+let opfsWhy = "";
 let table = null;
 let hb = 0;
 let kServiceMs = 0;
@@ -141,6 +143,30 @@ function setTimer(p, ms) {
     }
     reply(p, 0);
   }, ms);
+}
+
+/**
+ * The same completion contract for work that is awaited rather than timed: run `job()` off the
+ * dispatch path and answer when it settles, dropping the answer if the call it belongs to is gone.
+ *
+ * This is the shape constraint 57 requires of anything slow — a syscall that must wait does not
+ * hold the kernel thread — and it reuses setTimer's identity check rather than writing a second
+ * one, because two copies of a cancellation guard is how one of them ends up wrong.
+ */
+function later(p, job) {
+  const seqAtDispatch = p.inflight.seq;
+  Promise.resolve()
+    .then(job)
+    .then(
+      (r) => {
+        if (!p.ctl || p.seq !== seqAtDispatch) { lateReply += 1; return; }
+        finish(p, r);
+      },
+      () => {
+        if (!p.ctl || p.seq !== seqAtDispatch) { lateReply += 1; return; }
+        fail(p, EIO);
+      },
+    );
 }
 
 // ---------------------------------------------------------------------------- dispatch
@@ -608,16 +634,16 @@ function post(m) {
 self.onerror = (e) => panic(`kernel onerror: ${e.message ?? e}`);
 self.onunhandledrejection = (e) => panic(`kernel rejection: ${e.reason}`);
 
-self.onmessage = (ev) => {
+self.onmessage = async (ev) => {
   const m = ev.data;
   try {
-    handle(m);
+    await handle(m);
   } catch (error) {
     panic(`${m && m.t}: ${error && error.stack}`);
   }
 };
 
-function handle(m) {
+async function handle(m) {
   switch (m.t) {
     case "boot": {
       cfg = m.cfg || {};
@@ -629,7 +655,18 @@ function handle(m) {
       Atomics.store(g, G_EPOCH, 1);
       Atomics.store(g, G_KSTATE, K_BOOT);
       table = new ProcTable(PROC_CAP);
-      CALLS = buildCalls({ reply, fail, setTimer });
+      // The OPFS root, acquired ONCE at boot. Awaiting it per open would charge every caller for
+      // a directory lookup, and the handle is not releasable per-process anyway (constraint 15).
+      // A kernel that cannot reach storage still boots: SYS_open then answers -EIO, which is the
+      // honest state of a call the kernel cannot serve, rather than a boot that fails for a
+      // capability M0's three original calls never needed.
+      try {
+        OPFS_ROOT = await navigator.storage.getDirectory();
+      } catch (e) {
+        OPFS_ROOT = null;
+        opfsWhy = String((e && e.name) || e);
+      }
+      CALLS = buildCalls({ reply, fail, setTimer, later, opfsRoot: () => OPFS_ROOT });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
       // unless the page asked for a bench boot.

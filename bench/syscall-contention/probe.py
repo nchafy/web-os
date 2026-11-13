@@ -179,6 +179,8 @@ def query(args, n: int, *, depth: bool) -> str:
         q.append("over_cap=1")
     if args.fault_index >= 0:
         q.append(f"fault_index={args.fault_index}")
+    if args.io_procs > 0:
+        q.append(f"io_procs={args.io_procs}")
     return "&".join(q)
 
 
@@ -507,6 +509,39 @@ def print_cells(cells: list[dict], m0: dict) -> None:
               + f" · worst per-process p99 {c['worstP99Us']:.1f} us")
 
 
+def print_io_split(cells: list[dict]) -> None:
+    """M0a: what a cheap call costs WHILE file I/O is in flight.
+
+    The two groups ran in one barrier-held window and are reported apart, because the pooled
+    figure is precisely what hides the effect. The question this answers is whether a `getpid`
+    queued behind someone else's synchronous `flush` returns in 15 us or in milliseconds — and
+    therefore whether the kernel needs a second I/O worker (constraint 57) before M2.
+    """
+    rows = [c for c in cells if not c.get("invalid") and (c.get("split") or None)]
+    if not rows:
+        return
+    print()
+    print("  M0a: CHEAP CALLS WHILE FILE I/O IS IN FLIGHT (one window, reported apart)")
+    print("   N   io procs  cheap p50   cheap p99    io p50      io p99      cheap/io p99")
+    for c in rows:
+        s = c["split"]
+
+        def us(cellobj):
+            v = (cellobj or {}).get("us")
+            return "withheld" if v is None else f"{v:.1f}us"
+
+        cp = (s.get("cheap") or {}).get("us")
+        ip = (s.get("io") or {}).get("us")
+        ratio = "n/a" if not cp or not ip else f"{ip / cp:.1f}x"
+        print("  %3s  %2d of %-3d %-11s %-12s %-11s %-11s %s"
+              % (c["n"], s["ioProcs"], s["ioProcs"] + s["cheapProcs"],
+                 us(s.get("cheapP50")), us(s.get("cheap")),
+                 us(s.get("ioP50")), us(s.get("io")), ratio))
+    print("   open is awaited off the dispatch path (constraint 22's 495 us costs other processes")
+    print("   nothing); fsync is a synchronous flush on the kernel thread (constraint 23's 260 us)")
+    print("   and is what every other process waits for. That asymmetry is the finding.")
+
+
 def print_overhead(cells: list[dict]) -> None:
     """The instrumentation's own cost, as a first-class row. The HEADLINE stays the instrumented
     number — the slower, honest one — and this is what it costs."""
@@ -618,7 +653,12 @@ def main(argv: list[str] | None = None) -> int:
                                                "BROWSER, in this order")
     ap.add_argument("--window-ms", type=int, default=1000)
     ap.add_argument("--warmup", type=int, default=2000)
-    ap.add_argument("--call", default="getpid", choices=("getpid", "write", "nanosleep"))
+    ap.add_argument("--call", default="getpid",
+                    choices=("getpid", "write", "nanosleep", "io"))
+    ap.add_argument("--io-procs", type=int, default=0,
+                    help="M0a: how many processes do real OPFS work while the rest issue "
+                         "getpid. Reported separately, because pooling the two hides the "
+                         "whole effect. Implies --call io")
     ap.add_argument("--payload", type=int, default=64)
     ap.add_argument("--runs", type=int, default=1, help="browser launches; ACCEPT reads the worst")
     ap.add_argument("--smoke", action="store_true",
@@ -771,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
         print_quiescence(cell_m0s)
         print_cells(cells, merged)
         print_overhead(cells)
+        print_io_split(cells)
         print_liveness(merged)
 
         print()
