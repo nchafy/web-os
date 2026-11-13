@@ -158,16 +158,53 @@ passes either way it was testing nothing.
 
 ---
 
-## M3 — `/proc`, `/dev`, mounts · 2 days · ~450 LoC
+## M3 — `/proc`, `/dev`, mounts · 4 days · ~700 LoC
 
-**Build.** Longest-prefix mount table, static at boot: `/` OPFS rw, `/usr` read-only from a
-build-time JSON index, `/tmp` tmpfs, `/proc` and `/dev` generated on read.
-`/proc/<pid>/{status,cmdline,cwd,fd/<n>}` is ~120 lines and is the clearest demonstration that a
-process is a first-class object.
+Was 2 days. Carries two things folded in from option D because they are OS work rather than
+pedagogy, and because building them later means building them twice.
 
-**Proof.** `ls /proc` enumerates live pids; kill one and its directory vanishes.
-**Negative control.** Serve a cached `/proc` listing instead of regenerating — the killed pid must
-linger and the check must fail.
+**Build.** Longest-prefix mount table, static at boot: `/` OPFS rw, `/usr` read-only, `/tmp`
+tmpfs, `/proc` and `/dev` generated on read. `/proc/<pid>/{status,cmdline,cwd,fd/<n>}` is ~120
+lines and is the clearest demonstration that a process is a first-class object.
+
+**Folded in (a): `/usr` mounts on the provider interface, not a one-off driver.** +1 d. The
+original plan had a bespoke `httpimg` driver here and a general provider table later in option D.
+That is the same work twice. So `/usr` is the *first consumer* of a provider table that is data,
+not code:
+
+```
+{ id, url template, range strategy, max object, auth: 'none' }
+```
+
+Measured 2026-11-12: `cdn.jsdelivr.net` and `raw.githubusercontent.com` both serve genuine ranged
+block reads with `Content-Range` and CORS, so the default needs no account and no bucket.
+`unpkg.com` ignores `Range` and is unusable. `docs/LEARNING-MODE.md` §5.
+
+**Folded in (b): `/dev/trace`.** +1 d. A ring buffer the kernel writes two records into per
+syscall, measured at **4 ns a record** — 0.03% of a 14 µs syscall, so tracing is always on. This
+is the debugger for every milestone after it, which is why it is here and not at the end.
+
+**Proof.** Three:
+1. `ls /proc` enumerates live pids; kill one and its directory vanishes.
+2. **A capability probe per provider** — a ranged GET returns exactly the requested byte count
+   with `Content-Range`, and CORS is present. A provider that silently stops supporting `Range`
+   must fail the build, not degrade a mount.
+3. `/dev/trace` replays a known syscall sequence, and the dropped-record counter is visible.
+
+**Negative control.** Three, one per proof:
+1. Serve a cached `/proc` listing instead of regenerating — the killed pid must linger and the
+   check must fail.
+2. Point a provider at a 404 — the mount must fail loudly, never silently serve an empty `/usr`.
+3. Undersize the trace ring to 64 KiB at full syscall rate — the dropped-record counter must go
+   non-zero **and be displayed**. A trace that silently drops records shows a clean picture of a
+   broken system.
+
+**Note the sizing.** A 1 MiB ring holds 32,768 records and wraps every 0.5 s at full syscall
+rate. Ship ≥16 MiB if the scrubber (D7) is ever wanted.
+
+**`mount` must never accept a caller-supplied URL** — a provider id and a path, resolved against
+the committed table, and nothing else. Otherwise every process gets an SSRF primitive, and M6
+deletes `fetch` precisely to prevent that.
 
 ---
 
