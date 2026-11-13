@@ -117,9 +117,16 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
 - **A process holds only integers.** No fd, OPFS handle, pipe buffer, window handle or lock lives
   in a process worker. `terminate()` offers no chance to finish, so anything releasable is
   kernel-side. (15)
-- **The shell is a userland client of the same ABI.** Explorer, the taskbar and the window manager
-  use the same syscalls as a third-party app. If the shell needs a privilege it cannot express as
-  a capability it was granted, the boundary is fiction. (3 in `PLAN.md` §4)
+- **The shell is a userland client of the same ABI — with one stated exception.** Explorer and the
+  window manager use the same syscalls as a third-party app, and if they need a privilege they
+  cannot express as a capability they were granted, the boundary is fiction.
+  **The taskbar is the exception, and the earlier blanket claim was false.** It needs cross-process
+  window enumeration that no ordinary client may have, and a per-process window fd cannot name
+  another process's window. SerenityOS gives its taskbar a *second* endpoint on a separate socket
+  with an event mask and `(client_id, window_id)` identity pairs the ordinary endpoint cannot
+  enumerate. So the honest form of the invariant is **a second, separately-gated management
+  interface** — still a capability the kernel granted, so the boundary survives, but it is not the
+  same interface. (`docs/research/09-hobbyist-os-actions.md` §4)
 - **No `fork`.** `spawn` + `pipe` + `setpgid` only. (20)
 - **Processes get fds, never paths.** Resolve a path to an inode once, in the kernel, and cache.
   `getDirectoryHandle` is 85 µs per component. (24)
