@@ -1,0 +1,8 @@
+{
+  "accept_p99_us": 500,
+  "kill_p99_us": 2000,
+  "bar_n": 16,
+  "liveness_bound_factor": 1.2,
+  "liveness_poll_slack_ms": 1000,
+  "quiescence_max_workers": 0
+}

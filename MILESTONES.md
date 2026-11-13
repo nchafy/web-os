@@ -19,8 +19,8 @@ checks is a wish.
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
-| **M0** | **Prove the syscall channel under contention** | 1 | | ⬜ **next** |
-| M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
+| M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
+| **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
 | M3 | `/proc`, `/dev`, mounts | 2 | | ⬜ |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
@@ -87,28 +87,72 @@ its apps, so every check that reached the VFS reached it without a syscall.
 
 ---
 
-## M0 — Prove the syscall channel under contention · next · 1 day · ~250 LoC
+## M0 — Prove the syscall channel under contention · ✅ done · est 1 day, actual 1 · ~2,000 LoC
 
-The one milestone that can invalidate the whole plan. The 14–16 µs syscall was measured with **one
-caller against an idle kernel**; the kernel is a single thread that serializes every syscall in the
-system, and contention is unmeasured.
+**Verdict: ACCEPT.** p99 at N=16 is **255 µs** on the worst of three runs, against a 500 µs accept
+bar and a 2 ms kill bar. The plan stands and M1 is cleared to start.
 
-**Build.** Kernel worker; N process workers spawned *by the kernel* as nested workers; the SAB ABI;
-three calls — `getpid`, `write(1, …)`, `nanosleep`.
+The LoC estimate was wrong by 8×: ~250 was budgeted and ~2,000 written. Almost none of the overrun
+is kernel — `src/` is ~1,500 lines including the ABI table and the libos stub, and the rest is the
+bench. The estimate priced the mechanism and forgot that a measurement nobody can impeach costs
+more than the thing it measures.
 
-**Proof.** Closed-loop saturation at N ∈ {1, 4, 16, 64, 128}. No offered rate — every process
-issues its next call the instant the last returns — and **assert achieved concurrency**, not just
-process count. A rate-limited harness reports a clean p99 at "N=16" while the kernel never queues
-more than one. Accept if p99 at N=16 is under 500 µs.
+**Built.** `src/abi.mjs` (every integer both sides agree on, in one place), `src/kernel/` (boot,
+globals SAB, heartbeat, two-phase spawn, dispatch, process table, fd table, the dense syscall
+table), `src/libos/` (the blocking stub and the process entry), `www/m0.html`,
+`bench/syscall-contention/`. Three calls: `getpid`, `write(1, …)`, `clock_nanosleep`.
 
-**Negative control.** Insert a 2 ms synchronous stall in the kernel handler. p99 must blow past the
-bar.
+**Measured.** The curve is `docs/CONSTRAINTS.md` constraint 51; the clock it rests on is constraint
+52. Closed-loop, barrier-released so all N are inside the measured window together (overlap
+≥99.9%), release ramp and ramp-down excluded, one fresh browser per cell with quiescence asserted
+before any figure.
 
-**Kill criterion.** p99 above 2 ms at N=16 → stop. Do not write M1. Reconsider a sharded kernel
-(one kernel worker per process group, VFS behind a lock).
+**Negative control, fired.** A 2 ms synchronous stall in the kernel handler gives p99 **29,673.6 µs**
+and the harness returns `KILL`. So the ACCEPT above is demonstrably capable of being a KILL, which
+is the only thing that makes it worth reading. `--negative kernel-stall` keeps it re-runnable.
 
-**Watch for.** ~0.2% of round trips return `"not-equal"` from `Atomics.wait` because the kernel
-replied before the process parked. Fast path, not an error — handle it from the first line.
+**The anti-vacuity control, which is the one that matters.** A rate-limited process loop must make
+the concurrency gates fail *while the latency stays sane* — otherwise a harness that never saturated
+the kernel could report a clean p99 at "N=16". It does: clean N=16 gives depth_p50 13 of 16 and
+queued-fraction 0.999; the rate-limited control gives 0 and 0.000, failing seven of nine gates and
+producing NO VERDICT. The first attempt at this control was itself broken — it used a busy-spin, so
+sixteen spinning workers on twelve cores starved the kernel and destroyed the latency it was meant
+to leave alone (p99 8,270 µs). It is an idle park now.
+
+### What M0 changed in the plan
+
+- **`depth_min >= 2` was the wrong gate and is now a witness.** It read 1 on a saturated kernel and
+  1 on a rate-limited one, so it never discriminated, while firing on every healthy run. The cause
+  is real and unavoidable: the in-flight count is decremented before the woken process re-issues, so
+  every process has an un-outstanding interval equal to its own wake latency, and over 500,000
+  dispatches those coincide. Replaced by `depth_p50 >= max(2, 0.5N)` plus `depth_max >= 0.75N`,
+  which the rate-limited control still fails. A gate that fires on every good run is a gate on its
+  way to being ignored.
+- **`CALLID` is a per-call identity, not the syscall number**, and the number moved to its own word.
+  `docs/ABI.md` now says so; the two readings of the old table produced two incompatible kernels.
+- **M1's liveness bar is restated.** M1 asked for a parked process to return `EIO` "within 2× the
+  re-arm interval" (100 ms), which was written before anyone measured how long a saturated kernel
+  goes without servicing its own timer. The bar is now
+  `REARM_MS × (HB_MISS_LIMIT + 1)` = **200 ms**, and constraint 56 carries the measured tick-gap
+  distribution that sets it. Observed: `-EIO` at 168–189 ms from `terminate()`, inside the bound.
+- **The hard cap is advisory until M6.** A process can spawn a worker at depth 3 that holds the
+  kernel's SAB, can block, and is invisible to the process table — so the cap counts a number that
+  is not the real one. Constraint 53; the realm lockdown gains `SharedWorker` and
+  `URL.createObjectURL`, and M6 stops being only about the filesystem.
+- **Past ~16 callers, queueing dominates.** p99 is 3.06 ms at N=128 and 99.98% of calls there are
+  past 500 µs. Not a kill — the bar is N=16 — but the sharded-kernel question M0 deferred becomes
+  live somewhere between 16 and 64, not never. The kernel is also only ~44% busy inside its handlers
+  when saturated (constraint 54), so the cost to attack is per-message dispatch, not handler work.
+
+**Two harness defects the sweep itself exposed**, both fixed: the bench mislabelled a spawn the hard
+cap had correctly refused as "kernel-starved-children" (the cell asked for 129 processes against a
+cap of 128, because `--hb` adds an observer), and `probe.py` discarded a completed measurement with
+a traceback when `--out` named a directory that did not exist.
+
+**Watch for** — confirmed, and handled from the first line: 0.036–0.183% of round trips return
+`"not-equal"` from `Atomics.wait` because the kernel replied before the process parked. A fast path,
+not an error. The kernel's own notify-woke-nobody counter agrees with the process-side count to
+98.2–100%.
 
 ---
 
@@ -122,7 +166,14 @@ never-reused pids. Hard cap 128; the 129th returns `-EAGAIN`. Signals through th
 
 **Proof.** (a) compute-bound process dies on End Process; (b) `kill -9` under contention;
 (c) the 129th spawn fails cleanly; (d) kill the kernel worker and every parked process returns
-`EIO` within 2× the re-arm interval — **without reloading the page**.
+`EIO` within **`REARM_MS × (HB_MISS_LIMIT + 1)` = 200 ms** — **without reloading the page**.
+
+(d)'s bar was "2× the re-arm interval" until M0 measured the kernel's own tick gap under
+saturation: p999 reaches 58.5 ms at N=128 against a nominal 10 ms period, so a 100 ms bar would
+fault live processes under load. Constraint 56 carries the distribution. M0 already observes
+`-EIO` at 168–189 ms from `terminate()`, so (d) is close to free; what M1 owes is the *cap* case
+and the teardown, not the mechanism. Note (c) is now partly measured too — M0's cap correctly
+refused a 129th spawn, and the bench's mislabelling of that refusal is what exposed it.
 
 **Negative control.** Remove the SIGPEND check at syscall entry; Ctrl-C must stop working.
 
@@ -252,5 +303,7 @@ Three cheap measurements that should happen before the milestone that depends on
 | Experiment | Before | Cost | Why |
 |---|---|---|---|
 | Can `Atomics.notify` interrupt a worker inside a synchronous OPFS read? | M4 | 0.5 d | If not, `read()` is not interruptible and the ABI is lying about Ctrl-C. Weakest point in the cancellation design. |
+| Why is spawn 1.3–1.6× constraint 19's figure on this build? | M1 | 0.25 d | M0 excluded `Blob`/`createObjectURL` and classic-vs-module; what is left is the patch build, script size, and sample count. Re-run gap-04's own spawn harness here. M1 spawns constantly, so an unexplained 1.5× is worth a quarter day. |
+| Does the worker ceiling knee between 256 and 3,200? | M1 | 0.5 d | M0 stopped at 256 with zero failures but per-worker cost was still rising. Constraint 17 sets the design limit at 1,000, which sits inside the unmeasured gap. |
 | Is a journal append plus `flush()` durable across a kill? | before storing anything real | 1 d | The spec says "attempt to transfer" and allows a no-op. Build the zip-export affordance regardless. |
 | Calibrate the blur ceiling at boot instead of hard-coding one machine's number | M12 | 0.5 d | Turns an unknown into a runtime measurement, which is strictly better than more research. |

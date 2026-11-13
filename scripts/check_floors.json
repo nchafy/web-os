@@ -1,3 +1,4 @@
 {
-  "boot": 30
+  "boot": 30,
+  "syscall": 30
 }

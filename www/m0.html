@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m0 — syscall channel under contention</title>
+<style>
+  :root { color-scheme: dark; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 0; padding: 2rem; background: #0b1016; color: #c7d3e0; }
+  h1 { font-size: .95rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+       color: #74b8fc; margin: 0 0 1rem; }
+  pre { white-space: pre-wrap; color: #7d8da0; margin: 0; }
+  .bad { color: #ff7b72; }
+</style>
+</head>
+<body>
+<h1>m0 &mdash; syscall channel under contention</h1>
+<pre id="log"></pre>
+
+<script>
+/* THE MODULE-GRAPH PREFLIGHT, and it is a classic script on purpose: a preflight written inside
+ * the module it is meant to protect cannot run when that module 404s. The page is served from the
+ * REPOSITORY ROOT because it imports /src/abi.mjs; served from ./www, as CLAUDE.md's
+ * `scripts/serve.py` does, every one of these 404s, no module executes, and the only symptom is a
+ * blank page with globalThis.M0 never created.
+ *
+ * The list is written out rather than derived — nothing in the platform enumerates a module graph
+ * before it loads — so the capture-phase error listener below is what catches an import this list
+ * has not been told about.
+ */
+(() => {
+  const GRAPH = [
+    '/src/abi.mjs',
+    '/src/kernel/kernel.mjs',
+    '/src/kernel/table.mjs',
+    '/src/kernel/files.mjs',
+    '/src/kernel/calls.mjs',
+    '/src/libos/process.mjs',
+    '/src/libos/syscall.mjs',
+    '/bench/syscall-contention/summarise.mjs',
+    '/bench/syscall-contention/loop.mjs',
+    '/bench/syscall-contention/bars.json',
+  ]
+  globalThis.M0 = {
+    state: 'starting',
+    isolated: self.crossOriginIsolated === true,
+    cells: [], errors: [], faults: [],
+  }
+  const say = (s) => {
+    const out = document.getElementById('log')
+    if (out) out.textContent += s + '\n'
+  }
+  /* A resource that failed to load names itself here even if it is not in the list above. Resource
+   * error events do not bubble, so this has to be a capture-phase listener on the window. */
+  addEventListener('error', (ev) => {
+    const src = ev.target && (ev.target.src || ev.target.href)
+    if (!src) return
+    globalThis.M0.errors.push('failed to load ' + src)
+    if (globalThis.M0.state === 'starting') {
+      globalThis.M0.state = 'error'
+      globalThis.M0.why = 'failed to load ' + src + ' — the module graph is not reachable from ' +
+        'this server root. The bench serves the REPOSITORY ROOT; see ' +
+        'bench/syscall-contention/README.md.'
+    }
+  }, true)
+
+  globalThis.__m0Preflight = (async () => {
+    const missing = []
+    await Promise.all(GRAPH.map(async (url) => {
+      try {
+        const r = await fetch(url, { cache: 'no-store' })
+        if (!r.ok) missing.push(url + ' -> HTTP ' + r.status)
+      } catch (e) {
+        missing.push(url + ' -> ' + (e && e.message))
+      }
+    }))
+    const result = { ok: missing.length === 0, missing, graph: GRAPH }
+    globalThis.M0.preflight = result
+    if (!result.ok) {
+      globalThis.M0.state = 'error'
+      globalThis.M0.why = 'module-graph preflight failed, ' + missing.length + ' of ' +
+        GRAPH.length + ' unreachable: ' + missing.join('; ') +
+        '. The bench serves the REPOSITORY ROOT, not ./www.'
+      const out = document.getElementById('log')
+      if (out) out.className = 'bad'
+      say(globalThis.M0.why)
+    }
+    return result
+  })()
+})()
+</script>
+
+<script type="module">
+/* The bench page. It owns orchestration and nothing else: the kernel owns privilege, loop.mjs is
+ * userland, summarise.mjs owns the statistics.
+ *
+ * IT ABORTS RATHER THAN REPORTING A NUMBER FROM A NON-ISOLATED CONTEXT. scripts/serve.py
+ * --no-isolation exists to prove this path is taken, and `SharedArrayBuffer` being undefined there
+ * is not a graceful degradation — it is a different system.
+ *
+ * ONE CELL PER PAGE LOAD. A second N in one load would take its numbers while the previous cell's
+ * processes were still running: terminate() on the kernel worker does not reap its nested process
+ * workers, which keep executing for ~2 s (constraint 14), and the next cell boots in ~70 ms. The
+ * page refuses more than one N rather than trusting the harness to launch a browser per cell.
+ */
+
+import { ABI_FINGERPRINT, PROC_CAP, MAX_INLINE, REARM_MS, HB_PERIOD_MS, HB_MISS_LIMIT,
+  KDOWN_SEEN, KDOWN_MS }
+  from '/src/abi.mjs'
+import { summariseCell, agreementSelfTest, percentileSelfTest }
+  from '/bench/syscall-contention/summarise.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+
+const params = new URLSearchParams(location.search)
+const num = (k, d) => (params.has(k) ? Number(params.get(k)) : d)
+
+Object.assign(globalThis.M0, { isolated: self.crossOriginIsolated === true })
+
+/* The abort, before anything else runs. No figures are produced on this path. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M0.state = 'aborted'
+  globalThis.M0.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No figures. Run scripts/serve.py WITHOUT --no-isolation.'
+  out.className = 'bad'
+  say(globalThis.M0.why)
+} else {
+  main().catch((e) => {
+    globalThis.M0.state = 'error'
+    globalThis.M0.why = String(e && e.stack || e)
+    say(globalThis.M0.why)
+  })
+}
+
+/** A process said it could not continue, or the barrier did not close. Either makes the cell
+ *  INVALID, and both carry the reason to the surface instead of expiring a timeout. */
+class CellInvalid extends Error {}
+
+function kernelBoot(cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map()
+  const pending = []
+  let abort = null
+  const fail = (why) => {
+    abort = new CellInvalid(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    /* A fault and a barrier that did not close are terminal for the cell, and they are delivered
+     * to whatever is waiting rather than left to time out. Before this, a process fault fell
+     * through to the kernel's `dropped` counter and the page sat on a two-minute timeout for a
+     * `results` message that could never arrive. */
+    if (m.t === 'fault') {
+      globalThis.M0.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+      fail('process fault, pid ' + m.pid + ': ' + m.why)
+      return
+    }
+    if (m.t === 'barrier' && m.failed) {
+      globalThis.M0.barrierFailure = m.barrier
+      say('BARRIER FAILED: ' + m.why)
+      fail(m.why)
+      return
+    }
+    if (m.t === 'error') {
+      globalThis.M0.errors.push('kernel: ' + m.why)
+      say('kernel error: ' + m.why)
+      return
+    }
+    const w = waiters.get(m.t)
+    if (w) { waiters.delete(m.t); w(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M0.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, timeoutMs = 60000) => new Promise((resolve, reject) => {
+    if (abort) return reject(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return resolve(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); reject(new Error('timed out waiting for ' + t)) }, timeoutMs)
+    waiters.set(t, (m) => {
+      clearTimeout(timer)
+      if (m instanceof Error) reject(m); else resolve(m)
+    })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m) }
+}
+
+async function runCell(k, { n, call, windowMs, payloadBytes, warmupCalls, hbObserver, overflow,
+  probeNotEqual, faultIndex, overCap }) {
+  /* Control 7.11, `over_cap=1`: ask for one process more than the table has slots, on purpose.
+   * The kernel must refuse that spawn and name the CAP (constraint 17), and the cell must report
+   * INVALID with that reason. The clamp in main() is what makes an over-cap request unreachable
+   * by accident; this flag is what keeps the refusal path exercised rather than assumed, because
+   * the symptom of a refused spawn — children that never report ready — is identical to the
+   * starvation it was once misreported as. */
+  const count = overCap ? PROC_CAP + 1 : n + (hbObserver ? 1 : 0)
+  k.post({
+    t: 'spawn',
+    count,
+    programUrl: '/bench/syscall-contention/loop.mjs',
+    cfg: {},
+    readyTimeoutMs: 10000,
+  })
+  const spawned = await k.expect('spawned')
+  /* The cap before the clock. A refused spawn is reported as itself, and no `ready` message is
+   * coming: the kernel returns early rather than timing out on children it never created. */
+  if (spawned.refused) throw new CellInvalid(spawned.why)
+  const ready = await k.expect('ready', 30000)
+  if (ready.starved) throw new CellInvalid(ready.why || ('kernel-starved-children: ' + ready.ready + '/' + count))
+
+  k.post({
+    t: 'go',
+    go: {
+      call, windowMs, payloadBytes, warmupCalls, overflow, probeNotEqual, faultIndex,
+      // The last process is the heartbeat observer, and it is NOT part of N.
+      roleOf: hbObserver ? count - 1 : -1,
+      barrierTimeoutMs: 60000,
+    },
+  })
+  const res = await k.expect('results', windowMs + 120000)
+  return { ready, results: res.results, kernel: res.kernel }
+}
+
+async function main() {
+  const pre = await globalThis.__m0Preflight
+  if (!pre.ok) throw new Error(globalThis.M0.why)
+
+  const bars = await (await fetch('/bench/syscall-contention/bars.json')).json()
+  const cfg = {
+    bench: 1,
+    stallUs: num('stall_us', 0),
+    thinkUs: num('think_us', 0),
+    truncateOverflow: params.get('truncate_overflow') === '1',
+    spawnThenPark: params.get('spawn_then_park') === '1',
+    depth: params.get('depth') === '0' ? false : true,
+  }
+  const ns = (params.get('n') || '1').split(',').map(Number)
+  if (ns.length !== 1) {
+    throw new Error('this page runs ONE cell per load, and was given n=' + ns.join(',') +
+      '. terminate() does not reap a cell\'s processes (constraint 14), so a second cell in one ' +
+      'load would take its numbers against up to N orphans. The harness launches one browser per ' +
+      'cell; see bench/syscall-contention/probe.py.')
+  }
+  const windowMs = num('window_ms', 1000)
+  const call = params.get('call') || 'getpid'
+  const payloadBytes = num('payload', 64)
+  const warmupCalls = num('warmup', 2000)
+  const hbObserver = params.get('hb') === '1'
+
+  /* THE CELL'S ARITHMETIC AGAINST THE HARD CAP, done here because this is where the observer is
+   * decided. The observer is a real process and occupies a real slot, so the cell asks the kernel
+   * for n + 1 — and at n = PROC_CAP that is one more than the table has, which the kernel refuses
+   * by design (constraint 17). Measured: `--n 128 --hb` asked for 129 against a cap of 128, three
+   * runs out of three, and the refusal surfaced as "kernel-starved-children: 128/129", a
+   * diagnosis about yielding that was false.
+   *
+   * N is clamped, never the observer: N is what every figure is labelled with, and dropping the
+   * instrumentation the caller asked for would leave the heartbeat distribution unmeasured with
+   * nothing in the output saying so. The clamp is recorded on the cell and printed. */
+  const nAsked = ns[0]
+  const observerSlots = hbObserver ? 1 : 0
+  const n = Math.min(nAsked, PROC_CAP - observerSlots)
+  const clamp = n === nAsked ? null : {
+    asked: nAsked, measured: n, cap: PROC_CAP, observerSlots,
+    why: 'N was clamped from ' + nAsked + ' to ' + n + ': this cell also spawns ' +
+      observerSlots + ' heartbeat observer process, and ' + nAsked + ' + ' + observerSlots +
+      ' exceeds the ' + PROC_CAP + '-slot process table (constraint 17). Every figure below is ' +
+      'labelled with N=' + n + ', which is what ran.',
+  }
+  globalThis.M0.clamp = clamp
+  if (clamp) say(clamp.why)
+
+  globalThis.M0.pageFingerprint = ABI_FINGERPRINT
+  globalThis.M0.agreementSelfTest = agreementSelfTest()
+  /* The percentile machinery against hand-computed answers, published beside the figure it
+   * produces. The headline p99 is what this milestone reports, and a percentile function nobody
+   * has checked against a known answer can be replaced by a different quantile without any
+   * bound-shaped assertion noticing. */
+  globalThis.M0.percentileSelfTest = percentileSelfTest()
+  /* The machine, beside the figure. At N=16 this cell runs 16 process workers plus the kernel
+   * worker plus the main thread; against `hardwareConcurrency` logical cores that ratio is the
+   * dominant environmental input to every latency printed, and docs/CONSTRAINTS.md's convention is
+   * that a figure names the machine that produced it. `agents` is the derived count the reader
+   * actually wants, computed here rather than in the printer so page and harness cannot disagree. */
+  globalThis.M0.machine = {
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    platform: (navigator.userAgentData && navigator.userAgentData.platform) || 'unknown',
+    agents: n + (hbObserver ? 1 : 0) + 2,
+    dpr: globalThis.devicePixelRatio,
+  }
+  globalThis.M0.config = {
+    rearmMs: REARM_MS, hbPeriodMs: HB_PERIOD_MS, hbMissLimit: HB_MISS_LIMIT,
+    deathThresholdMs: REARM_MS * (HB_MISS_LIMIT + 1),
+    /* The designed trade, derived once and printed where the reader meets the -EIO: a kernel that
+     * is alive but synchronously busy for longer than this is declared dead by every parked
+     * process, so this is a hard ceiling on any synchronous kernel work (M2's flush, M2's
+     * snapshot). Constraint 46 is why there is no alternative: elapsed time alone must never
+     * fault a process, which leaves the heartbeat as the only liveness signal. */
+    busyCeilingMs: REARM_MS * HB_MISS_LIMIT,
+    procCap: PROC_CAP, maxInline: MAX_INLINE, windowMs, call, payloadBytes, warmupCalls, bars,
+  }
+
+  const k = kernelBoot(cfg)
+  const up = await k.expect('up')
+  globalThis.M0.kernelFingerprint = up.abiFingerprint
+  globalThis.M0.cfgEcho = up.cfg
+  globalThis.M0.kernelIsolated = up.isolated
+  say('kernel up  fingerprint ' + up.abiFingerprint + ' (page ' + ABI_FINGERPRINT + ')' +
+      '  isolated page=' + globalThis.M0.isolated + ' kernel=' + up.isolated)
+
+  const sleepMs = num('park_ms', 0)
+  if (sleepMs === 0) {
+    let cell
+    try {
+      cell = await runCell(k, {
+        n, call, windowMs, payloadBytes, warmupCalls,
+        hbObserver,
+        overflow: params.get('overflow') === '1',
+        probeNotEqual: params.get('force_not_equal') === '1',
+        faultIndex: params.has('fault_index') ? num('fault_index', -1) : -1,
+        overCap: params.get('over_cap') === '1',
+      })
+    } catch (e) {
+      if (!(e instanceof CellInvalid)) throw e
+      /* INVALID, never a number. The cell is reported with the reason in place of the figures. */
+      globalThis.M0.cells.push({
+        n, invalid: true, verdict: 'INVALID', why: String(e.message), clamp,
+        faults: globalThis.M0.faults.slice(),
+      })
+      globalThis.M0.state = 'done'
+      say('N=' + n + '  INVALID — ' + e.message)
+      return
+    }
+    const fps = cell.results.map((r) => r.abiFingerprint)
+    const summary = summariseCell({ n, samples: cell.results, kernel: cell.kernel, bars, windowMs })
+    summary.fingerprintsAgree = fps.every((f) => f === ABI_FINGERPRINT) && up.abiFingerprint === ABI_FINGERPRINT
+    summary.isolatedProcesses = cell.results.filter((r) => r.isolated && r.role !== 'hb').length
+    summary.clamp = clamp
+    summary.readyMs = cell.ready.ms
+    summary.heartbeat = (cell.results.find((r) => r.role === 'hb') || {}).heartbeat || null
+    summary.serviceMeanUs = cell.kernel.serviceMeanUs
+    /* The kernel's sink checksum against the process's own, over the SAME cumulative byte stream.
+     * A sink that ignored the buffer would pass a latency test while transferring nothing. */
+    summary.sinks = cell.results.filter((r) => r.role !== 'hb')
+      .map((r) => ({
+        pid: r.pid,
+        sinkBytes: r.sinkBytes, sinkSum: r.sinkSum, sinkWrites: r.sinkWrites,
+        sentBytes: r.sent.bytes, sentSum: r.sent.sum,
+      }))
+    summary.envKinds = (cell.results[0] || {}).envKinds || []
+    summary.forced = (cell.results.find((r) => r.forced) || {}).forced || null
+    /* The pid beside the probes, because each probe's r0 is the reply to a getpid and the only
+     * way to say it is the RIGHT reply is to compare it with the pid of the process that issued
+     * it. Without this the probes can only be checked for having returned some number, which a
+     * kernel replying with a constant also does. */
+    summary.forcedPid = (cell.results.find((r) => r.forced) || {}).pid ?? null
+    summary.overflow = (cell.results.find((r) => r.overflow) || {}).overflow || null
+    summary.clock = (cell.results[0] || {}).clock || null
+    const loops = cell.results.filter((r) => r.role !== 'hb')
+    summary.pids = loops.map((r) => r.pid)
+    summary.firstGetpid = loops.map((r) => r.firstGetpid)
+    summary.firstGetpidOk = loops.every((r) => r.firstGetpid === r.pid)
+    /* The process's OWN idea of its identity, beside the kernel's. `pids` is the kernel's table
+     * and `firstGetpid` is the kernel's answer, so comparing those two compares the kernel with
+     * itself; this is the third source, and it is the one a program reads. */
+    summary.envPids = loops.map((r) => r.envPid)
+    /* The same claim over every call in the window rather than over one: loop.mjs counts a reply
+     * that was not this process's own pid, so this is 70,000 comparisons, not one. */
+    summary.windowWrong = loops.reduce((a, r) => a + r.measured.wrong, 0)
+    globalThis.M0.cells.push(summary)
+    say('N=' + n + '  n=' + summary.count + '  mean ' + summary.meanUs.toFixed(2) + ' us  p99 ' +
+        summary.p99.text + '  depth_p50 ' + summary.depth.p50 + '  ' + summary.verdict)
+  } else {
+    /* Controls 7.4 and 7.5, the two edges of constraint 46. Every process issues ONE sleep far
+     * longer than the re-arm, and then either the kernel lives (7.5: nobody may fault) or the
+     * page terminates it (7.4: everybody must fault, inside the death threshold).
+     *
+     * The verdict is read off the SABs, not off a message. Terminating the kernel destroys the
+     * port the processes report through, so freezing a word while service continues — the obvious
+     * alternative — would mean no process ever reaches the timed-out branch and the control could
+     * not fire at all. */
+    k.post({
+      t: 'spawn',
+      count: n,
+      programUrl: '/bench/syscall-contention/loop.mjs',
+      cfg: {},
+      readyTimeoutMs: 10000,
+    })
+    const spawned = await k.expect('spawned')
+    if (spawned.refused) throw new CellInvalid(spawned.why)
+    const ready = await k.expect('ready', 30000)
+    if (ready.starved) throw new CellInvalid(ready.why)
+    k.post({ t: 'expose' })
+    const exposed = await k.expect('exposed')
+    const views = exposed.procs.map((p) => ({ pid: p.pid, ctl: new Int32Array(p.sab) }))
+    k.post({ t: 'go', go: { mode: 'park', sleepMs } })
+    await new Promise((r) => setTimeout(r, num('kill_after_ms', 100)))
+    const kill = params.get('kill_kernel') === '1'
+    const t0 = performance.now()
+    if (kill) k.worker.terminate()
+    /* ONE bound, declared once. The 20% margin is bench policy and lives in bars.json beside the
+     * bars; the polling slack is a separate fact with its own name, because a poll that stopped at
+     * the bound could not observe an overrun — it would report the bound back as the measurement. */
+    const boundMs = globalThis.M0.config.deathThresholdMs * bars.liveness_bound_factor
+    const deadline = performance.now() +
+      (kill ? boundMs + bars.liveness_poll_slack_ms : sleepMs + bars.liveness_poll_slack_ms)
+    while (performance.now() < deadline) {
+      if (views.every((v) => Atomics.load(v.ctl, KDOWN_SEEN))) break
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    globalThis.M0.liveness = {
+      killed: kill,
+      sleepMs,
+      boundMs,
+      boundFactor: bars.liveness_bound_factor,
+      pollSlackMs: bars.liveness_poll_slack_ms,
+      killAfterMs: num('kill_after_ms', 100),
+      faulted: views.filter((v) => Atomics.load(v.ctl, KDOWN_SEEN)).length,
+      of: views.length,
+      withinMs: performance.now() - t0,
+      /* Per process, with the flag beside the number. KDOWN_MS is only written by a process that
+       * concluded the kernel was gone, so a zero here means NOT REACHED, not "0 ms". */
+      perProcess: views.map((v) => ({
+        pid: v.pid,
+        seen: Atomics.load(v.ctl, KDOWN_SEEN) === 1,
+        ms: Atomics.load(v.ctl, KDOWN_MS),
+      })),
+    }
+    say('liveness: ' + JSON.stringify(globalThis.M0.liveness))
+  }
+
+  globalThis.M0.state = 'done'
+  say('done')
+}
+</script>
+</body>
+</html>
