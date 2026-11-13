@@ -36,6 +36,12 @@ a process Worker into an asynchronous kernel Worker**: `postMessage` out, `Atomi
 SharedArrayBuffer for the reply. Measured here at **14–16 µs**, which is *faster* than asynchronous
 message passing.
 
+That was one caller against an idle kernel. The kernel is one thread serialising every syscall in
+the system, so M0 measured the channel saturated: **p99 is 255 µs at 16 concurrent processes**
+against a 500 µs bar — and 3.06 ms at 128, where queueing dominates and the sharded-kernel question
+comes back. The number is worth reading only because the same harness returns `KILL` at
+**29,673 µs** when a 2 ms stall is put in the kernel handler. `docs/CONSTRAINTS.md` constraint 51.
+
 That one mechanism is what daedalOS, OS.js, win32.run and RipenOS all lack, and building it forces
 everything else into existence — a process table, fd tables, pipes, credentials, and a kill that
 actually kills. Running real Linux in a tab (v86, CheerpX) is a separate question with a separate
@@ -58,6 +64,13 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 
 - **The environment.** `www/index.html` proves isolation, SAB, `Atomics.wait` in a worker, and an
   OPFS sync access handle, in the context each has to work in.
+- **The syscall channel, under contention.** M0: a kernel Worker, process Workers it spawns itself
+  as nested workers, and the SAB ABI, measured closed-loop at N ∈ {1, 4, 16, 64, 128}. ACCEPT.
+  `bench/syscall-contention/`, and `scripts/check.py --negative kernel-stall` keeps the negative
+  control re-runnable.
+- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and four negative controls.
+  Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
+  the defect that table exists to forbid.
 - **Map tiles survive cross-origin isolation.** `bench/coep-tiles/` loads OpenFreeMap vector tiles
   plus OpenStreetMap, OpenTopoMap and Esri raster tiles under `COEP: require-corp` with zero
   blocked requests — and carries a negative control that fires, so the zero means something.

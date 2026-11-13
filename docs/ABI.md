@@ -22,13 +22,27 @@ i32[0]  SEQ       the only futex word. Only the kernel ever notifies it.
 i32[1]  STATUS
 i32[2]  RLEN
 i32[3]  SIGPEND   pending-signal bits, checked at syscall entry
-i32[4]  CALLID
+i32[4]  CALLID    per-call unique, monotonic per process, wrapping at 2^31
 i32[5]  UID       so getuid() costs no syscall
+i32[6]  NR        the syscall number
 i32[8..15]        a0..a7. A 64-bit argument takes a (lo, hi) register pair.
 i32[16],[17]      r0, r1, together an i64 return
 byte 128          one variable-length argument: [u32 len][bytes]
+                  so the length word is AT byte 128 and the bytes start at 132
                   MAX_INLINE = 65404 B
 ```
+
+**`CALLID` is a per-call identity, not the syscall number.** The two readings of the original table
+produced two incompatible kernels, so this is stated once here and derived nowhere else. Its job is
+the one §1 gives it — letting the kernel drop a late reply after a cancellation — and a syscall
+number cannot do that job, because it cannot distinguish two consecutive calls of the same number.
+That is precisely the case cancellation creates: interrupt a `read`, the caller retries `read`, and
+a late reply to the first must not be mistaken for the second. The number therefore lives in its
+own word, `NR`, and the two must not be packed into one i32 — a 16-bit sequence wraps about once a
+second under saturation and an aliased stale reply is the bug this separation exists to prevent.
+`port.postMessage(callid)` still carries the callid as a bare number, which gives the kernel a free
+integrity check: compare the posted value against the `CALLID` word and reply `-EINVAL` if they
+disagree.
 
 **The handshake.** The process does:
 
@@ -42,6 +56,13 @@ The kernel does the work, then `Atomics.store(ctl, SEQ, s+1)` and `Atomics.notif
 
 Measured: **14–16 µs** mean, p50 10–15 µs, p95 25–30 µs. *Faster* than an async `postMessage`
 round trip (17.3 µs), so there is no latency argument for an async API.
+
+Those figures are **one caller against an idle kernel**. M0 reproduced the mean — 15.8–16.0 µs at
+N=1, on a later Chrome build — and then measured what they never covered: **p99 is 200–255 µs at 16
+concurrent callers and 3.06 ms at 128**, because one thread serialises every syscall in the system.
+`CONSTRAINTS.md` constraint 51 carries the curve. The p50 and p95 above also sit at or below the
+clock's 5 µs quantum (constraint 52), so a 14 µs figure can only ever be a batch mean and never a
+percentile.
 
 **The race is closed by spec, not by luck.** If the kernel replies before the process parks,
 `Atomics.wait` returns `"not-equal"` immediately. About 0.2% of calls. It is a fast path and must
