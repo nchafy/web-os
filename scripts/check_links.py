@@ -19,9 +19,10 @@ AUTHORED = [
 ]
 
 #: Referenced on purpose, not built yet. MILESTONES.md says which milestone owes each.
-OWED = {
-    'scripts/check.py',
-}
+#: Forward references a milestone has not created yet. An entry here is a promise, so it is
+#: removed by the change that keeps the promise — an OWED set that outlives its files trains the
+#: reader to skim the line, and then a real forward reference hides in it.
+OWED = set()
 
 PATH_RE = re.compile(
     r'[`(]((?:docs/|src/|bench/|scripts/|www/|mockups/|\.\./)[A-Za-z0-9_./\-]+'
