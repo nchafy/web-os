@@ -209,7 +209,7 @@ async function spawnAll(k, count) {
 }
 
 async function runCell(k, { n, call, windowMs, payloadBytes, warmupCalls, hbObserver, overflow,
-  probeNotEqual, faultIndex, overCap }) {
+  probeNotEqual, faultIndex, overCap, ioProcs }) {
   /* Control 7.11, `over_cap=1`: ask for one process more than the table has slots, on purpose.
    * The kernel must refuse that spawn and name the CAP (constraint 17), and the cell must report
    * INVALID with that reason. The clamp in main() is what makes an over-cap request unreachable
@@ -227,7 +227,7 @@ async function runCell(k, { n, call, windowMs, payloadBytes, warmupCalls, hbObse
   k.post({
     t: 'go',
     go: {
-      call, windowMs, payloadBytes, warmupCalls, overflow, probeNotEqual, faultIndex,
+      call, windowMs, payloadBytes, warmupCalls, overflow, probeNotEqual, faultIndex, ioProcs,
       // The last process is the heartbeat observer, and it is NOT part of N.
       roleOf: hbObserver ? count - 1 : -1,
       barrierTimeoutMs: 60000,
@@ -330,6 +330,7 @@ async function main() {
     try {
       cell = await runCell(k, {
         n, call, windowMs, payloadBytes, warmupCalls,
+        ioProcs: num('io_procs', 0),
         hbObserver,
         overflow: params.get('overflow') === '1',
         probeNotEqual: params.get('force_not_equal') === '1',
