@@ -5,7 +5,13 @@ build/
 node_modules/
 .DS_Store
 
-# bench output: numbers belong in docs/ with their harness named, not committed raw
+# bench output. Screenshots and logs are regenerable noise; a results file is EVIDENCE.
+#
+# `bench/**/results*.json` was ignored here on the reasoning that numbers belong in docs/ with
+# their harness named. That was wrong in one direction: docs/CONSTRAINTS.md 51, 54 and 56 cite
+# bench/syscall-contention/results-sweep.json by path, and a citation that resolves to an ignored
+# file is not a citation. The numbers do belong in docs/ — and the artifact they were read out of
+# has to be in the tree for anyone to check them.
 bench/**/shot.png
-bench/**/results*.json
+bench/**/*.png
 *.log

@@ -20,6 +20,7 @@ checks is a wish.
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
+| **M0a** | **Addendum: the same sweep with a real OPFS call in the mix** | 0.5 | | ⬜ **next** |
 | **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
 | M3 | `/proc`, `/dev`, mounts | 2 | | ⬜ |
@@ -153,6 +154,39 @@ a traceback when `--out` named a directory that did not exist.
 `"not-equal"` from `Atomics.wait` because the kernel replied before the process parked. A fast path,
 not an error. The kernel's own notify-woke-nobody counter agrees with the process-side count to
 98.2–100%.
+
+---
+
+## M0a — Addendum: the same sweep with a real OPFS call · next · 0.5 day
+
+**Why this exists.** M0's three calls were `getpid`, `write(1, …)` to an in-memory sink, and
+`clock_nanosleep`. None touches storage, so the handler it measured costs 2–3 µs. A real `open()`
+is 495 µs and a `flush()` is 260 µs — 85–250× that — and the kernel is one thread serving every
+process, so one slow `open` is head-of-line blocking for all of them. **M0 measured the one
+workload in which that risk cannot appear**, which makes its ACCEPT conditional on a condition it
+never stated. Raised by a parallel session reviewing the result; the gap is real and was mine.
+
+**Build.** A fourth call that opens and writes a real OPFS file, added to the existing mix. No new
+harness — the eight controls, the anti-vacuity gates and the barrier all stand.
+
+**Proof.** Run the mix at N ∈ {1, 16, 64} and report **p99 for the cheap calls while the expensive
+ones are in flight**, separated by call. That is the figure that matters: it says whether a
+`getpid` queued behind someone else's `open` returns in 15 µs or in 500. Report the two
+distributions side by side, not a pooled number — pooling is what would hide it.
+
+**Negative control.** The existing kernel-stall control already proves the harness can see a slow
+handler. What this milestone additionally owes is the *separation*: show that the cheap-call p99
+moves when the expensive call is added and does not when it is removed, so the figure is coupled to
+the I/O and not to the extra traffic.
+
+**What a bad result means, and it is not a kill.** If cheap calls inherit the `open` latency, the
+first fallback is **a second kernel-side I/O worker owning the OPFS handles** — constraint 15
+forbids a releasable resource living in a *process*, and an I/O worker is kernel-side, so the
+handles stay legal while the dispatch thread stops blocking. That is much smaller than the sharded
+kernel M0's kill criterion named. Constraint 57.
+
+**Also specify while here:** the queue drain order. A kernel that replies out of order can livelock
+without one — notifications, then in-flight answers, then new requests.
 
 ---
 
