@@ -1,0 +1,406 @@
+[
+  {
+    "state": "done",
+    "isolated": true,
+    "cells": [
+      {
+        "n": 1,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 9440,
+        "throughputPerS": 47200,
+        "meanUs": 20.313559324180677,
+        "p50": {
+          "text": "\u2014",
+          "us": null,
+          "why": "withheld: 20.000 us is below 5 quanta (25.000 us)"
+        },
+        "p95": {
+          "us": 34.999992698431015,
+          "lowUs": 29.9999937415123,
+          "highUs": 39.99999165534973,
+          "text": "35.0[30.0,40.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 39.99999165534973,
+          "lowUs": 34.999992698431015,
+          "highUs": 44.99999061226845,
+          "text": "40.0[35.0,45.0]",
+          "why": null
+        },
+        "p99Quantile": 0.99,
+        "p99Witness": {
+          "q": 0.99,
+          "us": 39.99999165534973,
+          "atOrAboveFraction": 0.01885593220338983,
+          "aboveFraction": 0.00847457627118644,
+          "tail": 0.010000000000000009,
+          "ok": true
+        },
+        "minPercentileSamples": 1000,
+        "worstP99Us": 39.99999165534973,
+        "maxUs": 2035.0000001490116,
+        "exceedAccept": {
+          "count": 2,
+          "fraction": 0.000211864406779661
+        },
+        "depth": {
+          "dispatches": 9440,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 9440,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "little": 0.9588000001013279,
+        "dutyMin": 0.9590157786422336,
+        "rho": 0.14321769204370607,
+        "overlap": {
+          "processes": 1,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 200,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 9541,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 9541,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "depthRamp": {
+          "dispatches": 0,
+          "p50": 0,
+          "p01": 0,
+          "min": 0,
+          "max": 0,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 0
+        },
+        "saturated": true,
+        "latch": {
+          "target": 1,
+          "depth": 1
+        },
+        "hbGapKernel": {
+          "count": 30,
+          "meanMs": 10.022166666761041,
+          "p50Ms": 9.5,
+          "p99Ms": 13,
+          "p999Ms": 13,
+          "maxMs": 13.355000000447035,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 1,
+          "saturateAt": 1,
+          "windowMs": 200,
+          "phase": "done",
+          "armedWall": 1794545595317,
+          "releasedWall": 1794545595322,
+          "deadlineWall": 1794545595522,
+          "allLeftWall": 1794545595524,
+          "goToReleaseMs": 5,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A10 depth_max <= N and depth_p50 <= N",
+              "pass": true,
+              "detail": "max 1, p50 1, N 1",
+              "evaluated": true
+            },
+            {
+              "name": "A0 depth==1 at N=1",
+              "pass": true,
+              "detail": "p50 1, max 1",
+              "evaluated": true
+            },
+            {
+              "name": "A3 little in [0.85,1.05]",
+              "pass": true,
+              "detail": "little 0.959",
+              "evaluated": true
+            },
+            {
+              "name": "A6 rho >= 0.90",
+              "pass": true,
+              "detail": "not read below N=128 (n=1): below that the bottleneck is the renderer rather than the kernel, so this utilisation is not evidence about this N (rho 0.143)",
+              "evaluated": false
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": [
+            "A6 rho >= 0.90"
+          ]
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=1",
+        "accounting": {
+          "issued": 9541,
+          "returned": 9541,
+          "ok": 9518,
+          "dispatched": 9541,
+          "replied": 9541,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 23,
+          "notEqualFraction": 0.002410648778953988,
+          "notify0": 23,
+          "notifyWoke": 9518,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 1,
+        "clamp": null,
+        "readyMs": 87.39000000059605,
+        "heartbeat": null,
+        "serviceMeanUs": 3.034273136519196,
+        "sinks": [
+          {
+            "pid": 1,
+            "sinkBytes": 0,
+            "sinkSum": 2166136261,
+            "sinkWrites": 0,
+            "sentBytes": 0,
+            "sentSum": 2166136261
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": null,
+        "forcedPid": null,
+        "overflow": null,
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.970005,
+          "meanMs": 0.00015122499983757736,
+          "maxMs": 0.08500000089406967,
+          "distinct": [
+            [
+              0,
+              194001
+            ],
+            [
+              0.004999998956918716,
+              4319
+            ],
+            [
+              0.005000002682209015,
+              1667
+            ],
+            [
+              0.009999997913837433,
+              3
+            ],
+            [
+              0.010000001639127731,
+              1
+            ],
+            [
+              0.01499999687075615,
+              1
+            ],
+            [
+              0.015000000596046448,
+              2
+            ],
+            [
+              0.020000003278255463,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          1
+        ],
+        "firstGetpid": [
+          1
+        ],
+        "firstGetpidOk": true,
+        "envPids": [
+          1
+        ],
+        "windowWrong": 0,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 3,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      }
+    ],
+    "errors": [],
+    "faults": [],
+    "preflight": {
+      "ok": true,
+      "missing": [],
+      "graph": [
+        "/src/abi.mjs",
+        "/src/kernel/kernel.mjs",
+        "/src/kernel/table.mjs",
+        "/src/kernel/files.mjs",
+        "/src/kernel/calls.mjs",
+        "/src/libos/process.mjs",
+        "/src/libos/syscall.mjs",
+        "/bench/syscall-contention/summarise.mjs",
+        "/bench/syscall-contention/loop.mjs",
+        "/bench/syscall-contention/bars.json"
+      ]
+    },
+    "clamp": null,
+    "pageFingerprint": 1780549064,
+    "agreementSelfTest": {
+      "identical": 1,
+      "disjoint": 0,
+      "half": 0.5,
+      "unobserved": null,
+      "ok": true
+    },
+    "percentileSelfTest": {
+      "q": 0.99,
+      "got": {
+        "linP50Us": 500,
+        "linP95Us": 2500,
+        "linP99Us": 4500,
+        "logP50Us": 500,
+        "logP99Us": 10000,
+        "cellP99Text": "4500.0[4000.0,5000.0]",
+        "cellWithheldUs": null,
+        "cellInsufficientWhy": "insufficient",
+        "witnessOnP99": true,
+        "witnessOnP50": false
+      },
+      "want": {
+        "linP50Us": 500,
+        "linP95Us": 2500,
+        "linP99Us": 4500,
+        "logP50Us": 500,
+        "logP99Us": 10000,
+        "cellP99Text": "4500.0[4000.0,5000.0]",
+        "cellWithheldUs": null,
+        "cellInsufficientWhy": "insufficient",
+        "witnessOnP99": true,
+        "witnessOnP50": false
+      },
+      "wrong": [],
+      "ok": true
+    },
+    "machine": {
+      "hardwareConcurrency": 12,
+      "platform": "macOS",
+      "agents": 3,
+      "dpr": 1
+    },
+    "config": {
+      "rearmMs": 50,
+      "hbPeriodMs": 10,
+      "hbMissLimit": 3,
+      "deathThresholdMs": 200,
+      "busyCeilingMs": 150,
+      "procCap": 128,
+      "maxInline": 65404,
+      "windowMs": 200,
+      "call": "getpid",
+      "payloadBytes": 64,
+      "warmupCalls": 100,
+      "bars": {
+        "accept_p99_us": 500,
+        "kill_p99_us": 2000,
+        "bar_n": 16,
+        "liveness_bound_factor": 1.2,
+        "liveness_poll_slack_ms": 1000,
+        "quiescence_max_workers": 0
+      }
+    },
+    "kernelFingerprint": 1780549064,
+    "cfgEcho": {
+      "bench": 1,
+      "stallUs": 0,
+      "thinkUs": 0,
+      "truncateOverflow": false,
+      "spawnThenPark": false,
+      "depth": true
+    },
+    "kernelIsolated": true,
+    "program": {
+      "url": "http://127.0.0.1:60975/bench/syscall-contention/loop.mjs",
+      "bytes": 9319,
+      "resolved": 1,
+      "fetches": 1
+    },
+    "chrome": "157.0.8103.52",
+    "quiescence": {
+      "ok": true,
+      "workers": 0,
+      "limit": 0,
+      "census": {
+        "page": 1,
+        "browser_ui": 1
+      },
+      "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+    },
+    "run": 1,
+    "quiescencePerCell": [
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      }
+    ],
+    "liveness": null
+  }
+]

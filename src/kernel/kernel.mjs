@@ -221,6 +221,66 @@ function onSyscallNoDepth(p, posted) {
 
 let dispatch = onSyscall;
 
+// ---------------------------------------------------------------------- the program loader
+
+/**
+ * THE KERNEL LOADS A PROGRAM. A PROCESS NEVER FETCHES ONE.
+ *
+ * Constraint 41 deletes `fetch` and `importScripts` from the process realm, so a design where
+ * each process pulls its own program text over HTTP is already dead at M6 — and it does not
+ * survive to M6 either: 16 processes importing one URL at the same instant lost 6 of 480
+ * connections to the server's listen backlog (`socketserver` listens with a backlog of 5), which
+ * arrived as a process fault and an unmeasurable cell about one run in five. Constraint 19 also
+ * prices this path below an HTTP spawn.
+ *
+ * The image is a Blob URL, built once per program and handed to every process. A blob URL has an
+ * opaque path, so a specifier inside the image cannot be resolved against it — measured:
+ * `Failed to resolve module specifier "/src/abi.mjs". Invalid relative url or base scheme isn't
+ * hierarchical.` That is what the loader below is for, and it resolves against the program's own
+ * URL, which makes the specifier the SAME absolute URL `src/libos/process.mjs` already resolved
+ * for its own graph. So the dependency comes out of the process's module map instead of off the
+ * network — measured at 320 processes: 320 fetches of `/src/abi.mjs`, which is the one each
+ * process's runtime needed anyway, and 1 fetch of the program — and the program ends up holding
+ * the libos stub's own instance of the ABI rather than a second copy of it.
+ */
+const images = new Map();
+let programFetches = 0;
+
+/**
+ * A STATIC import or `export ... from` specifier, and only a path-shaped one: `/x`, `./x`, `../x`.
+ * A bare specifier has no resolution in a worker without an import map, and a dynamic `import()`
+ * inside a program would still see the blob's opaque base — no program has either, and a loader
+ * feature for a case that does not exist is a loader feature nobody has run. The quote must
+ * follow `from` or `import` directly, which is what keeps prose out of the match; `resolved` is
+ * reported so the count is asserted rather than assumed.
+ */
+const STATIC_SPECIFIER = /(\bfrom\s*|\bimport\s*)(["'])(\.{0,2}\/[^"']*)\2/g;
+
+async function programImage(programUrl) {
+  const cached = images.get(programUrl);
+  if (cached) return cached;
+  const url = new URL(programUrl, self.location.href).href;
+  const response = await fetch(url, { cache: "no-store" });
+  programFetches += 1;
+  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+  const text = await response.text();
+  let resolved = 0;
+  const linked = text.replace(STATIC_SPECIFIER, (all, lead, quote, specifier) => {
+    resolved += 1;
+    return `${lead}${quote}${new URL(specifier, url).href}${quote}`;
+  });
+  // Not revoked: the image is live for as long as any process may still import it, and the
+  // kernel's own lifetime is that bound. One blob per distinct program, for one kernel.
+  const image = {
+    url,
+    imageUrl: URL.createObjectURL(new Blob([linked], { type: "text/javascript" })),
+    bytes: text.length,
+    resolved,
+  };
+  images.set(programUrl, image);
+  return image;
+}
+
 // ---------------------------------------------------------------------------- spawn
 
 const results = [];
@@ -236,7 +296,7 @@ const results = [];
  * 157.0.8103.38). A kernel that spawned and parked would hang for a full re-arm interval and be
  * misread as a syscall-latency problem, which is why that failure is reported under its own name.
  */
-function spawn(programUrl, programCfg, index = 0) {
+function spawn(image, programCfg, index = 0) {
   const slot = table.alloc();
   if (typeof slot === "number") return slot;   // -EAGAIN, the hard cap (constraint 17)
 
@@ -269,12 +329,62 @@ function spawn(programUrl, programCfg, index = 0) {
       port: channel.port2,
       pid: slot.pid,
       uid: slot.uid,
-      programUrl,
+      // The image, not a path to fetch: the program text has already crossed the wire once.
+      image: image.imageUrl,
       cfg: { ...programCfg, index },
     },
     [channel.port2],
   );
   return slot.pid;
+}
+
+/**
+ * One program load, then `count` processes against the one image.
+ *
+ * The load is reported with the batch — url, bytes, how many specifiers the loader resolved, and
+ * how many times this kernel has been to the network for program text — because "the program
+ * crossed the wire once" is the invariant the herd broke, and a kernel that silently went back to
+ * a per-process fetch would otherwise only show up as a flake.
+ */
+async function spawnBatch(m) {
+  const image = await programImage(m.programUrl);
+  const pids = [];
+  // The ordinal of the attempt the cap refused, in pids-ever-allocated terms rather than in
+  // this request's terms: pids are monotonic and nothing is freed at M0, so table.spawned at
+  // the moment of the refusal is the number of live processes and the attempt was the next
+  // one. A refusal reported as "the 1st of this batch" would hide which process count the
+  // cap actually stopped at.
+  let refusedAt = 0;
+  for (let i = 0; i < m.count; i += 1) {
+    const pid = spawn(image, m.cfg || {}, i);
+    if (pid < 0 && !refusedAt) refusedAt = table.spawned + 1;
+    pids.push(pid);
+  }
+  const refused = pids.filter((pid) => pid < 0).length;
+  post({
+    t: "spawned", pids, refused, cap: PROC_CAP, live: table.live.size,
+    program: {
+      url: image.url, bytes: image.bytes, resolved: image.resolved, fetches: programFetches,
+    },
+    why: refused ? capRefusedWhy(refusedAt, refused, pids.length) : "",
+  });
+  // Nothing to wait for. A process the cap refused does not exist, so it can never increment
+  // G_READY, and awaitReady would spend its whole timeout and then report the one thing that
+  // did NOT happen: starvation between spawn and first use. That diagnosis names a latency
+  // problem and sends the next day in the wrong direction, when the kernel was behaving
+  // exactly as constraint 17 specifies.
+  if (refused) return;
+  if (cfg.spawnThenPark) {
+    // A busy-spin, not a park, so the no-parking lint over this directory still holds — and
+    // it reproduces the same mechanism, because it also never yields and the child's ready
+    // message can never be processed.
+    const until = now() + (m.parkMs || 10000);
+    while (now() < until && Atomics.load(g, G_READY) < m.count) { /* starve the children */ }
+    const ready = Atomics.load(g, G_READY);
+    post({ t: "ready", ready, want: m.count, starved: ready < m.count, why: starvedWhy(ready, m.count, m.parkMs || 10000) });
+    return;
+  }
+  awaitReady(m.count, m.readyTimeoutMs || 10000);
 }
 
 function onProcessMessage(slot, m) {
@@ -539,43 +649,12 @@ function handle(m) {
       post({ t: "up", globals, abiFingerprint: ABI_FINGERPRINT, cfg, isolated: self.crossOriginIsolated === true });
       return;
     }
-    case "spawn": {
-      const pids = [];
-      // The ordinal of the attempt the cap refused, in pids-ever-allocated terms rather than in
-      // this request's terms: pids are monotonic and nothing is freed at M0, so table.spawned at
-      // the moment of the refusal is the number of live processes and the attempt was the next
-      // one. A refusal reported as "the 1st of this batch" would hide which process count the
-      // cap actually stopped at.
-      let refusedAt = 0;
-      for (let i = 0; i < m.count; i += 1) {
-        const pid = spawn(m.programUrl, m.cfg || {}, i);
-        if (pid < 0 && !refusedAt) refusedAt = table.spawned + 1;
-        pids.push(pid);
-      }
-      const refused = pids.filter((pid) => pid < 0).length;
-      post({
-        t: "spawned", pids, refused, cap: PROC_CAP, live: table.live.size,
-        why: refused ? capRefusedWhy(refusedAt, refused, pids.length) : "",
-      });
-      // Nothing to wait for. A process the cap refused does not exist, so it can never increment
-      // G_READY, and awaitReady would spend its whole timeout and then report the one thing that
-      // did NOT happen: starvation between spawn and first use. That diagnosis names a latency
-      // problem and sends the next day in the wrong direction, when the kernel was behaving
-      // exactly as constraint 17 specifies.
-      if (refused) return;
-      if (cfg.spawnThenPark) {
-        // A busy-spin, not a park, so the no-parking lint over this directory still holds — and
-        // it reproduces the same mechanism, because it also never yields and the child's ready
-        // message can never be processed.
-        const until = now() + (m.parkMs || 10000);
-        while (now() < until && Atomics.load(g, G_READY) < m.count) { /* starve the children */ }
-        const ready = Atomics.load(g, G_READY);
-        post({ t: "ready", ready, want: m.count, starved: ready < m.count, why: starvedWhy(ready, m.count, m.parkMs || 10000) });
-        return;
-      }
-      awaitReady(m.count, m.readyTimeoutMs || 10000);
+    case "spawn":
+      // The loader awaits a fetch, so this leg is async — and its rejection has to be turned
+      // into the kernel's own panic here, because `handle` is called from a try/catch that an
+      // unawaited promise walks straight past.
+      spawnBatch(m).catch((error) => panic(`spawn: ${error && (error.stack || error)}`));
       return;
-    }
     case "go": {
       results.length = 0;
       // The kernel's counters are NOT reset here. They run from boot, which is what keeps the
