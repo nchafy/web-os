@@ -191,6 +191,23 @@ function kernelBoot(cfg) {
   return { worker, expect, post: (m) => worker.postMessage(m) }
 }
 
+/* The program every cell runs, in one place. The copy in the preflight list above is in a
+ * different script — a classic one, so that it still runs when this module does not — and carries
+ * its own reason. */
+const PROGRAM = '/bench/syscall-contention/loop.mjs'
+
+/** Ask the kernel for `count` processes on ONE program image, and surface what it loaded.
+ *
+ *  The program text crosses the wire once, to the kernel, whatever N is: the kernel resolves the
+ *  URL to a blob image and hands that to every process (src/kernel/kernel.mjs, the loader). What
+ *  it loaded is published here because the harness asserts the once. */
+async function spawnAll(k, count) {
+  k.post({ t: 'spawn', count, programUrl: PROGRAM, cfg: {}, readyTimeoutMs: 10000 })
+  const spawned = await k.expect('spawned')
+  globalThis.M0.program = spawned.program || null
+  return spawned
+}
+
 async function runCell(k, { n, call, windowMs, payloadBytes, warmupCalls, hbObserver, overflow,
   probeNotEqual, faultIndex, overCap }) {
   /* Control 7.11, `over_cap=1`: ask for one process more than the table has slots, on purpose.
@@ -200,14 +217,7 @@ async function runCell(k, { n, call, windowMs, payloadBytes, warmupCalls, hbObse
    * the symptom of a refused spawn — children that never report ready — is identical to the
    * starvation it was once misreported as. */
   const count = overCap ? PROC_CAP + 1 : n + (hbObserver ? 1 : 0)
-  k.post({
-    t: 'spawn',
-    count,
-    programUrl: '/bench/syscall-contention/loop.mjs',
-    cfg: {},
-    readyTimeoutMs: 10000,
-  })
-  const spawned = await k.expect('spawned')
+  const spawned = await spawnAll(k, count)
   /* The cap before the clock. A refused spawn is reported as itself, and no `ready` message is
    * coming: the kernel returns early rather than timing out on children it never created. */
   if (spawned.refused) throw new CellInvalid(spawned.why)
@@ -385,14 +395,7 @@ async function main() {
      * port the processes report through, so freezing a word while service continues — the obvious
      * alternative — would mean no process ever reaches the timed-out branch and the control could
      * not fire at all. */
-    k.post({
-      t: 'spawn',
-      count: n,
-      programUrl: '/bench/syscall-contention/loop.mjs',
-      cfg: {},
-      readyTimeoutMs: 10000,
-    })
-    const spawned = await k.expect('spawned')
+    const spawned = await spawnAll(k, n)
     if (spawned.refused) throw new CellInvalid(spawned.why)
     const ready = await k.expect('ready', 30000)
     if (ready.starved) throw new CellInvalid(ready.why)

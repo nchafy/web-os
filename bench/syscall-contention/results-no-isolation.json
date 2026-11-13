@@ -1,0 +1,36 @@
+{
+  "state": "aborted",
+  "isolated": false,
+  "cells": [],
+  "errors": [],
+  "faults": [],
+  "preflight": {
+    "ok": true,
+    "missing": [],
+    "graph": [
+      "/src/abi.mjs",
+      "/src/kernel/kernel.mjs",
+      "/src/kernel/table.mjs",
+      "/src/kernel/files.mjs",
+      "/src/kernel/calls.mjs",
+      "/src/libos/process.mjs",
+      "/src/libos/syscall.mjs",
+      "/bench/syscall-contention/summarise.mjs",
+      "/bench/syscall-contention/loop.mjs",
+      "/bench/syscall-contention/bars.json"
+    ]
+  },
+  "why": "crossOriginIsolated === false; SharedArrayBuffer is undefined. No figures. Run scripts/serve.py WITHOUT --no-isolation.",
+  "chrome": "157.0.8103.52",
+  "quiescence": {
+    "ok": true,
+    "workers": 0,
+    "limit": 0,
+    "census": {
+      "page": 1,
+      "browser_ui": 1
+    },
+    "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+  },
+  "run": 1
+}
