@@ -13,6 +13,8 @@ mode is impossible.
 | a stale copy of www/, or a wrong --root             | matches_disk byte-compares against CANONICAL       | 1   |
 | server serving an empty root (200 + dir listing,    | serve()'s document preflight maps "/" to           | 3   |
 |   so "got 200" proves nothing)                      |   root/index.html and byte-compares                |     |
+| a check pointed at a document this tree does not    | the same preflight, over every document the        | 3   |
+|   have: a second root, a renamed page               |   phase's checks declare                           |     |
 | COOP/COEP absent, or a value isolating nothing      | serve() compares VALUES to ISOLATION_HEADERS       | 3   |
 | a --no-isolation server that still sends them       | the same assertion, inverted (gate N2)             | 3   |
 | no Chrome                                           | CDPError from cdp.find_chrome/_await_port          | 3   |
@@ -22,11 +24,16 @@ mode is impossible.
 | a check body raising anything else                  | run_one catches Exception -> BROKEN, run continues | 3   |
 | a check that asserted nothing                       | min_expectations, and PASS with count 0 -> BROKEN  | 3   |
 | min_expectations lowered to match deleted asserts   | the committed floor in scripts/check_floors.json   | 3   |
+| a label renamed, added or dropped in a check body   | run_one compares recorded labels to Check.labels   | 3   |
+| a control that scores only some of a check's labels | audit rule 14: failed + held must cover the        | 3   |
+|                                                     |   inventory, and `held` is derived from it          |     |
 | an in-page table that did not run                   | boot's row-name set asserted before any row value  | 1   |
 | console errors nobody looked at                     | per-check drain of all three CDP error events      | 1   |
 | a check written and never registered                | registry.audit rules 1, 2 and 7                    | 3   |
 | a check nothing can invert                          | INVERT is mandatory; the opt-out needs a reason    | 3   |
 | a control declared and never expected to fire       | audit ties Check.controls to CONTROLS[..].expects  | 3   |
+| a page that did not refuse once isolation was gone  | gate N3, per document, off the registry's own      | 1   |
+|                                                     |   refusal_expr - audit rule 12 requires one        |     |
 | a --prove-failure that proved nothing               | gates I1/I2/I4: every inversion must fire          | 4   |
 | a dead FAIL-to-exit-code path                       | gate I5: status() of the inverted phase is non-0   | 4   |
 | a control phase that passed over its own strays     | one sweep (_strays) feeds every gate               | 4   |
@@ -46,6 +53,7 @@ things this harness can be wrong about, rather than detecting them afterwards.
     scripts/check.py --prove-failure       # invert every invertible expectation, and
                                            #   re-run the isolation-sensitive ones unisolated
     scripts/check.py --negative no-isolation
+    scripts/check.py --negative kernel-stall
     scripts/check.py --bless               # record today's min_expectations as the floor
 
 --prove-failure proves three things: that every inversion fires, that those failures reach the
@@ -99,6 +107,33 @@ REPO = HERE.parent
 #: (CLAUDE.md, harness honesty). A phase serving a fixture-built tree carries its own canonical
 #: root, because there the fixture's self-verification is the pin.
 CANONICAL = REPO / "www"
+
+
+class Root:
+    """The document roots a check can declare. Two, because the trees genuinely differ.
+
+    WWW is what a user's browser is pointed at, and is what --root may override.
+
+    REPO exists because `www/m0.html` imports `/src/abi.mjs` and
+    `/bench/syscall-contention/summarise.mjs`: the syscall numbers, the SAB offsets and the
+    percentile rules have exactly one definition each, imported by the kernel, the process stub
+    and the page alike (CLAUDE.md, code conventions), and `src/` sits outside the server root.
+    Copying them into www/ is the hand-synced-copy defect this project names first, so the page
+    is served from the repository root instead - the same choice
+    bench/syscall-contention/probe.py:4-6 already made.
+
+    REPO is resolved from this file, like CANONICAL, and no flag overrides it: there is no
+    --root for it to be wrong about, which is why serving it and byte-comparing against it is
+    not the server-compared-with-itself defect that _assert_serving's canonical= argument exists
+    to prevent. The byte-compare still earns its keep - a partial read or a transforming proxy
+    would fail it.
+    """
+
+    WWW = "www"
+    REPO = "repo"
+
+
+ROOTS = (Root.WWW, Root.REPO)
 
 #: The committed ratchet for min_expectations. A declaration the eroding edit can also lower is
 #: not a floor; a data file is a reviewable diff (docs/designs/REVIEW-FINDINGS.md:649, item (2)).
@@ -304,12 +339,14 @@ def _recording_handler(isolate: bool, log: List[Served], lock: threading.Lock):
 
 
 @contextlib.contextmanager
-def serve(root, *, canonical=None, port: int = 0, isolate: bool = True) -> Iterator[Serving]:
+def serve(root, *, canonical=None, port: int = 0, isolate: bool = True,
+          documents: Tuple[str, ...] = ("/",)) -> Iterator[Serving]:
     """A ThreadingHTTPServer on a daemon thread, in this process, on an OS-chosen port.
 
     No subprocess, so nothing parses a child's stdout and port 0 is readable from
-    server_address. Asserts its own isolation mode and its own document on the wire before
-    yielding: a control that cannot fire is worse than no control.
+    server_address. Asserts its own isolation mode and EVERY document its checks will navigate
+    to, on the wire, before yielding: a control that cannot fire is worse than no control, and a
+    check whose page 404s must not get as far as reporting that it measured nothing interesting.
     """
     root = pathlib.Path(root).resolve()
     if not root.is_dir():
@@ -326,7 +363,8 @@ def serve(root, *, canonical=None, port: int = 0, isolate: bool = True) -> Itera
     thread.start()
     serving = Serving("http://127.0.0.1:%d" % bound, root, canonical, isolate, log, lock)
     try:
-        _assert_serving(serving)
+        for document in documents:
+            _assert_serving(serving, document)
         yield serving
     finally:
         httpd.shutdown()
@@ -334,18 +372,24 @@ def serve(root, *, canonical=None, port: int = 0, isolate: bool = True) -> Itera
         thread.join(timeout=10)
 
 
-def _assert_serving(serving: Serving) -> None:
-    """The gate that runs before Chrome exists: mode on the wire, document against disk."""
+def _assert_serving(serving: Serving, document: str = "/") -> None:
+    """The gate that runs before Chrome exists: mode on the wire, document against disk.
+
+    Run once per document a check will navigate to, so a second root or a renamed page cannot
+    reach the point where a check reports BROKEN on a blank page instead of the harness saying
+    which file is not there.
+    """
     try:
-        with _harness_get(serving.base + "/") as response:
+        with _harness_get(serving.base + document) as response:
             body = response.read()
             wire = {k.lower(): v for k, v in response.headers.items()}
     except urllib.error.HTTPError as error:
-        raise ServeError("GET %s/ returned %s, so there is no document to check"
-                         % (serving.base, error.code), reason=Gate.HTTP_STATUS) from error
+        raise ServeError("GET %s%s returned %s, so there is no document to check"
+                         % (serving.base, document, error.code),
+                         reason=Gate.HTTP_STATUS) from error
     except (urllib.error.URLError, OSError) as error:
-        raise ServeError("GET %s/ failed, so nothing is listening where this run is about to "
-                         "point Chrome: %s" % (serving.base, error),
+        raise ServeError("GET %s%s failed, so nothing is listening where this run is about to "
+                         "point Chrome: %s" % (serving.base, document, error),
                          reason=Gate.FETCH_FAILED) from error
 
     # The VALUE, not the name. `Cross-Origin-Opener-Policy: unsafe-none` satisfies a
@@ -368,16 +412,16 @@ def _assert_serving(serving: Serving) -> None:
                 "%s: %r" % (name, wire.get(name.lower())) for name in present),
             reason=Gate.WIRE_HEADERS)
 
-    index = _mapped(serving.root, "/")
+    index = _mapped(serving.root, document)
     if not index.is_file():
         raise ServeError(
-            "GET %s/ returned %d bytes but %s does not exist. An empty or wrong root answers "
+            "GET %s%s returned %d bytes but %s does not exist. An empty or wrong root answers "
             "200 with a directory listing, so the status proves nothing. Nothing was measured."
-            % (serving.base, len(body), index), reason=Gate.NO_DOCUMENT)
+            % (serving.base, document, len(body), index), reason=Gate.NO_DOCUMENT)
     if body != index.read_bytes():
         raise ServeError(
-            "GET %s/ does not match %s byte for byte, so this run would be measuring a tree "
-            "other than the one it was pointed at." % (serving.base, index),
+            "GET %s%s does not match %s byte for byte, so this run would be measuring a tree "
+            "other than the one it was pointed at." % (serving.base, document, index),
             reason=Gate.NOT_THIS_TREE)
 
 
@@ -391,6 +435,7 @@ class Control:
     NO_ISOLATION = "no-isolation"
     EMPTY_ROOT = "empty-root"
     PATCHED = "patched"
+    KERNEL_STALL = "kernel-stall"
     ONCE = "once"
 
 
@@ -404,6 +449,7 @@ CONTROL_RUNS = {
     Control.NO_ISOLATION: ("no-isolation",),
     Control.EMPTY_ROOT: ("empty-root",),
     Control.PATCHED: ("patched-required", "patched-optional"),
+    Control.KERNEL_STALL: ("kernel-stall",),
 }
 
 
@@ -421,6 +467,13 @@ class Check:
     func: Callable[["Env"], None]
     milestone: str
     controls: Tuple[str, ...]
+    #: EVERY expectation label this check records, as a declaration rather than as whatever the
+    #: body happened to produce. run_one refuses a run whose recorded labels differ from it, and
+    #: a negative control's `held` is derived from it, so a label added to a body reaches every
+    #: control's declaration or the run says so. H5's defect was the other way round: a 24th
+    #: expectation was added, min_expectations stayed a floor at 23, and the control scored 23 of
+    #: 24 labels while reporting "1 red and 22 intact".
+    labels: Tuple[str, ...]
     min_expectations: int
     requires_isolation: bool
     #: Non-empty only for a check that genuinely cannot be inverted. Audited, and printed by
@@ -428,6 +481,21 @@ class Check:
     no_invert_reason: str
     note: str
     control_address: str
+    #: A Root member: which tree this check's page is served from.
+    root: str
+    #: The request path Env.reload navigates to, query included. Asserted on the wire by serve()
+    #: before Chrome starts, and the key env.request() reads the document's own response back by.
+    document: str
+    #: The readiness predicate, polled instead of slept on, and what to say when it never holds.
+    #: Declared per check because "the page finished" is a different fact for every page.
+    ready_expr: str
+    ready_what: str
+    ready_timeout: float
+    #: What this page must report when COOP/COEP are taken away, read by gate N3. Required of
+    #: every check carrying the no-isolation control (audit rule 12): a page that cannot be asked
+    #: whether it refused leaves the refusal itself unchecked, and the refusal is the product.
+    refusal_expr: str
+    refusal_want: str
 
 
 #: Every check lives in this file. The design's scripts/checks/<name>.py layout is NOT in use:
@@ -437,20 +505,33 @@ class Check:
 _REGISTRY: List[Check] = []
 
 
-def check(*, name: str, milestone: str, controls: Tuple[str, ...], min_expectations: int,
+def check(*, name: str, milestone: str, controls: Tuple[str, ...], labels: Tuple[str, ...],
+          root: str, document: str, ready_expr: str, ready_what: str, ready_timeout: float,
           requires_isolation: bool = True, no_invert_reason: str = "", note: str = "",
-          control_address: str = ""):
+          control_address: str = "", refusal_expr: str = "", refusal_want: str = ""):
     def decorate(func: Callable[["Env"], None]) -> Callable[["Env"], None]:
         _REGISTRY.append(Check(
             name=name,
             func=func,
             milestone=milestone,
             controls=tuple(controls),
-            min_expectations=min_expectations,
+            labels=tuple(labels),
+            # The count is the inventory's length and is never written twice: a declaration a
+            # reader has to keep in step with a list beside it is two renderers of one fact. The
+            # committed floor in scripts/check_floors.json is still what stops the inventory
+            # being shortened to match a body that stopped asserting.
+            min_expectations=len(labels),
             requires_isolation=requires_isolation,
             no_invert_reason=no_invert_reason,
             note=note,
             control_address=control_address,
+            root=root,
+            document=document,
+            ready_expr=ready_expr,
+            ready_what=ready_what,
+            ready_timeout=ready_timeout,
+            refusal_expr=refusal_expr,
+            refusal_want=refusal_want,
         ))
         return func
 
@@ -546,10 +627,30 @@ def resting_on_once() -> Tuple[Check, ...]:
     return tuple(c for c in registered() if Control.ONCE in c.controls)
 
 
-def _expect_problems(run: str, name: str, expect: "Expect") -> List[str]:
+def _expect_problems(run: str, name: str, expect: "Expect",
+                     candidate: Optional[Check]) -> List[str]:
     """Audit rule 10: a negative control's declaration has to be scorable and specific."""
     where = "CONTROLS[%r].expects[%r]" % (run, name)
     out: List[str] = []
+    # 14. COVERAGE, at startup rather than discovered on the run: for an outcome that records
+    #     labels, failed and held together must account for every label the check declares. A
+    #     label no control clause names is a label that control does not constrain, and the gate
+    #     would still print "1 red and 22 intact" over a check that recorded 24.
+    if candidate is not None and expect.outcome in (Outcome.FAIL, Outcome.PASS):
+        inventory = set(candidate.labels)
+        declared = set(expect.failed) | set(expect.held)
+        unknown = sorted(declared - inventory)
+        unscored = sorted(inventory - declared)
+        if unknown:
+            out.append("%s names %s, which %s does not record. Those could never be scored"
+                       % (where, ", ".join(repr(label) for label in unknown), name))
+        if unscored:
+            out.append(
+                "%s accounts for %d of %s's %d expectations and says nothing about %s. Every "
+                "label the check records must be in failed or held, or this control does not "
+                "constrain them"
+                % (where, len(inventory) - len(unscored), name, len(inventory),
+                   ", ".join(repr(label) for label in unscored)))
     if expect.outcome == UNMEASURABLE and not expect.why:
         out.append("%s declares the measurement unobtainable and gives no reason. An undeclared "
                    "or unexplained BROKEN is a stray, not a satisfied control" % where)
@@ -663,6 +764,19 @@ def audit() -> None:
                 "%s rests on a once-only control and must carry note= and control_address=; a "
                 "control recorded only in a comment is the predecessor's 76-of-83 problem"
                 % candidate.name)
+        # 5c. The inventory itself. A duplicate label cannot be scored - score() reads labels by
+        #     name - and a count that disagrees with the inventory means one of the two is a
+        #     second renderer of the other.
+        duplicated = sorted({label for label in candidate.labels
+                             if candidate.labels.count(label) > 1})
+        if duplicated:
+            problems.append(
+                "%s declares %s twice in its label inventory; a control naming it could not say "
+                "which one it meant" % (candidate.name, ", ".join(duplicated)))
+        if candidate.min_expectations != len(candidate.labels):
+            problems.append(
+                "%s declares min_expectations=%d and a %d-label inventory"
+                % (candidate.name, candidate.min_expectations, len(candidate.labels)))
         # 5.
         if candidate.min_expectations < 1:
             problems.append("%s declares min_expectations=%d; a check that can assert nothing "
@@ -677,6 +791,29 @@ def audit() -> None:
             if entry not in _CONTROL_NAMES:
                 problems.append("%s declares control %r, which is not a Control member"
                                 % (candidate.name, entry))
+        # 12. The page's own refusal. Gate N3 asserts it per document and reads the expression
+        #     from here, so a check with no declaration would silently remove the one assertion
+        #     that says the product refused rather than quietly measured a different system.
+        if Control.NO_ISOLATION in candidate.controls and not (
+                candidate.refusal_expr and candidate.refusal_want):
+            problems.append(
+                "%s carries the %s control and declares no refusal_expr/refusal_want, so gate "
+                "N3 has nothing to read and the page's own refusal would go unasserted"
+                % (candidate.name, Control.NO_ISOLATION))
+        # 13. Where the check's page is and how it says it is ready. A document the server does
+        #     not have, or a readiness predicate that is never true, both end in a BROKEN check;
+        #     these are the declarations serve() and Env.reload are driven by, so they are
+        #     checked before a browser is started.
+        if candidate.root not in ROOTS:
+            problems.append("%s declares root %r, which is not a Root member (%s)"
+                            % (candidate.name, candidate.root, ", ".join(ROOTS)))
+        if not candidate.document.startswith("/"):
+            problems.append("%s declares document %r, which is not a request path"
+                            % (candidate.name, candidate.document))
+        if not (candidate.ready_expr and candidate.ready_what and candidate.ready_timeout > 0):
+            problems.append(
+                "%s declares no readiness predicate, so the runner would have nothing to poll "
+                "and would read a half-built page" % candidate.name)
 
     # 6. The same two pins read the other way, so a rename or a deletion cannot leave either
     #    file pointing at a check that no longer exists.
@@ -687,7 +824,7 @@ def audit() -> None:
         #     names: `--negative patched-required` scored on Outcome.FAIL alone was satisfied by
         #     any failure of the check, including one that left the page's verdict green.
         for name, expect in sorted(CONTROLS[run].expects.items()):
-            problems.extend(_expect_problems(run, name, expect))
+            problems.extend(_expect_problems(run, name, expect, seen.get(name)))
         for name in sorted(CONTROLS[run].expects):
             if name not in names:
                 problems.append(
@@ -782,7 +919,8 @@ class Env:
     """The only thing a check touches."""
 
     def __init__(self, *, page: Session, serving: Serving, out: pathlib.Path, check_name: str,
-                 inverted: bool, epochs: Iterator[int], artifact_prefix: str = "") -> None:
+                 inverted: bool, epochs: Iterator[int], document: str, ready_expr: str,
+                 ready_what: str, ready_timeout: float, artifact_prefix: str = "") -> None:
         self.page = page
         self.base = serving.base
         self.serving = serving
@@ -790,6 +928,13 @@ class Env:
         self.artifact_prefix = artifact_prefix
         self.ready_wait_s = 0.0
         self.check = check_name
+        #: The request path this check's page was loaded from, query and all. Public, because a
+        #: check asserting on its own document's response headers needs the key the server
+        #: recorded, and a second copy of the query string in the check body is a copy to drift.
+        self.document = document
+        self._ready_expr = ready_expr
+        self._ready_what = ready_what
+        self._ready_timeout = ready_timeout
         self.count = 0
         #: Every label this check recorded, and the ones whose plain expectation did not hold.
         #: A negative control scores labels, not just the outcome, so it has to be able to say
@@ -961,11 +1106,14 @@ class Env:
         a precondition of every check body, which makes --only unsound and a per-check negative
         control un-re-runnable. Measured cost here: 21-70 ms to navigate plus ~61 ms to settle.
 
+        Measured for www/index.html; a check whose readiness predicate IS its measurement - the
+        m0 cell - waits for as long as the cell takes.
+
         Once there is a kernel this reset becomes a kernel reboot plus an OPFS wipe. Re-measure
         the cost at M2 and record the decision there rather than discovering it at M5.
         """
         self.page.evaluate("window.__epoch = %d" % next(self._epochs))
-        self.page.navigate(self.base + "/")
+        self.page.navigate(self.base + self.document)
         # Session.evaluate returns (result.get("result") or {}).get("value") (cdp.py:167), so an
         # undefined window.__epoch reads None and a navigate that did nothing is caught here.
         if self.page.evaluate("window.__epoch") is not None:
@@ -976,11 +1124,7 @@ class Env:
 
     def _settle_ready(self) -> float:
         start = time.monotonic()
-        self.settle(
-            "'preflight' in document.documentElement.dataset",
-            timeout=15.0,
-            what="preflight flag (document.documentElement.dataset.preflight, "
-                 "www/index.html:129)")
+        self.settle(self._ready_expr, timeout=self._ready_timeout, what=self._ready_what)
         return time.monotonic() - start
 
 
@@ -1024,6 +1168,11 @@ class Result:
     #: Read by score(): which expectations this check recorded, and which did not hold.
     labels: Tuple[str, ...] = ()
     failed_labels: Tuple[str, ...] = ()
+    #: The response that carried THIS check's document, as the server recorded it on the wire,
+    #: and what the page's refusal_expr evaluated to after the body returned. Gates N2 and N3
+    #: read these: the wire and the page, never a check's message text.
+    document_headers: Dict[str, str] = dataclasses.field(default_factory=dict)
+    refusal: Optional[str] = None
 
 
 class Report:
@@ -1231,6 +1380,12 @@ class NegativeControl:
     serve_kwargs: Dict[str, Any]
     fixture: Optional[Callable[[pathlib.Path], pathlib.Path]]
     expects: Dict[str, Expect]
+    #: Query parameters merged into every check's document for this control's phase. The third
+    #: way to build a broken world, beside the headers and the fixture: the subject is behind a
+    #: switch the PAGE owns, so the control turns it on through the page's own interface rather
+    #: than by hand-editing privileged code. src/kernel/kernel.mjs:513-516 refuses the stall hook
+    #: unless the page asked for a bench boot, so the switch cannot be left armed by accident.
+    query: Tuple[Tuple[str, str], ...] = ()
 
 
 def score(expect: Expect, name: str, result: Optional[Result], gated: str) -> List[str]:
@@ -1317,10 +1472,80 @@ def _patch_probe(source: pathlib.Path, needle: str) -> pathlib.Path:
 
 #: www/index.html:49. Required: its absence must turn the verdict to 'fail'.
 _OPFS_PROBE = "() => typeof navigator?.storage?.getDirectory === 'function'"
+#: The four check_boot expectations a forced-false OPFS probe turns red: the row itself, and the
+#: page's verdict rendered three ways.
+_PATCHED_REQUIRED_FAILS = ("OPFS state", "verdict flag", "verdict class", "verdict text")
+
 #: www/index.html:53. The only non-required row (www/index.html:63) - Aero is cosmetic and the
 #: kernel does not care. A check that cannot tell this from a required row is not checking the
 #: required/optional split, it is checking that ten rows read 'present'.
 _BACKDROP_PROBE = "() => CSS.supports('backdrop-filter', 'blur(9px)')"
+
+#: The page's rows, in the page's order, with whether the page treats each as fatal. Rows 1-7
+#: are the synchronous probes (www/index.html:40-55); rows 8-10 are the three the page can only
+#: get from a worker, because createSyncAccessHandle exists nowhere else (www/index.html:73-74,
+#: :101-108). backdrop-filter is the only non-required row (www/index.html:63).
+#:
+#: This tuple is the harness's own expectation and is deliberately NOT read back from the page.
+#: An expectation derived from the subject is one the subject cannot fail. The cost is real and
+#: points the right way: editing www/index.html fails check_boot until this tuple is edited
+#: too. When the drift message fires, decide which side is right. Do not delete the assertion.
+#:
+#: It sits here, above the controls, because check_boot's label inventory and therefore every
+#: control's `held` set are derived from it.
+PREFLIGHT_ROWS = (
+    ("crossOriginIsolated", True),
+    ("SharedArrayBuffer", True),
+    ("Atomics.wait", True),
+    ("dedicated Worker", True),
+    ("OPFS", True),
+    ("OffscreenCanvas", True),
+    ("backdrop-filter", False),
+    ("worker is isolated", True),
+    ("OPFS sync handle", True),
+    ("worker can block", True),
+)
+
+#: state text -> the class the page paints it with (www/index.html:68-69 for the synchronous
+#: rows, :113-114 for the worker rows). The pairing is the assertion: a green MISSING, or a
+#: 'present' with no class, is a page telling the DOM one thing and the human reading it
+#: another. ('absent', '') was measured under --negative patched-optional on Chrome 157: the
+#: row reads state='absent', class='', why non-empty, and the verdict stays 'ok'. Note the
+#: check passes under either state for that row, so the pass alone is not evidence the control
+#: fired - the row had to be read directly.
+STATE_CLASS = {"present": "ok", "MISSING": "bad", "absent": ""}
+
+#: Every label check_boot records, in body order: the row-name set, then two per row, then the
+#: painted-colour injectivity, the page's verdict three ways, two live re-probes, the two
+#: response headers and the served-bytes witness. 1 + 20 + 1 + 3 + 2 + 2 + 1 = 30.
+BOOT_LABELS = (
+    ("row names",)
+    + tuple(part for name, _ in PREFLIGHT_ROWS
+            for part in ("%s state" % name, "%s cell" % name))
+    + ("state colours distinguish states", "verdict flag", "verdict class", "verdict text",
+       "live crossOriginIsolated", "live SharedArrayBuffer",
+       "document COOP", "document COEP", "served index.html")
+)
+
+
+def held_rest(labels: Tuple[str, ...], failed: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Every label a check records that this control does not turn red - DERIVED, never listed.
+
+    A hand-written `held` is the H5 defect in miniature: it is a subset nobody has to extend,
+    so an expectation added to a check body is scored by no control and the gate still reports
+    "1 red and N intact". Deriving it means a new label is held by default and the control run
+    says so the first time it is not.
+    """
+    unknown = sorted(set(failed) - set(labels))
+    if unknown:
+        # Raised, not returned: a declaration naming a label the check cannot record is a
+        # registry defect, and audit rule 14 reports it beside the rest. This guard is for the
+        # order of definition - CONTROLS is built before audit() runs.
+        raise RegistryError(
+            "a negative control declares %s as failing, and the check records no label by that "
+            "name" % ", ".join(repr(label) for label in unknown))
+    return tuple(label for label in labels if label not in failed)
+
 
 #: The four required rows COOP/COEP removal turns red, measured on Chrome 157 and recorded the
 #: same way in MILESTONES.md:54-57. NOT `OPFS sync handle`: a sync access handle does not need
@@ -1329,21 +1554,85 @@ _BACKDROP_PROBE = "() => CSS.supports('backdrop-filter', 'blur(9px)')"
 _ISOLATION_ROWS = ("crossOriginIsolated", "SharedArrayBuffer", "worker is isolated",
                    "worker can block")
 
+#: The eleven check_boot expectations removing COOP/COEP turns red: the four rows above, the
+#: page's verdict rendered three ways, the two live re-probes and the two response headers.
+_NO_ISOLATION_FAILS = (
+    tuple("%s state" % row for row in _ISOLATION_ROWS)
+    + ("verdict flag", "verdict class", "verdict text",
+       "live crossOriginIsolated", "live SharedArrayBuffer", "document COOP", "document COEP")
+)
+
+#: Every label check_syscall records, in body order. This is the registry's inventory: the count
+#: below is its length, each negative control's `held` is derived from it, and run_one refuses a
+#: run whose body records anything else.
+SYSCALL_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "abi fingerprint agrees",
+    "kernel applied the cfg it was handed",
+    "percentile known-answer vectors",
+    "processes reporting",
+    "getpid returns each process's own pid",
+    "each process's self-reported pid",
+    "every windowed call returned the right answer",
+    "calls issued",
+    "accounting identity",
+    "no error or lost-reply path",
+    "histogram represents every sample",
+    "not-equal fast path reached",
+    "not-equal returned the reply, not an error",
+    "not-equal counted on both sides",
+    "kernel reached N outstanding calls",
+    "depth instrument within bounds",
+    "concurrency gates",
+    "page and harness read the same accept bar",
+    "page and harness read the same headline quantile",
+    "clock fine enough to describe the channel",
+    "p99 printable",
+    "the headline p99 is the 99th percentile",
+    "pooled p99 within the worst per-process p99",
+    "p99 under the accept bar",
+    "document COOP",
+    "document COEP",
+    "served m0.html",
+)
+
+#: The one expectation the kernel-stall control is named for; everything else it must leave
+#: standing is derived. Named here because the control is scored on WHICH expectation fails: a
+#: 2 ms stall that turned the check red by breaking the accounting identity, or by starving the
+#: kernel until no cell was produced at all, would satisfy a control scored on Outcome.FAIL alone
+#: while proving nothing about latency. Measured on this machine under the control (probe.py
+#: --n 16 --window-ms 2600 --warmup 100 --stall-us 2000 --force-not-equal): p99 29,673.6 us
+#: against the 500 us bar, 1,296 samples past the 1,000 the withholding rule needs, identity
+#: 2967/2967/2967/2967, depth_p50 15 of 16, every anti-vacuity clause still ok, and 1 of 3 forced
+#: not-equals.
+_STALL_FAILS = ("p99 under the accept bar",)
+_STALL_HOLDS = held_rest(SYSCALL_LABELS, _STALL_FAILS)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
         why="serve(isolate=False): no COOP/COEP, so no SharedArrayBuffer",
         serve_kwargs={"isolate": False},
         fixture=None,
-        expects={"boot": Expect(
+        expects={"syscall": Expect(
+            UNMEASURABLE,
+            why="SharedArrayBuffer is not constructible outside a cross-origin isolated "
+                "context, and the syscall channel IS a SharedArrayBuffer (docs/CONSTRAINTS.md "
+                "constraints 1 and 31). There is no slower kernel to measure here and no "
+                "degraded figure to report: www/m0.html:120-126 aborts before it boots one, so "
+                "the measurement does not happen. BROKEN is the capability going away, which is "
+                "why this is declared and not a FAIL - a FAIL would claim a number was taken "
+                "and found wanting",
+        ), "boot": Expect(
             Outcome.FAIL,
-            failed=tuple("%s state" % row for row in _ISOLATION_ROWS)
-                   + ("verdict flag", "verdict class", "verdict text",
-                      "live crossOriginIsolated", "live SharedArrayBuffer",
-                      "document COOP", "document COEP"),
-            held=("row names", "OPFS state", "OPFS sync handle state", "backdrop-filter state",
-                  "crossOriginIsolated cell", "state colours distinguish states",
-                  "served index.html"),
+            failed=_NO_ISOLATION_FAILS,
+            # Everything else, derived from check_boot's inventory rather than listed: the ten
+            # cell-coherence expectations, the six rows isolation does not touch, the row-name
+            # set, the colour injectivity and the served-bytes witness. Measured under the
+            # control on Chrome 157: exactly these 11 red, the other 19 intact.
+            held=held_rest(BOOT_LABELS, _NO_ISOLATION_FAILS),
         )},
     ),
     "empty-root": NegativeControl(
@@ -1373,9 +1662,11 @@ CONTROLS: Dict[str, NegativeControl] = {
         expects={"boot": Expect(
             Outcome.FAIL,
             why="a required capability's absence must turn the page's verdict to 'fail'",
-            failed=("OPFS state", "verdict flag", "verdict class", "verdict text"),
-            held=("row names", "OPFS cell", "state colours distinguish states",
-                  "live SharedArrayBuffer", "served index.html"),
+            failed=_PATCHED_REQUIRED_FAILS,
+            # The other 26, derived. "OPFS cell" is the one the comment above is about and it is
+            # in here: the row must be PAINTED as missing, in a colour that differs from a
+            # present row's. Measured under the control: exactly these 4 red.
+            held=held_rest(BOOT_LABELS, _PATCHED_REQUIRED_FAILS),
         )},
     ),
     "patched-optional": NegativeControl(
@@ -1387,8 +1678,31 @@ CONTROLS: Dict[str, NegativeControl] = {
         expects={"boot": Expect(
             Outcome.PASS,
             why="a cosmetic capability's absence must not block the boot",
-            held=("backdrop-filter state", "backdrop-filter cell", "verdict flag",
-                  "state colours distinguish states"),
+            # All 30: a control that must leave the check passing is a control under which every
+            # label holds, so there is nothing to choose between here.
+            held=BOOT_LABELS,
+        )},
+    ),
+    "kernel-stall": NegativeControl(
+        name="kernel-stall",
+        why="stall_us=2000: every kernel handler busy-waits 2 ms before it replies "
+            "(src/kernel/kernel.mjs:513-516 installs the hook, and refuses unless the page asked "
+            "for a bench boot). M0's own negative control, MILESTONES.md - the author's hand run "
+            "at N=16 gave p99 29,673.6 us and a KILL verdict, and this is that run made "
+            "re-runnable. window_ms is widened WITH the stall and for one reason: 2 ms per call "
+            "serialises the channel, so the check's own 400 ms window yields ~200 samples and "
+            "summarise.mjs:112 withholds a p99 below 1,000 of them. Without the wider window the "
+            "p99 expectation would fail for want of samples rather than on a number over the "
+            "bar, and the control would be named for something it did not demonstrate",
+        serve_kwargs={},
+        fixture=None,
+        query=(("stall_us", "2000"), ("window_ms", "2600")),
+        expects={"syscall": Expect(
+            Outcome.FAIL,
+            why="a kernel that takes 2 ms in the handler must put the p99 over the accept bar "
+                "read from bench/syscall-contention/bars.json, and must break nothing else",
+            failed=_STALL_FAILS,
+            held=_STALL_HOLDS,
         )},
     ),
 }
@@ -1406,37 +1720,6 @@ CONTROLS: Dict[str, NegativeControl] = {
 # exists is to refuse. A harness that passes here on a page whose verdict reads 'fail' makes
 # every number downstream a number about a different system (constraint 39).
 # ======================================================================================
-
-#: The page's rows, in the page's order, with whether the page treats each as fatal. Rows 1-7
-#: are the synchronous probes (www/index.html:40-55); rows 8-10 are the three the page can only
-#: get from a worker, because createSyncAccessHandle exists nowhere else (www/index.html:73-74,
-#: :101-108). backdrop-filter is the only non-required row (www/index.html:63).
-#:
-#: This tuple is the harness's own expectation and is deliberately NOT read back from the page.
-#: An expectation derived from the subject is one the subject cannot fail. The cost is real and
-#: points the right way: editing www/index.html fails check_boot until this tuple is edited
-#: too. When the drift message fires, decide which side is right. Do not delete the assertion.
-PREFLIGHT_ROWS = (
-    ("crossOriginIsolated", True),
-    ("SharedArrayBuffer", True),
-    ("Atomics.wait", True),
-    ("dedicated Worker", True),
-    ("OPFS", True),
-    ("OffscreenCanvas", True),
-    ("backdrop-filter", False),
-    ("worker is isolated", True),
-    ("OPFS sync handle", True),
-    ("worker can block", True),
-)
-
-#: state text -> the class the page paints it with (www/index.html:68-69 for the synchronous
-#: rows, :113-114 for the worker rows). The pairing is the assertion: a green MISSING, or a
-#: 'present' with no class, is a page telling the DOM one thing and the human reading it
-#: another. ('absent', '') was measured under --negative patched-optional on Chrome 157: the
-#: row reads state='absent', class='', why non-empty, and the verdict stays 'ok'. Note the
-#: check passes under either state for that row, so the pass alone is not evidence the control
-#: fired - the row had to be read directly.
-STATE_CLASS = {"present": "ok", "MISSING": "bad", "absent": ""}
 
 READ_PREFLIGHT = """
 (() => {
@@ -1470,15 +1753,20 @@ SHAPE = {"verdict": (str, type(None)), "rows": list, "note": str,
     name="boot",
     milestone="day-zero",
     controls=(Control.INVERT, Control.NO_ISOLATION, Control.EMPTY_ROOT, Control.PATCHED),
-    # 1 row-name set + 10 row states + 10 cell coherence + 1 painted-colour injectivity
-    # + 1 verdict flag + 1 verdict class + 1 verdict text + 2 live re-probes + 2 response headers
-    # + 1 served-bytes witness = 30.
-    # Every term is fixed by PREFLIGHT_ROWS, not by what the page rendered, so a page that
-    # renders no rows still records 30 - 21 of them failing - rather than passing on an empty
-    # table. Correct this declaration to the arithmetic if the arithmetic changes; the floor in
-    # scripts/check_floors.json is what stops it being lowered to whatever the run produced.
-    min_expectations=30,
+    # Every term of the inventory is fixed by PREFLIGHT_ROWS, not by what the page rendered, so a
+    # page that renders no rows still records 30 - 21 of them failing - rather than passing on an
+    # empty table. The floor in scripts/check_floors.json is what stops the inventory being
+    # shortened to whatever the run produced.
+    labels=BOOT_LABELS,
     requires_isolation=True,
+    root=Root.WWW,
+    document="/",
+    ready_expr="'preflight' in document.documentElement.dataset",
+    ready_what="the preflight flag (document.documentElement.dataset.preflight, "
+               "www/index.html:129)",
+    ready_timeout=15.0,
+    refusal_expr="document.documentElement.dataset.preflight",
+    refusal_want="fail",
     note="negative controls: --negative no-isolation turns four required rows red (measured: "
          "crossOriginIsolated, SharedArrayBuffer, worker is isolated, worker can block - NOT "
          "OPFS sync handle, which stays 'present' because a sync access handle does not need "
@@ -1580,6 +1868,456 @@ def check_boot(env: Env) -> None:
 
 
 # ======================================================================================
+# syscall (M0). The gate M0 exists to decide is already decided - the sweep ran, the verdict is
+# ACCEPT at N=16 - and this check is NOT that sweep. It asserts the invariants the sweep
+# established, at a size that runs in about a second, so a later milestone cannot quietly break
+# one of them: the round trip returns the RIGHT pid, the four counters agree, constraint 7's
+# not-equal fast path is reachable and is a reply rather than an error, the kernel really was
+# saturated while the figure was taken, and the p99 at this N is under the bar in
+# bench/syscall-contention/bars.json.
+#
+# It is a CHECK and not a benchmark: the decision figure is p99 at N=16 over a 3 s window, three
+# runs, one fresh browser per cell (bench/syscall-contention/README.md). One 400 ms window in a
+# browser shared with check_boot cannot produce that number and does not claim to. It is taken at
+# the bar's own N, though, and read against the real accept bar, so what it guards is the margin
+# the decision rests on rather than a smoke-sized version of it.
+#
+# NO QUIESCENCE ASSERTION, unlike probe.py: that one exists because the probe runs several cells
+# per browser and a terminated kernel's process workers run on for ~2 s (constraint 14). Here the
+# cell is the only one in its phase and its page is freshly navigated, so there is no previous
+# cell to inherit. If a second kernel check is ever added to this file, probe.py's
+# Target.getTargets census has to come with it.
+# ======================================================================================
+
+BARS_JSON = REPO / "bench" / "syscall-contention" / "bars.json"
+
+#: loop.mjs:183 forces the not-equal path exactly three times. Declared here so an empty `forced`
+#: array fails the arity instead of satisfying a comparison of two empty tuples.
+FORCED_PROBES = 3
+
+#: The anti-vacuity clauses from summarise.mjs this check asserts, by their row prefix. The
+#: concurrency ones: A2a/A2b say the median dispatch saw a backlog, A2c that nearly every dispatch
+#: did, A7 that the processes were inside their windows AT THE SAME TIME, A8 that the window held
+#: N calls at once AND that the latch saying so was armed at N.
+#:
+#: A2c joins the set because this check now runs at N=16, which is the N the bench's own rule says
+#: it may be read at; measured 0.999, 0.999, 0.999 over three runs against its 0.95 floor.
+#:
+#: A4 STAYS OUT, and this is the one place that decision is recorded. It is a two-sided clause and
+#: the only one whose upward direction would catch a runaway depth counter, which is why excluding
+#: it was worth re-examining - but it is a TOLERANCE on two estimators, and at N=16 a healthy run
+#: spends 70% of it: depth_p50 is an integer 13 against little*N of 15.76-15.80 (three runs), i.e.
+#: 2.8 of the 3.95 the clause allows, so one bin of jitter in the median dispatch fails it. A gate
+#: that flakes is a gate that gets deleted. The direction it was wanted for is covered instead by
+#: A10 - depth_max <= N and depth_p50 <= N, exact bounds and not tolerances, true by construction
+#: for N processes with one outstanding call each - which the "depth instrument within bounds"
+#: expectation asserts in the harness's own arithmetic. A3, A5 and A9 are reported in the note and
+#: not asserted, as before.
+CONCURRENCY_GATES = ("A2a", "A2b", "A2c", "A7", "A8")
+
+#: Which counters must read zero. NOT `spurious`: a wake with the watched word unchanged is a
+#: platform event the stub handles by re-arming (src/libos/syscall.mjs:164), and one was measured
+#: in a clean run. These eight are each a lost, duplicated or misattributed reply.
+QUIET_COUNTERS = ("badCallId", "lateReply", "dropped", "rlenFault", "hostGone", "timedOut",
+                  "timedOutButReplied", "seqSkip")
+
+#: One cell per page load, so one N per document (www/m0.html:232-238 refuses more). N is read
+#: back OUT of this query by the page, never restated in Python.
+#:
+#: N=16 BECAUSE THAT IS THE N THE DECISION WAS TAKEN AT. At N=4 this check measured p99 ~45-60 us
+#: against the 500 us bar - about 8x headroom - so a 2-8x contention regression at the bar's own N
+#: would have flipped the verdict off ACCEPT while the suite stayed green. At N=16 over 400 ms,
+#: measured on this machine: 70,293-70,479 calls, depth_p50 13 of 16, p99 175.0 / 245.0 / 235.0 us
+#: over three runs, so the suite now guards the ~2x margin the sweep's ACCEPT actually rests on
+#: (p99 255 us at N=16 over 3 s, three runs). It cost 0.12 s: 1.19 s at N=4, 1.31 s at N=16.
+#: The sweep is still the bench - this is one 400 ms cell in a browser shared with check_boot.
+SYSCALL_DOCUMENT = ("/www/m0.html?n=16&window_ms=400&warmup=100&call=getpid&payload=64"
+                    "&force_not_equal=1")
+
+#: The page's own terminal state, polled. 'done' is a finished cell, 'aborted' is the isolation
+#: refusal and 'error' is a page that threw; all three are terminal, and which one it was is the
+#: check body's business, not the runner's.
+SYSCALL_READY = ("(() => { const s = globalThis.M0 && globalThis.M0.state; "
+                 "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+#: Everything this check reads, in one round trip, trimmed in the PAGE. The histograms behind
+#: these figures are tens of thousands of bins wide and summarise.mjs owns the statistics over
+#: them (one definition, imported by the bench and read here) - pulling them into Python would be
+#: a second renderer of the same fact.
+READ_SYSCALL = """
+(() => {
+  const m0 = globalThis.M0 || {}
+  const cells = m0.cells || []
+  const q = new URLSearchParams(location.search)
+  const cfg = m0.config || {}
+  const out = {
+    state: String(m0.state),
+    why: String(m0.why || ''),
+    cells: cells.length,
+    invalid: cells.filter((c) => c.invalid).map((c) => String(c.why)),
+    isolated: m0.isolated === true,
+    kernelIsolated: m0.kernelIsolated === true,
+    pageFingerprint: String(m0.pageFingerprint || ''),
+    requestedStallUs: Number(q.get('stall_us') || 0),
+    echoedStallUs: Number((m0.cfgEcho || {}).stallUs || 0),
+    requestedN: Number(q.get('n') || 0),
+    // null, never NaN: a page that aborted before it fetched bars.json has no bar, and that
+    // fact belongs to the expectation that compares the two bars - not to the shape check,
+    // which would raise first and report a type where the reason is that the kernel never
+    // booted. An error path must name what actually failed.
+    acceptBarUs: typeof (cfg.bars || {}).accept_p99_us === 'number'
+      ? cfg.bars.accept_p99_us : null,
+    // summarise.mjs's own known-answer test over two fixed sample vectors, run at page start-up.
+    // Reported as the verdict plus the whole comparison, because a self-test that says only
+    // 'false' names nothing.
+    percentileSelfTest: (m0.percentileSelfTest || {}).ok === true,
+    percentileSelfTestWrong: ((m0.percentileSelfTest || {}).wrong || []).map(String),
+    percentileSelfTestDetail: JSON.stringify((m0.percentileSelfTest || {}).got || null),
+    errors: (m0.errors || []).map(String),
+    faults: (m0.faults || []).map((f) => 'pid ' + f.pid + ': ' + f.why),
+    cell: null,
+  }
+  const c = cells.length === 1 && !cells[0].invalid ? cells[0] : null
+  if (c) {
+    out.cell = {
+      n: c.n,
+      count: c.count,
+      fingerprintsAgree: c.fingerprintsAgree === true,
+      saturated: c.saturated === true,
+      depthP50: c.depth.p50,
+      depthMax: c.depth.max,
+      quantumOk: c.quantumGuard.ok === true,
+      quantumWhy: String(c.quantumGuard.why || ''),
+      quantumUs: c.quantumUs,
+      p99Us: c.p99.us,
+      p99Text: String(c.p99.text),
+      p99Why: String(c.p99.why || ''),
+      // The quantile the figure was asked for, and the counting witness that the figure printed
+      // is that quantile of the pooled histogram. Beside them, the worst per-process p99 at the
+      // same quantile: the pooled one cannot exceed it.
+      p99Quantile: c.p99Quantile,
+      p99Witness: c.p99Witness === null || c.p99Witness === undefined ? null : {
+        ok: c.p99Witness.ok === true,
+        q: c.p99Witness.q,
+        atOrAbove: c.p99Witness.atOrAboveFraction,
+        above: c.p99Witness.aboveFraction,
+        tail: c.p99Witness.tail,
+      },
+      worstP99Us: c.worstP99Us,
+      // The latch that gives `saturated` its meaning: the threshold this window armed, and the
+      // depth the hand-over fired at.
+      latch: c.latch === null || c.latch === undefined ? null
+        : { target: c.latch.target, depth: c.latch.depth },
+      meanUs: c.meanUs,
+      serviceMeanUs: c.serviceMeanUs,
+      pids: c.pids,
+      envPids: c.envPids,
+      windowWrong: c.windowWrong,
+      firstGetpid: c.firstGetpid,
+      forcedPid: c.forcedPid === undefined ? null : c.forcedPid,
+      forced: (c.forced || []).map((f) => ({
+        notEqual: f.notEqual === true, published: f.publishedBeforePark === true, r0: f.r0,
+      })),
+      gates: (c.gates.rows || []).map((r) => ({
+        name: String(r.name), ok: r.pass === true, evaluated: r.evaluated !== false,
+        detail: String(r.detail),
+      })),
+      accounting: c.accounting,
+      verdict: String(c.verdict),
+    }
+  }
+  return out
+})()
+"""
+
+SYSCALL_SHAPE = {"state": str, "why": str, "cells": int, "invalid": list, "isolated": bool,
+                 "kernelIsolated": bool, "pageFingerprint": str, "requestedStallUs": (int, float),
+                 "echoedStallUs": (int, float), "requestedN": int,
+                 "acceptBarUs": (int, float, type(None)), "errors": list, "faults": list,
+                 "percentileSelfTest": bool, "percentileSelfTestWrong": list,
+                 "percentileSelfTestDetail": str, "cell": (dict, type(None))}
+
+#: The quantile the headline figure must be read at, as the harness's own expectation and NOT
+#: read back from the page: summarise.mjs declares HEADLINE_QUANTILE once and both of its
+#: percentile call sites read it, which is what stops the two columns being two statistics - but
+#: a constant the subject supplies and the harness echoes is a constant the subject cannot be
+#: wrong about. A p99 is the 0.99 quantile; that is what the figure in MILESTONES.md means.
+HEADLINE_QUANTILE = 0.99
+
+
+def accept_bar_us() -> float:
+    """The accept bar, read from the file the bench reads it from. NOT restated here: 500 us
+    written twice is two numbers to keep in step, and the one in bars.json is the one the sweep's
+    verdict was taken against."""
+    try:
+        data = json.loads(BARS_JSON.read_text(encoding="utf-8"))
+        return float(data["accept_p99_us"])
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise Unmeasurable(
+            "the accept bar cannot be read from %s, so there is no bar to compare a p99 against: "
+            "%s" % (_relative(BARS_JSON), error))
+
+
+@check(
+    name="syscall",
+    milestone="m0",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.KERNEL_STALL),
+    # Every term of the inventory is fixed by SYSCALL_LABELS and not by what the page produced, so
+    # a cell that reported nothing records failing expectations rather than passing on an empty
+    # object.
+    labels=SYSCALL_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=SYSCALL_DOCUMENT,
+    ready_expr=SYSCALL_READY,
+    ready_what="globalThis.M0.state reaching done, aborted or error (www/m0.html:297, :121)",
+    # The cell itself, not a render: 400 ms of window plus warm-up normally, and ~4 s under
+    # --negative kernel-stall where every call costs 2 ms. Bounded, because a wedged kernel must
+    # end as a BROKEN check with a reason and not as a suite that never returns.
+    ready_timeout=90.0,
+    refusal_expr="globalThis.M0 && globalThis.M0.state",
+    refusal_want="aborted",
+    note="negative controls: --negative kernel-stall installs a 2 ms synchronous stall in the "
+         "kernel handler (src/kernel/kernel.mjs:513-516) and must turn 'p99 under the accept bar' "
+         "red with every other expectation in the inventory intact - M0's own negative control, "
+         "made re-runnable; "
+         "--negative no-isolation must come out BROKEN, because SharedArrayBuffer does not exist "
+         "there and the measurement cannot be taken at all. The decision sweep itself is "
+         "bench/syscall-contention/probe.py --n 1,4,16,64,128 --runs 3, which this check does not "
+         "re-run",
+    control_address="bench/syscall-contention/probe.py --n 16 --window-ms 2600 --warmup 100 "
+                    "--stall-us 2000 --force-not-equal",
+)
+def check_syscall(env: Env) -> None:
+    bar_us = accept_bar_us()
+    got = env.read(READ_SYSCALL, SYSCALL_SHAPE)
+
+    if got["state"] != "done":
+        # The page refused or threw, so no figure exists. BROKEN, never a FAIL: a FAIL claims a
+        # measurement was taken and found wanting. --negative no-isolation declares this outcome.
+        env.unmeasurable(
+            "www/m0.html reached state %r rather than 'done' after %.1fs, so no cell was "
+            "produced and nothing below was measured: %s%s"
+            % (got["state"], env.ready_wait_s, got["why"] or "no reason given",
+               (" errors: %s" % "; ".join(got["errors"])) if got["errors"] else ""))
+
+    # Anti-vacuity, and it comes first: every figure below is read off exactly one cell, and the
+    # bench reports INVALID rather than a number whenever it could not stand behind one.
+    env.note("the page reported %d cell(s), %d of them INVALID: %s. Faults: %s"
+             % (got["cells"], len(got["invalid"]), "; ".join(got["invalid"]) or "none",
+                "; ".join(got["faults"]) or "none"))
+    env.expect("cell reported", (got["cells"], len(got["invalid"])), (1, 0))
+    cell = got["cell"]
+    if cell is None:
+        env.unmeasurable(
+            "the page produced %d cell(s) and %d of them are INVALID (%s), so there is no figure "
+            "to read. The bench refuses to report a number it cannot stand behind."
+            % (got["cells"], len(got["invalid"]), "; ".join(got["invalid"]) or "no reason given"))
+
+    account = cell["accounting"]
+
+    # Isolation, from the realm rather than from a self-report, in both agents. The kernel's own
+    # answer is the one that matters: a page that is isolated while its worker is not has no
+    # blocking channel at all (constraints 1 and 10).
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    # One ABI, imported by the page, the kernel and every process. Two hand-synced copies across
+    # the kernel boundary is the defect the convention in CLAUDE.md exists for, and a fingerprint
+    # that agrees because all three are empty is not agreement.
+    env.expect_that(
+        "abi fingerprint agrees",
+        bool(got["pageFingerprint"]) and cell["fingerprintsAgree"],
+        "page fingerprint %r, and the page reports agreement across the kernel and every process "
+        "as %r" % (got["pageFingerprint"], cell["fingerprintsAgree"]))
+    # The kernel echoes the cfg it booted with, which is how a control proves it was applied
+    # rather than accepted and dropped. Read against what the URL asked for, so this holds at 0
+    # on a plain run and at 2000 under --negative kernel-stall without the check branching on
+    # either: a stall that never reached the handler leaves the p99 under the bar and the control
+    # unsatisfied, and one that reached it and was not echoed fails here.
+    env.expect("kernel applied the cfg it was handed",
+               got["echoedStallUs"], got["requestedStallUs"])
+
+    # The arithmetic BEFORE the figures it produces. summarise.mjs owns every percentile in this
+    # bench and the p99 is the number M0 is reported in, so its nearest-rank walk, its printed
+    # band, its withholding rule and its quantile witness are pinned against hand-computed
+    # answers over two fixed vectors - the pattern agreementSelfTest() and src/abi.mjs's FNV-1a
+    # vectors already set here. A percentile function nobody has checked against a known answer
+    # can be swapped for a different quantile without a single bound-shaped assertion noticing.
+    env.expect_that(
+        "percentile known-answer vectors", got["percentileSelfTest"],
+        "summarise.mjs percentileSelfTest() disagrees with its hand-computed answers on %s. Got "
+        "%s" % (", ".join(got["percentileSelfTestWrong"]) or "nothing it names",
+                got["percentileSelfTestDetail"]))
+
+    # The smallest end-to-end claim M0 owes, per process and not in aggregate: this pid was
+    # allocated by the kernel, and the getpid that process issued came back as ITS OWN pid. A
+    # check that accepted "a number" would pass against a kernel that replied with a constant.
+    env.expect("processes reporting", sorted(cell["pids"]),
+               list(range(1, got["requestedN"] + 1)))
+    env.note("pids %s answered getpid with %s, and report their own pid as %s"
+             % (cell["pids"], cell["firstGetpid"], cell["envPids"]))
+    env.expect("getpid returns each process's own pid",
+               tuple(cell["firstGetpid"]), tuple(cell["pids"]))
+    # THE THIRD SOURCE, and the only one outside the kernel. The two above are the kernel's table
+    # and the kernel's reply, so comparing them compares the kernel with itself: a kernel that
+    # hands every process the pid 1 at spawn and still answers getpid correctly passes both. This
+    # is env.pid, what the program is handed and what M1's getppid, setpgid and signal delivery
+    # will all inherit.
+    env.expect("each process's self-reported pid",
+               tuple(cell["envPids"]), tuple(cell["pids"]))
+    # The same claim over every call in the window instead of over one named round trip: loop.mjs
+    # compares each reply against its own env.pid as it goes, so this is ~70,000 comparisons.
+    env.expect_that(
+        "every windowed call returned the right answer", cell["windowWrong"] == 0,
+        "%s of %s calls in the window returned something other than what the caller asked for "
+        "(for call=getpid that is the caller's own pid)"
+        % (cell["windowWrong"], cell["count"]))
+
+    # issued == dispatched == replied == returned, counted twice in each agent. The order matters:
+    # an identity over four zeros holds, so the sample count is asserted first.
+    env.expect_that(
+        "calls issued", account["issued"] > 0,
+        "the cell recorded %d issued calls, and an identity over zeros would hold vacuously"
+        % account["issued"])
+    env.expect("accounting identity",
+               (account["dispatched"], account["replied"], account["returned"],
+                account["identity"]),
+               (account["issued"], account["issued"], account["issued"], True))
+    quiet = dict((name, account[name]) for name in QUIET_COUNTERS)
+    env.expect("no error or lost-reply path", quiet, dict((name, 0) for name in QUIET_COUNTERS))
+    # A percentile over samples the histogram could not represent is not that percentile.
+    env.expect("histogram represents every sample", account["beyondTop"], 0)
+
+    # Constraint 7: a notify that wakes nobody returns "not-equal" from Atomics.wait, and that is
+    # the ABSENCE of a park, not an error. Forced rather than waited for - the natural rate is
+    # 0.1-0.3% of calls - and asserted three ways: it was reached, the reply it returned was the
+    # right one, and both sides of the boundary counted the same event.
+    forced = cell["forced"]
+    env.note("forced not-equal probes: %s" % forced)
+    env.expect_that(
+        "not-equal fast path reached",
+        len(forced) == FORCED_PROBES and any(f["notEqual"] for f in forced),
+        "%d of %d probes took it (loop.mjs:183 forces %d). Each posts, busy-spins 5 ms without "
+        "yielding so the reply is certainly published, then parks: a kernel whose reply never "
+        "lands inside the spin reaches none of them, and so does a stub that treats not-equal as "
+        "an error" % (sum(1 for f in forced if f["notEqual"]), len(forced), FORCED_PROBES))
+    env.expect("not-equal returned the reply, not an error",
+               tuple(f["r0"] for f in forced), (cell["forcedPid"],) * FORCED_PROBES)
+    env.expect_that(
+        "not-equal counted on both sides",
+        account["notEqual"] >= 1 and account["notify0"] >= 1,
+        "the processes tallied %d not-equal wakes and the kernel tallied %d notifies that woke "
+        "nobody; these are two counters over one event and neither may read zero while the other "
+        "does not" % (account["notEqual"], account["notify0"]))
+
+    # Was the kernel actually loaded while the figure was taken? An unsaturated kernel produces a
+    # perfectly respectable p99 that says nothing about contention, which is the whole failure
+    # mode this cell exists to avoid.
+    # Read as the latch's two numbers and not as the boolean alone: `saturated` means "N calls
+    # were outstanding at once" only if the hand-over it reports was armed at N and fired at a
+    # depth of at least N. A kernel that latched on the first dispatch sets the same flag, keeps
+    # every figure plausible at this N, and leaves A8 asserting a comment.
+    env.expect("kernel reached N outstanding calls",
+               (cell["saturated"], (cell["latch"] or {}).get("target"),
+                (cell["latch"] or {}).get("depth", -1) >= cell["n"]),
+               (True, cell["n"], True))
+    # The depth device's own bound, and an exact one: N processes with one outstanding call each
+    # cannot put more than N in flight, so a value above N is the instrument lying rather than
+    # contention being high. Every other depth clause is a lower bound, which a counter that runs
+    # away to the top bin satisfies trivially while fabricating the saturation they prove.
+    env.expect_that(
+        "depth instrument within bounds",
+        cell["depthMax"] <= cell["n"] and cell["depthP50"] <= cell["n"],
+        "depth_max %s and depth_p50 %s against N=%s. Above N is impossible by construction, so "
+        "this is an instrument fault and not a measurement"
+        % (cell["depthMax"], cell["depthP50"], cell["n"]))
+    rows = dict((row["name"].split()[0], row) for row in cell["gates"])
+    env.note("the page's anti-vacuity gates: %s"
+             % "; ".join("%s %s [%s]" % (row["name"], "ok" if row["ok"] else "FAIL",
+                                         "n/a" if not row["evaluated"] else row["detail"])
+                         for row in cell["gates"]))
+    absent = [name for name in CONCURRENCY_GATES if name not in rows]
+    failed = ["%s (%s)" % (rows[name]["name"], rows[name]["detail"])
+              for name in CONCURRENCY_GATES if name in rows
+              and not (rows[name]["ok"] and rows[name]["evaluated"])]
+    env.expect_that(
+        "concurrency gates", not absent and not failed,
+        "absent from the page's gate rows: %s. Evaluated and failing, or not evaluated at all: "
+        "%s. depth_p50 %s of N=%s, depth_max %s over %s calls"
+        % (", ".join(absent) or "none", "; ".join(failed) or "none", cell["depthP50"],
+           cell["n"], cell["depthMax"], cell["count"]))
+
+    # The latency statement, and the bar is read from the file the bench reads it from.
+    env.expect("page and harness read the same accept bar", got["acceptBarUs"], bar_us)
+    # And the same quantile. The bench reads one constant at both of its percentile call sites;
+    # this says which constant that has to be, so "the p99" cannot quietly become some other
+    # quantile reported under the same name.
+    env.expect("page and harness read the same headline quantile",
+               (cell["p99Quantile"], (cell["p99Witness"] or {}).get("q")),
+               (HEADLINE_QUANTILE, HEADLINE_QUANTILE))
+    env.expect("clock fine enough to describe the channel", cell["quantumOk"], True)
+    env.expect_that(
+        "p99 printable", cell["p99Us"] is not None,
+        "the page withheld it: %s (%s). summarise.mjs withholds a p99 below 1,000 samples or "
+        "below three clock quanta rather than printing a number it cannot stand behind, and a "
+        "withheld p99 is not evidence either way" % (cell["p99Text"], cell["p99Why"]))
+    # THE HEADLINE FIGURE, CHECKED BY COUNTING, because this is the number the milestone is
+    # reported in and nothing else here would notice it being replaced. The witness is
+    # estimator-free: more than (1-q) of the pooled samples must lie at or above the printed
+    # value and no more than (1-q) strictly above it, which is true of the q-quantile of any
+    # distribution. A figure computed at a lower quantile fails the second clause - and no bound
+    # on the value can catch that, because a lower quantile of a tight distribution is a perfectly
+    # plausible number and can even equal the right one under the stall control.
+    witness = cell["p99Witness"]
+    env.note("the counting witness on the printed p99: %s" % witness)
+    env.expect_that(
+        "the headline p99 is the 99th percentile",
+        witness is not None and witness["ok"],
+        "p99 %s: %.4f%% of the %d pooled samples lie at or above it and %.4f%% strictly above, "
+        "against a tail of %.4f%%. The second figure exceeding the tail means the printed number "
+        "sits lower in the distribution than q=%s - it is some other quantile under this one's "
+        "name" % ((cell["p99Text"], witness["atOrAbove"] * 100, cell["count"],
+                   witness["above"] * 100, witness["tail"] * 100, witness["q"])
+                  if witness is not None
+                  else (cell["p99Text"], 0.0, cell["count"], 0.0, 0.0, HEADLINE_QUANTILE)))
+    # The two renderings of one quantile, against each other. The pooled q-quantile cannot exceed
+    # the largest per-process q-quantile: if every process has at most (1-q) of its samples above
+    # X then so does the pool. Exact, not a tolerance - and it is what catches the per-process
+    # column being read at a different quantile from the headline.
+    env.expect_that(
+        "pooled p99 within the worst per-process p99",
+        cell["p99Us"] is not None and cell["p99Us"] <= cell["worstP99Us"],
+        "pooled p99 %s against the worst per-process p99 of %.1f us at the same quantile. The "
+        "pooled figure cannot be the higher of the two, so the two columns are not the same "
+        "statistic" % (cell["p99Text"], cell["worstP99Us"]))
+    env.note("mean %.2f us, p99 %s over %d calls at N=%s, worst per-process p99 %.1f us, kernel "
+             "in-handler mean %.2f us, clock quantum %.3f us"
+             % (cell["meanUs"], cell["p99Text"], cell["count"], cell["n"], cell["worstP99Us"],
+                cell["serviceMeanUs"], cell["quantumUs"]))
+    env.expect_that(
+        "p99 under the accept bar",
+        cell["p99Us"] is not None and cell["p99Us"] < bar_us,
+        "p99 %s against the %g us accept bar in %s. This is N=%s over %s calls in a 400 ms "
+        "window, which is the bar's own N but not the decision figure - that one is p99 at N=16 "
+        "over a 3 s window, three runs, one fresh browser per cell, and it is ACCEPT"
+        % (cell["p99Text"], bar_us, _relative(BARS_JSON), cell["n"], cell["count"]))
+
+    # From outside the page entirely: the response that carried the document, as the server
+    # recorded it on the wire, and the bytes it served against this tree.
+    document = env.request(env.document)
+    env.expect("document COOP", document.headers.get("Cross-Origin-Opener-Policy"),
+               "same-origin")
+    env.expect("document COEP", document.headers.get("Cross-Origin-Embedder-Policy"),
+               "require-corp")
+    env.expect_that(
+        "served m0.html", env.served_matches_disk(env.document),
+        "the bytes served differ from www/m0.html on disk, so this run measured something other "
+        "than this tree")
+
+    env.shoot("syscall")
+
+
+# ======================================================================================
 # Phases, the loop and the gates (§5, §7, §9)
 # ======================================================================================
 
@@ -1599,11 +2337,11 @@ PROVE_LIMIT = (
 @dataclasses.dataclass
 class Phase:
     mode: str
-    root: pathlib.Path
-    #: What the served bytes are compared against. The repository's own www/ for every phase
-    #: that serves a real tree; the fixture's root where a fixture built a deliberately
-    #: different one and verified its own patch.
-    canonical: pathlib.Path
+    #: Root name -> (the directory this phase serves for it, what the served bytes are compared
+    #: against). One server per entry, all of them bound before Chrome starts. The comparison
+    #: tree is the repository's own for every phase that serves a real tree, and the fixture's
+    #: root where a fixture built a deliberately different one and verified its own patch.
+    roots: Dict[str, Tuple[pathlib.Path, pathlib.Path]]
     isolated: bool
     checks: Tuple[Check, ...]
     #: Selected, and not run by this phase. Carried so the report can say so with a reason
@@ -1611,6 +2349,45 @@ class Phase:
     filtered: Tuple[Tuple[Check, str], ...]
     inverted: bool
     label: str
+    #: Query parameters a negative control merged into every document this phase loads.
+    query: Tuple[Tuple[str, str], ...] = ()
+    #: Temporary trees this phase owns and main() must remove.
+    cleanup: Tuple[pathlib.Path, ...] = ()
+
+
+def phase_document(candidate: Check, query: Tuple[Tuple[str, str], ...]) -> str:
+    """The request path a check's page is loaded from, with a control's parameters merged in.
+
+    One definition, because serve() asserts this exact path on the wire before Chrome starts,
+    Env.reload navigates it, and the check reads its own response headers back by it. Three
+    copies of a query string is three chances for the assertion to be about a different URL
+    than the one the browser fetched.
+    """
+    if not query:
+        return candidate.document
+    parts = urllib.parse.urlsplit(candidate.document)
+    merged = dict(urllib.parse.parse_qsl(parts.query))
+    merged.update(dict(query))
+    return urllib.parse.urlunsplit(
+        ("", "", parts.path, urllib.parse.urlencode(merged), ""))
+
+
+def phase_roots(checks: Tuple[Check, ...], *, www: pathlib.Path,
+                www_canonical: pathlib.Path) -> Dict[str, Tuple[pathlib.Path, pathlib.Path]]:
+    """The servers a set of checks needs. Derived from what they declare, never listed: a root
+    nothing declares is a server nothing loads from, and a check whose root is unserved would
+    read a 404 instead of its page.
+
+    --root overrides Root.WWW only, which is what it has always meant: the tree a user's browser
+    is pointed at. Root.REPO is resolved from this file - see Root.
+    """
+    out: Dict[str, Tuple[pathlib.Path, pathlib.Path]] = {}
+    for candidate in checks:
+        if candidate.root == Root.WWW:
+            out[Root.WWW] = (www, www_canonical)
+        else:
+            out[Root.REPO] = (REPO, REPO)
+    return out
 
 
 def run_one(candidate: Check, env: Env, *, inverted: bool) -> Result:
@@ -1638,6 +2415,25 @@ def run_one(candidate: Check, env: Env, *, inverted: bool) -> Result:
         outcome = Outcome.BROKEN
         reason = "%s: could not measure - the check body raised %s: %s" % (
             candidate.name, type(error).__name__, error)
+    # Read before the console drain and whatever the body did: the document's response as the
+    # server recorded it, and what this page says about its own verdict. Gates N2 and N3 score
+    # these, so they are collected for every check in every phase rather than only where a gate
+    # happens to want them - a gate that can only read what the phase remembered to keep is a
+    # gate the next phase disarms.
+    document_headers: Dict[str, str] = {}
+    try:
+        document_headers = dict(env.serving.last(env.document).headers)
+    except ServeError:
+        # Not a failure here: a phase that gated before the navigate recorded no response, and
+        # that check is already BROKEN above. An empty mapping carries no header to leak.
+        pass
+    refusal: Optional[str] = None
+    if candidate.refusal_expr:
+        try:
+            value = env.page.evaluate(candidate.refusal_expr)
+            refusal = None if value is None else str(value)
+        except CDPError:
+            refusal = None
     # Drained whatever happened: an error the page logged on its way down is evidence, and
     # erasing it would be the swallowed failure this harness exists to prevent. A channel that
     # died here is recorded, never suppressed: a renderer that went away after the body returned
@@ -1665,6 +2461,22 @@ def run_one(candidate: Check, env: Env, *, inverted: bool) -> Result:
             reason = ("%s: recorded %d, declared %d. The check stopped asserting most of what "
                       "it claims, so neither a pass nor a fail from it means anything."
                       % (candidate.name, env.count, candidate.min_expectations))
+        elif sorted(env.labels) != sorted(candidate.labels):
+            # The inventory, read the other way round: a body that recorded a label the registry
+            # does not declare, renamed one, or recorded one twice is not a product verdict
+            # either. This is what keeps every negative control's derived `held` honest, because
+            # that set is computed from the inventory - the count gate above cannot see a label
+            # added and another dropped in the same edit.
+            outcome = Outcome.BROKEN
+            recorded = sorted(env.labels)
+            declared = sorted(candidate.labels)
+            reason = (
+                "%s: recorded expectation labels its registry entry does not declare. Recorded "
+                "and undeclared: %s. Declared and not recorded: %s. Until the two agree, no "
+                "negative control can say which labels it left unscored."
+                % (candidate.name,
+                   [label for label in recorded if label not in declared] or "none",
+                   [label for label in declared if label not in recorded] or "none"))
         elif env.failures:
             outcome = Outcome.FAIL
         elif unclaimed:
@@ -1674,7 +2486,8 @@ def run_one(candidate: Check, env: Env, *, inverted: bool) -> Result:
     return Result(check=candidate, outcome=outcome, count=env.count, seconds=seconds,
                   failures=tuple(env.failures), inverted_fired=tuple(env.inverted_fired),
                   reason=reason, artifacts=tuple(env.artifacts), console=tuple(unclaimed),
-                  labels=tuple(env.labels), failed_labels=tuple(env.failed_labels))
+                  labels=tuple(env.labels), failed_labels=tuple(env.failed_labels),
+                  document_headers=document_headers, refusal=refusal)
 
 
 def _unclaimed(env: Env) -> List[ConsoleEntry]:
@@ -1703,12 +2516,27 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
         control = CONTROLS[args.negative]
         fixture_root = control.fixture(root) if control.fixture else root
         isolated = bool(control.serve_kwargs.get("isolate", True))
-        return [Phase(mode=MODE_NEGATIVE, root=fixture_root,
+        # Only what this control scores. A check the control declares nothing about would be
+        # dragged through a broken world, and gate_negative would neither score it nor be able
+        # to say what its result meant: under --negative empty-root a kernel check would serve a
+        # tree the fixture never touched and pass, which reads as the control having been
+        # harmless when it was simply absent.
+        scored = tuple(c for c in selected if c.name in control.expects)
+        return [Phase(mode=MODE_NEGATIVE,
                       # A fixture tree is meant to differ from www/, and _patch_probe verifies
                       # its own single replacement, so the pin there is the fixture, not www/.
-                      canonical=fixture_root if control.fixture else CANONICAL,
-                      isolated=isolated, checks=selected, filtered=(), inverted=False,
-                      label="negative %s (%s)" % (control.name, control.why))], None
+                      roots=phase_roots(scored, www=fixture_root,
+                                        www_canonical=fixture_root if control.fixture
+                                        else CANONICAL),
+                      isolated=isolated, checks=scored,
+                      filtered=tuple(
+                          (c, "CONTROLS[%r] declares no expectation for it, so this phase would "
+                              "run it against a broken world and score nothing"
+                           % control.name)
+                          for c in selected if c not in scored),
+                      inverted=False, query=control.query,
+                      label="negative %s (%s)" % (control.name, control.why),
+                      cleanup=(fixture_root,) if control.fixture else ())], None
 
     out: List[Phase] = []
     if args.prove_failure in (MODE_INVERT, "both"):
@@ -1716,8 +2544,9 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
             print("check.py: the selection contains 0 invertible checks. Narrowing the run "
                   "cannot quietly disarm it.", file=sys.stderr)
             return [], 4
-        out.append(Phase(mode=MODE_INVERT, root=root, canonical=CANONICAL, isolated=True,
-                         checks=selected, filtered=(), inverted=True,
+        out.append(Phase(mode=MODE_INVERT,
+                         roots=phase_roots(selected, www=root, www_canonical=CANONICAL),
+                         isolated=True, checks=selected, filtered=(), inverted=True,
                          label="--prove-failure invert"))
     if args.prove_failure in (MODE_NO_ISOLATION, "both"):
         sensitive = tuple(c for c in selected if Control.NO_ISOLATION in c.controls)
@@ -1726,15 +2555,18 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
                   "would prove nothing.", file=sys.stderr)
             return [], 4
         out.append(Phase(
-            mode=MODE_NO_ISOLATION, root=root, canonical=CANONICAL, isolated=False,
-            checks=sensitive,
+            mode=MODE_NO_ISOLATION,
+            roots=phase_roots(sensitive, www=root, www_canonical=CANONICAL),
+            isolated=False, checks=sensitive,
             filtered=tuple((c, "not isolation-sensitive (no %s control), so this phase does not "
                                "run it" % Control.NO_ISOLATION)
                            for c in selected if c not in sensitive),
             inverted=False, label="--prove-failure no-isolation"))
     if not out:
-        out.append(Phase(mode=MODE_NORMAL, root=root, canonical=CANONICAL, isolated=True,
-                         checks=selected, filtered=(), inverted=False, label="normal"))
+        out.append(Phase(mode=MODE_NORMAL,
+                         roots=phase_roots(selected, www=root, www_canonical=CANONICAL),
+                         isolated=True, checks=selected, filtered=(), inverted=False,
+                         label="normal"))
     return out, None
 
 
@@ -1742,21 +2574,26 @@ class PhaseRun(NamedTuple):
     phase: Phase
     results: List[Result]
     witness_failures: List[str]
-    #: Gates N2 and N3 read the wire and the page, never a check's message text: the document
-    #: response as the server recorded it, and the page's own verdict flag.
-    headers: Dict[str, str]
-    verdict: Optional[str]
 
 
 def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> PhaseRun:
     results: List[Result] = []
-    headers: Dict[str, str] = {}
-    verdict: Optional[str] = None
+    documents = dict((c.name, phase_document(c, phase.query)) for c in phase.checks)
     with contextlib.ExitStack() as stack:
-        serving = stack.enter_context(serve(phase.root, canonical=phase.canonical, port=0,
-                                           isolate=phase.isolated))
+        # One server per declared root, every one of them asserting its own isolation mode and
+        # every document the checks on it will navigate to, before Chrome exists. Two servers in
+        # one process is safe because the root travels as functools.partial(.., directory=..)
+        # and the isolation mode as a per-server Handler subclass; serve.py's os.chdir is in its
+        # main() and is never reached from here.
+        servings: Dict[str, Serving] = {}
+        for name in phase.roots:
+            served, canonical = phase.roots[name]
+            servings[name] = stack.enter_context(serve(
+                served, canonical=canonical, port=0, isolate=phase.isolated,
+                documents=tuple(dict.fromkeys(
+                    documents[c.name] for c in phase.checks if c.root == name))))
         # Nesting order is load-bearing: ExitStack unwinds last-in-first-out, so Chrome closes
-        # before the server. A page mid-fetch against a dead server logs a console error the
+        # before the servers. A page mid-fetch against a dead server logs a console error the
         # sweep would otherwise attribute to the product.
         # cdp.Browser tears its own Chrome and temp profile down when __enter__ raises
         # (cdp.py:__enter__), so a failed launch here leaks neither.
@@ -1775,20 +2612,28 @@ def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> Ph
         # must not be invisible either. Browser.getVersion over a page-target session was
         # verified on Chrome 157.0.8103.38 on this machine.
         header(str(page.call("Browser.getVersion").get("product") or "?"))
-        print("  server    %s/  root=%s  %s" % (
-            serving.base, _relative(serving.root),
-            "ISOLATED (COOP+COEP verified on the wire)" if serving.isolated
-            else "NOT ISOLATED (both headers verified absent on the wire)"))
+        for name in phase.roots:
+            serving = servings[name]
+            print("  server    %s/  root=%s (%s)  %s" % (
+                serving.base, _relative(serving.root), name,
+                "ISOLATED (COOP+COEP verified on the wire)" if serving.isolated
+                else "NOT ISOLATED (both headers verified absent on the wire)"))
         print("  viewport  %dx%d @ dpr %g, mobile=false, focus emulation on"
               % (VIEWPORT_WIDTH, VIEWPORT_HEIGHT, VIEWPORT_SCALE))
+        if phase.query:
+            print("  injected  %s, merged into every document this phase loads"
+                  % "&".join("%s=%s" % pair for pair in phase.query))
         print("  phase     %s\n" % phase.label)
         sys.stdout.flush()
 
         epochs = itertools.count(1)
         for candidate in phase.checks:
             inverted = phase.inverted and Control.INVERT in candidate.controls
-            env = Env(page=page, serving=serving, out=report.out, check_name=candidate.name,
-                      inverted=inverted, epochs=epochs, artifact_prefix=phase.mode)
+            env = Env(page=page, serving=servings[candidate.root], out=report.out,
+                      check_name=candidate.name, inverted=inverted, epochs=epochs,
+                      document=documents[candidate.name], ready_expr=candidate.ready_expr,
+                      ready_what=candidate.ready_what, ready_timeout=candidate.ready_timeout,
+                      artifact_prefix=phase.mode)
             result = run_one(candidate, env, inverted=inverted)
             results.append(result)
             report.add(result)
@@ -1797,11 +2642,10 @@ def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> Ph
         for candidate, why in phase.filtered:
             report.add(Result(check=candidate, outcome=Outcome.SKIP,
                               reason="%s: %s" % (candidate.name, why)))
-        if phase.mode == MODE_NO_ISOLATION:
-            headers = dict(serving.last("/").headers)
-            verdict = page.evaluate("document.documentElement.dataset.preflight")
-        witness_failures = report.witness(serving, phase.mode)
-    return PhaseRun(phase, results, witness_failures, headers, verdict)
+        witness_failures: List[str] = []
+        for name in phase.roots:
+            witness_failures.extend(report.witness(servings[name], "%s %s" % (phase.mode, name)))
+    return PhaseRun(phase, results, witness_failures)
 
 
 def _header_printer(report: Report, selected: int) -> Callable[[str], None]:
@@ -1911,18 +2755,33 @@ def gate_invert(run: PhaseRun, report: Report) -> int:
 
 def gate_no_isolation(run: PhaseRun, report: Report) -> int:
     results = run.results
-    # Presence, not value: this control claims to omit the pair, so any value for either name
-    # is a leak. The value is printed so the reader sees which.
-    leaked = ["%s: %r" % (name, run.headers[name])
-              for name, _ in ISOLATION_HEADERS if name in run.headers]
+    # Presence, not value, and per document: this control claims to omit the pair, so any value
+    # for either name on any page this phase loaded is a leak. The value is printed so the reader
+    # sees which. Read off the response the BROWSER got, as the server recorded it.
+    leaked = ["%s's document (%s) carried %s: %r"
+              % (r.check.name, phase_document(r.check, run.phase.query), name,
+                 r.document_headers[name])
+              for r in results for name, _ in ISOLATION_HEADERS if name in r.document_headers]
     if leaked:
-        print("  gate N2: the document response under --no-isolation still carried %s. The "
-              "control did not remove what it claims to." % ", ".join(leaked))
+        print("  gate N2: under --no-isolation %s. The control did not remove what it claims to."
+              % "; ".join(leaked))
         return 3
-    if run.verdict != "fail":
-        print("  gate N3: data-preflight reads %r, want 'fail'. Without COOP/COEP the page must "
-              "refuse." % run.verdict)
+    # N3. Each page's OWN refusal, read from the registry rather than hardcoded here: without
+    # COOP/COEP www/index.html must set data-preflight='fail' and www/m0.html must reach state
+    # 'aborted'. "The capability is gone" is not the product claim - "the page refused to
+    # proceed and said why" is - and a gate that knew about one page would have left the other's
+    # refusal unasserted. audit rule 12 is what keeps every isolation-sensitive check declaring
+    # one.
+    silent = ["%s: %s reads %r, want %r"
+              % (r.check.name, r.check.refusal_expr, r.refusal, r.check.refusal_want)
+              for r in results if r.check.refusal_expr and r.refusal != r.check.refusal_want]
+    if silent:
+        print("  gate N3: %s. Without COOP/COEP the page must refuse." % "; ".join(silent))
         return 1
+    # Printed when it holds as well: a gate nobody can see run is a gate nobody has checked.
+    print("  gate N3: %s" % "; ".join(
+        "%s's page refused: %s reads %r" % (r.check.name, r.check.refusal_expr, r.refusal)
+        for r in results if r.check.refusal_expr))
     # N4. Each check against the outcome CONTROLS['no-isolation'] declares for it - the same
     # declaration --negative no-isolation scores, so the two phases cannot disagree. A check that
     # DECLARES its measurement unobtainable without COOP/COEP (an M0 kernel check: there is no
@@ -2020,9 +2879,11 @@ def parse(argv: Optional[List[str]]):
                     help="run exactly this check, repeatable. Exact names only: a substring "
                          "can widen or narrow a run silently.")
     ap.add_argument("--root", default=str(REPO / "www"),
-                    help="the tree to serve. www/ is the server root (serve.py:68) and src/ "
-                         "sits outside it; M0 must choose between serving the repository root "
-                         "and symlinking into www/, and this default moves with that decision.")
+                    help="the tree to serve for checks declaring Root.WWW. src/ sits outside "
+                         "www/, so M0's kernel page is served from the repository root instead "
+                         "(Root.REPO) - which is resolved from this file and not overridable, "
+                         "because the one definition of a syscall number cannot be copied into "
+                         "www/ to suit a server root.")
     ap.add_argument("--out", default="", metavar="DIR",
                     help="artifact directory. Defaults under /tmp, because a harness that "
                          "dirties the tree it is measuring is one more way to measure the "
@@ -2061,11 +2922,12 @@ def select(only: List[str]) -> Tuple[Tuple[Check, ...], Tuple[Check, ...]]:
 
 
 def _list() -> None:
-    print("name|milestone|controls|invertible|min_expectations|floor")
+    print("name|milestone|root|document|controls|invertible|min_expectations|floor")
     recorded = floors()
     for candidate in registered():
-        print("%s|%s|%s|%s|%d|%s" % (
-            candidate.name, candidate.milestone, runnable_controls(candidate),
+        print("%s|%s|%s|%s|%s|%s|%d|%s" % (
+            candidate.name, candidate.milestone, candidate.root, candidate.document,
+            runnable_controls(candidate),
             "yes" if Control.INVERT in candidate.controls
             else "no: " + candidate.no_invert_reason,
             candidate.min_expectations, recorded.get(candidate.name, "-")))
@@ -2167,7 +3029,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if refusal is not None:
         return refusal
 
-    cleanup = [p.root for p in plan if p.root != pathlib.Path(args.root).resolve()]
+    cleanup = [path for phase in plan for path in phase.cleanup]
     gated = ""
     runs: List[PhaseRun] = []
     try:
@@ -2220,8 +3082,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 #: from it but the Result's outcome, and building one here is what lets I5 ask about a FAIL
 #: without needing a phase that produced one.
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
-                      min_expectations=1, requires_isolation=False, no_invert_reason="",
-                      note="", control_address="")
+                      labels=("-",), min_expectations=1,
+                      requires_isolation=False, no_invert_reason="",
+                      note="", control_address="", root=Root.WWW, document="/",
+                      ready_expr="true", ready_what="-", ready_timeout=1.0,
+                      refusal_expr="", refusal_want="")
 
 
 def _gate_reporting_path(run: PhaseRun, report: Report) -> int:

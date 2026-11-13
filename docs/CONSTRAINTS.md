@@ -30,6 +30,10 @@ says so.
 5. The channel is `postMessage` out, `Atomics.wait` on a SharedArrayBuffer for the reply, woken
    by `Atomics.store` + `Atomics.notify`. Measured 14–16 µs mean, p50 10–15 µs, p95 25–30 µs,
    p99 40 µs. About 550 fit in one 8.3 ms frame. `research/gap-04.md`.
+   **These figures are one caller against an idle kernel.** M0 reproduced the mean on a different
+   build and measured what this constraint never did — the same channel with 4, 16, 64 and 128
+   concurrent callers against a kernel that serialises all of them. See constraint 51; the p50 and
+   p95 quoted here are also below the clock's resolution floor, per constraint 52.
 6. Blocking is cheaper than not blocking: async `postMessage` round trip measured 17.3 µs against
    the channel's 14.0 µs. There is therefore no latency argument for an async syscall API, and the
    synchronous one MUST be built. `research/gap-04.md`.
@@ -78,12 +82,20 @@ says so.
 17. The process table MUST carry a hard cap. The renderer survived 3,200 live workers and died
     between 3,200 and 4,800; every process shares one renderer, so exceeding the ceiling kills the
     whole OS. 1,000 is the design limit. Budget ~600 KiB resident, 271 KiB JS-attributed, per live
-    process. `research/gap-04.md`.
+    process. `research/gap-04.md`. The JS-attributed figure reproduced at 272–274 KiB per worker on
+    M0's build; the ~600 KiB resident claim remains untested here, because nothing in M0 reads RSS.
+    **The cap is advisory until M6**, because a process can spawn a worker the table never sees —
+    constraint 53.
 18. Signals, broadcasts and any per-frame sweep MUST be O(interested), never O(N). Round-tripping
     all live workers cost 378 µs each; at 1,600 workers that is 502 ms. `research/gap-04.md`.
 19. Spawn from a Blob URL built from VFS bytes (1.86 ms), not an HTTP URL (3.45 ms). Add 5–6 ms for
     a WASM instantiation, so budget ~8 ms for a real process — under one frame, which means `exec`
     can be synchronous from the user's point of view. `research/gap-04.md`.
+    M0 reproduced the *ordering* but measured both 1.3–1.6× higher on its build, and could not
+    isolate why: `Blob` + `createObjectURL` is only 0.135–0.150 ms of the timed region and
+    classic-vs-module makes no difference, which leaves the patch build, M0's 5–6 KB process script
+    against gap-04's trivial one, and n=20 against n=1000. Re-running gap-04's own spawn harness on
+    this build would settle it and has not been done. `tmp/m0-probe-nested/probe.py`.
 20. `spawn` is the only way to create a process. **`fork` MUST NOT be relied on** — but the reason
     matters, because the original version of this constraint got it wrong and the corrected reason
     is narrower.
@@ -215,6 +227,9 @@ rather than of the candidate they were raised against. `designs/REVIEW-FINDINGS.
     `XMLHttpRequest`, `importScripts`, `indexedDB`, `caches`, `WebSocket` and `Worker`. This is
     hardening, not a security boundary — same-origin is not a security boundary — and MUST be
     labelled as such wherever it is documented. *Every design.*
+    **`SharedWorker` and `URL.createObjectURL` MUST go with them**, and the list is not only about
+    the filesystem: an un-stripped `Worker` also defeats the process table's cap, which makes this
+    a correctness requirement and not only a hardening one. Constraint 53 carries the measurement.
 42. A window MUST be a file description, not a bare handle, and `poll()` MUST be the single wait
     primitive over fds. A process has one futex word and one outstanding call, so a process with
     two windows — or one window plus a pipe — cannot otherwise be woken by both.
@@ -269,3 +284,72 @@ rather than of the candidate they were raised against. `designs/REVIEW-FINDINGS.
 40. A window manager cannot be checked by screenshot: an inert frame and a working one are the same
     picture. What separates them is whether the numbers changed after a drag.
     `../../webxp/scripts/check.py`.
+
+## What M0 measured
+
+M0 built the channel and measured it under contention, which is what the 14–16 µs figure in
+constraint 5 had never been. Every figure in 51–56 was produced on **Chrome 157.0.8103.52**, macOS
+Darwin 25.6.0, Apple M2 Pro, `navigator.hardwareConcurrency` 12, headless — a *different patch
+build* from the 157.0.8103.38 the rest of this file was measured on, which is stated because it is
+a different measurement and not a continuation of the old one.
+
+51. The channel holds under contention to N=16 and degrades predictably past it. Closed-loop
+    saturation, every process issuing its next call the instant the last returned, barrier-held
+    windows overlapping ≥99.9%, release ramp and ramp-down excluded from the statistics:
+
+    | N | mean | p50 | p95 | p99 | throughput |
+    |---|---|---|---|---|---|
+    | 1 | 15.8–16.0 µs | — | 25 µs | 35 µs | ~61 k calls/s |
+    | 4 | 29.0–30.0 µs | 25–30 µs | 45–50 µs | 65–75 µs | ~131 k/s |
+    | 16 | 91.8–98.1 µs | 85–90 µs | 125–140 µs | **200–255 µs** | ~162 k/s |
+    | 64 | 393–426 µs | 365–370 µs | 480–625 µs | 1030–1360 µs | ~156 k/s |
+    | 128 | 881 µs | 790 µs | 1305 µs | 3062 µs | ~145 k/s |
+
+    **The N=1 mean reproduces constraint 5's 14–16 µs on a different build**, which is the strongest
+    cross-check available for that figure. M0's accept bar — p99 under 500 µs at N=16 — is met with
+    about 2× margin on the worst of three runs. **The 2 ms kill bar is exceeded at N=128 (3.06 ms
+    p99), and 99.98% of calls there are past 500 µs.** That is not a kill, because the bar is
+    specified at N=16, but it is the honest shape of a single-threaded kernel: past ~16 concurrent
+    callers queueing dominates, and the sharded-kernel question M0 deferred becomes live somewhere
+    between 16 and 64 rather than never. `bench/syscall-contention/probe.py --n 1,4,16,64,128
+    --window-ms 3000 --runs 3`, artifact `bench/syscall-contention/results-sweep.json`.
+52. `performance.now()` is clamped to **5.000 µs** in a cross-origin isolated agent and
+    **100.000 µs** without isolation, identically on the main thread and in a dedicated worker. The
+    clamp is hard, not noisy: 99.8% of 79,866 non-zero deltas were exactly one quantum, across only
+    14 distinct values, every one an exact integer multiple. Consequences, both load-bearing: a
+    per-call p99 is trustworthy at the 500 µs and 2 ms bars (100 and 400 quanta, agreeing with an
+    independent clock to 0.2–1.5%) and **meaningless at 14 µs**, which is 2.8 quanta and where the
+    distribution collapses to {5, 10, 15, 20} µs and p50 came out 10–17% wrong. A 14 µs figure must
+    therefore be a batch mean, never a percentile. A spinning-`Atomics` counter is ~470× finer at
+    idle (7.8–10.8 ns/tick) but loses 7–55× of that under 128 busy workers and has no reference
+    independent of `performance.now()`, so it was rejected. `tmp/m0-probe-timer/probe.py`, reported
+    in full in `MILESTONES.md` §M0.
+53. **A process worker can construct its own worker, so the cap in constraint 17 is not enforced
+    until the realm is stripped.** Confirmed at depth 3: a process built a worker that held the
+    kernel's SAB, was `crossOriginIsolated`, and could block. That worker is invisible to the
+    process table while still consuming a renderer-wide worker slot, so the kernel enforces its cap
+    over a number that is not the real one. This widens constraint 41 past "hardening": the realm
+    lockdown must also delete `SharedWorker` and `URL.createObjectURL`, or make `Worker` a stub that
+    becomes a `spawn` syscall, and **until M6 lands, the cap is advisory.** M0's process table says
+    so where it checks the cap. `tmp/m0-probe-nested/probe.py`.
+54. The kernel's per-message cost dominates its handler work, so M1–M4's handlers are not the thing
+    to optimise. At N=128 the in-handler mean is 3.03 µs against a serving rate of ~145 k calls/s,
+    i.e. ρ ≈ 0.44 — **the kernel is busy inside its handlers only 44% of the time it is saturated**,
+    and the remaining 56% is `postMessage` dispatch and wake overhead. A handler made twice as fast
+    would move the headline by far less than half. `bench/syscall-contention/results-sweep.json`.
+55. A terminated kernel's nested process workers keep running for about **2.0 s**, which reproduces
+    constraint 14 one level down the worker tree: `terminate()` on the kernel does not reap what the
+    kernel spawned. Measured twice by renderer CPU time, 3.27 → 5.30 s over the 2.3 s after
+    `terminate()`, then flat. A bench that starts its next cell inside that window measures its own
+    orphans, which is why M0 runs one fresh browser per cell and asserts quiescence before taking a
+    figure. `tmp/orphan.py`.
+56. The kernel's own timer starves under saturation, and this is the input that sets the heartbeat
+    threshold. Kernel tick gap, nominal 10 ms: p999 15.5 ms at N=1, 19.0 ms at N=4, 33.0 ms at
+    N=16, 41.5 ms at N=64, 58.5 ms at N=128 — against a death threshold of
+    `REARM_MS × (HB_MISS_LIMIT + 1)` = 200 ms. So the margin at N=128 is about 3.4×, and the
+    threshold must not be set from the nominal period. The reverse consequence binds M2:
+    **a kernel that is alive but synchronously busy for longer than the threshold is declared dead
+    by every parked process**, which puts a hard ceiling on any synchronous kernel work — M2's
+    `flush()` is 260 µs and its snapshot is not yet measured. Constraint 46 leaves no way around
+    this, because no fixed timeout can separate a dead kernel from `sleep 100`.
+    `bench/syscall-contention/results-sweep.json`, heartbeat-gap rows.
