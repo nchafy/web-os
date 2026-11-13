@@ -7,10 +7,10 @@
 
 import {
   A0, A1, A2, LEN_I32, DATA_OFF, MAX_INLINE, NSYS,
-  SYS_getpid, SYS_write, SYS_clock_nanosleep,
-  EBADF, EINVAL, ENOSYS, unpackI64,
+  SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
+  EBADF, EINVAL, ENOSYS, EIO, unpackI64,
 } from "../abi.mjs";
-import { KIND_OPS } from "./files.mjs";
+import { KIND_OPS, openFile } from "./files.mjs";
 
 /** A handler that will reply later, by calling k.reply() itself. */
 export const PENDING = Symbol("PENDING");
@@ -36,6 +36,38 @@ export function buildCalls(k) {
     const ops = KIND_OPS[d.kind];
     if (!ops || !ops.write) return -ENOSYS;
     return ops.write(d, p.bytes, DATA_OFF, length);
+  };
+
+  // M0a. open is SLOW but cheap to serve: createSyncAccessHandle returns a promise, so the 495 us
+  // (constraint 22) is awaited off the dispatch path and no other process waits for it. This is
+  // constraint 57's rule applied — a syscall that must wait does not hold the kernel thread.
+  table[SYS_open] = (p) => {
+    const root = k.opfsRoot();
+    if (!root) return -EIO;
+    const length = Atomics.load(p.ctl, LEN_I32);
+    if (length < 0 || length > MAX_INLINE) return -EINVAL;
+    // The copy is not avoidable and not incidental: TextDecoder refuses a view backed by a
+    // SharedArrayBuffer ("must not be shared"), so the bytes are lifted into a private buffer
+    // first. M2's path resolution will hit the same wall on every path argument.
+    const name = new TextDecoder().decode(
+      new Uint8Array(p.bytes.subarray(DATA_OFF, DATA_OFF + length)));
+    if (!name || name.includes("/") || name.includes("\0")) return -EINVAL;
+    k.later(p, async () => {
+      const d = await openFile(root, name);
+      return p.fds.add(d);
+    });
+    return PENDING;
+  };
+
+  // And fsync is the reverse: a cheap-sounding call that is expensive to SERVE, because flush() is
+  // synchronous and 260 us of kernel thread nobody else can use (constraint 23). M0a measures what
+  // that does to every other process's latency.
+  table[SYS_fsync] = (p) => {
+    const d = p.fds.get(p.ctl[A0]);
+    if (!d) return -EBADF;
+    const ops = KIND_OPS[d.kind];
+    if (!ops || !ops.fsync) return -ENOSYS;
+    return ops.fsync(d);
   };
 
   // The async path exists at M0 precisely so it exists before M2's OPFS handlers need it.

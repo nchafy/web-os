@@ -371,6 +371,37 @@ a different measurement and not a continuation of the old one.
     A kernel that replies out of order MUST also specify its queue drain order, or it can livelock:
     drain notifications first, then in-flight answers, then new requests. That is HelenOS's order
     and the standard defence. Same source, same caveat.
+58. **A second kernel-side I/O worker is REQUIRED before M2, not a fallback.** M0a measured it:
+    one process calling `fsync` in a loop destroys every other process's latency, and the damage
+    is not marginal.
+
+    | I/O procs of 16 | cheap p50 | cheap p99 | I/O p99 |
+    |---|---|---|---|
+    | 0 | **105 µs** | 275 µs | — |
+    | 1 | 280 µs | 850 µs | 860 µs |
+    | 2 | 545 µs | 1,820 µs | 1,815 µs |
+    | 4 | 840 µs | **2,000 µs** | 2,000 µs |
+
+    With a **single** I/O process: cheap p99 is 815 µs at N=4, 850 µs at N=16, and **2,657 µs at
+    N=64 — past M0's own 2 ms kill bar.** At every level the cheap p99 and the I/O p99 are within
+    1.3×, which is the signature of head-of-line blocking: a `getpid` is not a cheap call any more,
+    it is whatever the call in front of it was.
+
+    **The asymmetry is the actionable part, and it is the reverse of how the two raw costs read.**
+    `createSyncAccessHandle` is the expensive OPERATION at 495 µs (constraint 22) but it returns a
+    promise, so it is awaited off the dispatch path and costs other processes nothing.
+    `FileSystemSyncAccessHandle.flush()` is the cheap-sounding one at 260 µs (constraint 23) but it
+    is SYNCHRONOUS, so every microsecond is kernel thread no other process can use. **`fsync` is
+    the call to get off the dispatch thread; `open` already is.** Constraint 23 required the split
+    for throughput and this is the stronger, latency argument for the same split.
+
+    So M0's ACCEPT (constraint 51) stands for a mix with no I/O in it and does not survive a
+    realistic one. The remedy is named in constraint 57 and is now scheduled rather than
+    contingent: the OPFS handles move to a second kernel-side worker, which constraint 15 permits
+    because an I/O worker is kernel-side. Sharding the kernel per process group is still not
+    required. `bench/syscall-contention/probe.py --n 16 --call io --io-procs 1` and its control,
+    `--call getpid`, which returns cheap p50 to 105 µs and so couples the effect to the I/O rather
+    than to the mix machinery.
 55. A terminated kernel's nested process workers keep running for about **2.0 s**, which reproduces
     constraint 14 one level down the worker tree: `terminate()` on the kernel does not reap what the
     kernel spawned. Measured twice by renderer CPU time, 3.27 → 5.30 s over the 2.3 s after

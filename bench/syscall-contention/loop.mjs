@@ -10,7 +10,8 @@
 // makes it importable from inside a process. Writing `const SYS_write = 1` here instead would be
 // the second hand-synced copy CLAUDE.md names as the defect this rule exists for.
 import {
-  SYS_getpid, SYS_write, SYS_clock_nanosleep, MAX_INLINE, packI64, fnv1a, FNV1A_BASIS,
+  SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
+  MAX_INLINE, packI64, fnv1a, FNV1A_BASIS,
 } from "/src/abi.mjs";
 
 const now = () => performance.now();
@@ -71,6 +72,45 @@ function runWindow(env, { call, until, buf }) {
   }
   const t1 = now();
   return { calls, wrong, firstMs: t0, lastMs: t1, spanMs: t1 - t0 };
+}
+
+/**
+ * M0a's arrangement. A few processes do real OPFS work; the rest issue getpid. The question is
+ * what a getpid costs WHILE someone else's file I/O is in flight, so the two groups must run in
+ * the same window and be reported separately — a pooled figure is exactly what would hide it.
+ *
+ * The split is by role rather than by alternating calls inside one process, because a process that
+ * interleaves its own cheap and expensive calls measures its own queue, not the kernel's.
+ */
+function runIoWindow(env, { until, buf, ioRole }) {
+  const t0 = now();
+  let calls = 0;
+  let wrong = 0;
+  let fd = -1;
+  let opened = 0;
+  if (ioRole) {
+    // One open per process, not one per write: constraint 22 says open is rare and fd I/O common,
+    // and this is the shape M2 will have.
+    const name = new TextEncoder().encode(`m0a-${env.pid}.bin`);
+    fd = env.syscall(SYS_open, 0, 0, 0, 0, 0, 0, 0, 0, name, 0, name.length);
+    if (fd < 0) return { calls: 0, wrong: 1, openErrno: fd, firstMs: t0, lastMs: now(), spanMs: 0 };
+    opened = 1;
+    while (now() < until) {
+      const w = env.syscall(SYS_write, fd, 0, 0, 0, 0, 0, 0, 0, buf, 0, buf.length);
+      if (w !== buf.length) wrong += 1;
+      // The expensive half, and the reason for the milestone: flush() is synchronous and holds the
+      // kernel thread for ~260 us (constraint 23) while every other process waits.
+      if (env.syscall(SYS_fsync, fd) !== 0) wrong += 1;
+      calls += 2;
+    }
+  } else {
+    while (now() < until) {
+      if (env.syscall(SYS_getpid) !== env.pid) wrong += 1;
+      calls += 1;
+    }
+  }
+  const t1 = now();
+  return { calls, wrong, opened, fd, firstMs: t0, lastMs: t1, spanMs: t1 - t0 };
 }
 
 /** The checks on both edges of MAX_INLINE, and the raw bypass. Outside the latency sweep. */
@@ -169,7 +209,12 @@ export function run(env, m) {
     return { role: "loop", barrier: released, barrierFailed: true, counters: env.samples() };
   }
 
-  const measured = runWindow(env, { call: m.call || "getpid", until: released.untilLocalMs, buf });
+  // M0a: ioProcs processes do file I/O, the rest issue getpid, all inside one barrier-held window.
+  const ioProcs = m.ioProcs | 0;
+  const ioRole = ioProcs > 0 && env.index < ioProcs;
+  const measured = (m.call === "io")
+    ? runIoWindow(env, { until: released.untilLocalMs, buf, ioRole })
+    : runWindow(env, { call: m.call || "getpid", until: released.untilLocalMs, buf });
   const after = env.samples();
   // Leave the window before anything out-of-window runs: a 1 MiB write or a 5 ms spin landing
   // inside another process's window would move its p99, and 1 ms of a 1,000 ms window is enough
@@ -185,7 +230,9 @@ export function run(env, m) {
   if (m.overflow) extra.overflow = overflowChecks(env);
 
   return {
-    role: "loop",
+    // The role the statistics partition on. "io" and "cheap" exist only in the M0a mix; every
+    // other call keeps the plain "loop" so nothing downstream has to special-case the normal path.
+    role: m.call === "io" ? (ioRole ? "io" : "cheap") : "loop",
     firstGetpid,
     // WHAT THIS PROCESS THINKS IT IS, from the program's side of the boundary. The kernel's table
     // and the kernel's getpid are one source checked against itself; this is the identity the

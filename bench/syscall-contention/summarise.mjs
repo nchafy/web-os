@@ -550,6 +550,19 @@ export function quantumGuard(list) {
 export function summariseCell({ n, samples, kernel, bars, windowMs }) {
   const loops = samples.filter((s) => s.role !== "hb");
   const hists = loops.map((s) => s.samples);
+  // M0a: the cheap and expensive groups, reported SEPARATELY. Pooling them is what would hide the
+  // thing the milestone exists to measure — a getpid queued behind someone else's synchronous
+  // flush. Null on every other call, so the normal path reports exactly what it did before.
+  const cheapHists = samples.filter((s) => s.role === "cheap").map((s) => s.samples);
+  const ioHists = samples.filter((s) => s.role === "io").map((s) => s.samples);
+  const split = (cheapHists.length && ioHists.length) ? {
+    cheap: cell(poolHistograms(cheapHists), HEADLINE_QUANTILE, MIN_PERCENTILE_SAMPLES),
+    cheapP50: cell(poolHistograms(cheapHists), 0.5, MIN_PERCENTILE_SAMPLES),
+    io: cell(poolHistograms(ioHists), HEADLINE_QUANTILE, MIN_PERCENTILE_SAMPLES),
+    ioP50: cell(poolHistograms(ioHists), 0.5, MIN_PERCENTILE_SAMPLES),
+    cheapProcs: cheapHists.length,
+    ioProcs: ioHists.length,
+  } : null;
   const guard = quantumGuard(hists);
   const pooled = poolHistograms(hists);
   const quantumUs = guard.quantumUs;
@@ -609,7 +622,7 @@ export function summariseCell({ n, samples, kernel, bars, windowMs }) {
     count: pooled.count,
     throughputPerS: pooled.count / (windowMs / 1000),
     meanUs,
-    p50, p95, p99,
+    p50, p95, p99, split,
     // The quantile every percentile above was read at, and the counting check on the printed
     // headline. Published rather than assumed: this is the one number the milestone reports.
     p99Quantile: HEADLINE_QUANTILE,

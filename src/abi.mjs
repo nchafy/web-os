@@ -72,7 +72,15 @@ const INTS = {
   SYS_getpid: 0,
   SYS_write: 1,
   SYS_clock_nanosleep: 2,
-  NSYS: 3,
+  // M0a. These two exist to measure which half of OPFS holds the kernel thread, because the two
+  // halves behave oppositely: createSyncAccessHandle returns a PROMISE, so its 495 us
+  // (constraint 22) is awaited and the dispatch thread stays free, while the handle's own
+  // write/flush are SYNCHRONOUS and flush is 260 us (constraint 23) of kernel thread nobody else
+  // can use. open is therefore the cheap one to serve and fsync is the expensive one, which is the
+  // reverse of how their raw costs read.
+  SYS_open: 3,
+  SYS_fsync: 4,
+  NSYS: 5,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -143,7 +151,7 @@ export const {
   A0, A1, A2, A3, A4, A5, A6, A7, R0, R1, KDOWN_SEEN, KDOWN_MS,
   IDLE_PARK,
   SAB_BYTES, BYTE_OFF, DATA_OFF, LEN_I32, MAX_INLINE,
-  SYS_getpid, SYS_write, SYS_clock_nanosleep, NSYS,
+  SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync, NSYS,
   ST_RETURN, ST_INTR, ST_KDOWN,
   F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN,
   PROC_CAP, A_SHM, CALLID_WRAP,
@@ -156,7 +164,7 @@ export const {
 } = INTS;
 
 /** Indexed by syscall number, so a number and its printed name cannot drift. */
-export const SYS_NAME = Object.freeze(["getpid", "write", "clock_nanosleep"]);
+export const SYS_NAME = Object.freeze(["getpid", "write", "clock_nanosleep", "open", "fsync"]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
 //

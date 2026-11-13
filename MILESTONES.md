@@ -20,7 +20,8 @@ checks is a wish.
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
-| **M0a** | **Addendum: the same sweep with a real OPFS call in the mix** | 0.5 | | ⬜ **next** |
+| M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
+| **M0b** | **Move the OPFS handles to a second kernel-side worker** | 1.5 | | ⬜ **next** |
 | M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
@@ -186,36 +187,64 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 
 ---
 
-## M0a — Addendum: the same sweep with a real OPFS call · next · 0.5 day
+## M0a — Addendum: a real OPFS call in the mix · ✅ done · est 0.5 d, actual 0.5
 
-**Why this exists.** M0's three calls were `getpid`, `write(1, …)` to an in-memory sink, and
-`clock_nanosleep`. None touches storage, so the handler it measured costs 2–3 µs. A real `open()`
-is 495 µs and a `flush()` is 260 µs — 85–250× that — and the kernel is one thread serving every
-process, so one slow `open` is head-of-line blocking for all of them. **M0 measured the one
-workload in which that risk cannot appear**, which makes its ACCEPT conditional on a condition it
-never stated. Raised by a parallel session reviewing the result; the gap is real and was mine.
+**Verdict: the second kernel-side I/O worker is REQUIRED before M2, not a fallback.** The numbers
+and the asymmetry behind them are `docs/CONSTRAINTS.md` constraint 58; the short version is that
+**one** process calling `fsync` in a loop takes every other process's p99 from 275 µs to 850 µs at
+N=16, and to 2,657 µs at N=64 — past M0's own 2 ms kill bar — with cheap and expensive calls
+landing within 1.3× of each other, which is head-of-line blocking by definition.
 
-**Build.** A fourth call that opens and writes a real OPFS file, added to the existing mix. No new
-harness — the eight controls, the anti-vacuity gates and the barrier all stand.
+**The finding that changes the design, and it inverts the obvious reading.** `open` is the
+expensive operation (495 µs) and the cheap call to serve, because `createSyncAccessHandle` returns
+a promise and is awaited off the dispatch path. `fsync` is the cheap-sounding one (260 µs) and the
+expensive call to serve, because `flush()` is synchronous and holds the kernel thread. The review
+that prompted this milestone predicted "one slow `open` is head-of-line blocking for every
+process"; the mechanism was right and the call was wrong, and only measuring told the difference.
 
-**Proof.** Run the mix at N ∈ {1, 16, 64} and report **p99 for the cheap calls while the expensive
-ones are in flight**, separated by call. That is the figure that matters: it says whether a
-`getpid` queued behind someone else's `open` returns in 15 µs or in 500. Report the two
-distributions side by side, not a pooled number — pooling is what would hide it.
+**Built.** `SYS_open` and `SYS_fsync` (ABI numbers 3 and 4, appended, never renumbered), the
+`F_FILE` kind on a real sync access handle, and `later()` in the kernel — the async completion
+contract constraint 57 demands, reusing `setTimer`'s cancellation identity check rather than
+writing a second one. `--call io --io-procs K` runs K processes doing file I/O against N−K issuing
+`getpid`, in one barrier-held window, reported apart.
 
-**Negative control.** The existing kernel-stall control already proves the harness can see a slow
-handler. What this milestone additionally owes is the *separation*: show that the cheap-call p99
-moves when the expensive call is added and does not when it is removed, so the figure is coupled to
-the I/O and not to the extra traffic.
+**Proof.** The table in constraint 58, at N ∈ {4, 16, 64}.
+**Negative control, and it is the separation itself.** `--call getpid` on the same build returns
+cheap p50 to 105 µs, identical to the no-I/O baseline, so the effect is coupled to the I/O and not
+to the mix machinery. The I/O-process count also moves it monotonically (1 → 2 → 4 gives 850 →
+1,820 → 2,000 µs), which a confounder in the harness would not do.
 
-**What a bad result means, and it is not a kill.** If cheap calls inherit the `open` latency, the
-first fallback is **a second kernel-side I/O worker owning the OPFS handles** — constraint 15
-forbids a releasable resource living in a *process*, and an I/O worker is kernel-side, so the
-handles stay legal while the dispatch thread stops blocking. That is much smaller than the sharded
-kernel M0's kill criterion named. Constraint 57.
+**Incidental, and it will bite M2 on every path argument:** `TextDecoder` refuses a view backed by
+a `SharedArrayBuffer` — "the provided ArrayBufferView value must not be shared" — so a path has to
+be lifted into a private buffer before it can be decoded. Found by the first run of this milestone
+crashing on it.
 
-**Also specify while here:** the queue drain order. A kernel that replies out of order can livelock
-without one — notifications, then in-flight answers, then new requests.
+---
+
+## M0b — Move the OPFS handles to a second kernel-side worker · next · 1.5 days
+
+Scheduled by M0a's measurement, not by preference. Constraint 58.
+
+**Build.** A second kernel-side worker owning the OPFS sync access handles. The dispatch kernel
+forwards `write`/`fsync`/`read` to it and answers via `later()`, which already exists and already
+drops a reply whose call is gone. Constraint 15 is satisfied because an I/O worker is kernel-side:
+the handles never enter a process. Constraint 47's per-inode refcount goes with the handles.
+
+**Specify the queue drain order while here** — notifications, then in-flight answers, then new
+requests (constraint 57). A kernel that replies out of order can livelock without one.
+
+**Proof.** Re-run M0a's exact measurement. Cheap p50 must stay at the no-I/O baseline (~105 µs at
+N=16) with K I/O processes running, for K ∈ {1, 2, 4}, and cheap p99 must stay under the 500 µs
+accept bar at N=16. The table in constraint 58 is the before; this is the after, in the same shape.
+
+**Negative control.** Route the I/O back through the dispatch thread and the M0a numbers must
+return. A fix that cannot be switched off has not been shown to be the thing that worked.
+
+**Watch for.** The handles are now in another agent, so a write is a message plus a copy. Measure
+the single-process cost too: if uncontended `write` latency more than doubles, the trade needs
+restating rather than assuming the contention win pays for it.
+
+---
 
 ---
 
