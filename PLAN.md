@@ -27,7 +27,7 @@ they changed.
 | **Syscalls** | ~40 | 68 + a WASI preview1 shim | ~44 |
 | **Aero** | DOM + `backdrop-filter`, frame-only glass | same | Canvas/WebGL compositor, the real additive composite |
 | **Thumbnails / Peek** | static icon | static icon | live, from the compositor's own textures |
-| **Effort** | **70 working days** | **~135 working days** | **~170 working days** |
+| **Effort** | **73 working days** | **~138 working days** | **~173 working days** |
 | **Gives up** | no real binaries; Peek is fake | 2× the time; still no live thumbnails | no WASM; abandons all of `webxp/src/*.mjs`; the least-verified assumption in the set |
 | **Riskiest assumption** | a single-threaded kernel stays fast under contention — **unmeasured** | a stock wasip1 binary runs unpatched over this ABI | the exact Aero composite is reachable from CSS |
 
@@ -39,8 +39,12 @@ context switching genuine rather than simulated. Full writeup and the measured f
 in `docs/LEARNING-MODE.md`. **Follows the spine; must not precede M0.** 3 of its days fold into
 M3 and M5 and should be taken regardless.
 
-**Calendar, converted once.** 70 working days — 2.5 setup + 30 spine + 37 window half — is ~14
-weeks full-time, ~8 months at two days a week, ~16 months at one. Every other figure in this
+**Calendar, converted once.** 73 working days — 2.5 setup + 33.5 spine + 37 window half — is ~15
+weeks full-time, ~8 months at two days a week, ~17 months at one. The spine grew from 30 after M0
+ran: +0.5 for **M0a** (M0's workload touched no storage, so it could not see the risk it existed to
+measure), +1 for **M2a** (a host-runnable kernel, because journal replay is a fuzz target and that
+is cheaper before M2 than after), and +2 on **M3** (the provider interface and `/dev/trace`, folded
+in from option D because both are OS work and the general version was otherwise built twice). Every other figure in this
 document is in **working days**; multiply once, using your own cadence, and write the answer at the
 top of §8's table.
 
@@ -434,6 +438,70 @@ criterion, a negative control that must fire) and **M6** (concrete exploit, enum
 correct negative control, and an honest label). Both stand unchanged.
 
 ---
+
+## 9b. Proposed constraints, queued for review
+
+`docs/research/09-hobbyist-os-actions.md` proposes 22 constraints (numbered 52–73 there) from a
+survey of 18 hobbyist operating systems. **They are not accepted.** The researcher labelled them a
+proposal, and this project's own rule is that every finding is verified against the code before it
+is acted on — two rounds have now produced a confident finding that was wrong on the code.
+
+**Accepted and landed** (the three that were sequencing claims, cheap now and expensive later):
+
+| | Landed as |
+| --- | --- |
+| A syscall that must wait must not hold the kernel thread | **M0a**, and constraint 57. M0's ACCEPT is a figure about a mix containing no I/O: its in-handler mean was 2.1–3.3 µs against `createSyncAccessHandle` at 495 µs, so 150–250×. The fallback is a kernel-side I/O worker, not a sharded kernel — much smaller, and legal under constraint 15 because the handles stay kernel-side. |
+| File data is not journalled, only metadata | **M2 days 5–8.** Blobs mutate in place, so a torn blob leaves intact metadata pointing at it — ext4 `data=writeback`, which is not ext4's default precisely to avoid this. COW the blob or declare the guarantee metadata-only. |
+| The ABI has no growth mechanism | **M1 (e).** Format magic + version word, reserved numbers, one `perform` hatch. Derived at runtime, not generated — a generator would be a build step. |
+
+**Also landed, as corrections rather than new constraints:** the taskbar cannot be an ordinary
+client of the same ABI (`CLAUDE.md`); D16's rationale (`docs/DECISIONS.md`); M8 gates M12 rather
+than following it, and M7 is missing the destroy cascade and cross-process ownership
+(`MILESTONES.md`).
+
+**Queued, in the order I would review them.** Each needs checking against the code before it
+becomes normative:
+
+1. **A process is single-threaded by construction** — one futex word, one outstanding call, and M6
+   deletes `Worker`. So no coroutine runtime, no background decode, and `await prompt()` as
+   straight-line code is inexpressible. Constraint 20a's deadlock is a *special case*, and the
+   remedy is the general one: concurrency inside an app costs a second process, charged against
+   the cap. **Free to write down, and it changes the cap arithmetic for every app not yet
+   designed** — so this is first in the queue.
+2. **The per-process event backlog has no bound and no defined overflow** — constraint 9's unnamed
+   sibling. A process parked in `Atomics.wait` cannot drain, so the kernel must buffer, unbounded.
+   HelenOS's answer: a fixed in-flight budget with a synchronous `ELIMIT`, as part of the ABI
+   contract rather than an implementation detail.
+3. **Capabilities that can only narrow** — the credential carries `caps` with nothing reading it.
+   A bitmask in the process table, a `pledge`-shaped call that only clears bits, checked at
+   dispatch. The asserted invariant is **monotonicity**, not a symptom. This is a genuine boundary
+   against a confused-deputy bug in a first-party app, which is this project's actual threat model,
+   in a way that deleting `fetch` inside the worker is not.
+4. **Durability on one call, not the journal** — EROS/KeyKOS carries an escape hatch committing one
+   page immediately because database logs cannot wait. Define durability on `fsync` of one fd,
+   measure *that*, and let everything else ride the snapshot. This turns §10's unanswerable
+   question about the whole design into one measurement.
+5. **The superblock needs a generation counter and a major/minor version** — "minor newer than me ⇒
+   refuse". Three copies, not two: against two alternating slots, a bad write to the older slot
+   during a commit can leave zero valid copies. Then constraint 28's "mounts read-only and reports"
+   can become "mounts the previous generation read-write and reports" for the same honesty. **The
+   version field is unavailable later.**
+6. **An invariant must abort loudly in dev builds** rather than be documented as a rule, each abort
+   owing a `--prove-failure` control. Three systems independently say so. Implies a policy not yet
+   made: which of the 68 calls return an errno and which fault the process.
+7. The window-protocol items — repaint from server-held state with two damage sets, server-drawn
+   chrome, a global window cap with its own errno, a "not responding" detector. All M7–M12, all
+   reviewable when that half starts.
+8. **Pin the browser surface in writing** — the APIs and the version the spine depends on, as one
+   list, so drift arrives as a diff rather than a bug report. SkyOS died because "catching up with
+   the development for all this is just not possible anymore… not for one person", and its drivers
+   are our browser APIs.
+
+**Proposed D17 — window surface ownership.** Kernel-allocated retained surfaces with a serial,
+versus M8's transferred `OffscreenCanvas`. Haiku and SerenityOS chose opposite sides. The terms
+here favour server-allocated, because it is the only version giving accounting and revocation —
+which constraint 49's admission controller and constraint 17's cap both need and neither has.
+Decide before M8, because M8 gates M12.
 
 ## 10. Honest gaps
 

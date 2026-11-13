@@ -5,9 +5,10 @@ build/
 node_modules/
 .DS_Store
 
-# bench output: numbers belong in docs/ with their harness named, not committed raw
+# bench output. results*.json IS committed: docs/CONSTRAINTS.md cites those files by path,
+# and a citation that is not in the clone is not a citation. Screenshots and logs are not.
 bench/**/shot.png
-bench/**/results*.json
+bench/**/*.log
 *.log
 
 # rendered mockup screenshots: regenerate with mockups/shoot.py
