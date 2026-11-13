@@ -332,11 +332,45 @@ a different measurement and not a continuation of the old one.
     lockdown must also delete `SharedWorker` and `URL.createObjectURL`, or make `Worker` a stub that
     becomes a `spawn` syscall, and **until M6 lands, the cap is advisory.** M0's process table says
     so where it checks the cap. `tmp/m0-probe-nested/probe.py`.
-54. The kernel's per-message cost dominates its handler work, so M1–M4's handlers are not the thing
-    to optimise. At N=128 the in-handler mean is 3.03 µs against a serving rate of ~145 k calls/s,
-    i.e. ρ ≈ 0.44 — **the kernel is busy inside its handlers only 44% of the time it is saturated**,
-    and the remaining 56% is `postMessage` dispatch and wake overhead. A handler made twice as fast
-    would move the headline by far less than half. `bench/syscall-contention/results-sweep.json`.
+54. **For handlers of a few microseconds**, the kernel's per-message cost dominates its handler
+    work. At N=128 the in-handler mean is 3.03 µs against a serving rate of ~145 k calls/s, i.e.
+    ρ ≈ 0.44 — the kernel is busy inside its handlers only 44% of the time it is saturated, and the
+    remaining 56% is `postMessage` dispatch and wake overhead. A handler made twice as fast would
+    move the headline by far less than half. `bench/syscall-contention/results-sweep.json`.
+
+    **The scope of that sentence is load-bearing and an earlier draft of this constraint omitted
+    it.** M0's three calls were `getpid`, `write(1, …)` to an in-memory sink, and `clock_nanosleep`
+    — none of which touches storage, so the measured handler cost is 2–3 µs. A real `open()` is
+    **495 µs** (constraint 22) and a `flush()` is **260 µs** (23), which is 85–250× the handler
+    M0 measured. The kernel is one thread serving every process, so a single slow `open` is
+    head-of-line blocking for all of them: a `getpid` queued behind someone else's `open` cannot
+    return in 15 µs no matter how cheap `getpid` is. **M0's p99 of 255 µs at N=16 is therefore a
+    true figure about a mix containing no I/O, and the generalisation "handlers are not the thing to
+    optimise" does NOT survive the first OPFS call entering the mix.** Constraint 57 is the
+    measurement that settles it; until that is taken, no conclusion about the kernel under a
+    realistic mix is available from M0.
+57. **A syscall that must wait MUST NOT hold the kernel thread.** Three independent hobbyist
+    kernels converge on this rule and none of them services a slow request inline: HelenOS holds a
+    per-fd lock across a downstream call, SerenityOS splits a slow request into a ticket plus an
+    async completion, and Orbital parks on the resource and replies out of order.
+    `research/09-hobbyist-os-actions.md` §1 — **not yet in this branch**: it is on
+    `worktree-learning-mode`, written by a parallel session, and this citation resolves only
+    once that branch merges. Flagged rather than dropped, per the rule that an unsourced claim
+    says so.
+
+    The consequence for this project is that the kernel's dispatch must be able to reply out of
+    order, which M0's design already permits — the reply is addressed by `CALLID` and the process
+    parks on `SEQ` — but which M0 never exercised, because every call it measured completed inline.
+    **If the measurement in 54 shows cheap calls inheriting an `open`'s latency, the first fallback
+    is a second kernel-side I/O worker owning the OPFS handles, not a sharded kernel.** That is a
+    far smaller change: constraint 15 forbids a releasable resource living in a *process*, and an
+    I/O worker is kernel-side, so the handles stay where they are required to be while the dispatch
+    thread stops blocking on them. Sharding the kernel per process group remains the larger and
+    later option.
+
+    A kernel that replies out of order MUST also specify its queue drain order, or it can livelock:
+    drain notifications first, then in-flight answers, then new requests. That is HelenOS's order
+    and the standard defence. Same source, same caveat.
 55. A terminated kernel's nested process workers keep running for about **2.0 s**, which reproduces
     constraint 14 one level down the worker tree: `terminate()` on the kernel does not reap what the
     kernel spawned. Measured twice by renderer CPU time, 3.27 → 5.30 s over the 2.3 s after

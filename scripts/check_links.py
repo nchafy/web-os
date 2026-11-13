@@ -21,10 +21,6 @@ AUTHORED = [
 #: Referenced on purpose, not built yet. MILESTONES.md says which milestone owes each.
 OWED = {
     'scripts/check.py',
-    # M0's raw sweep, cited by docs/CONSTRAINTS.md 51-54. web-os-builder has the data; it is not
-    # committed yet. Listed here rather than left red, because a gate that is red for someone
-    # else's pending file trains people to ignore it. Remove this entry when the file lands.
-    'bench/syscall-contention/results-sweep.json',
 }
 
 PATH_RE = re.compile(
