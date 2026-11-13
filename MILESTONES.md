@@ -20,7 +20,7 @@ checks is a wish.
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
-| **M0a** | **A syscall that waits must not hold the kernel thread** | 0.5 | | ⬜ **next** |
+| **M0a** | **Addendum: the same sweep with a real OPFS call in the mix** | 0.5 | | ⬜ **next** |
 | M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
@@ -186,6 +186,39 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 
 ---
 
+## M0a — Addendum: the same sweep with a real OPFS call · next · 0.5 day
+
+**Why this exists.** M0's three calls were `getpid`, `write(1, …)` to an in-memory sink, and
+`clock_nanosleep`. None touches storage, so the handler it measured costs 2–3 µs. A real `open()`
+is 495 µs and a `flush()` is 260 µs — 85–250× that — and the kernel is one thread serving every
+process, so one slow `open` is head-of-line blocking for all of them. **M0 measured the one
+workload in which that risk cannot appear**, which makes its ACCEPT conditional on a condition it
+never stated. Raised by a parallel session reviewing the result; the gap is real and was mine.
+
+**Build.** A fourth call that opens and writes a real OPFS file, added to the existing mix. No new
+harness — the eight controls, the anti-vacuity gates and the barrier all stand.
+
+**Proof.** Run the mix at N ∈ {1, 16, 64} and report **p99 for the cheap calls while the expensive
+ones are in flight**, separated by call. That is the figure that matters: it says whether a
+`getpid` queued behind someone else's `open` returns in 15 µs or in 500. Report the two
+distributions side by side, not a pooled number — pooling is what would hide it.
+
+**Negative control.** The existing kernel-stall control already proves the harness can see a slow
+handler. What this milestone additionally owes is the *separation*: show that the cheap-call p99
+moves when the expensive call is added and does not when it is removed, so the figure is coupled to
+the I/O and not to the extra traffic.
+
+**What a bad result means, and it is not a kill.** If cheap calls inherit the `open` latency, the
+first fallback is **a second kernel-side I/O worker owning the OPFS handles** — constraint 15
+forbids a releasable resource living in a *process*, and an I/O worker is kernel-side, so the
+handles stay legal while the dispatch thread stops blocking. That is much smaller than the sharded
+kernel M0's kill criterion named. Constraint 57.
+
+**Also specify while here:** the queue drain order. A kernel that replies out of order can livelock
+without one — notifications, then in-flight answers, then new requests.
+
+---
+
 ## M1 — Process lifecycle, signals, hard cap · 4 days · ~1100 LoC
 
 > **Four additions from `docs/research/09-hobbyist-os-actions.md`, all because the process-table
@@ -202,6 +235,14 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 > SIGHUP off the session. The ABI has `setpgid` and no session concept at all, so M4 would
 > otherwise have to add a field to a live table.
 >
+> **M1 lands the field, the leader link and `setsid` — and explicitly does not claim SIGHUP,
+> SIGTTIN or SIGTTOU work.** A session id is four bytes and free; a session that *works* is not:
+> SIGHUP on leader death means the kernel has to know which pid leads, keep that link correct
+> across teardown, and deliver to every process in every process group in the session — and
+> constraint 18 requires that sweep be O(interested), not O(N). Recorded as a field plus an
+> invariant rather than a feature, so M4 inherits something true instead of something that looks
+> done. *(web-os-builder's caution, taken.)*
+>
 > **(c) `waitpid` must distinguish "exited with code N" from "killed for reason R".** With
 > `Worker.terminate()` as the only kill and no exit path in the dying worker, **the kernel is the
 > only thing that can record why** — so it is written at teardown or it is lost forever.
@@ -210,7 +251,21 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 > the count is zero. HelenOS's `EHANGUP` cleanup. Cheap here, and it is the only point where the
 > outstanding-call count is still knowable.
 >
-> **(e) The ABI needs a growth mechanism, and it is cheapest now.** AROS's ABI v1 break — a
+> **(e) The per-process event backlog gets a bound and a defined overflow.** Promoted out of
+> `PLAN.md` §9b on web-os-builder's argument, which corrected mine. I had filed it as "constraint
+> 9's unnamed sibling". It is **strictly worse than constraint 9**: constraint 9's overflow is
+> bounded by one 64 KiB SAB and visible at the call site, while this one grows without limit **on
+> the kernel's own heap**, and the process that caused it is asleep in `Atomics.wait` and cannot
+> drain. Constraint 17 caps processes at 128 precisely because the renderer dies between 3,200 and
+> 4,800 workers; an unbounded per-process backlog reintroduces that same failure mode with no cap
+> on it at all.
+>
+> HelenOS's answer is the cheap one and belongs in the **ABI contract** rather than the
+> implementation: a fixed in-flight budget per process, with a synchronous `ELIMIT` when it is
+> exhausted. Which is why it lands here with the other table fields rather than at the milestone
+> that first needs it.
+>
+> **(f) The ABI needs a growth mechanism, and it is cheapest now.** AROS's ABI v1 break — a
 > one-year estimate still producing forks a decade later — was *entirely* representation
 > decisions: where a handle lives, what unit a pointer counts in, how state is partitioned. The
 > analogues here are the SAB layout, the futex word's position, the `(lo, hi)` pairing and the
@@ -274,6 +329,13 @@ thousand, and finds the tear that the one hand-written case does not.
 
 Costs no dependency and no build step — the same `.mjs` files, imported by a script. This is why
 `src/abi.mjs` holding only integers and pure codecs matters: it is importable from Node.
+
+**Scope condition, and it is the whole value of the milestone: the host-runnable path must be the
+same code, not a port.** The risk is M2's codecs reaching for OPFS or a SAB *inside* the parse path
+and quietly becoming unfuzzable. So the inode table, the superblock codec and the journal codec stay
+**pure over byte arrays, with all I/O at the edges**. Hold that and the fuzz target is free forever;
+lose it and M2a decays into a maintained second implementation, which is the exact thing it exists
+to avoid. *(web-os-builder's addition, from M0's experience with `src/abi.mjs`.)*
 
 **Proof.** The journal codec round-trips under Node; a fuzz run over truncated and bit-flipped
 journals terminates with no crash and no silent acceptance of a bad record.
