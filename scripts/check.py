@@ -1592,7 +1592,8 @@ SYSCALL_LABELS = (
     "p99 printable",
     "the headline p99 is the 99th percentile",
     "pooled p99 within the worst per-process p99",
-    "p99 under the accept bar",
+    "p50 under the regression bar",
+    "p99 under the tail ceiling",
     "document COOP",
     "document COEP",
     "served m0.html",
@@ -1607,7 +1608,9 @@ SYSCALL_LABELS = (
 #: against the 500 us bar, 1,296 samples past the 1,000 the withholding rule needs, identity
 #: 2967/2967/2967/2967, depth_p50 15 of 16, every anti-vacuity clause still ok, and 1 of 3 forced
 #: not-equals.
-_STALL_FAILS = ("p99 under the accept bar",)
+#: A 2 ms stall drives EVERY percentile to ~29,673 us, so both latency clauses must go red. Naming
+#: only one would let a stall that moved the tail but not the median satisfy this control.
+_STALL_FAILS = ("p50 under the regression bar", "p99 under the tail ceiling")
 _STALL_HOLDS = held_rest(SYSCALL_LABELS, _STALL_FAILS)
 
 CONTROLS: Dict[str, NegativeControl] = {
@@ -1992,6 +1995,9 @@ READ_SYSCALL = """
       p99Us: c.p99.us,
       p99Text: String(c.p99.text),
       p99Why: String(c.p99.why || ''),
+      // p50 carries the suite's tight bar, because it is the statistic this environment measures
+      // repeatably. Read from the same cell, at the same bin geometry, as the p99 beside it.
+      p50Us: c.p50 ? c.p50.us : null,
       // The quantile the figure was asked for, and the counting witness that the figure printed
       // is that quantile of the pooled histogram. Beside them, the worst per-process p99 at the
       // same quantile: the pooled one cannot exceed it.
@@ -2045,17 +2051,43 @@ SYSCALL_SHAPE = {"state": str, "why": str, "cells": int, "invalid": list, "isola
 HEADLINE_QUANTILE = 0.99
 
 
-def accept_bar_us() -> float:
-    """The accept bar, read from the file the bench reads it from. NOT restated here: 500 us
-    written twice is two numbers to keep in step, and the one in bars.json is the one the sweep's
-    verdict was taken against."""
+def bar_us(key: str) -> float:
+    """A bar, read from the file the bench reads it from. NOT restated here: a threshold written
+    twice is two numbers to keep in step, and the ones in bars.json are what the sweep's verdict
+    was taken against."""
     try:
         data = json.loads(BARS_JSON.read_text(encoding="utf-8"))
-        return float(data["accept_p99_us"])
+        return float(data[key])
     except (OSError, ValueError, KeyError, TypeError) as error:
         raise Unmeasurable(
-            "the accept bar cannot be read from %s, so there is no bar to compare a p99 against: "
-            "%s" % (_relative(BARS_JSON), error))
+            "%s cannot be read from %s, so there is no bar to compare against: %s"
+            % (key, _relative(BARS_JSON), error))
+
+
+# WHY THIS CHECK DOES NOT ASSERT THE 500 us ACCEPT BAR, which is the opposite of what an earlier
+# draft did and the reason it was flaky at about one run in five.
+#
+# The gate's figure and this check's figure are different measurements of the same channel. The
+# gate ran one FRESH BROWSER PER CELL with quiescence asserted and 2,000 warm-up calls, took three
+# runs and read the worst: p50 85-90 us, p99 200-255 us. This check runs ONE cell in a browser
+# shared with every other check, after 100 warm-up calls. Measured over ten runs here, that
+# environment gives p50 100-115 us and p99 230-430 us -- and a 540 us p99 was observed once, which
+# is what tripped the 500 us bar.
+#
+# So the accept bar sits INSIDE this environment's noise band, and no window length fixes it:
+# p99 at a 400 ms window spanned 230-430 us and at a 3 s window 265-390 us. The spread is
+# run-to-run variance, not a short-window artifact, which was the first and wrong diagnosis.
+#
+# p50, measured in the same ten runs, spanned 100-115 us -- 15 us of spread against p99's 200.
+# A regression that doubles channel latency doubles p50, so a 200 us p50 bar catches it with 1.7x
+# margin over observed noise, and catches it MORE reliably than a 500 us p99 bar would. The loose
+# p99 ceiling is there for a tail blow-up: the kernel-stall control drives every percentile to
+# 29,673 us, so it clears 1,000 us by 30x.
+#
+# The 500 us accept bar is still verified, by the sweep that produced it --
+# bench/syscall-contention/probe.py --n 1,4,16,64,128 --runs 3 -- and that is the right place for
+# it, because it is the protocol the number came from. A suite check cannot assert a controlled
+# measurement's bar in an uncontrolled environment; trying to is what produced the flake.
 
 
 @check(
@@ -2089,7 +2121,9 @@ def accept_bar_us() -> float:
                     "--stall-us 2000 --force-not-equal",
 )
 def check_syscall(env: Env) -> None:
-    bar_us = accept_bar_us()
+    accept_bar = bar_us("accept_p99_us")
+    p50_bar = bar_us("suite_p50_regression_us")
+    p99_ceiling = bar_us("suite_p99_tail_us")
     got = env.read(READ_SYSCALL, SYSCALL_SHAPE)
 
     if got["state"] != "done":
@@ -2248,7 +2282,7 @@ def check_syscall(env: Env) -> None:
            cell["n"], cell["depthMax"], cell["count"]))
 
     # The latency statement, and the bar is read from the file the bench reads it from.
-    env.expect("page and harness read the same accept bar", got["acceptBarUs"], bar_us)
+    env.expect("page and harness read the same accept bar", got["acceptBarUs"], accept_bar)
     # And the same quantile. The bench reads one constant at both of its percentile call sites;
     # this says which constant that has to be, so "the p99" cannot quietly become some other
     # quantile reported under the same name.
@@ -2294,13 +2328,24 @@ def check_syscall(env: Env) -> None:
              "in-handler mean %.2f us, clock quantum %.3f us"
              % (cell["meanUs"], cell["p99Text"], cell["count"], cell["n"], cell["worstP99Us"],
                 cell["serviceMeanUs"], cell["quantumUs"]))
+    # The tight bar is on p50, because p50 is the statistic this environment can measure
+    # repeatably: 100-115 us over ten runs, against p99's 230-430. See the note above bar_us().
     env.expect_that(
-        "p99 under the accept bar",
-        cell["p99Us"] is not None and cell["p99Us"] < bar_us,
-        "p99 %s against the %g us accept bar in %s. This is N=%s over %s calls in a 400 ms "
-        "window, which is the bar's own N but not the decision figure - that one is p99 at N=16 "
-        "over a 3 s window, three runs, one fresh browser per cell, and it is ACCEPT"
-        % (cell["p99Text"], bar_us, _relative(BARS_JSON), cell["n"], cell["count"]))
+        "p50 under the regression bar",
+        cell["p50Us"] is not None and cell["p50Us"] < p50_bar,
+        "p50 %.1f us against the %g us regression bar in %s. This is N=%s over %s calls. p50 is "
+        "the bar-bearing statistic here because it is stable to +/-15 us in this environment, so a "
+        "regression that doubles channel latency trips this with margin. The 500 us ACCEPT bar "
+        "belongs to the sweep, which measures one fresh browser per cell over three runs"
+        % (cell["p50Us"] or -1, p50_bar, _relative(BARS_JSON), cell["n"], cell["count"]))
+    env.expect_that(
+        "p99 under the tail ceiling",
+        cell["p99Us"] is not None and cell["p99Us"] < p99_ceiling,
+        "p99 %s against the %g us tail ceiling in %s. This is deliberately loose: p99 spans "
+        "230-430 us run to run in a shared browser, so a bar near the 500 us accept figure sits "
+        "inside the noise. What this clause catches is a tail blow-up - the kernel-stall control "
+        "drives every percentile to 29,673 us and clears this by 30x"
+        % (cell["p99Text"], p99_ceiling, _relative(BARS_JSON)))
 
     # From outside the page entirely: the response that carried the document, as the server
     # recorded it on the wire, and the bytes it served against this tree.

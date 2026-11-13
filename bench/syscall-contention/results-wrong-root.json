@@ -1,0 +1,47 @@
+{
+  "state": "error",
+  "isolated": true,
+  "cells": [],
+  "errors": [],
+  "faults": [],
+  "preflight": {
+    "ok": false,
+    "missing": [
+      "/src/abi.mjs -> HTTP 404",
+      "/src/kernel/kernel.mjs -> HTTP 404",
+      "/src/kernel/table.mjs -> HTTP 404",
+      "/src/kernel/files.mjs -> HTTP 404",
+      "/src/kernel/calls.mjs -> HTTP 404",
+      "/src/libos/syscall.mjs -> HTTP 404",
+      "/src/libos/process.mjs -> HTTP 404",
+      "/bench/syscall-contention/summarise.mjs -> HTTP 404",
+      "/bench/syscall-contention/loop.mjs -> HTTP 404",
+      "/bench/syscall-contention/bars.json -> HTTP 404"
+    ],
+    "graph": [
+      "/src/abi.mjs",
+      "/src/kernel/kernel.mjs",
+      "/src/kernel/table.mjs",
+      "/src/kernel/files.mjs",
+      "/src/kernel/calls.mjs",
+      "/src/libos/process.mjs",
+      "/src/libos/syscall.mjs",
+      "/bench/syscall-contention/summarise.mjs",
+      "/bench/syscall-contention/loop.mjs",
+      "/bench/syscall-contention/bars.json"
+    ]
+  },
+  "why": "module-graph preflight failed, 10 of 10 unreachable: /src/abi.mjs -> HTTP 404; /src/kernel/kernel.mjs -> HTTP 404; /src/kernel/table.mjs -> HTTP 404; /src/kernel/files.mjs -> HTTP 404; /src/kernel/calls.mjs -> HTTP 404; /src/libos/syscall.mjs -> HTTP 404; /src/libos/process.mjs -> HTTP 404; /bench/syscall-contention/summarise.mjs -> HTTP 404; /bench/syscall-contention/loop.mjs -> HTTP 404; /bench/syscall-contention/bars.json -> HTTP 404. The bench serves the REPOSITORY ROOT, not ./www.",
+  "chrome": "157.0.8103.52",
+  "quiescence": {
+    "ok": true,
+    "workers": 0,
+    "limit": 0,
+    "census": {
+      "page": 1,
+      "browser_ui": 1
+    },
+    "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+  },
+  "run": 1
+}

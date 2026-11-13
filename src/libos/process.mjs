@@ -88,8 +88,16 @@ self.onmessage = async (ev) => {
       initSyscall({ ctl, u8, g, port, pid, quantumMs: clock.quantumMs, onsignal });
       // The program's own commands arrive on the port, the same channel its syscalls leave by.
       port.onmessage = (e) => onCommand(e.data);
-      const mod = await import(m.programUrl);
-      program = mod;
+      // THE IMAGE THE KERNEL LOADED, never a path this process goes and gets. A process that
+      // fetches its own program text needs a network it must not have (constraint 41 deletes
+      // `fetch` and `importScripts` from this realm), and sixteen of them importing one URL at
+      // once lost connections to the server about one run in five. The check on the scheme is
+      // here because the alternative is that regression coming back as an intermittent fault
+      // rather than as a refusal naming itself.
+      if (!String(m.image).startsWith("blob:")) {
+        throw new Error(`process ${pid}: program image ${m.image} is not a kernel-loaded blob`);
+      }
+      program = await import(m.image);
       // Phase 2 of spawn. The kernel marks RUNNING on this, and it can only arrive because the
       // kernel returned to its event loop after posting init — a kernel that spawned and then
       // parked would never read it.
