@@ -262,8 +262,24 @@ As an app it costs weeks rather than months, because it needs no protocol work a
 ## D16 · Risk order, not visibility order — with one exception
 
 **Decided:** the riskiest assumption is tested first. M0 is one day and precedes everything.
-**Exception:** M4a puts a real window on screen at day ~22, because 30 days with nothing visible is
-how solo projects die.
+**Exception:** M4a puts a real window on screen at day ~22.
+
+**The rationale I first gave for that exception does not survive the evidence.** I wrote "30 days
+with nothing visible is how solo projects die." The release record says otherwise: **SkyOS** had by
+far the most visible cadence in this family — numbered builds to 6947, a paying beta from 2003,
+compositing demos in 2006 — and stopped in 2009. **Haiku** went five years and eleven months with
+no release at all, in its own words, and still ships. The reading is `inferred`, n=4, across
+projects differing on many axes at once, and no source was found that tests it.
+
+The better-evidenced ground is the **AtheOS** record, where the author's own farewell names
+tiredness, a theory course, flying lessons, a plane and a dead PC, with a fork as what finished it.
+So the defensible claim is narrower and more useful: **a solo author's motivation is a load-bearing
+component with no redundancy.** M4a is therefore a promise to the *author*, not to an audience —
+and the same evidence is the argument for `MILESTONES.md`, this file and `PLAN.md` §10 existing at
+all, because the plan has to survive a multi-week gap.
+
+The decision stands unchanged: M4a is two days and it deletes its own special case.
+`research/09-hobbyist-os-actions.md`, D16.
 
 M4a's window is explicitly special-cased rather than an ABI, and M7 deletes the special case. That
 has to be said in the code or it becomes the architecture by accident.

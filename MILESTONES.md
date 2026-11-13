@@ -20,14 +20,16 @@ checks is a wish.
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
-| **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
+| **M0a** | **A syscall that waits must not hold the kernel thread** | 0.5 | | ⬜ **next** |
+| M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
+| M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
-| M3 | `/proc`, `/dev`, mounts | 2 | | ⬜ |
+| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
-| | **— end of spine. Choose option A / B / C here —** | **30** | | |
+| | **— end of spine. Choose option A / B / C here —** | **33.5** | | |
 | M7 | A window is a file description | 4 | | ⬜ A |
 | M8 | The window surface | 3 | | ⬜ A |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
@@ -37,7 +39,7 @@ checks is a wish.
 | M13 | The geometry harness | 5 | | ⬜ A |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
-| | **Option A total** | **70** | | |
+| | **Option A total** | **73** | | |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
 | D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
 | D2 | Traps, timer, real preemption | 2 | | ⬜ D |
@@ -207,6 +209,29 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 > **(d) Teardown is two-phase**: answer every outstanding call with a defined errno, then assert
 > the count is zero. HelenOS's `EHANGUP` cleanup. Cheap here, and it is the only point where the
 > outstanding-call count is still knowable.
+>
+> **(e) The ABI needs a growth mechanism, and it is cheapest now.** AROS's ABI v1 break — a
+> one-year estimate still producing forks a decade later — was *entirely* representation
+> decisions: where a handle lives, what unit a pointer counts in, how state is partitioned. The
+> analogues here are the SAB layout, the futex word's position, the `(lo, hi)` pairing and the
+> `r0 < 0 && r1 == -1` convention. Three parts:
+>
+> - **A format magic and a version word in the SAB frame header.** Four bytes, impossible to
+>   retrofit, and the harness is a second consumer of that format. Haiku reads four message
+>   dialects through one dispatcher on exactly this.
+> - **Retired call numbers stay reserved**, and one `perform(opcode, struct)` escape hatch exists.
+>   Haiku added eight `BView` methods without touching the BeOS R5 vtable using reserved slots
+>   plus one `Perform()`. The CALLID/NR split M0 already made is the class of change this makes
+>   survivable.
+> - **One declaration, derived at runtime — not generated.** `src/abi.mjs` is already that single
+>   declaration, and a grep for duplicate SAB offsets or syscall numbers across `src`, `bench`,
+>   `www` and `scripts` comes back clean. So the kernel dispatch table is **derived from it at
+>   boot**, with an assertion that every declared call has a handler.
+>
+>   *An earlier version of this item asked for a generator emitting the stubs and the dispatch
+>   table. That was wrong: a generator is a build step, and `CLAUDE.md` forbids one. It would also
+>   be the project's first. The runtime-derived form gets the same single-source-of-truth property
+>   with no build step and no generated file to drift — correction from web-os-builder.*
 >
 > One thing deliberately *not* added: the "not responding" detector. It depends on nothing in the
 > window half — it is a kernel-side timer plus a UI hook — and with no preemption a wedged app is
