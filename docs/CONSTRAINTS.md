@@ -307,7 +307,14 @@ a different measurement and not a continuation of the old one.
 
     **The N=1 mean reproduces constraint 5's 14–16 µs on a different build**, which is the strongest
     cross-check available for that figure. M0's accept bar — p99 under 500 µs at N=16 — is met with
-    about 2× margin on the worst of three runs. **The 2 ms kill bar is exceeded at N=128 (3.06 ms
+    about 2× margin on the worst of three runs.
+
+    **Re-measured after M0a and M0b changed the kernel** — new syscalls, `settle()`, `later()`, and
+    the I/O worker — the same sweep gives **ACCEPT at p99 250 µs**, worst of three runs, 3 of 3
+    producing a figure. So the headline survived the work done on the strength of it, which is the
+    only reason it can still be quoted. The N=128 cell now reports as **N=127, clamped**, because
+    `--hb` adds an observer process and 128 + 1 exceeds the 128-slot table (constraint 17); the
+    clamp states itself rather than appearing as a failure. **The 2 ms kill bar is exceeded at N=128 (3.06 ms
     p99), and 99.98% of calls there are past 500 µs.** That is not a kill, because the bar is
     specified at N=16, but it is the honest shape of a single-threaded kernel: past ~16 concurrent
     callers queueing dominates, and the sharded-kernel question M0 deferred becomes live somewhere
