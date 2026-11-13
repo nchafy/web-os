@@ -474,7 +474,9 @@ becomes normative:
    visible at the call site. This one grows without limit on the *kernel's own heap* while the
    process that caused it is asleep and cannot drain — reintroducing the renderer-death failure
    mode that constraint 17's cap exists to prevent, with no cap on it. It wants the ABI contract,
-   so it lands with M1's other table fields.
+   so it lands with M1's other table fields — **charged per fd**, because constraint 42 already made
+   the fd the unit of wakeability and a budget charged against anything else disagrees with the wait
+   primitive about what an event source is.
 3. **Capabilities that can only narrow** — the credential carries `caps` with nothing reading it.
    A bitmask in the process table, a `pledge`-shaped call that only clears bits, checked at
    dispatch. The asserted invariant is **monotonicity**, not a symptom. This is a genuine boundary
