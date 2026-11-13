@@ -186,6 +186,33 @@ not an error. The kernel's own notify-woke-nobody counter agrees with the proces
 
 ## M1 — Process lifecycle, signals, hard cap · 4 days · ~1100 LoC
 
+> **Four additions from `docs/research/09-hobbyist-os-actions.md`, all because the process-table
+> layout is set here and reworking it later is the expensive version.** Sources are in that file;
+> each is a dependency, not a preference.
+>
+> **(a) The capability bitmask goes in the table now, even though the narrowing call lands at M6.**
+> Otherwise M6 reworks the table. The credential already carries `caps` with nothing reading it.
+> SerenityOS's shape: a service acquires its handles, then drops the promise that would let it
+> acquire more — kernel state, checked at dispatch, and **monotonic**. The asserted invariant is
+> monotonicity, not a symptom: after narrowing, every widening must fail.
+>
+> **(b) `sid` goes in the table now**, because M4's line discipline hangs SIGTTIN, SIGTTOU and
+> SIGHUP off the session. The ABI has `setpgid` and no session concept at all, so M4 would
+> otherwise have to add a field to a live table.
+>
+> **(c) `waitpid` must distinguish "exited with code N" from "killed for reason R".** With
+> `Worker.terminate()` as the only kill and no exit path in the dying worker, **the kernel is the
+> only thing that can record why** — so it is written at teardown or it is lost forever.
+>
+> **(d) Teardown is two-phase**: answer every outstanding call with a defined errno, then assert
+> the count is zero. HelenOS's `EHANGUP` cleanup. Cheap here, and it is the only point where the
+> outstanding-call count is still knowable.
+>
+> One thing deliberately *not* added: the "not responding" detector. It depends on nothing in the
+> window half — it is a kernel-side timer plus a UI hook — and with no preemption a wedged app is
+> the normal case. But there is no UI to hook until M4a, so it lands there. Noted so it is not
+> discovered at M9.
+
 Delivers the headline: a process in `for(;;){}` with no syscalls dies on End Process.
 
 **Build.** `spawn`, `exit`, `waitpid`, `kill`, `sigaction`, `setpgid`, `sched_yield`. Monotonic,
@@ -207,6 +234,29 @@ refused a 129th spawn, and the bench's mislabelling of that refusal is what expo
 
 ---
 
+## M2a — A host-runnable kernel, before M2 · 1 day
+
+Ordering finding, not a preference: this is cheaper before M2 than after it.
+
+The inode table, the superblock and journal codecs, path resolution and the dispatch table should
+run in **plain Node** — no Worker, no SAB, no OPFS. SerenityOS builds its libraries a second time
+for the host ("Lagom") precisely so unit tests and 81 fuzz targets run in milliseconds while the
+OS target gets only UBSAN.
+
+The reason it must precede M2: **journal replay is a parser over torn bytes, which is exactly a
+fuzz target.** M2's negative control tests *one* hand-truncated journal. A fuzzer tests ten
+thousand, and finds the tear that the one hand-written case does not.
+
+Costs no dependency and no build step — the same `.mjs` files, imported by a script. This is why
+`src/abi.mjs` holding only integers and pure codecs matters: it is importable from Node.
+
+**Proof.** The journal codec round-trips under Node; a fuzz run over truncated and bit-flipped
+journals terminates with no crash and no silent acceptance of a bad record.
+**Negative control.** Remove the CRC check — the fuzzer must immediately find an accepted bad
+record.
+
+---
+
 ## M2 — VFS core on OPFS · 8 days · ~1400 LoC
 
 **Build.** Days 1–4: port `../webxp/shared/fs/vfs.mjs` (1,301 lines) — `#lookup` with
@@ -217,6 +267,30 @@ a per-call argument (29).
 Days 5–8: the inode→`{handle, refcount}` table (47); boot-lock retry ~3 s with backoff (48);
 `fsync` separate, journal flushed on fsync/snapshot/idle (23); fsck never reseeds (28). Write
 ordering: blob → flush → journal → flush → apply in memory.
+
+**Decide the data-consistency question in days 5-8.** File data is **not journalled — only
+metadata is.** Blobs live flat in OPFS named by inode (26), so overwriting an existing file
+mutates its blob *in place*. The journal and the alternating superblocks give consistency for
+metadata; a blob half-overwritten when the tab dies leaves **intact metadata pointing at torn
+data**. M2's ordering protects *new* data and does not make an overwrite atomic.
+
+That is POSIX-permissible without `fsync`, and it is exactly ext4's `data=writeback` — which is
+not ext4's default, precisely to avoid it. Phantom, the only shipped orthogonally-persistent OS,
+gives every page three blocks under the rule "if a page is to be written, it goes to curr ONLY".
+
+Two acceptable answers, and the choice must be made here rather than discovered later:
+1. **Copy-on-write the blob** — write a new one, swing the reference at commit. Cheap, because the
+   name is just an integer.
+2. **Declare the guarantee metadata-only**, in `docs/CONSTRAINTS.md` and wherever a reader meets
+   it.
+
+Discovering this after a user has files is the bad outcome. `docs/research/09-hobbyist-os-actions.md` §5.
+
+**Also decide the superblock's version field here**, because it is unavailable later: a generation
+counter plus major/minor, with "minor newer than me ⇒ refuse". Phantom holds three superblock
+copies, not two — against two alternating slots, a bad write to the older slot *during* a commit
+can leave zero valid copies. With three, constraint 28's "mounts read-only and reports" can become
+"mounts the previous generation read-write and reports" for the same honesty.
 
 **Proof.** (a) 10k files, reload, every byte and every mode bit intact; (b) truncate the journal
 mid-record — fsck reports the discarded tail rather than reseeding; (c) two concurrent opens of one
@@ -341,6 +415,39 @@ check is testing nothing.
 
 **Label honestly in the docs:** hardening, not a security boundary. Same-origin is not a security
 boundary. Threat model is first-party only for v1.
+
+---
+
+## Ordering corrections in the window half
+
+Two from `docs/research/09-hobbyist-os-actions.md`, both of which reverse or tighten what
+`PLAN.md` §5 currently implies.
+
+**M8 gates M12, not the other way round.** The blur governor cannot account what it did not
+allocate. So the surface-ownership decision — kernel-allocated retained surfaces versus M8's
+transferred `OffscreenCanvas` — has to be made *before* the governor, because only
+server-allocated surfaces give **accounting and revocation**, which constraint 49's admission
+controller and constraint 17's cap both need and neither currently has.
+
+A transfer is also one-way and one-shot: the process loses the object, so there is **no front/back
+pair and no cheap flip**. Haiku's server allocates bitmap memory and maps it to the client;
+SerenityOS has the client allocate both stores and hand over an fd with a monotonic serial, so a
+steady-state flip re-sends a known serial and the server maps nothing. The two mature systems chose
+opposite sides — so decide it on this project's terms, and those terms favour server-allocated.
+Recorded as proposed **D17**.
+
+**M7 is missing two things the window fd will have to express**, and both are cheaper before M9 and
+M10 are built on top:
+1. **The destroy cascade.** Destroying a parent destroys its children, so closing one fd must be
+   reported as closing *several*. SerenityOS's `destroy_window` returns the list of ids destroyed.
+   M7 has no such event, so the process's fd table silently desynchronises from the kernel's.
+2. **Cross-process ownership.** A picker broker must be able to parent its dialog onto the
+   *requesting app's* window — that is the whole point of a broker — and M9's owner chain has no
+   way to name a window in another process.
+
+Also: M9's `modal ∈ {none, window, app, system}` describes *scope*, where SerenityOS's enforced
+`WindowMode` describes *behaviour* — `Modeless | Passive | RenderAbove | Blocking`, with the blocker
+computed by walking the chain. Those are different axes and an owned window needs both.
 
 ---
 
