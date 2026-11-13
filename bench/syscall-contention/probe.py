@@ -181,6 +181,8 @@ def query(args, n: int, *, depth: bool) -> str:
         q.append(f"fault_index={args.fault_index}")
     if args.io_procs > 0:
         q.append(f"io_procs={args.io_procs}")
+    if args.io_inline:
+        q.append("io_inline=1")
     return "&".join(q)
 
 
@@ -228,6 +230,18 @@ def run_cell(args, serving: Serving, n: int, *, depth: bool, shared) -> dict:
 ATOMICS_WAIT = "Atomics.wait"
 
 
+def _strip_comments(src: str) -> str:
+    """Comments out, so the lint reads CODE.
+
+    It fired on prose twice — `src/kernel/io-worker.mjs` and `src/kernel/kernel.mjs` both explain
+    in a comment why a PROCESS parks, which is the opposite of the kernel parking. A lint that
+    cannot tell code from prose teaches people to delete the prose, and the comment it objected to
+    carries the argument for why a zero-copy write out of a parked process's SAB is safe.
+    """
+    out = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"^\s*//.*$|(?<=\s)//.*$", "", out, flags=re.M)
+
+
 def kernel_never_parks() -> tuple[bool, str]:
     """Enforcement (i) of "the kernel never blocks": the string must NOT occur in src/kernel/ and
     MUST occur in src/libos/syscall.mjs. The detector is then run against a fixture containing the
@@ -235,16 +249,21 @@ def kernel_never_parks() -> tuple[bool, str]:
     offenders = [
         str(p.relative_to(REPO))
         for p in sorted((REPO / "src" / "kernel").glob("*.mjs"))
-        if ATOMICS_WAIT in p.read_text(encoding="utf-8")
+        if ATOMICS_WAIT in _strip_comments(p.read_text(encoding="utf-8"))
     ]
     stub = (REPO / "src" / "libos" / "syscall.mjs").read_text(encoding="utf-8")
-    present = ATOMICS_WAIT in stub
-    fired_on_fixture = ATOMICS_WAIT in f"function f() {{ {ATOMICS_WAIT}(a, 0, 0, 1) }}"
-    ok = not offenders and present and fired_on_fixture
+    present = ATOMICS_WAIT in _strip_comments(stub)
+    # The fixture is CODE, so stripping comments must not save it. A second fixture checks the
+    # other direction: the string inside a comment must NOT count, or this change silently
+    # disabled the lint instead of narrowing it.
+    fired_on_fixture = ATOMICS_WAIT in _strip_comments(f"function f() {{ {ATOMICS_WAIT}(a, 0, 0, 1) }}")
+    ignores_comments = ATOMICS_WAIT not in _strip_comments(f"// a process sits in {ATOMICS_WAIT} here")
+    ok = not offenders and present and fired_on_fixture and ignores_comments
     detail = (
         f"src/kernel offenders {offenders or 'none'} · "
         f"present in src/libos/syscall.mjs {present} · "
-        f"detector fired against its fixture {fired_on_fixture}"
+        f"detector fired against its fixture {fired_on_fixture} · "
+        f"ignores the same string in a comment {ignores_comments}"
     )
     return ok, detail
 
@@ -655,6 +674,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--call", default="getpid",
                     choices=("getpid", "write", "nanosleep", "io"))
+    ap.add_argument("--io-inline", action="store_true",
+                    help="M0b's negative control: keep the OPFS handles on the dispatch thread, "
+                         "which must reproduce constraint 58's numbers")
     ap.add_argument("--io-procs", type=int, default=0,
                     help="M0a: how many processes do real OPFS work while the rest issue "
                          "getpid. Reported separately, because pooling the two hides the "

@@ -28,6 +28,9 @@ let g = null;
 let CALLS = null;
 let OPFS_ROOT = null;
 let opfsWhy = "";
+let IO = null;
+let ioBooted = false;
+let ioWhy = "";
 let table = null;
 let hb = 0;
 let kServiceMs = 0;
@@ -143,6 +146,47 @@ function setTimer(p, ms) {
     }
     reply(p, 0);
   }, ms);
+}
+
+/**
+ * The I/O worker surface. One outstanding-request map keyed by a sequence the worker echoes, so
+ * answers can arrive out of order — which is the point of having a second thread at all.
+ *
+ * This is kernel-side in the sense constraint 15 requires: the port lives here, in the dispatch
+ * kernel, and a process never receives it or a handle behind it. What a process gets back is an
+ * integer fd, exactly as before.
+ */
+function makeIo(worker) {
+  const pending = new Map();
+  let seq = 1;
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.t === "booted") { ioBooted = m.ok; ioWhy = m.why || ""; return; }
+    if (m.t === "io-error") {
+      const w = pending.get(m.seq);
+      pending.delete(m.seq);
+      if (w) w.reject(new Error(m.why));
+      return;
+    }
+    const w = pending.get(m.seq);
+    pending.delete(m.seq);
+    if (w) w.resolve(m.r);
+  };
+  return {
+    request(t, body) {
+      const s = seq++;
+      return new Promise((resolve, reject) => {
+        pending.set(s, { resolve, reject });
+        worker.postMessage({ t, seq: s, ...body });
+      });
+    },
+    // Notifications: no reply expected, so they cannot queue behind a request (constraint 57's
+    // drain order — notifications first).
+    boot() { worker.postMessage({ t: "boot" }); },
+    register(pid, sab) { worker.postMessage({ t: "register", pid, sab }); },
+    unregister(pid) { worker.postMessage({ t: "unregister", pid }); },
+    outstanding() { return pending.size; },
+  };
 }
 
 /**
@@ -330,6 +374,13 @@ function spawn(image, programCfg, index = 0) {
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
   slot.ctl[UID] = slot.uid;
+
+  // The I/O worker reads write payloads straight out of this SAB, so a write is a message with
+  // three integers and no copy. That is safe for one specific reason: the calling process is
+  // parked in Atomics.wait until the dispatch kernel bumps its SEQ, and the dispatch kernel does
+  // not bump it until the I/O worker has answered — so the process cannot mutate the buffer while
+  // it is being read. A process still receives nothing but its own SAB and port (constraint 15).
+  if (IO) IO.register(slot.pid, slot.sab);
 
   // fds 1 and 2 to the sink; fd 0 stays null so a future read(0) is -EBADF, not a silent zero.
   const sink = makeSink();
@@ -666,7 +717,19 @@ async function handle(m) {
         OPFS_ROOT = null;
         opfsWhy = String((e && e.name) || e);
       }
-      CALLS = buildCalls({ reply, fail, setTimer, later, opfsRoot: () => OPFS_ROOT });
+      // The I/O worker, unless the control routes storage back onto this thread. Constraint 58:
+      // with the handles here, one process's fsync took every other process's p99 from 275 us to
+      // 850 at N=16 and past the kill bar at N=64.
+      if (!cfg.ioInline) {
+        IO = makeIo(new Worker(new URL("./io-worker.mjs", import.meta.url), { type: "module" }));
+        IO.boot();
+      }
+      CALLS = buildCalls({
+        reply, fail, setTimer, later,
+        opfsRoot: () => OPFS_ROOT,
+        io: IO,
+        ioInline: !!cfg.ioInline,
+      });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
       // unless the page asked for a bench boot.
