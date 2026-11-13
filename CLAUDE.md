@@ -28,6 +28,7 @@ to start work.
 | 5 | `docs/DECISIONS.md` | 16 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
+| 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
 | 8 | `docs/GLOSSARY.md` | Lookup, not prose. Use it as you go. | — |
 
 Then as needed: `docs/research/gap-04.md` for the measurements everything is sized from,
@@ -65,8 +66,9 @@ docs/
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
+  LEARNING-MODE.md  option D: learning mode, the teaching CPU, device providers
   designs/        4 candidate architectures + REVIEW-FINDINGS.md
-  research/       374 cited claims. Raw evidence, append-only.
+  research/       507 cited claims. Raw evidence, append-only.
 scripts/
   serve.py        COOP/COEP static server. --no-isolation to prove a check fails.
   cdp.py          Chrome DevTools Protocol driver, carried from webxp
@@ -75,6 +77,11 @@ scripts/
 bench/
   coep-tiles/     worked example of the harness discipline, with a working negative control
   syscall-contention/  M0's bench: the saturation sweep and its eight controls
+  feasibility/    option D feasibility: RV32I MIPS, Proxy-MMU cost, trace-ring cost
+mockups/
+  milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
+  learning-mode.html the three learning-page types + the coverage matrix
+  shoot.py          renders both and fails on a JS error
 src/
   abi.mjs         every integer both sides agree on, and nothing else   ← see below
   kernel/         the only privileged code
@@ -110,9 +117,16 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
 - **A process holds only integers.** No fd, OPFS handle, pipe buffer, window handle or lock lives
   in a process worker. `terminate()` offers no chance to finish, so anything releasable is
   kernel-side. (15)
-- **The shell is a userland client of the same ABI.** Explorer, the taskbar and the window manager
-  use the same syscalls as a third-party app. If the shell needs a privilege it cannot express as
-  a capability it was granted, the boundary is fiction. (3 in `PLAN.md` §4)
+- **The shell is a userland client of the same ABI — with one stated exception.** Explorer and the
+  window manager use the same syscalls as a third-party app, and if they need a privilege they
+  cannot express as a capability they were granted, the boundary is fiction.
+  **The taskbar is the exception, and the earlier blanket claim was false.** It needs cross-process
+  window enumeration that no ordinary client may have, and a per-process window fd cannot name
+  another process's window. SerenityOS gives its taskbar a *second* endpoint on a separate socket
+  with an event mask and `(client_id, window_id)` identity pairs the ordinary endpoint cannot
+  enumerate. So the honest form of the invariant is **a second, separately-gated management
+  interface** — still a capability the kernel granted, so the boundary survives, but it is not the
+  same interface. (`docs/research/09-hobbyist-os-actions.md` §4)
 - **No `fork`.** `spawn` + `pipe` + `setpgid` only. (20)
 - **Processes get fds, never paths.** Resolve a path to an inode once, in the kernel, and cache.
   `getDirectoryHandle` is 85 µs per component. (24)
@@ -191,7 +205,7 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 ## Running it
 
 ```sh
-scripts/serve.py                    # serves ./www with COOP/COEP on 8000
+scripts/serve.py                    # serves the repo root with COOP/COEP on 8000
 scripts/serve.py --no-isolation     # omit the headers, to prove a check fails without them
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
@@ -199,11 +213,15 @@ scripts/check.py --controls         # what negative controls exist and what each
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 
-**`www/m0.html` needs the repository root, not `./www`**, because it imports `/src/abi.mjs` and
-`/bench/...`. Use `scripts/serve.py --root . --port 8000` and open `/www/m0.html`, or just run
-`bench/syscall-contention/probe.py`, which binds its own server on the right root. The page carries
-a module-graph preflight, so serving it from the wrong root says which imports 404'd rather than
-rendering a blank screen.
+**`serve.py` defaults to the repository root**, resolved from its own path rather than the caller's
+cwd, so it works from any directory and `/www/`, `/mockups/` and `/bench/` are all reachable from
+one server. That default exists because `www/m0.html` imports `/src/abi.mjs` and `/bench/...` and
+cannot be served from `./www`. Dot-prefixed paths 404 and are hidden from listings, since the root
+contains `.git`.
+
+`bench/syscall-contention/probe.py` binds its own server on the right root, so it needs none of
+this. `www/m0.html` carries a module-graph preflight, so serving it from the wrong root says which
+imports 404'd rather than rendering a blank screen.
 
 `python3 -m http.server` **will not work** — it cannot send COOP/COEP, so `SharedArrayBuffer` is
 undefined and nothing boots. `www/index.html` is a preflight that refuses to proceed and says why.

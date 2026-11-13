@@ -15,3 +15,6 @@ node_modules/
 bench/**/shot.png
 bench/**/*.png
 *.log
+
+# rendered mockup screenshots: regenerate with mockups/shoot.py
+mockups/*.png

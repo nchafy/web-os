@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web-os — learning mode mockup</title>
+<style>
+  :root { --ink:#17212c; --dim:#67788b; --line:#ccd8e5; --bg:#f4f8fb; --acc:#2f7fd4;
+          --live:#3f8f55; --part:#b98024; --abs:#8a93a0; --inv:#8156b8;
+          font:13.5px/1.6 "Segoe UI", Selawik, system-ui, sans-serif; }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--ink); background:var(--bg); }
+  header { background:linear-gradient(#1d4straight,#15344f); }
+  header { background:linear-gradient(#20507d,#143650); color:#fff; padding:13px 22px;
+           display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+           border-bottom:1px solid #0c2338; }
+  header h1 { margin:0; font-size:15px; font-weight:600; letter-spacing:.01em; }
+  header .sub { color:#a9c8e4; font-size:12px; }
+  nav.tabs { margin-left:auto; display:flex; gap:3px; }
+  nav.tabs button { border:0; font:inherit; font-size:12.5px; padding:5px 13px; border-radius:3px;
+                    background:rgba(255,255,255,.14); color:#e9f2fa; cursor:pointer; }
+  nav.tabs button[aria-current="true"] { background:#fff; color:#17212c; font-weight:600; }
+  main { max-width:1120px; margin:0 auto; padding:22px 22px 70px; }
+
+  .badge { display:inline-flex; align-items:center; gap:5px; font-size:11px; font-weight:600;
+           letter-spacing:.04em; text-transform:uppercase; padding:2px 8px; border-radius:10px;
+           color:#fff; }
+  .badge.live{background:var(--live)} .badge.part{background:var(--part)}
+  .badge.abs{background:var(--abs)}  .badge.inv{background:var(--inv)}
+
+  h2.t { margin:0 0 3px; font-size:22px; }
+  .cite { color:var(--dim); font-size:12px; margin-bottom:16px; }
+  .cite a { color:var(--acc); }
+  .sect { margin:26px 0 0; }
+  .sect > h3 { font-size:11px; letter-spacing:.09em; text-transform:uppercase; color:var(--dim);
+               margin:0 0 9px; display:flex; align-items:center; gap:9px; }
+  .sect > h3::after { content:''; flex:1; height:1px; background:var(--line); }
+  .prose { max-width:70ch; }
+  .prose p { margin:0 0 11px; }
+  code { font:12px ui-monospace,Menlo,monospace; background:#e6edf5; padding:1px 5px; border-radius:3px; }
+  .panel { background:#fff; border:1px solid var(--line); border-radius:5px; }
+
+  /* live drill-down */
+  .live-wrap { display:grid; grid-template-columns:1fr 310px; gap:14px; }
+  .viz { padding:0; overflow:hidden; }
+  .viz .bar { display:flex; align-items:center; gap:9px; padding:7px 11px; font-size:12px;
+              background:#f0f5fa; border-bottom:1px solid var(--line); }
+  .viz .bar .pill { font:11px ui-monospace,monospace; background:#dfe9f4; padding:1px 7px;
+                    border-radius:9px; color:#2c5d8f; }
+  .lanes { padding:12px 11px; }
+  .lane { display:grid; grid-template-columns:76px 1fr; align-items:center; gap:9px; margin-bottom:7px; }
+  .lane .nm { font:11.5px ui-monospace,monospace; color:var(--dim); text-align:right; }
+  .track { position:relative; height:22px; background:#eef3f9; border-radius:3px; overflow:hidden; }
+  .blk { position:absolute; top:3px; height:16px; border-radius:2px; font:10px/16px ui-monospace,monospace;
+         color:#fff; text-align:center; overflow:hidden; white-space:nowrap; }
+  .blk.user{background:#5a9bd4} .blk.sys{background:#3f8f55} .blk.blk2{background:#b0bcc9;color:#47535f}
+  .blk.krn{background:#8156b8}
+  .tl { position:relative; height:26px; margin:4px 9px 0; border-top:1px solid var(--line); }
+  .tl span { position:absolute; top:3px; font:10px ui-monospace,monospace; color:var(--dim);
+             transform:translateX(-50%); }
+  .scrub { display:flex; align-items:center; gap:10px; padding:9px 11px; border-top:1px solid var(--line);
+           background:#f8fbfd; }
+  .scrub input[type=range] { flex:1; }
+  .scrub .btn { width:26px; height:22px; border:1px solid #a9bdd1; border-radius:3px;
+                background:linear-gradient(#fdfefe,#e7eff7); display:grid; place-items:center;
+                font-size:10px; cursor:pointer; }
+  .scrub .t { font:11px ui-monospace,monospace; color:var(--dim); min-width:88px; }
+
+  .side .blkh { font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--dim);
+                padding:9px 12px 0; }
+  .side table { width:100%; border-collapse:collapse; font:11.5px ui-monospace,monospace; }
+  .side td { padding:3px 12px; }
+  .side td:last-child { text-align:right; color:#2c5d8f; }
+  .side tr:nth-child(odd) { background:#f7fafd; }
+  .trace { font:11px/1.55 ui-monospace,Menlo,monospace; padding:9px 12px; max-height:168px;
+           overflow:auto; }
+  .trace div { white-space:nowrap; }
+  .trace .e { color:#3f8f55; } .trace .r { color:#2c5d8f; } .trace .s { color:#8156b8; }
+  .trace .hl { background:#fff4cf; }
+
+  /* try-it block */
+  .try { background:#10202f; color:#cfe0ef; border-radius:5px; padding:11px 13px;
+         font:12px/1.65 ui-monospace,Menlo,monospace; white-space:pre-wrap; overflow-x:auto; }
+  .try .p { color:#6ba3d6; } .try .c { color:#eaf2f9; } .try .o { color:#9fb3c6; }
+
+  /* real-hw / check cards */
+  .two { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .card { padding:12px 14px; }
+  .card h4 { margin:0 0 7px; font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--dim); }
+  .card.chk { border-left:3px solid var(--live); }
+  .card.gap { border-left:3px solid var(--abs); }
+
+  /* matrix */
+  table.mx { width:100%; border-collapse:collapse; background:#fff; font-size:12.5px; }
+  table.mx th { text-align:left; font-size:11px; letter-spacing:.07em; text-transform:uppercase;
+                color:var(--dim); border-bottom:1px solid var(--line); padding:7px 9px; font-weight:600; }
+  table.mx td { padding:6px 9px; border-bottom:1px solid #eaf0f6; vertical-align:top; }
+  table.mx tr:hover td { background:#f7fbfe; }
+  table.mx .v { width:88px; }
+  table.mx .ch { width:122px; color:var(--dim); font:11px ui-monospace,monospace; }
+  .grph { background:#eaf1f8; font-weight:600; font-size:11.5px; letter-spacing:.05em;
+          text-transform:uppercase; color:#44586d; }
+  .legend { display:flex; gap:16px; flex-wrap:wrap; margin:0 0 14px; font-size:12px; color:var(--dim); }
+  .tot { display:flex; gap:22px; margin:16px 0 0; font-size:12.5px; }
+  .tot b { font-size:20px; display:block; }
+  .note { color:var(--dim); font-size:12px; max-width:76ch; margin-top:16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>web-os · learning mode</h1>
+  <span class="sub">mockup — three page types</span>
+  <nav class="tabs">
+    <button data-v="live" aria-current="true">LIVE page</button>
+    <button data-v="absent">ABSENT page</button>
+    <button data-v="matrix">Coverage matrix</button>
+  </nav>
+</header>
+<main id="main"></main>
+
+<script type="module">
+/* Learning-mode mockup. Three page types, because they are the three honest cases:
+ *   LIVE   — instrument the running system; the view reads real kernel state
+ *   ABSENT — the hardware or primitive does not exist; explain the hole and what it costs
+ *   MATRIX — the index, with a verdict per principle
+ * The page template is identical in every case, so the shape itself teaches.
+ */
+
+/* ---------------- LIVE: context switching ---------------- */
+const liveFrames = [
+  { t:'0.000', note:'sh is in user code. Nothing else runnable.',
+    lanes:[['sh (2)',[['user',0,34,'user']]],['grep (8)',[]],['kernel',[]]],
+    regs:[['pc','0x1004c'],['sp','0x7ffe00'],['state','R running'],['quantum left','4.0 ms']],
+    trace:[['s','0.000 sh    user code']], hl:0 },
+  { t:'1.204', note:'sh calls read() on an empty pipe. Trap into the kernel.',
+    lanes:[['sh (2)',[['user',0,30,'user'],['sys',30,8,'read()']]],['grep (8)',[]],['kernel',[['krn',30,8,'read']]]],
+    regs:[['pc','0x10070'],['syscall','read(0, 4096)'],['state','S → blocking'],['quantum left','2.8 ms']],
+    trace:[['s','0.000 sh    user code'],['e','1.204 sh    → read(0,4096)']], hl:1 },
+  { t:'1.204', note:'Pipe is empty, so the kernel parks sh and picks the next runnable process.',
+    lanes:[['sh (2)',[['user',0,30,'user'],['blk2',30,56,'blocked in Atomics.wait']]],
+           ['grep (8)',[['krn',38,5,'resume']]],['kernel',[['krn',30,8,'sched']]]],
+    regs:[['sh state','S blocked'],['waiting on','pipe 3 (readWaiters)'],['chosen','pid 8 grep'],['switch cost','11 µs']],
+    trace:[['s','0.000 sh    user code'],['e','1.204 sh    → read(0,4096)'],
+           ['s','1.204 krn   park pid 2 on pipe 3'],['s','1.204 krn   switch → pid 8']], hl:3 },
+  { t:'3.980', note:'grep runs, then writes. The kernel wakes sh — but does not run it yet.',
+    lanes:[['sh (2)',[['user',0,30,'user'],['blk2',30,56,'blocked']]],
+           ['grep (8)',[['user',38,40,'user'],['sys',78,7,'write()']]],['kernel',[['krn',78,7,'write']]]],
+    regs:[['grep state','R → S'],['bytes written','14'],['sh state','S → R runnable'],['notify','Atomics.notify(1)']],
+    trace:[['s','1.204 krn   switch → pid 8'],['e','3.980 grep  → write(1,"...",14)'],
+           ['r','3.980 krn   wake pid 2 (readWaiters)'],['s','3.980 krn   pid 2 state S→R']], hl:3 },
+  { t:'4.012', note:'sh returns from read() with 14 bytes. Round trip measured at 14 µs.',
+    lanes:[['sh (2)',[['user',0,30,'user'],['blk2',30,56,'blocked'],['sys',86,6,'ret 14']]],
+           ['grep (8)',[['user',38,40,'user'],['sys',78,7,'write']]],
+           ['kernel',[['krn',78,7,'write'],['krn',86,4,'ret']]]],
+    regs:[['pc','0x10074'],['read() returned','14'],['state','R running'],['total blocked','2.808 ms']],
+    trace:[['r','3.980 krn   wake pid 2'],['e','4.012 sh    ← read = 14'],['s','4.012 sh    user code']], hl:1 },
+]
+
+function liveView(i) {
+  const f = liveFrames[i]
+  const lanes = f.lanes.map(([nm, blks]) => `
+    <div class="lane"><span class="nm">${nm}</span><div class="track">
+      ${blks.map(([c,l,w,lab]) => `<div class="blk ${c}" style="left:${l}%;width:${w}%">${lab}</div>`).join('')}
+    </div></div>`).join('')
+  return `
+  <h2 class="t">Context switching</h2>
+  <div class="cite"><span class="badge live">● live</span> &nbsp;
+    OSTEP ch.6 <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-mechanisms.pdf">Direct Execution</a> ·
+    Wikipedia <a href="https://en.wikipedia.org/wiki/Operating_system#Kernel">Components → Kernel</a> ·
+    web-os <code>docs/ABI.md</code> §1, <code>docs/CONSTRAINTS.md</code> 5–7, 16</div>
+
+  <div class="sect"><h3>The principle</h3><div class="prose">
+    <p>A context switch is the kernel saving everything that makes one process <em>this</em> process —
+    its registers, its program counter, its stack pointer — then loading another's and jumping into it.
+    Real hardware forces it with a timer interrupt. web-os cannot: there is no preemption in a browser
+    (<code>constraint 21</code>), so a switch happens only when a process <em>enters the kernel</em>, which
+    means at a syscall.</p>
+    <p>That makes the mechanism unusually legible. Every switch is visible as a syscall in the trace,
+    and the thing a real OS hides behind an interrupt is here an ordinary function call you can step
+    through. The cost of the legibility is the thing you cannot show: a process that never calls a
+    syscall is never switched away from.</p>
+  </div></div>
+
+  <div class="sect"><h3>Drill-down — the real kernel, as it ran</h3>
+  <div class="live-wrap">
+    <div class="panel viz">
+      <div class="bar"><span class="pill">live</span> <b>${f.note}</b></div>
+      <div class="lanes">${lanes}
+        <div class="tl"><span style="left:0%">0 ms</span><span style="left:25%">1.25</span>
+          <span style="left:50%">2.5</span><span style="left:75%">3.75</span><span style="left:100%">5 ms</span></div>
+      </div>
+      <div class="scrub">
+        <span class="btn" data-step="-1">◀</span><span class="btn" data-step="1">▶</span>
+        <input type="range" min="0" max="${liveFrames.length-1}" value="${i}" id="scrub">
+        <span class="t">t = ${f.t} ms</span>
+      </div>
+    </div>
+    <div class="panel side">
+      <div class="blkh">pid 2 — sh</div>
+      <table>${f.regs.map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>
+      <div class="blkh" style="padding-top:12px">/dev/trace</div>
+      <div class="trace">${f.trace.map((x,k)=>`<div class="${x[0]} ${k===f.hl?'hl':''}">${x[1]}</div>`).join('')}</div>
+    </div>
+  </div>
+  <p class="note">The timeline is rendered from <code>/dev/trace</code>, a ring buffer the kernel writes
+  two records into per syscall — measured at <b>4 ns a record</b>, 0.03% of a 14 µs syscall, so tracing
+  is always on. Scrubbing is replay of that buffer: you cannot rewind a real kernel, and you can rewind
+  this one.</p>
+  </div>
+
+  <div class="sect"><h3>Try it</h3>
+  <div class="try"><span class="p">$</span> <span class="c">strace -f -p 2 &amp; echo hi | grep h</span>
+<span class="o">  sh    → read(0, 4096)            blocked 2.808ms
+  krn     park pid 2 on pipe 3
+  krn     switch → pid 8  (11µs)
+  grep  → write(1, "hi\\n", 3)     = 3
+  krn     wake pid 2
+  sh    ← read = 3                 14µs round trip</span>
+
+<span class="p">$</span> <span class="c">cat /proc/2/status | grep State</span>
+<span class="o">  State:  S (parked in Atomics.wait, syscall=read)</span></div></div>
+
+  <div class="sect"><h3>How this differs on real hardware</h3>
+  <div class="two">
+    <div class="panel card gap"><h4>What a timer interrupt would add</h4>
+      Linux switches on a timer tick whether or not the process cooperates, so a CPU-bound loop
+      still yields. Here it does not — which is why <code>End&nbsp;Process</code> degrades to SIGKILL
+      and the UI has to say so. The <a href="#">scheduling pages</a> run on the teaching CPU instead,
+      where a real quantum exists.</div>
+    <div class="panel card chk"><h4>The check that keeps this page honest</h4>
+      <code>lessons/ctxswitch.check</code> runs the pipeline above and asserts the trace contains
+      a park, a switch and a wake, in that order, with the wake naming pid&nbsp;2.
+      <b>Negative control:</b> stop parking on an empty pipe — the switch disappears from the
+      trace and the check must fail.</div>
+  </div></div>`
+}
+
+/* ---------------- ABSENT: virtual memory ---------------- */
+const absentView = () => `
+  <h2 class="t">Virtual memory and address translation</h2>
+  <div class="cite"><span class="badge abs">○ absent</span> &nbsp;
+    OSTEP ch.13–23 ·
+    Wikipedia <a href="https://en.wikipedia.org/wiki/Operating_system#Kernel">Components → Virtual memory</a> ·
+    web-os <code>docs/CONSTRAINTS.md</code> — no constraint, because there is nothing to constrain</div>
+
+  <div class="sect"><h3>The principle</h3><div class="prose">
+    <p>Every address a program uses is a lie. The CPU hands each one to a memory-management unit that
+    walks a page table and returns a different, physical address — or faults, if the page is not
+    resident. That indirection is what makes <code>malloc</code> return addresses that look the same in
+    every process, lets two processes share one copy of libc, lets a 4 GB program run in 1 GB of RAM,
+    and makes <code>mmap</code> of a file possible at all.</p>
+  </div></div>
+
+  <div class="sect"><h3>Why web-os cannot show you this</h3><div class="prose">
+    <p>There is no MMU, and no browser API exposes one. A JavaScript process cannot intercept
+    <code>arr[i]</code>; a WebAssembly process addresses one flat linear memory with no translation
+    step to hook. Processes here <em>are</em> isolated from each other — but by <b>realm</b>, not by
+    translation: a Worker simply holds no reference to another Worker's memory.</p>
+    <p>That distinction is the whole lesson. Realm isolation gives you protection and nothing else.
+    Translation gives you protection <em>plus</em> a layer of indirection, and almost everything
+    interesting about virtual memory lives in the indirection rather than the protection.</p>
+  </div></div>
+
+  <div class="sect"><h3>What the hole costs — and the measurement that closed the question</h3>
+  <div class="two">
+    <div class="panel card gap"><h4>Capabilities forfeited</h4>
+      <ul style="margin:0;padding-left:17px">
+        <li><code>mmap</code> of a file — no page-fault-on-touch</li>
+        <li>Copy-on-write, so no cheap <code>fork</code></li>
+        <li>Shared mappings — two processes, one physical copy</li>
+        <li>Overcommit, and swap of any kind</li>
+        <li>Guard pages, so no stack-overflow trap</li>
+        <li>ASLR</li>
+      </ul></div>
+    <div class="panel card chk"><h4>We tried the cheap way. It failed.</h4>
+      A software MMU built from a <code>Proxy</code> over a typed array <em>does</em> translate,
+      fault and enforce protection bits. Measured on this machine: <b>66× slower</b> than direct
+      access (262 ms vs 4 ms for 2M read+writes, checksums matching).
+      <div style="margin-top:7px">That is unusable as a runtime. So there is no cheap virtual memory —
+      which is a useful negative result, because it collapses two options into one.
+      <code>bench/feasibility/</code></div></div>
+  </div></div>
+
+  <div class="sect"><h3>Where you can see it for real</h3><div class="prose">
+    <p>On the <b>teaching CPU</b> — an RV32I interpreter where web-os owns the instruction fetch, so
+    every load and store passes through a real Sv32 two-level page table. Translation, TLB, faults,
+    demand paging to OPFS and copy-on-write all become genuine mechanisms rather than animations.
+    Measured at <b>455 MIPS</b>, which is roughly a 1990s workstation — fast enough to be a real tier,
+    not a curiosity.</p>
+    <p>The declarable limit there: <em>mechanism and policy are faithful; performance is not.</em>
+    A TLB miss on silicon costs ~100 cycles against an L1 hit's ~4. In an interpreter both cost
+    "some JavaScript." Synthetic cycle charges give you the shape of the curve and are labelled
+    as synthetic.</p>
+  </div>
+  <div class="try" style="margin-top:12px"><span class="p">$</span> <span class="c">mmap /dev/zero 4096</span>
+<span class="o">  mmap: function not implemented (ENOSYS)
+  there is no MMU in this tier. see: lessons/vm-absent
+  the teaching CPU has one:  machine run --mmu lessons/vm/translate.elf</span></div></div>`
+
+/* ---------------- MATRIX ---------------- */
+const MX = [
+ ['grp','Kernel'],
+ ['Kernel','live','● live','the kernel Worker, live SAB words, syscall histogram','kernel.check'],
+ ['Program execution','live','● live','step a spawn: VFS → Blob URL → Worker → SAB + port','spawn.check'],
+ ['Software interrupt / trap','inv','◑ inverted','x86 traps into ring 0; here postMessage + futex park. Side by side.','trap.check'],
+ ['Signals','live','● live','keystroke → line discipline → SIGINT → pgrp, and the case it fails','signal.check'],
+ ['Hardware interrupts','part','◐ partial','real trap vector on the teaching CPU, synthetic device raising it','irq.check'],
+ ['Drivers','live','● live','opfs / httpimg / tmpfs / genfs / cloud behind one interface','driver.check'],
+ ['Interrupt-driven I/O','part','◐ partial','device-initiated events; not an IRQ, and labelled so','—'],
+ ['DMA','part','◐ partial','same device twice: PIO vs shared-buffer + completion interrupt','dma.check'],
+ ['Memory management (free space)','live','● live','a real allocator in-process: first-fit vs best-fit, fragmentation map','malloc.check'],
+ ['Virtual memory, paging, TLB','part','◐ partial','absent in tier 1 (Proxy MMU = 66× slower, measured); real Sv32 on the teaching CPU','vm.check'],
+ ['grp','Concurrency'],
+ ['Threads','inv','◑ inverted','no shared memory by default, so races are impossible — then hand over a SAB','race.check'],
+ ['Locks','live','● live','Atomics.compareExchange is a real CAS; build a spinlock, show contention','lock.check'],
+ ['Condition variables, semaphores','live','● live','Atomics.wait/notify is a futex — the primitive, not an imitation','cv.check'],
+ ['Concurrency bugs','live','● live','cause the documented f|g deadlock, inspect who holds what while blocked','deadlock.check'],
+ ['Event-based concurrency','live','● live','web-os is the reference implementation, not a degraded case','—'],
+ ['CPU scheduling, MLFQ, lottery','part','◐ partial','cooperative with a real quantum in tier 1; real preemption on the teaching CPU','sched.check'],
+ ['grp','File system'],
+ ['Files and directories','live','● live','inodes, hard links, symlinks, the name/inode split, live refcounts','fs.check'],
+ ['FS implementation','live','● live','walk a path, watch the inode cache hit, see the fd appear','fs.check'],
+ ['FSCK and journaling','live','● live','truncate the journal, watch replay stop and report the discarded tail','fsck.check'],
+ ['Data integrity','live','● live','real CRCs; corrupt a byte, watch detection','crc.check'],
+ ['Buffer cache, read-ahead, eviction','live','● live','LRU vs clock vs random, measurable only because cloud latency is ~50 ms','cache.check'],
+ ['I/O devices','live','● live','tunable latency model, replaying a measured distribution','io.check'],
+ ['RAID','live','● live','stripe/mirror/parity across providers; delete one and rebuild','raid.check'],
+ ['Log-structured FS','live','● live','S3 has no partial write, so append-only is forced — which is LFS','lfs.check'],
+ ['HDD, seek scheduling','part','◐ partial','modelled seek cost makes the elevator testable; declared as modelled','—'],
+ ['Flash / SSD','abs','○ absent','no erase blocks, no FTL. Short page on what a device layer adds.','—'],
+ ['Distributed systems, NFS','live','● live','two tabs over BroadcastChannel; cause a coherence bug at 20% loss','nfs.check'],
+ ['AFS','part','◐ partial','whole-file caching over the same link','—'],
+ ['grp','Networking, security, UI'],
+ ['Networking','part','◐ partial','sockets over the inter-tab link. No IP layer — stated plainly.','sock.check'],
+ ['Access control','live','● live','uid/gid/mode checked in the kernel against a per-call credential','perm.check'],
+ ['Protection and isolation','part','◐ partial','the M6 exploit is a real escalation you can run, then can\'t','m6.check'],
+ ['Authentication','abs','○ absent','no users or login in v1','—'],
+ ['Cryptography','abs','○ absent','not an OS concern here','—'],
+ ['User interface','live','● live','the WM is userland on the same syscalls. The shell is just a program.','wm.check'],
+]
+const matrixView = () => `
+  <h2 class="t">Coverage matrix</h2>
+  <div class="cite">Every component in Wikipedia's
+    <a href="https://en.wikipedia.org/wiki/Operating_system#Components">Operating system § Components</a>,
+    drilled to <a href="https://pages.cs.wisc.edu/~remzi/OSTEP/">OSTEP</a> chapter depth.
+    OSTEP is cited by chapter link, never copied.</div>
+  <div class="legend">
+    <span><span class="badge live">● live</span> instrumented — the view reads real state</span>
+    <span><span class="badge part">◐ partial</span> real but reduced, or real only on the teaching CPU</span>
+    <span><span class="badge inv">◑ inverted</span> web-os does the opposite; the contrast teaches both</span>
+    <span><span class="badge abs">○ absent</span> the page explains the hole</span>
+  </div>
+  <table class="mx">
+    <tr><th>Principle</th><th class="v">Verdict</th><th>Drill-down</th><th class="ch">Check</th></tr>
+    ${MX.map(r => r[0]==='grp'
+      ? `<tr><td class="grph" colspan="4">${r[1]}</td></tr>`
+      : `<tr><td>${r[0]}</td><td class="v"><span class="badge ${r[1]}">${r[2]}</span></td>
+         <td style="color:#4a5c6e">${r[3]}</td><td class="ch">${r[4]}</td></tr>`).join('')}
+  </table>
+  <div class="tot">
+    <span><b>22</b> live</span><span><b>8</b> partial</span><span><b>2</b> inverted</span>
+    <span><b>3</b> absent</span><span><b>35</b> pages</span>
+  </div>
+  <p class="note">Every row with a check is a CI test: the page runs its scenario and asserts the
+  invariant, so a lesson that stops being true fails the build rather than quietly lying. Rows marked
+  partial because they need the teaching CPU are absent until option D ships —
+  the matrix shows the planned end state and the index marks what is built.</p>`
+
+/* ---------------- wiring ---------------- */
+const main = document.getElementById('main')
+let view = 'live', frame = 0
+function render() {
+  main.innerHTML = view === 'live' ? liveView(frame) : view === 'absent' ? absentView() : matrixView()
+  const s = document.getElementById('scrub')
+  if (s) {
+    s.oninput = () => { frame = +s.value; render() }
+    main.querySelectorAll('[data-step]').forEach(b => b.onclick = () => {
+      frame = Math.max(0, Math.min(liveFrames.length - 1, frame + +b.dataset.step)); render() })
+  }
+}
+document.querySelectorAll('nav.tabs button').forEach(b => b.onclick = () => {
+  view = b.dataset.v
+  document.querySelectorAll('nav.tabs button').forEach(x => x.setAttribute('aria-current', x === b))
+  render()
+})
+render()
+</script>
+</body>
+</html>

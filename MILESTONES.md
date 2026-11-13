@@ -21,14 +21,15 @@ checks is a wish.
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | **M0a** | **Addendum: the same sweep with a real OPFS call in the mix** | 0.5 | | ⬜ **next** |
-| **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
+| M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
+| M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
-| M3 | `/proc`, `/dev`, mounts | 2 | | ⬜ |
+| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
-| | **— end of spine. Choose option A / B / C here —** | **30** | | |
+| | **— end of spine. Choose option A / B / C here —** | **33.5** | | |
 | M7 | A window is a file description | 4 | | ⬜ A |
 | M8 | The window surface | 3 | | ⬜ A |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
@@ -38,10 +39,38 @@ checks is a wish.
 | M13 | The geometry harness | 5 | | ⬜ A |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
-| | **Option A total** | **70** | | |
+| | **Option A total** | **73** | | |
+| D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
+| D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
+| D2 | Traps, timer, real preemption | 2 | | ⬜ D |
+| D3 | Scheduler policies, swappable | 3 | | ⬜ D |
+| D4 | `fork`, copy-on-write, demand paging | 3 | | ⬜ D |
+| D5 | Device bus, providers, hot-unplug, RAID | 14 | | ⬜ D |
+| D6 | Two tabs, minimal NFS | 3 | | ⬜ D |
+| D7 | Page harness, scrubber, check runner | 6 | | ⬜ D |
+| D8 | 35 principle pages | 14 | | ⬜ D |
+| | **Option D total** | **54** | | |
 
-Options B (+65, WASI binaries) and C (+100, canvas compositor) are in `PLAN.md` §6. They are not
-started and should not be until the spine is done.
+Option D is **54 days standalone**, plus the 3 that fold into M3 and M5 above = 57 total, which is
+the figure in `docs/LEARNING-MODE.md` §9. D0 is 6 rather than 4 because it carries the prebuilt
+binaries; D5 is 14 because it carries the device bus, the provider table, PIO-vs-DMA, the latency
+harness, hot-unplug and RAID.
+
+Options B (+65, WASI binaries) and C (+100, canvas compositor) are in `PLAN.md` §6. Option D
+(+57, the teaching machine and learning mode) is in `docs/LEARNING-MODE.md`. None are started and
+none should be until the spine is done.
+
+**Three of option D's days fold into the spine and should be taken regardless**, because for the
+first 30 days they are the only visible thing:
+
+| | Folds into | Est | Why now |
+|---|---|---|---|
+| `/dev/trace` ring + dropped-record counter | M3 | 1 d | Measured at **4 ns/record** — 0.03% of a syscall. Tracing is free, and it is the debugger for everything after it. |
+| `top` and `strace` as real programs | M5 | 2 d | A live syscall histogram on day 3 is a better M0 deliverable than a number in a terminal. |
+
+The trace ring needs **≥16 MiB** and a visible dropped-record counter: a 1 MiB ring holds 32,768
+records and wraps every 0.5 s at full syscall rate, and a view that silently drops records shows a
+clean picture of a broken system.
 
 ---
 
@@ -192,6 +221,108 @@ without one — notifications, then in-flight answers, then new requests.
 
 ## M1 — Process lifecycle, signals, hard cap · 4 days · ~1100 LoC
 
+> **Four additions from `docs/research/09-hobbyist-os-actions.md`, all because the process-table
+> layout is set here and reworking it later is the expensive version.** Sources are in that file;
+> each is a dependency, not a preference.
+>
+> **(a) The capability bitmask goes in the table now, even though the narrowing call lands at M6.**
+> Otherwise M6 reworks the table. The credential already carries `caps` with nothing reading it.
+> SerenityOS's shape: a service acquires its handles, then drops the promise that would let it
+> acquire more — kernel state, checked at dispatch, and **monotonic**. The asserted invariant is
+> monotonicity, not a symptom: after narrowing, every widening must fail.
+>
+> **(b) `sid` goes in the table now**, because M4's line discipline hangs SIGTTIN, SIGTTOU and
+> SIGHUP off the session. The ABI has `setpgid` and no session concept at all, so M4 would
+> otherwise have to add a field to a live table.
+>
+> **M1 lands the field, the leader link and `setsid` — and explicitly does not claim SIGHUP,
+> SIGTTIN or SIGTTOU work.** A session id is four bytes and free; a session that *works* is not:
+> SIGHUP on leader death means the kernel has to know which pid leads, keep that link correct
+> across teardown, and deliver to every process in every process group in the session — and
+> constraint 18 requires that sweep be O(interested), not O(N). Recorded as a field plus an
+> invariant rather than a feature, so M4 inherits something true instead of something that looks
+> done. *(web-os-builder's caution, taken.)*
+>
+> **(c) `waitpid` must distinguish "exited with code N" from "killed for reason R".** With
+> `Worker.terminate()` as the only kill and no exit path in the dying worker, **the kernel is the
+> only thing that can record why** — so it is written at teardown or it is lost forever.
+>
+> **(d) Teardown is two-phase**: answer every outstanding call with a defined errno, then assert
+> the count is zero. HelenOS's `EHANGUP` cleanup. Cheap here, and it is the only point where the
+> outstanding-call count is still knowable.
+>
+> **(e) The per-process event backlog gets a bound and a defined overflow.** Promoted out of
+> `PLAN.md` §9b on web-os-builder's argument, which corrected mine. I had filed it as "constraint
+> 9's unnamed sibling". It is **strictly worse than constraint 9**: constraint 9's overflow is
+> bounded by one 64 KiB SAB and visible at the call site, while this one grows without limit **on
+> the kernel's own heap**, and the process that caused it is asleep in `Atomics.wait` and cannot
+> drain. Constraint 17 caps processes at 128 precisely because the renderer dies between 3,200 and
+> 4,800 workers; an unbounded per-process backlog reintroduces that same failure mode with no cap
+> on it at all.
+>
+> HelenOS's answer is the cheap one and belongs in the **ABI contract** rather than the
+> implementation: a fixed in-flight budget with a synchronous `ELIMIT` when it is exhausted. Which
+> is why it lands here with the other table fields rather than at the milestone that first needs it.
+>
+> **The budget is charged per fd — not per process, and not per event source.** This is not a new
+> concept; it falls out of constraint 42, which already made the fd the unit of *wakeability*:
+> "`poll()` MUST be the single wait primitive over fds." If the fd is the unit a process waits on,
+> it is the unit a budget must be charged against — otherwise the budget and the wait primitive
+> disagree about what an event source is.
+>
+> Per *process* is wrong for the reason the OPFS finding was wrong: one chatty window consumes the
+> whole budget and starves the same process's pipe events. That is head-of-line blocking across
+> unrelated event classes, which is the same shape as one queue serving things with no reason to
+> share a queue.
+>
+> Per *(process, source)* is wrong because "source" would be a second taxonomy beside the fd table,
+> needing its own identity, lifetime and teardown. Per-fd gets all three free: the fd table already
+> has them, `close(fd)` already releases the budget, and the two-phase teardown in (d) already walks
+> the fds, so it drains the budgets in the same pass rather than needing a second sweep.
+>
+> It also gives the property the promotion was for: a process that floods one window's queue gets
+> `ELIMIT` on **that fd** and keeps servicing its pipe. HelenOS's per-phone budget is consistent
+> with this rather than against it — a phone is its connection handle, so it is the fd-equivalent
+> once the handle types are lined up.
+>
+> **The invariant, stated so the next reader meets it: an event source that cannot be charged to an
+> fd has no budget, and that is a design error rather than a special case.** True trivially at M1
+> (no event sources yet — the budget is a field and an errno), still true at M4 (pipes and the pty
+> are fds) and at M7 (`win_create` returns an fd). If a future event source is not an fd, the move
+> is to make it an fd, not to add a second budget taxonomy.
+>
+> *(web-os-builder's answer to a question I left open rather than guessed at. I had offered
+> per-process or per-(process, source); both were wrong, and constraint 42 already contained the
+> answer. To be confirmed against the dispatch code at M1.)*
+>
+> **(f) The ABI needs a growth mechanism, and it is cheapest now.** AROS's ABI v1 break — a
+> one-year estimate still producing forks a decade later — was *entirely* representation
+> decisions: where a handle lives, what unit a pointer counts in, how state is partitioned. The
+> analogues here are the SAB layout, the futex word's position, the `(lo, hi)` pairing and the
+> `r0 < 0 && r1 == -1` convention. Three parts:
+>
+> - **A format magic and a version word in the SAB frame header.** Four bytes, impossible to
+>   retrofit, and the harness is a second consumer of that format. Haiku reads four message
+>   dialects through one dispatcher on exactly this.
+> - **Retired call numbers stay reserved**, and one `perform(opcode, struct)` escape hatch exists.
+>   Haiku added eight `BView` methods without touching the BeOS R5 vtable using reserved slots
+>   plus one `Perform()`. The CALLID/NR split M0 already made is the class of change this makes
+>   survivable.
+> - **One declaration, derived at runtime — not generated.** `src/abi.mjs` is already that single
+>   declaration, and a grep for duplicate SAB offsets or syscall numbers across `src`, `bench`,
+>   `www` and `scripts` comes back clean. So the kernel dispatch table is **derived from it at
+>   boot**, with an assertion that every declared call has a handler.
+>
+>   *An earlier version of this item asked for a generator emitting the stubs and the dispatch
+>   table. That was wrong: a generator is a build step, and `CLAUDE.md` forbids one. It would also
+>   be the project's first. The runtime-derived form gets the same single-source-of-truth property
+>   with no build step and no generated file to drift — correction from web-os-builder.*
+>
+> One thing deliberately *not* added: the "not responding" detector. It depends on nothing in the
+> window half — it is a kernel-side timer plus a UI hook — and with no preemption a wedged app is
+> the normal case. But there is no UI to hook until M4a, so it lands there. Noted so it is not
+> discovered at M9.
+
 Delivers the headline: a process in `for(;;){}` with no syscalls dies on End Process.
 
 **Build.** `spawn`, `exit`, `waitpid`, `kill`, `sigaction`, `setpgid`, `sched_yield`. Monotonic,
@@ -213,6 +344,36 @@ refused a 129th spawn, and the bench's mislabelling of that refusal is what expo
 
 ---
 
+## M2a — A host-runnable kernel, before M2 · 1 day
+
+Ordering finding, not a preference: this is cheaper before M2 than after it.
+
+The inode table, the superblock and journal codecs, path resolution and the dispatch table should
+run in **plain Node** — no Worker, no SAB, no OPFS. SerenityOS builds its libraries a second time
+for the host ("Lagom") precisely so unit tests and 81 fuzz targets run in milliseconds while the
+OS target gets only UBSAN.
+
+The reason it must precede M2: **journal replay is a parser over torn bytes, which is exactly a
+fuzz target.** M2's negative control tests *one* hand-truncated journal. A fuzzer tests ten
+thousand, and finds the tear that the one hand-written case does not.
+
+Costs no dependency and no build step — the same `.mjs` files, imported by a script. This is why
+`src/abi.mjs` holding only integers and pure codecs matters: it is importable from Node.
+
+**Scope condition, and it is the whole value of the milestone: the host-runnable path must be the
+same code, not a port.** The risk is M2's codecs reaching for OPFS or a SAB *inside* the parse path
+and quietly becoming unfuzzable. So the inode table, the superblock codec and the journal codec stay
+**pure over byte arrays, with all I/O at the edges**. Hold that and the fuzz target is free forever;
+lose it and M2a decays into a maintained second implementation, which is the exact thing it exists
+to avoid. *(web-os-builder's addition, from M0's experience with `src/abi.mjs`.)*
+
+**Proof.** The journal codec round-trips under Node; a fuzz run over truncated and bit-flipped
+journals terminates with no crash and no silent acceptance of a bad record.
+**Negative control.** Remove the CRC check — the fuzzer must immediately find an accepted bad
+record.
+
+---
+
 ## M2 — VFS core on OPFS · 8 days · ~1400 LoC
 
 **Build.** Days 1–4: port `../webxp/shared/fs/vfs.mjs` (1,301 lines) — `#lookup` with
@@ -224,6 +385,30 @@ Days 5–8: the inode→`{handle, refcount}` table (47); boot-lock retry ~3 s wi
 `fsync` separate, journal flushed on fsync/snapshot/idle (23); fsck never reseeds (28). Write
 ordering: blob → flush → journal → flush → apply in memory.
 
+**Decide the data-consistency question in days 5-8.** File data is **not journalled — only
+metadata is.** Blobs live flat in OPFS named by inode (26), so overwriting an existing file
+mutates its blob *in place*. The journal and the alternating superblocks give consistency for
+metadata; a blob half-overwritten when the tab dies leaves **intact metadata pointing at torn
+data**. M2's ordering protects *new* data and does not make an overwrite atomic.
+
+That is POSIX-permissible without `fsync`, and it is exactly ext4's `data=writeback` — which is
+not ext4's default, precisely to avoid it. Phantom, the only shipped orthogonally-persistent OS,
+gives every page three blocks under the rule "if a page is to be written, it goes to curr ONLY".
+
+Two acceptable answers, and the choice must be made here rather than discovered later:
+1. **Copy-on-write the blob** — write a new one, swing the reference at commit. Cheap, because the
+   name is just an integer.
+2. **Declare the guarantee metadata-only**, in `docs/CONSTRAINTS.md` and wherever a reader meets
+   it.
+
+Discovering this after a user has files is the bad outcome. `docs/research/09-hobbyist-os-actions.md` §5.
+
+**Also decide the superblock's version field here**, because it is unavailable later: a generation
+counter plus major/minor, with "minor newer than me ⇒ refuse". Phantom holds three superblock
+copies, not two — against two alternating slots, a bad write to the older slot *during* a commit
+can leave zero valid copies. With three, constraint 28's "mounts read-only and reports" can become
+"mounts the previous generation read-write and reports" for the same honesty.
+
 **Proof.** (a) 10k files, reload, every byte and every mode bit intact; (b) truncate the journal
 mid-record — fsck reports the discarded tail rather than reseeding; (c) two concurrent opens of one
 file both succeed.
@@ -234,16 +419,53 @@ passes either way it was testing nothing.
 
 ---
 
-## M3 — `/proc`, `/dev`, mounts · 2 days · ~450 LoC
+## M3 — `/proc`, `/dev`, mounts · 4 days · ~700 LoC
 
-**Build.** Longest-prefix mount table, static at boot: `/` OPFS rw, `/usr` read-only from a
-build-time JSON index, `/tmp` tmpfs, `/proc` and `/dev` generated on read.
-`/proc/<pid>/{status,cmdline,cwd,fd/<n>}` is ~120 lines and is the clearest demonstration that a
-process is a first-class object.
+Was 2 days. Carries two things folded in from option D because they are OS work rather than
+pedagogy, and because building them later means building them twice.
 
-**Proof.** `ls /proc` enumerates live pids; kill one and its directory vanishes.
-**Negative control.** Serve a cached `/proc` listing instead of regenerating — the killed pid must
-linger and the check must fail.
+**Build.** Longest-prefix mount table, static at boot: `/` OPFS rw, `/usr` read-only, `/tmp`
+tmpfs, `/proc` and `/dev` generated on read. `/proc/<pid>/{status,cmdline,cwd,fd/<n>}` is ~120
+lines and is the clearest demonstration that a process is a first-class object.
+
+**Folded in (a): `/usr` mounts on the provider interface, not a one-off driver.** +1 d. The
+original plan had a bespoke `httpimg` driver here and a general provider table later in option D.
+That is the same work twice. So `/usr` is the *first consumer* of a provider table that is data,
+not code:
+
+```
+{ id, url template, range strategy, max object, auth: 'none' }
+```
+
+Measured 2026-11-12: `cdn.jsdelivr.net` and `raw.githubusercontent.com` both serve genuine ranged
+block reads with `Content-Range` and CORS, so the default needs no account and no bucket.
+`unpkg.com` ignores `Range` and is unusable. `docs/LEARNING-MODE.md` §5.
+
+**Folded in (b): `/dev/trace`.** +1 d. A ring buffer the kernel writes two records into per
+syscall, measured at **4 ns a record** — 0.03% of a 14 µs syscall, so tracing is always on. This
+is the debugger for every milestone after it, which is why it is here and not at the end.
+
+**Proof.** Three:
+1. `ls /proc` enumerates live pids; kill one and its directory vanishes.
+2. **A capability probe per provider** — a ranged GET returns exactly the requested byte count
+   with `Content-Range`, and CORS is present. A provider that silently stops supporting `Range`
+   must fail the build, not degrade a mount.
+3. `/dev/trace` replays a known syscall sequence, and the dropped-record counter is visible.
+
+**Negative control.** Three, one per proof:
+1. Serve a cached `/proc` listing instead of regenerating — the killed pid must linger and the
+   check must fail.
+2. Point a provider at a 404 — the mount must fail loudly, never silently serve an empty `/usr`.
+3. Undersize the trace ring to 64 KiB at full syscall rate — the dropped-record counter must go
+   non-zero **and be displayed**. A trace that silently drops records shows a clean picture of a
+   broken system.
+
+**Note the sizing.** A 1 MiB ring holds 32,768 records and wraps every 0.5 s at full syscall
+rate. Ship ≥16 MiB if the scrubber (D7) is ever wanted.
+
+**`mount` must never accept a caller-supplied URL** — a provider id and a path, resolved against
+the committed table, and nothing else. Otherwise every process gets an SSRF primitive, and M6
+deletes `fetch` precisely to prevent that.
 
 ---
 
@@ -313,6 +535,39 @@ boundary. Threat model is first-party only for v1.
 
 ---
 
+## Ordering corrections in the window half
+
+Two from `docs/research/09-hobbyist-os-actions.md`, both of which reverse or tighten what
+`PLAN.md` §5 currently implies.
+
+**M8 gates M12, not the other way round.** The blur governor cannot account what it did not
+allocate. So the surface-ownership decision — kernel-allocated retained surfaces versus M8's
+transferred `OffscreenCanvas` — has to be made *before* the governor, because only
+server-allocated surfaces give **accounting and revocation**, which constraint 49's admission
+controller and constraint 17's cap both need and neither currently has.
+
+A transfer is also one-way and one-shot: the process loses the object, so there is **no front/back
+pair and no cheap flip**. Haiku's server allocates bitmap memory and maps it to the client;
+SerenityOS has the client allocate both stores and hand over an fd with a monotonic serial, so a
+steady-state flip re-sends a known serial and the server maps nothing. The two mature systems chose
+opposite sides — so decide it on this project's terms, and those terms favour server-allocated.
+Recorded as proposed **D17**.
+
+**M7 is missing two things the window fd will have to express**, and both are cheaper before M9 and
+M10 are built on top:
+1. **The destroy cascade.** Destroying a parent destroys its children, so closing one fd must be
+   reported as closing *several*. SerenityOS's `destroy_window` returns the list of ids destroyed.
+   M7 has no such event, so the process's fd table silently desynchronises from the kernel's.
+2. **Cross-process ownership.** A picker broker must be able to parent its dialog onto the
+   *requesting app's* window — that is the whole point of a broker — and M9's owner chain has no
+   way to name a window in another process.
+
+Also: M9's `modal ∈ {none, window, app, system}` describes *scope*, where SerenityOS's enforced
+`WindowMode` describes *behaviour* — `Modeless | Passive | RenderAbove | Blocking`, with the blocker
+computed by walking the chain. Those are different axes and an owned window needs both.
+
+---
+
 ## The window half (option A) — M7 to M14
 
 Full table with per-row proof and negative control in `PLAN.md` §5. Summarised here only as status
@@ -326,6 +581,137 @@ Two traps recorded there and worth repeating:
   device px, comfortably under the 58–63 M wall, so a gate sized at five passes by construction.
   That error was in the first draft of the plan and `docs/CONSTRAINTS.md` constraint 49 records the
   correction.
+
+---
+
+## Option D — the teaching machine and learning mode
+
+Rationale, the honesty policy and the coverage matrix are in `docs/LEARNING-MODE.md`. The
+milestones live here, with the same contract as everything else: **a proof that can fail, and a
+negative control that breaks the thing the proof is about.**
+
+**Order is risk-first.** D0 re-measures the one figure option D rests on, against a real workload
+rather than the 5-instruction loop that produced 455 MIPS.
+
+### D0 — RV32I interpreter + one real binary · 4 d
+
+**Build.** RV32I base integer set, decode-and-execute from memory. One prebuilt binary committed
+to the repo (no toolchain dependency for a reader).
+
+**Proof.** The binary runs and produces its known output. Then **re-measure MIPS on that real
+workload** and record it beside the 455 MIPS synthetic figure — the benchmark that produced 455 was
+a 5-instruction loop with a hot dispatch path and good branch prediction, so a real program will be
+slower.
+
+**Negative control.** Corrupt one instruction's decode (swap `ADDI`'s immediate sign extension).
+The binary must produce wrong output or trap — if it still passes, the proof is not reading the
+interpreter.
+
+**Kill criterion.** Real-workload throughput below 20 MIPS → the tier is too slow to be a tier.
+Reconsider before D1.
+
+### D1 — Sv32 MMU · 3 d
+
+**Build.** Two-level page tables, 4 KiB pages, a TLB, page faults vectoring through the trap
+mechanism.
+
+**Proof.** Two processes write the *same virtual address* and read back different values — which is
+the entire point of translation and is inexpressible in tier 1. An unmapped access faults with the
+correct `mcause`, and the handler runs.
+
+**Negative control.** Make translation the identity map. The two processes must start seeing each
+other's data, and the first assertion must fail.
+
+### D2 — Traps, timer, real preemption · 2 d
+
+**Build.** `mtime`/`mtimecmp`, `mtvec`/`mcause`/`mepc`, a quantum expressed in instructions.
+
+**Proof.** A process that issues **no syscalls at all** is still switched away from. Count context
+switches over one second of two spinning processes and assert it is within tolerance of
+`elapsed / quantum`. This is the thing tier 1 cannot do.
+
+**Negative control.** Disable the timer. The switch count must collapse to the syscall-driven count
+(zero, for two spinning processes), and the check must fail.
+
+### D3 — Scheduler policies · 3 d
+
+**Build.** Round-robin, MLFQ, lottery and stride as swappable modules behind one interface.
+
+**Proof.** The *same* workload — one interactive and two batch processes — run under each policy
+produces different and *predicted* turnaround and response times. Assert the ordering: MLFQ gives
+the interactive process a lower mean response time than round-robin, and round-robin lower than
+FCFS. The convoy effect is reproducible on demand.
+
+**Negative control.** Make every policy return the same choice. The orderings must collapse and the
+assertion must fail — otherwise the test is measuring noise rather than policy.
+
+### D4 — `fork`, copy-on-write, demand paging · 3 d
+
+**Build.** Fork by copying the interpreter's state object; mark pages read-only and copy on write
+fault; page out to OPFS on pressure and fault back in.
+
+**Proof.** Child returns 0, parent returns the pid, and the child's writes are invisible to the
+parent. A COW page's **physical frame number is identical in both processes until one writes** —
+assert the frame id, not the contents. Demand paging: touch a paged-out page and assert the fault
+count incremented and the data is correct.
+
+**Negative control.** Eager-copy instead of COW. The shared-frame assertion must fail. Separately,
+pin all pages — the demand-paging fault count must drop to zero and that check must fail.
+
+### D5 — Device bus, providers, hot-unplug · 9 d
+
+**Build.** Device bus on the emulated machine; synthetic block device with a latency model that
+*replays a measured distribution*; provider table (`raw.githubusercontent.com`, `cdn.jsdelivr.net`
+free; one owned R2 bucket); buffer cache with swappable eviction; PIO and DMA as two
+implementations; RAID 0/1/5 across providers.
+
+**Proof.** Four, and the first is the one that keeps the rest honest:
+1. **A CI capability probe per provider** — ranged GET returns exactly the requested byte count with
+   `Content-Range`, and CORS is present. A provider that silently stops supporting `Range` must fail
+   the build, not degrade a page.
+2. A block read at a known LBA returns known bytes through the cache.
+3. Hot-unplug: kill connectivity mid-read and assert `EIO` propagates up through the cache to the
+   process, with a partially filled buffer discarded rather than returned.
+4. Eviction policy matters: the same access pattern under LRU and under clock produces different
+   measured hit rates, in the predicted direction.
+
+**Negative control.** Point a provider at a 404 URL — the synthetic fallback must engage *and the
+page must say it did*. A silent fallback is the failure mode this whole milestone is guarding
+against. Then set the latency model to 0 µs and confirm the eviction-policy assertion collapses,
+proving it was measuring cache behaviour and not scheduling noise.
+
+### D6 — Two tabs, minimal NFS · 3 d
+
+**Build.** `BroadcastChannel` as the link — no server, no signalling. Synthetic latency and loss
+model. A minimal NFS with whole-file caching.
+
+**Proof.** Tab A writes, tab B reads the new content. Then set loss to 20% and assert the
+retransmission path recovers. Then **cause a stale-cache read on demand** and assert the client
+detects it.
+
+**Negative control.** Disable cache invalidation — the stale read must go undetected and the check
+must fail.
+
+### D7 — Page harness, scrubber, check runner · 6 d
+
+**Build.** The page template, the trace scrubber over `/dev/trace`, and the runner that executes
+every page's check.
+
+**Proof.** The scrubber reconstructs a known syscall sequence from a recorded trace, and the
+reconstruction matches the sequence that was recorded. The dropped-record counter is visible and
+non-zero when the ring is deliberately undersized.
+
+**Negative control.** Undersize the ring to 64 KiB and run at full syscall rate. The dropped-record
+counter must become non-zero **and be displayed** — a trace view that silently drops records shows
+a clean picture of a broken system.
+
+### D8 — The 35 principle pages · 14 d
+
+**Proof.** Every page carries a check, and `--prove-failure` inverts all of them so the run must
+report failures.
+
+**Negative control.** That *is* the control — the mode exists so the lesson suite can be seen to
+fail. A page whose check cannot fail is not a page.
 
 ---
 
