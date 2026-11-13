@@ -249,6 +249,10 @@ async function main() {
     truncateOverflow: params.get('truncate_overflow') === '1',
     spawnThenPark: params.get('spawn_then_park') === '1',
     depth: params.get('depth') === '0' ? false : true,
+    // M0b's negative control: route storage back onto the dispatch thread, which must
+    // reproduce constraint 58's numbers. A fix that cannot be switched off has not been
+    // shown to be the thing that worked.
+    ioInline: params.get('io_inline') === '1',
   }
   const ns = (params.get('n') || '1').split(',').map(Number)
   if (ns.length !== 1) {

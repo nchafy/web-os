@@ -163,6 +163,17 @@ export const {
   EHOSTGONE,
 } = INTS;
 
+/**
+ * Kernel-internal message kinds for the I/O worker. NOT integers, so they are not in INTS, and
+ * NOT part of the process ABI: a process never sends one and never receives one. They are declared
+ * here for the one reason anything is declared here — so the dispatch kernel and the I/O worker
+ * cannot disagree about a string.
+ */
+export const IO_OPEN = "io-open";
+export const IO_WRITE = "io-write";
+export const IO_FSYNC = "io-fsync";
+export const IO_CLOSE = "io-close";
+
 /** Indexed by syscall number, so a number and its printed name cannot drift. */
 export const SYS_NAME = Object.freeze(["getpid", "write", "clock_nanosleep", "open", "fsync"]);
 

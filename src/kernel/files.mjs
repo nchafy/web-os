@@ -4,7 +4,10 @@
 // M2 adds F_FILE as a row and M4 adds F_PIPE_R/F_PIPE_W as rows, and dup/dup2/close stay three
 // lines each. Constraint 47's per-inode refcounted sync handles go UNDER this table, not inside it.
 
-import { F_SINK, F_FILE, EBADF, EIO, MAX_INLINE, fnv1a, FNV1A_BASIS } from "../abi.mjs";
+import {
+  F_SINK, F_FILE, EBADF, EIO, MAX_INLINE, fnv1a, FNV1A_BASIS,
+  IO_OPEN, IO_WRITE, IO_FSYNC, IO_CLOSE,
+} from "../abi.mjs";
 
 /** Indexed by kind. A kind with no entry is -ENOSYS, which is the honest state of a call the
  *  kernel has not implemented — never a silent zero. */
@@ -82,42 +85,75 @@ registerKind(F_SINK, {
  * Only `open` is async here, which is why it is the only one returning PENDING in calls.mjs.
  */
 registerKind(F_FILE, {
-  write(d, u8, offset, length) {
-    // Synchronous, on the kernel thread, by the API's own shape — there is no async form.
-    try {
-      const n = d.handle.write(u8.subarray(offset, offset + length), { at: d.at });
-      d.at += n;
-      d.bytes += n;
-      d.writes += 1;
-      return n;
-    } catch (e) {
-      return -EIO;
-    }
+  // These return PROMISES, which is the whole fix. The handle lives in the I/O worker, so the
+  // synchronous write/flush happen on a thread whose only job is waiting for storage. calls.mjs's
+  // settle() turns a promise into PENDING, so SYS_write is identical for F_SINK and F_FILE.
+  write(d, u8, offset, length, p) {
+    if (d.inline) return inlineWrite(d, u8, offset, length);
+    return d.io.request(IO_WRITE, { id: d.ioId, pid: p.pid, offset, length });
   },
   fsync(d) {
-    // 260 us of kernel thread, and the reason M0a exists.
-    try {
-      d.handle.flush();
-      d.flushes += 1;
-      return 0;
-    } catch (e) {
-      return -EIO;
-    }
+    if (d.inline) return inlineFsync(d);
+    return d.io.request(IO_FSYNC, { id: d.ioId });
   },
   close(d) {
-    try { d.handle.close(); } catch (e) { /* a closed handle is the desired end state */ }
+    if (d.inline) {
+      try { d.handle.close(); } catch (e) { /* a closed handle is the desired end state */ }
+      return;
+    }
+    d.io.request(IO_CLOSE, { id: d.ioId });
   },
 });
 
 /**
- * Open is two phases because the API is: get the file handle and the sync access handle, both
- * awaited, then hand back a description the synchronous ops can use. The kernel calls this off
- * the dispatch path and replies when it settles, so a 495 us open costs other processes nothing.
+ * The inline path, kept so the fix can be switched OFF. A fix that cannot be switched off has not
+ * been shown to be the thing that worked — this is M0b's negative control, and it must reproduce
+ * the numbers in constraint 58.
  */
-export async function openFile(root, name) {
-  const fh = await root.getFileHandle(name, { create: true });
-  const handle = await fh.createSyncAccessHandle();
-  return { kind: F_FILE, refs: 1, handle, at: 0, bytes: 0, writes: 0, flushes: 0, name };
+function inlineWrite(d, u8, offset, length) {
+  try {
+    const n = d.handle.write(u8.subarray(offset, offset + length), { at: d.at });
+    d.at += n;
+    d.bytes += n;
+    d.writes += 1;
+    return n;
+  } catch (e) {
+    return -EIO;
+  }
+}
+
+function inlineFsync(d) {
+  try {
+    d.handle.flush();
+    d.flushes += 1;
+    return 0;
+  } catch (e) {
+    return -EIO;
+  }
+}
+
+/**
+ * Open, through the I/O worker unless the inline control is armed. Either way it is awaited off
+ * the dispatch path, because `createSyncAccessHandle` returns a promise — open was never the call
+ * that blocked anybody (constraint 58).
+ */
+export async function openFile(k, name) {
+  if (k.ioInline) {
+    const root = k.opfsRoot();
+    if (!root) return -EIO;
+    try {
+      const fh = await root.getFileHandle(name, { create: true });
+      const handle = await fh.createSyncAccessHandle();
+      return { kind: F_FILE, refs: 1, inline: true, handle, at: 0, bytes: 0, writes: 0, flushes: 0, name };
+    } catch (e) {
+      return -EIO;
+    }
+  }
+  const io = k.io;
+  if (!io) return -EIO;
+  const ioId = await io.request(IO_OPEN, { name });
+  if (ioId < 0) return ioId;
+  return { kind: F_FILE, refs: 1, inline: false, io, ioId, name };
 }
 
 /**
