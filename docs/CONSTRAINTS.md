@@ -307,7 +307,14 @@ a different measurement and not a continuation of the old one.
 
     **The N=1 mean reproduces constraint 5's 14–16 µs on a different build**, which is the strongest
     cross-check available for that figure. M0's accept bar — p99 under 500 µs at N=16 — is met with
-    about 2× margin on the worst of three runs. **The 2 ms kill bar is exceeded at N=128 (3.06 ms
+    about 2× margin on the worst of three runs.
+
+    **Re-measured after M0a and M0b changed the kernel** — new syscalls, `settle()`, `later()`, and
+    the I/O worker — the same sweep gives **ACCEPT at p99 250 µs**, worst of three runs, 3 of 3
+    producing a figure. So the headline survived the work done on the strength of it, which is the
+    only reason it can still be quoted. The N=128 cell now reports as **N=127, clamped**, because
+    `--hb` adds an observer process and 128 + 1 exceeds the 128-slot table (constraint 17); the
+    clamp states itself rather than appearing as a failure. **The 2 ms kill bar is exceeded at N=128 (3.06 ms
     p99), and 99.98% of calls there are past 500 µs.** That is not a kill, because the bar is
     specified at N=16, but it is the honest shape of a single-threaded kernel: past ~16 concurrent
     callers queueing dominates, and the sharded-kernel question M0 deferred becomes live somewhere
@@ -402,6 +409,38 @@ a different measurement and not a continuation of the old one.
     required. `bench/syscall-contention/probe.py --n 16 --call io --io-procs 1` and its control,
     `--call getpid`, which returns cheap p50 to 105 µs and so couples the effect to the I/O rather
     than to the mix machinery.
+59. **The I/O worker fixes it, and the trade is 30% of uncontended throughput.** M0b moved the
+    handles to `src/kernel/io-worker.mjs`. Cheap-call latency with K processes doing file I/O,
+    against the inline design it replaces:
+
+    | | worker | inline |
+    |---|---|---|
+    | N=16, K=1 | 105 / **185 µs** | 360 / 2,657 µs |
+    | N=16, K=2 | 100 / **290 µs** | 420 / 1,275 µs |
+    | N=16, K=4 | 85 / **225 µs** | — |
+    | N=64, K=1 | 450 / **795 µs** | 685 / 2,000 µs |
+
+    (cheap p50 / cheap p99.) Every cheap p99 at N=16 is under the 500 µs accept bar, and cheap p50
+    returns to the 85–105 µs no-I/O baseline. The cheap-to-I/O p99 ratio goes from 1.3× — calls
+    indistinguishable from each other — to 7.4×, which is what a kernel that is not head-of-line
+    blocked looks like.
+
+    **The cost, stated because a fix measured only where it helps is a fix nobody can price.** A
+    write is now a message to another agent, so a single process doing nothing but `write` +
+    `fsync` gets **30% fewer operations through** (2,631 against 3,765 in the same window) and its
+    mean rises 43% (378 µs against 264 µs). Its p50 barely moves, 280 µs against 270 µs. The
+    threshold set before measuring was "if uncontended write latency more than doubles, the trade
+    needs restating" — it did not, so the trade stands: 30% of single-process throughput to remove
+    blocking that reached the kill bar at N=64.
+
+    **The write is zero-copy**, which is why the cost is a message and not a message plus a copy:
+    the I/O worker reads the payload directly out of the calling process's SAB, which is safe
+    because that process is parked until the dispatch kernel bumps its `SEQ`, and the dispatch
+    kernel does not bump it until the I/O worker has answered.
+
+    The negative control is `--io-inline`, which routes storage back onto the dispatch thread and
+    reproduces the inline column above. A fix that cannot be switched off has not been shown to be
+    the thing that worked.
 55. A terminated kernel's nested process workers keep running for about **2.0 s**, which reproduces
     constraint 14 one level down the worker tree: `terminate()` on the kernel does not reap what the
     kernel spawned. Measured twice by renderer CPU time, 3.27 → 5.30 s over the 2.3 s after

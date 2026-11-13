@@ -21,8 +21,8 @@ checks is a wish.
 | — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
-| **M0b** | **Move the OPFS handles to a second kernel-side worker** | 1.5 | | ⬜ **next** |
-| M1 | Process lifecycle, signals, hard cap | 4 | | ⬜ |
+| M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
+| **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
@@ -30,7 +30,7 @@ checks is a wish.
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
-| | **— end of spine. Choose option A / B / C here —** | **33.5** | | |
+| | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | | ⬜ A |
 | M8 | The window surface | 3 | | ⬜ A |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
@@ -40,7 +40,7 @@ checks is a wish.
 | M13 | The geometry harness | 5 | | ⬜ A |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
-| | **Option A total** | **73** | | |
+| | **Option A total** | **74.5** | | |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
 | D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
 | D2 | Traps, timer, real preemption | 2 | | ⬜ D |
@@ -221,7 +221,29 @@ crashing on it.
 
 ---
 
-## M0b — Move the OPFS handles to a second kernel-side worker · next · 1.5 days
+## M0b — Move the OPFS handles to a second kernel-side worker · ✅ done · est 1.5 d, actual 0.5
+
+**It works.** Cheap p99 at N=16 is 185 µs with one process doing file I/O and 290 µs with two,
+against a 500 µs accept bar and the 850–2,657 µs the inline design produced. Cheap p50 returns to
+the 85–105 µs no-I/O baseline at every K tested. The full table, the trade and the negative control
+are `docs/CONSTRAINTS.md` constraint 59.
+
+**The trade, stated rather than buried:** a write is now a message to another agent, so a single
+process doing nothing but `write` + `fsync` gets 30% fewer operations through and its mean rises
+43%, though its p50 barely moves. The threshold set before measuring was "more than double and the
+trade needs restating"; it did not, so the trade stands.
+
+**The write is zero-copy.** The I/O worker reads the payload out of the calling process's own SAB,
+which is safe for one specific reason: that process is parked until the dispatch kernel bumps its
+`SEQ`, and the dispatch kernel does not bump it until the I/O worker has answered. A process still
+receives nothing but its own SAB and port, so constraint 15 holds — no handle, and no port to the
+I/O worker, is reachable from a process.
+
+**One general mechanism came out of it**, and M2 and M4 inherit it: an entry in `KIND_OPS` may
+return a promise, and `settle()` in `src/kernel/calls.mjs` turns that into `PENDING` answered via
+`later()`. So `SYS_write` is the same four lines whether the description is an in-memory sink or a
+file served from another agent, and constraint 57's rule is available to every kind rather than
+re-derived per handler.
 
 Scheduled by M0a's measurement, not by preference. Constraint 58.
 

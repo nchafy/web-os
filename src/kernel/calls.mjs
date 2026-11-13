@@ -16,6 +16,23 @@ import { KIND_OPS, openFile } from "./files.mjs";
 export const PENDING = Symbol("PENDING");
 
 /**
+ * An ops method MAY return a promise, and then the call becomes PENDING and the kernel answers it
+ * through later(). This one rule is what lets a file description be served by the I/O worker
+ * without any syscall handler knowing where the bytes went: F_SINK answers synchronously, F_FILE
+ * answers from another agent, and SYS_write is the same four lines either way.
+ *
+ * It is also the general form of constraint 57 — a syscall that must wait does not hold the kernel
+ * thread — available to every kind M2 and M4 add rather than re-derived per handler.
+ */
+function settle(k, p, r) {
+  if (r && typeof r.then === "function") {
+    k.later(p, () => r);
+    return PENDING;
+  }
+  return r;
+}
+
+/**
  * @param k the kernel's reply surface: { reply, fail, setTimer }
  * @returns a dense Array(NSYS) indexed by syscall number
  */
@@ -35,7 +52,7 @@ export function buildCalls(k) {
     if (!d) return -EBADF;
     const ops = KIND_OPS[d.kind];
     if (!ops || !ops.write) return -ENOSYS;
-    return ops.write(d, p.bytes, DATA_OFF, length);
+    return settle(k, p, ops.write(d, p.bytes, DATA_OFF, length, p));
   };
 
   // M0a. open is SLOW but cheap to serve: createSyncAccessHandle returns a promise, so the 495 us
@@ -53,7 +70,8 @@ export function buildCalls(k) {
       new Uint8Array(p.bytes.subarray(DATA_OFF, DATA_OFF + length)));
     if (!name || name.includes("/") || name.includes("\0")) return -EINVAL;
     k.later(p, async () => {
-      const d = await openFile(root, name);
+      const d = await openFile(k, name);
+      if (typeof d === "number") return d;        // an errno from the I/O worker, passed through
       return p.fds.add(d);
     });
     return PENDING;
@@ -67,7 +85,7 @@ export function buildCalls(k) {
     if (!d) return -EBADF;
     const ops = KIND_OPS[d.kind];
     if (!ops || !ops.fsync) return -ENOSYS;
-    return ops.fsync(d);
+    return settle(k, p, ops.fsync(d, p));
   };
 
   // The async path exists at M0 precisely so it exists before M2's OPFS handlers need it.
