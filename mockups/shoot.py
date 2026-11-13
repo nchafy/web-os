@@ -19,6 +19,9 @@ PAGES = [
     ("milestones-M4a",   "mockups/milestones.html",    "document.querySelectorAll('nav button')[5].click()"),
     ("milestones-M11",   "mockups/milestones.html",    "document.querySelectorAll('nav button')[12].click()"),
     ("milestones-M14",   "mockups/milestones.html",    "document.querySelectorAll('nav button')[15].click()"),
+    ("milestones-D1",    "mockups/milestones.html",    "document.querySelectorAll('nav button')[17].click()"),
+    ("milestones-D3",    "mockups/milestones.html",    "document.querySelectorAll('nav button')[19].click()"),
+    ("milestones-D5",    "mockups/milestones.html",    "document.querySelectorAll('nav button')[21].click()"),
     ("learning-live",    "mockups/learning-mode.html", None),
     ("learning-scrub",   "mockups/learning-mode.html", "document.getElementById('scrub').value=2;"
                                                        "document.getElementById('scrub').dispatchEvent(new Event('input'))"),
