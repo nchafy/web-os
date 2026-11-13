@@ -1,0 +1,6499 @@
+[
+  {
+    "state": "done",
+    "isolated": true,
+    "cells": [
+      {
+        "n": 1,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 182449,
+        "throughputPerS": 60816.333333333336,
+        "meanUs": 15.912200122438623,
+        "p50": {
+          "text": "\u2014",
+          "us": null,
+          "why": "withheld: 15.000 us is below 5 quanta (25.000 us)"
+        },
+        "p95": {
+          "us": 24.999994784593582,
+          "lowUs": 19.999995827674866,
+          "highUs": 29.9999937415123,
+          "text": "25.0[20.0,30.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 34.999992698431015,
+          "lowUs": 29.9999937415123,
+          "highUs": 39.99999165534973,
+          "text": "35.0[30.0,40.0]",
+          "why": null
+        },
+        "worstP99Us": 34.999992698431015,
+        "maxUs": 5259.999999776483,
+        "exceedAccept": {
+          "count": 23,
+          "fraction": 0.00012606262572006425
+        },
+        "depth": {
+          "dispatches": 182449,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 182449,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "little": 0.9677216667129348,
+        "dutyMin": 0.9677442474121372,
+        "rho": 0.14428116698778096,
+        "overlap": {
+          "processes": 1,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 184475,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 184475,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "depthRamp": {
+          "dispatches": 0,
+          "p50": 0,
+          "p01": 0,
+          "min": 0,
+          "max": 0,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 0
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 317,
+          "meanMs": 10.003312302841467,
+          "p50Ms": 10,
+          "p99Ms": 10.5,
+          "p999Ms": 15,
+          "maxMs": 15.345000000670552,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 2,
+          "saturateAt": 1,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515534147,
+          "releasedWall": 1794515534184,
+          "deadlineWall": 1794515537184,
+          "allLeftWall": 1794515537225,
+          "goToReleaseMs": 37,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A0 depth==1 at N=1",
+              "pass": true,
+              "detail": "p50 1, max 1",
+              "evaluated": true
+            },
+            {
+              "name": "A3 little in [0.85,1.05]",
+              "pass": true,
+              "detail": "little 0.968",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=1",
+        "accounting": {
+          "issued": 184475,
+          "returned": 184475,
+          "ok": 184167,
+          "dispatched": 184475,
+          "replied": 184475,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 308,
+          "notEqualFraction": 0.0016696029272259114,
+          "notify0": 308,
+          "notifyWoke": 184167,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 1,
+        "readyMs": 76,
+        "heartbeat": {
+          "windowMs": 3037.7599999997765,
+          "advances": 182652,
+          "p50Ms": 0.015000000596046448,
+          "p99Ms": 0.03500000014901161,
+          "p999Ms": 0.09500000067055225,
+          "maxMs": 5.255000000819564
+        },
+        "serviceMeanUs": 2.3724081851001806,
+        "sinks": [
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.977145,
+          "meanMs": 0.00011494999972172081,
+          "maxMs": 0.04999999888241291,
+          "distinct": [
+            [
+              0,
+              195429
+            ],
+            [
+              0.004999998956918716,
+              2037
+            ],
+            [
+              0.005000000819563866,
+              2526
+            ],
+            [
+              0.009999999776482582,
+              2
+            ],
+            [
+              0.010000001639127731,
+              1
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.019999999552965164,
+              1
+            ],
+            [
+              0.02500000037252903,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          1
+        ],
+        "firstGetpid": [
+          1
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 4,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 4,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 393447,
+        "throughputPerS": 131149,
+        "meanUs": 29.85187331383486,
+        "p50": {
+          "us": 29.9999937415123,
+          "lowUs": 24.999994784593582,
+          "highUs": 34.999992698431015,
+          "text": "30.0[25.0,35.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 49.999989569187164,
+          "lowUs": 44.99999061226845,
+          "highUs": 54.99998852610588,
+          "text": "50.0[45.0,55.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 74.99998435378075,
+          "lowUs": 69.99998539686203,
+          "highUs": 79.99998331069946,
+          "text": "75.0[70.0,80.0]",
+          "why": null
+        },
+        "worstP99Us": 74.99998435378075,
+        "maxUs": 5445.000000298023,
+        "exceedAccept": {
+          "count": 169,
+          "fraction": 0.0004295368880687869
+        },
+        "depth": {
+          "dispatches": 393442,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 40505,
+          "atOneFraction": 0.10295037133808795,
+          "queuedFraction": 0.8970496286619121
+        },
+        "little": 0.9787608333090321,
+        "dutyMin": 0.9785497497024995,
+        "rho": 0.26926058859343255,
+        "overlap": {
+          "processes": 4,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 401551,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 41404,
+          "atOneFraction": 0.10311019023735465,
+          "queuedFraction": 0.8968898097626453
+        },
+        "depthRamp": {
+          "dispatches": 5,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 3,
+          "atOne": 1,
+          "atOneFraction": 0.2,
+          "queuedFraction": 0.8
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 328,
+          "meanMs": 10.061570121952128,
+          "p50Ms": 10,
+          "p99Ms": 11,
+          "p999Ms": 31.5,
+          "maxMs": 31.640000000596046,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 5,
+          "saturateAt": 4,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515538402,
+          "releasedWall": 1794515538481,
+          "deadlineWall": 1794515541481,
+          "allLeftWall": 1794515541564,
+          "goToReleaseMs": 79,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 4 vs 3",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 3 vs floor 2",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "not read below N=16: the per-process wake-latency gap is too large a share of the cycle here (q_frac 0.897)",
+              "evaluated": false
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.979",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 3 vs little*N 3.92",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.979, calls min/mean 98262/98362",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 0 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 99.4%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": [
+            "A2c queued_fraction >= 0.95"
+          ]
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=4",
+        "accounting": {
+          "issued": 401551,
+          "returned": 401551,
+          "ok": 401010,
+          "dispatched": 401551,
+          "replied": 401551,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 3,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 541,
+          "notEqualFraction": 0.0013472759375521416,
+          "notify0": 538,
+          "notifyWoke": 401013,
+          "raceAgreement": 0.9944547134935305,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 4,
+        "readyMs": 113.99500000104308,
+        "heartbeat": {
+          "windowMs": 3078.7050000000745,
+          "advances": 392550,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.030000001192092896,
+          "p999Ms": 0.07499999925494194,
+          "maxMs": 5.424999998882413
+        },
+        "serviceMeanUs": 2.0530891474081585,
+        "sinks": [
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 3
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 3
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 3
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.976785,
+          "meanMs": 0.00011965000004507601,
+          "maxMs": 0.3049999997019768,
+          "distinct": [
+            [
+              0,
+              195357
+            ],
+            [
+              0.004999998956918716,
+              2031
+            ],
+            [
+              0.005000000819563866,
+              2595
+            ],
+            [
+              0.009999999776482582,
+              5
+            ],
+            [
+              0.010000001639127731,
+              1
+            ],
+            [
+              0.015000000596046448,
+              3
+            ],
+            [
+              0.019999999552965164,
+              2
+            ],
+            [
+              0.02500000037252903,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          3,
+          2,
+          1,
+          4
+        ],
+        "firstGetpid": [
+          3,
+          2,
+          1,
+          4
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 7,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 16,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 517544,
+        "throughputPerS": 172514.66666666666,
+        "meanUs": 91.80503493556579,
+        "p50": {
+          "us": 84.99998226761818,
+          "lowUs": 79.99998331069946,
+          "highUs": 89.9999812245369,
+          "text": "85.0[80.0,90.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 124.99997392296791,
+          "lowUs": 119.9999749660492,
+          "highUs": 129.99997287988663,
+          "text": "125.0[120.0,130.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 199.99995827674866,
+          "lowUs": 194.99995931982994,
+          "highUs": 204.99995723366737,
+          "text": "200.0[195.0,205.0]",
+          "why": null
+        },
+        "worstP99Us": 204.99995723366737,
+        "maxUs": 10245.000001043081,
+        "exceedAccept": {
+          "count": 1130,
+          "fraction": 0.0021833892384029185
+        },
+        "depth": {
+          "dispatches": 517469,
+          "p50": 12,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 348,
+          "atOneFraction": 0.000672504053382908,
+          "queuedFraction": 0.9993274959466171
+        },
+        "little": 0.9898571875144262,
+        "dutyMin": 0.9895766493144363,
+        "rho": 0.4018692081571118,
+        "overlap": {
+          "processes": 16,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 1,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 549960,
+          "p50": 12,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 510,
+          "atOneFraction": 0.0009273401701941959,
+          "queuedFraction": 0.9990726598298058
+        },
+        "depthRamp": {
+          "dispatches": 69,
+          "p50": 12,
+          "p01": 4,
+          "min": 4,
+          "max": 15,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 1
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 352,
+          "meanMs": 10.172713068181606,
+          "p50Ms": 10,
+          "p99Ms": 20,
+          "p999Ms": 33,
+          "maxMs": 33.32499999925494,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 17,
+          "saturateAt": 16,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515542781,
+          "releasedWall": 1794515542975,
+          "deadlineWall": 1794515545975,
+          "allLeftWall": 1794515546072,
+          "goToReleaseMs": 194,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 16 vs 12",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 12 vs floor 8",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 0.999",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.990",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 12 vs little*N 15.84",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.990, calls min/mean 32061/32347",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 1 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 98.6%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "ACCEPT",
+        "why": "p99 200.0 us + 1 quantum < 500 us",
+        "accounting": {
+          "issued": 549960,
+          "returned": 549960,
+          "ok": 549104,
+          "dispatched": 549960,
+          "replied": 549960,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 12,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 856,
+          "notEqualFraction": 0.0015564768346788857,
+          "notify0": 844,
+          "notifyWoke": 549116,
+          "raceAgreement": 0.985981308411215,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 16,
+        "readyMs": 236.49499999918044,
+        "heartbeat": {
+          "windowMs": 3095.035000000149,
+          "advances": 504621,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.029999999329447746,
+          "p999Ms": 0.06499999947845936,
+          "maxMs": 10.139999998733401
+        },
+        "serviceMeanUs": 2.329478507086036,
+        "sinks": [
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 12
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 12
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 12
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.978155,
+          "meanMs": 0.000110500000230968,
+          "maxMs": 0.08499999903142452,
+          "distinct": [
+            [
+              0,
+              195631
+            ],
+            [
+              0.004999998956918716,
+              1893
+            ],
+            [
+              0.005000000819563866,
+              2466
+            ],
+            [
+              0.009999999776482582,
+              1
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.015000000596046448,
+              1
+            ],
+            [
+              0.020000001415610313,
+              2
+            ],
+            [
+              0.029999999329447746,
+              2
+            ]
+          ]
+        },
+        "pids": [
+          12,
+          14,
+          9,
+          3,
+          6,
+          4,
+          7,
+          10,
+          8,
+          13,
+          2,
+          1,
+          5,
+          15,
+          11,
+          16
+        ],
+        "firstGetpid": [
+          12,
+          14,
+          9,
+          3,
+          6,
+          4,
+          7,
+          10,
+          8,
+          13,
+          2,
+          1,
+          5,
+          15,
+          11,
+          16
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 19,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 64,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 448659,
+        "throughputPerS": 149553,
+        "meanUs": 426.4765445469108,
+        "p50": {
+          "us": 369.999922811985,
+          "lowUs": 364.9999238550663,
+          "highUs": 374.99992176890373,
+          "text": "370.0[365.0,375.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 624.9998696148396,
+          "lowUs": 619.9998706579208,
+          "highUs": 629.9998685717583,
+          "text": "625.0[620.0,630.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 1359.9997162818909,
+          "lowUs": 1354.9997173249722,
+          "highUs": 1364.9997152388096,
+          "text": "1360.0[1355.0,1365.0]",
+          "why": null
+        },
+        "worstP99Us": 1474.9996922910213,
+        "maxUs": 20425.000000745058,
+        "exceedAccept": {
+          "count": 37050,
+          "fraction": 0.08257942000494808
+        },
+        "depth": {
+          "dispatches": 448454,
+          "p50": 60,
+          "p01": 36,
+          "min": 1,
+          "max": 64,
+          "atOne": 35,
+          "atOneFraction": 7.804590883345895e-05,
+          "queuedFraction": 0.9999219540911666
+        },
+        "little": 0.9965757291660025,
+        "dutyMin": 0.9961535769553247,
+        "rho": 0.5509281857509674,
+        "overlap": {
+          "processes": 64,
+          "releaseSpreadMs": 1,
+          "endSpreadMs": 1,
+          "overlapMs": 2999,
+          "fraction": 0.9996666666666667
+        },
+        "depthAll": {
+          "dispatches": 578323,
+          "p50": 60,
+          "p01": 36,
+          "min": 1,
+          "max": 64,
+          "atOne": 97,
+          "atOneFraction": 0.00016772633977898163,
+          "queuedFraction": 0.999832273660221
+        },
+        "depthRamp": {
+          "dispatches": 90,
+          "p50": 11,
+          "p01": 1,
+          "min": 1,
+          "max": 63,
+          "atOne": 2,
+          "atOneFraction": 0.022222222222222223,
+          "queuedFraction": 0.9777777777777777
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 475,
+          "meanMs": 11.073673684212721,
+          "p50Ms": 10,
+          "p99Ms": 41.5,
+          "p999Ms": 60.5,
+          "maxMs": 60.59000000171363,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 65,
+          "saturateAt": 64,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515547864,
+          "releasedWall": 1794515548707,
+          "deadlineWall": 1794515551707,
+          "allLeftWall": 1794515551809,
+          "goToReleaseMs": 843,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 64 vs 48",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 60 vs floor 32",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 1.000",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.997",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 60 vs little*N 63.78",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.996, calls min/mean 6961/7010",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 99.97% (release spread 1 ms, end spread 1 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 99.4%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=64",
+        "accounting": {
+          "issued": 578323,
+          "returned": 578323,
+          "ok": 578142,
+          "dispatched": 578323,
+          "replied": 578323,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 1,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 181,
+          "notEqualFraction": 0.00031297389175253274,
+          "notify0": 180,
+          "notifyWoke": 578143,
+          "raceAgreement": 0.994475138121547,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 64,
+        "readyMs": 756.7450000010431,
+        "heartbeat": {
+          "windowMs": 3100.8349999990314,
+          "advances": 436962,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.03500000014901161,
+          "p999Ms": 0.09500000067055225,
+          "maxMs": 10.025000000372529
+        },
+        "serviceMeanUs": 3.6838323922018774,
+        "sinks": [
+          {
+            "pid": 20,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 46,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 56,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 33,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 19,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 43,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 62,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 54,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 24,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 41,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 17,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 63,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 55,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 22,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 59,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 60,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 48,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 23,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 49,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 36,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 31,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 30,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 50,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 38,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 45,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 26,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 58,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 64,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 28,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 25,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 39,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 44,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 51,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 18,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 52,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 32,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 21,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 57,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 27,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 53,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 37,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 47,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 29,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 35,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 40,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 61,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 34,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 42,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 20
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 20
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 20
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.977615,
+          "meanMs": 0.00011210000021383167,
+          "maxMs": 0.015000000596046448,
+          "distinct": [
+            [
+              0,
+              195523
+            ],
+            [
+              0.004999998956918716,
+              1944
+            ],
+            [
+              0.005000000819563866,
+              2528
+            ],
+            [
+              0.009999999776482582,
+              3
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.015000000596046448,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          20,
+          15,
+          46,
+          56,
+          33,
+          19,
+          43,
+          62,
+          54,
+          8,
+          24,
+          41,
+          7,
+          6,
+          17,
+          63,
+          55,
+          22,
+          59,
+          60,
+          48,
+          23,
+          11,
+          10,
+          49,
+          5,
+          36,
+          31,
+          30,
+          50,
+          38,
+          45,
+          1,
+          26,
+          16,
+          58,
+          64,
+          28,
+          3,
+          25,
+          2,
+          39,
+          44,
+          51,
+          18,
+          52,
+          32,
+          21,
+          57,
+          4,
+          27,
+          53,
+          37,
+          12,
+          47,
+          29,
+          35,
+          14,
+          40,
+          61,
+          34,
+          42,
+          9,
+          13
+        ],
+        "firstGetpid": [
+          20,
+          15,
+          46,
+          56,
+          33,
+          19,
+          43,
+          62,
+          54,
+          8,
+          24,
+          41,
+          7,
+          6,
+          17,
+          63,
+          55,
+          22,
+          59,
+          60,
+          48,
+          23,
+          11,
+          10,
+          49,
+          5,
+          36,
+          31,
+          30,
+          50,
+          38,
+          45,
+          1,
+          26,
+          16,
+          58,
+          64,
+          28,
+          3,
+          25,
+          2,
+          39,
+          44,
+          51,
+          18,
+          52,
+          32,
+          21,
+          57,
+          4,
+          27,
+          53,
+          37,
+          12,
+          47,
+          29,
+          35,
+          14,
+          40,
+          61,
+          34,
+          42,
+          9,
+          13
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 67,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 128,
+        "invalid": true,
+        "verdict": "INVALID",
+        "why": "kernel-starved-children: 128/129 ready in 10000 ms; the kernel did not yield between spawn and first use",
+        "faults": [],
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 131,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      }
+    ],
+    "errors": [],
+    "faults": [],
+    "preflight": {
+      "ok": true,
+      "missing": [],
+      "graph": [
+        "/src/abi.mjs",
+        "/src/kernel/kernel.mjs",
+        "/src/kernel/table.mjs",
+        "/src/kernel/files.mjs",
+        "/src/kernel/calls.mjs",
+        "/src/libos/process.mjs",
+        "/src/libos/syscall.mjs",
+        "/bench/syscall-contention/summarise.mjs",
+        "/bench/syscall-contention/loop.mjs",
+        "/bench/syscall-contention/bars.json"
+      ]
+    },
+    "pageFingerprint": 1780549064,
+    "agreementSelfTest": {
+      "identical": 1,
+      "disjoint": 0,
+      "half": 0.5,
+      "unobserved": null,
+      "ok": true
+    },
+    "machine": {
+      "hardwareConcurrency": 12,
+      "platform": "macOS",
+      "agents": 4,
+      "dpr": 1
+    },
+    "config": {
+      "rearmMs": 50,
+      "hbPeriodMs": 10,
+      "hbMissLimit": 3,
+      "deathThresholdMs": 200,
+      "busyCeilingMs": 150,
+      "procCap": 128,
+      "maxInline": 65404,
+      "windowMs": 3000,
+      "call": "getpid",
+      "payloadBytes": 64,
+      "warmupCalls": 2000,
+      "bars": {
+        "accept_p99_us": 500,
+        "kill_p99_us": 2000,
+        "bar_n": 16,
+        "liveness_bound_factor": 1.2,
+        "liveness_poll_slack_ms": 1000,
+        "quiescence_max_workers": 0
+      }
+    },
+    "kernelFingerprint": 1780549064,
+    "cfgEcho": {
+      "bench": 1,
+      "stallUs": 0,
+      "thinkUs": 0,
+      "truncateOverflow": false,
+      "spawnThenPark": false,
+      "depth": true
+    },
+    "kernelIsolated": true,
+    "chrome": "157.0.8103.52",
+    "quiescence": {
+      "ok": true,
+      "workers": 0,
+      "limit": 0,
+      "census": {
+        "page": 1,
+        "browser_ui": 1
+      },
+      "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+    },
+    "run": 1,
+    "quiescencePerCell": [
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      }
+    ],
+    "liveness": null
+  },
+  {
+    "state": "done",
+    "isolated": true,
+    "cells": [
+      {
+        "n": 1,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 182292,
+        "throughputPerS": 60764,
+        "meanUs": 15.951659973961155,
+        "p50": {
+          "text": "\u2014",
+          "us": null,
+          "why": "withheld: 15.000 us is below 5 quanta (25.000 us)"
+        },
+        "p95": {
+          "us": 24.999994784593582,
+          "lowUs": 19.999995827674866,
+          "highUs": 29.9999937415123,
+          "text": "25.0[20.0,30.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 34.999992698431015,
+          "lowUs": 29.9999937415123,
+          "highUs": 39.99999165534973,
+          "text": "35.0[30.0,40.0]",
+          "why": null
+        },
+        "worstP99Us": 34.999992698431015,
+        "maxUs": 5410.000000149012,
+        "exceedAccept": {
+          "count": 19,
+          "fraction": 0.00010422838083953218
+        },
+        "depth": {
+          "dispatches": 182292,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 182292,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "little": 0.9692866666577756,
+        "dutyMin": 0.9693012061758443,
+        "rho": 0.14606166536984042,
+        "overlap": {
+          "processes": 1,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 184318,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 184318,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "depthRamp": {
+          "dispatches": 0,
+          "p50": 0,
+          "p01": 0,
+          "min": 0,
+          "max": 0,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 0
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 318,
+          "meanMs": 10.03174528301512,
+          "p50Ms": 10,
+          "p99Ms": 10.5,
+          "p999Ms": 26.5,
+          "maxMs": 26.705000000074506,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 2,
+          "saturateAt": 1,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515565323,
+          "releasedWall": 1794515565364,
+          "deadlineWall": 1794515568364,
+          "allLeftWall": 1794515568405,
+          "goToReleaseMs": 41,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A0 depth==1 at N=1",
+              "pass": true,
+              "detail": "p50 1, max 1",
+              "evaluated": true
+            },
+            {
+              "name": "A3 little in [0.85,1.05]",
+              "pass": true,
+              "detail": "little 0.969",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=1",
+        "accounting": {
+          "issued": 184318,
+          "returned": 184318,
+          "ok": 184107,
+          "dispatched": 184318,
+          "replied": 184318,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 211,
+          "notEqualFraction": 0.0011447606853372974,
+          "notify0": 211,
+          "notifyWoke": 184107,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 1,
+        "readyMs": 91.3099999986589,
+        "heartbeat": {
+          "windowMs": 3036.9550000000745,
+          "advances": 182487,
+          "p50Ms": 0.015000000596046448,
+          "p99Ms": 0.03500000014901161,
+          "p999Ms": 0.0800000000745058,
+          "maxMs": 5.404999999329448
+        },
+        "serviceMeanUs": 2.4037532975090583,
+        "sinks": [
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.978145,
+          "meanMs": 0.00010954999975860119,
+          "maxMs": 0.02499999850988388,
+          "distinct": [
+            [
+              0,
+              195629
+            ],
+            [
+              0.004999998956918716,
+              1944
+            ],
+            [
+              0.005000000819563866,
+              2422
+            ],
+            [
+              0.009999999776482582,
+              1
+            ],
+            [
+              0.014999998733401299,
+              3
+            ],
+            [
+              0.02499999850988388,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          1
+        ],
+        "firstGetpid": [
+          1
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 4,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 4,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 405282,
+        "throughputPerS": 135094,
+        "meanUs": 28.97908123276649,
+        "p50": {
+          "us": 24.999994784593582,
+          "lowUs": 19.999995827674866,
+          "highUs": 29.9999937415123,
+          "text": "25.0[20.0,30.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 44.99999061226845,
+          "lowUs": 39.99999165534973,
+          "highUs": 49.999989569187164,
+          "text": "45.0[40.0,50.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 64.99998643994331,
+          "lowUs": 59.9999874830246,
+          "highUs": 69.99998539686203,
+          "text": "65.0[60.0,70.0]",
+          "why": null
+        },
+        "worstP99Us": 64.99998643994331,
+        "maxUs": 5294.999999925494,
+        "exceedAccept": {
+          "count": 146,
+          "fraction": 0.00036024299129988504
+        },
+        "depth": {
+          "dispatches": 405275,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 42481,
+          "atOneFraction": 0.1048201838257973,
+          "queuedFraction": 0.8951798161742027
+        },
+        "little": 0.9787250000148391,
+        "dutyMin": 0.9783880451581084,
+        "rho": 0.2693899576615462,
+        "overlap": {
+          "processes": 4,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 413386,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 43399,
+          "atOneFraction": 0.10498420362566706,
+          "queuedFraction": 0.8950157963743329
+        },
+        "depthRamp": {
+          "dispatches": 7,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 3,
+          "atOne": 1,
+          "atOneFraction": 0.14285714285714285,
+          "queuedFraction": 0.8571428571428571
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 326,
+          "meanMs": 10.032622699391531,
+          "p50Ms": 10,
+          "p99Ms": 10.5,
+          "p999Ms": 20.5,
+          "maxMs": 20.720000000670552,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 5,
+          "saturateAt": 4,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515569517,
+          "releasedWall": 1794515569591,
+          "deadlineWall": 1794515572591,
+          "allLeftWall": 1794515572675,
+          "goToReleaseMs": 74,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 4 vs 3",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 3 vs floor 2",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "not read below N=16: the per-process wake-latency gap is too large a share of the cycle here (q_frac 0.895)",
+              "evaluated": false
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.979",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 3 vs little*N 3.91",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.978, calls min/mean 101199/101321",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 0 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 99.7%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": [
+            "A2c queued_fraction >= 0.95"
+          ]
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=4",
+        "accounting": {
+          "issued": 413386,
+          "returned": 413386,
+          "ok": 412993,
+          "dispatched": 413386,
+          "replied": 413386,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 1,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 393,
+          "notEqualFraction": 0.0009506853159032962,
+          "notify0": 392,
+          "notifyWoke": 412994,
+          "raceAgreement": 0.9974554707379135,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 4,
+        "readyMs": 94.30000000074506,
+        "heartbeat": {
+          "windowMs": 3079.445000000298,
+          "advances": 404460,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.030000001192092896,
+          "p999Ms": 0.06000000052154064,
+          "maxMs": 5.259999999776483
+        },
+        "serviceMeanUs": 1.9940926885098245,
+        "sinks": [
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 2
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 2
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 2
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.976065,
+          "meanMs": 0.00012139999977312982,
+          "maxMs": 0.13000000081956387,
+          "distinct": [
+            [
+              0,
+              195213
+            ],
+            [
+              0.004999998956918716,
+              2126
+            ],
+            [
+              0.005000000819563866,
+              2649
+            ],
+            [
+              0.009999999776482582,
+              3
+            ],
+            [
+              0.010000001639127731,
+              2
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.019999999552965164,
+              1
+            ],
+            [
+              0.029999999329447746,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          2,
+          1,
+          4,
+          3
+        ],
+        "firstGetpid": [
+          2,
+          1,
+          4,
+          3
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 7,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 16,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 484460,
+        "throughputPerS": 161486.66666666666,
+        "meanUs": 98.10685092696413,
+        "p50": {
+          "us": 89.9999812245369,
+          "lowUs": 84.99998226761818,
+          "highUs": 94.99998018145561,
+          "text": "90.0[85.0,95.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 139.99997079372406,
+          "lowUs": 134.99997183680534,
+          "highUs": 144.99996975064278,
+          "text": "140.0[135.0,145.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 254.99994680285454,
+          "lowUs": 249.99994784593582,
+          "highUs": 259.99994575977325,
+          "text": "255.0[250.0,260.0]",
+          "why": null
+        },
+        "worstP99Us": 254.99994680285454,
+        "maxUs": 11089.999999850988,
+        "exceedAccept": {
+          "count": 1353,
+          "fraction": 0.002792800231185237
+        },
+        "depth": {
+          "dispatches": 484428,
+          "p50": 13,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 375,
+          "atOneFraction": 0.0007741088458966039,
+          "queuedFraction": 0.9992258911541034
+        },
+        "little": 0.9901842708349383,
+        "dutyMin": 0.9894281923697422,
+        "rho": 0.3965339410472902,
+        "overlap": {
+          "processes": 16,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 516876,
+          "p50": 13,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 595,
+          "atOneFraction": 0.0011511465032232103,
+          "queuedFraction": 0.9988488534967768
+        },
+        "depthRamp": {
+          "dispatches": 28,
+          "p50": 10,
+          "p01": 1,
+          "min": 1,
+          "max": 15,
+          "atOne": 1,
+          "atOneFraction": 0.03571428571428571,
+          "queuedFraction": 0.9642857142857143
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 358,
+          "meanMs": 10.057206703911863,
+          "p50Ms": 10,
+          "p99Ms": 15.5,
+          "p999Ms": 25,
+          "maxMs": 25.15000000037253,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 17,
+          "saturateAt": 16,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515573972,
+          "releasedWall": 1794515574178,
+          "deadlineWall": 1794515577178,
+          "allLeftWall": 1794515577272,
+          "goToReleaseMs": 206,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 16 vs 12",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 13 vs floor 8",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 0.999",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.990",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 13 vs little*N 15.84",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.989, calls min/mean 29874/30279",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 0 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 98.3%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "ACCEPT",
+        "why": "p99 255.0 us + 1 quantum < 500 us",
+        "accounting": {
+          "issued": 516876,
+          "returned": 516876,
+          "ok": 516159,
+          "dispatched": 516876,
+          "replied": 516876,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 12,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 717,
+          "notEqualFraction": 0.0013871799038841037,
+          "notify0": 705,
+          "notifyWoke": 516171,
+          "raceAgreement": 0.9832635983263598,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 16,
+        "readyMs": 245.089999999851,
+        "heartbeat": {
+          "windowMs": 3092.175000000745,
+          "advances": 480001,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.029999999329447746,
+          "p999Ms": 0.07000000029802322,
+          "maxMs": 10.029999999329448
+        },
+        "serviceMeanUs": 2.4555212466289693,
+        "sinks": [
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 10
+          },
+          {
+            "notEqual": false,
+            "publishedBeforePark": false,
+            "r0": 10
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 10
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.979545,
+          "meanMs": 0.00010792499992996455,
+          "maxMs": 0.7250000014901161,
+          "distinct": [
+            [
+              0,
+              195909
+            ],
+            [
+              0.004999998956918716,
+              1802
+            ],
+            [
+              0.005000000819563866,
+              2272
+            ],
+            [
+              0.009999999776482582,
+              7
+            ],
+            [
+              0.010000001639127731,
+              1
+            ],
+            [
+              0.015000000596046448,
+              3
+            ],
+            [
+              0.02500000037252903,
+              1
+            ],
+            [
+              0.03500000014901161,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          10,
+          11,
+          9,
+          5,
+          6,
+          13,
+          8,
+          1,
+          15,
+          4,
+          7,
+          12,
+          16,
+          14,
+          2,
+          3
+        ],
+        "firstGetpid": [
+          10,
+          11,
+          9,
+          5,
+          6,
+          13,
+          8,
+          1,
+          15,
+          4,
+          7,
+          12,
+          16,
+          14,
+          2,
+          3
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 19,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 64,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 470091,
+        "throughputPerS": 156697,
+        "meanUs": 406.9637368086275,
+        "p50": {
+          "us": 369.999922811985,
+          "lowUs": 364.9999238550663,
+          "highUs": 374.99992176890373,
+          "text": "370.0[365.0,375.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 509.9998936057091,
+          "lowUs": 504.99989464879036,
+          "highUs": 514.9998925626278,
+          "text": "510.0[505.0,515.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 1219.9997454881668,
+          "lowUs": 1214.999746531248,
+          "highUs": 1224.9997444450855,
+          "text": "1220.0[1215.0,1225.0]",
+          "why": null
+        },
+        "worstP99Us": 1339.999720454216,
+        "maxUs": 10835.00000089407,
+        "exceedAccept": {
+          "count": 25091,
+          "fraction": 0.053374772118589806
+        },
+        "depth": {
+          "dispatches": 469903,
+          "p50": 60,
+          "p01": 38,
+          "min": 1,
+          "max": 64,
+          "atOne": 45,
+          "atOneFraction": 9.576444500247923e-05,
+          "queuedFraction": 0.9999042355549975
+        },
+        "little": 0.996406197917211,
+        "dutyMin": 0.9959287175339305,
+        "rho": 0.5229730207365757,
+        "overlap": {
+          "processes": 64,
+          "releaseSpreadMs": 1,
+          "endSpreadMs": 1,
+          "overlapMs": 2999,
+          "fraction": 0.9996666666666667
+        },
+        "depthAll": {
+          "dispatches": 599755,
+          "p50": 60,
+          "p01": 37,
+          "min": 1,
+          "max": 64,
+          "atOne": 89,
+          "atOneFraction": 0.00014839392752040418,
+          "queuedFraction": 0.9998516060724796
+        },
+        "depthRamp": {
+          "dispatches": 76,
+          "p50": 43,
+          "p01": 1,
+          "min": 1,
+          "max": 63,
+          "atOne": 2,
+          "atOneFraction": 0.02631578947368421,
+          "queuedFraction": 0.9736842105263158
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 478,
+          "meanMs": 10.842646443514957,
+          "p50Ms": 10,
+          "p99Ms": 39.5,
+          "p999Ms": 52,
+          "maxMs": 52.36500000022352,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 65,
+          "saturateAt": 64,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515579099,
+          "releasedWall": 1794515579929,
+          "deadlineWall": 1794515582929,
+          "allLeftWall": 1794515583030,
+          "goToReleaseMs": 830,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 64 vs 48",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 60 vs floor 32",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 1.000",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.996",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 60 vs little*N 63.77",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.996, calls min/mean 7265/7345",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 99.97% (release spread 1 ms, end spread 1 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=64",
+        "accounting": {
+          "issued": 599755,
+          "returned": 599755,
+          "ok": 599544,
+          "dispatched": 599755,
+          "replied": 599755,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 211,
+          "notEqualFraction": 0.0003518103225483739,
+          "notify0": 211,
+          "notifyWoke": 599544,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 64,
+        "readyMs": 749.3849999997765,
+        "heartbeat": {
+          "windowMs": 3098.3650000002235,
+          "advances": 461208,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.030000001192092896,
+          "p999Ms": 0.08499999903142452,
+          "maxMs": 10.019999999552965
+        },
+        "serviceMeanUs": 3.3374794714421827,
+        "sinks": [
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 49,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 60,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 30,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 21,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 22,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 28,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 64,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 42,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 24,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 29,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 32,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 62,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 40,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 20,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 57,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 51,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 44,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 19,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 53,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 63,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 34,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 36,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 27,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 43,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 26,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 31,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 33,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 54,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 58,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 39,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 52,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 46,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 38,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 37,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 61,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 45,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 35,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 23,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 56,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 41,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 48,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 17,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 50,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 55,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 47,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 59,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 18,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 25,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 9
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 9
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 9
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.979255,
+          "meanMs": 0.00010562499983236194,
+          "maxMs": 0.25,
+          "distinct": [
+            [
+              0,
+              195851
+            ],
+            [
+              0.004999998956918716,
+              1838
+            ],
+            [
+              0.005000000819563866,
+              2299
+            ],
+            [
+              0.009999999776482582,
+              3
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.015000000596046448,
+              5
+            ],
+            [
+              0.019999999552965164,
+              1
+            ],
+            [
+              0.04999999888241291,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          9,
+          49,
+          60,
+          30,
+          21,
+          22,
+          28,
+          64,
+          42,
+          5,
+          24,
+          29,
+          32,
+          62,
+          12,
+          40,
+          16,
+          20,
+          11,
+          57,
+          51,
+          44,
+          19,
+          3,
+          53,
+          63,
+          2,
+          34,
+          36,
+          27,
+          43,
+          26,
+          31,
+          33,
+          54,
+          58,
+          39,
+          52,
+          7,
+          1,
+          10,
+          46,
+          38,
+          37,
+          13,
+          61,
+          8,
+          45,
+          35,
+          23,
+          56,
+          41,
+          14,
+          48,
+          17,
+          50,
+          55,
+          47,
+          6,
+          59,
+          18,
+          15,
+          4,
+          25
+        ],
+        "firstGetpid": [
+          9,
+          49,
+          60,
+          30,
+          21,
+          22,
+          28,
+          64,
+          42,
+          5,
+          24,
+          29,
+          32,
+          62,
+          12,
+          40,
+          16,
+          20,
+          11,
+          57,
+          51,
+          44,
+          19,
+          3,
+          53,
+          63,
+          2,
+          34,
+          36,
+          27,
+          43,
+          26,
+          31,
+          33,
+          54,
+          58,
+          39,
+          52,
+          7,
+          1,
+          10,
+          46,
+          38,
+          37,
+          13,
+          61,
+          8,
+          45,
+          35,
+          23,
+          56,
+          41,
+          14,
+          48,
+          17,
+          50,
+          55,
+          47,
+          6,
+          59,
+          18,
+          15,
+          4,
+          25
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 67,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 128,
+        "invalid": true,
+        "verdict": "INVALID",
+        "why": "kernel-starved-children: 128/129 ready in 10000 ms; the kernel did not yield between spawn and first use",
+        "faults": [],
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 131,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      }
+    ],
+    "errors": [],
+    "faults": [],
+    "preflight": {
+      "ok": true,
+      "missing": [],
+      "graph": [
+        "/src/abi.mjs",
+        "/src/kernel/kernel.mjs",
+        "/src/kernel/table.mjs",
+        "/src/kernel/files.mjs",
+        "/src/kernel/calls.mjs",
+        "/src/libos/process.mjs",
+        "/src/libos/syscall.mjs",
+        "/bench/syscall-contention/summarise.mjs",
+        "/bench/syscall-contention/loop.mjs",
+        "/bench/syscall-contention/bars.json"
+      ]
+    },
+    "pageFingerprint": 1780549064,
+    "agreementSelfTest": {
+      "identical": 1,
+      "disjoint": 0,
+      "half": 0.5,
+      "unobserved": null,
+      "ok": true
+    },
+    "machine": {
+      "hardwareConcurrency": 12,
+      "platform": "macOS",
+      "agents": 4,
+      "dpr": 1
+    },
+    "config": {
+      "rearmMs": 50,
+      "hbPeriodMs": 10,
+      "hbMissLimit": 3,
+      "deathThresholdMs": 200,
+      "busyCeilingMs": 150,
+      "procCap": 128,
+      "maxInline": 65404,
+      "windowMs": 3000,
+      "call": "getpid",
+      "payloadBytes": 64,
+      "warmupCalls": 2000,
+      "bars": {
+        "accept_p99_us": 500,
+        "kill_p99_us": 2000,
+        "bar_n": 16,
+        "liveness_bound_factor": 1.2,
+        "liveness_poll_slack_ms": 1000,
+        "quiescence_max_workers": 0
+      }
+    },
+    "kernelFingerprint": 1780549064,
+    "cfgEcho": {
+      "bench": 1,
+      "stallUs": 0,
+      "thinkUs": 0,
+      "truncateOverflow": false,
+      "spawnThenPark": false,
+      "depth": true
+    },
+    "kernelIsolated": true,
+    "chrome": "157.0.8103.52",
+    "quiescence": {
+      "ok": true,
+      "workers": 0,
+      "limit": 0,
+      "census": {
+        "page": 1,
+        "browser_ui": 1
+      },
+      "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+    },
+    "run": 2,
+    "quiescencePerCell": [
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      }
+    ],
+    "liveness": null
+  },
+  {
+    "state": "done",
+    "isolated": true,
+    "cells": [
+      {
+        "n": 1,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 183648,
+        "throughputPerS": 61216,
+        "meanUs": 15.82342307003589,
+        "p50": {
+          "text": "\u2014",
+          "us": null,
+          "why": "withheld: 15.000 us is below 5 quanta (25.000 us)"
+        },
+        "p95": {
+          "us": 24.999994784593582,
+          "lowUs": 19.999995827674866,
+          "highUs": 29.9999937415123,
+          "text": "25.0[20.0,30.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 34.999992698431015,
+          "lowUs": 29.9999937415123,
+          "highUs": 39.99999165534973,
+          "text": "35.0[30.0,40.0]",
+          "why": null
+        },
+        "worstP99Us": 34.999992698431015,
+        "maxUs": 5380.000000819564,
+        "exceedAccept": {
+          "count": 21,
+          "fraction": 0.0001143491897543126
+        },
+        "depth": {
+          "dispatches": 183648,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 183648,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "little": 0.9686466666553171,
+        "dutyMin": 0.968669268938355,
+        "rho": 0.14563172784066622,
+        "overlap": {
+          "processes": 1,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 185674,
+          "p50": 1,
+          "p01": 1,
+          "min": 1,
+          "max": 1,
+          "atOne": 185674,
+          "atOneFraction": 1,
+          "queuedFraction": 0
+        },
+        "depthRamp": {
+          "dispatches": 0,
+          "p50": 0,
+          "p01": 0,
+          "min": 0,
+          "max": 0,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 0
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 318,
+          "meanMs": 9.999952830186805,
+          "p50Ms": 10,
+          "p99Ms": 11,
+          "p999Ms": 15.5,
+          "maxMs": 15.605000000447035,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 2,
+          "saturateAt": 1,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515596545,
+          "releasedWall": 1794515596586,
+          "deadlineWall": 1794515599586,
+          "allLeftWall": 1794515599624,
+          "goToReleaseMs": 41,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A0 depth==1 at N=1",
+              "pass": true,
+              "detail": "p50 1, max 1",
+              "evaluated": true
+            },
+            {
+              "name": "A3 little in [0.85,1.05]",
+              "pass": true,
+              "detail": "little 0.969",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=1",
+        "accounting": {
+          "issued": 185674,
+          "returned": 185674,
+          "ok": 185335,
+          "dispatched": 185674,
+          "replied": 185674,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 339,
+          "notEqualFraction": 0.0018257806693451964,
+          "notify0": 339,
+          "notifyWoke": 185335,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 1,
+        "readyMs": 80.50999999977648,
+        "heartbeat": {
+          "windowMs": 3037.5600000005215,
+          "advances": 183856,
+          "p50Ms": 0.015000000596046448,
+          "p99Ms": 0.03500000014901161,
+          "p999Ms": 0.0949999988079071,
+          "maxMs": 5.375
+        },
+        "serviceMeanUs": 2.37898144015725,
+        "sinks": [
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 1
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.976485,
+          "meanMs": 0.00011867500023916364,
+          "maxMs": 0.044999999925494194,
+          "distinct": [
+            [
+              0,
+              195297
+            ],
+            [
+              0.004999998956918716,
+              2036
+            ],
+            [
+              0.005000000819563866,
+              2651
+            ],
+            [
+              0.009999999776482582,
+              7
+            ],
+            [
+              0.014999998733401299,
+              1
+            ],
+            [
+              0.015000000596046448,
+              2
+            ],
+            [
+              0.019999999552965164,
+              1
+            ],
+            [
+              0.020000001415610313,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          1
+        ],
+        "firstGetpid": [
+          1
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 4,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 4,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 392235,
+        "throughputPerS": 130745,
+        "meanUs": 29.95790788608196,
+        "p50": {
+          "us": 24.999994784593582,
+          "lowUs": 19.999995827674866,
+          "highUs": 29.9999937415123,
+          "text": "25.0[20.0,30.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 49.999989569187164,
+          "lowUs": 44.99999061226845,
+          "highUs": 54.99998852610588,
+          "text": "50.0[45.0,55.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 74.99998435378075,
+          "lowUs": 69.99998539686203,
+          "highUs": 79.99998331069946,
+          "text": "75.0[70.0,80.0]",
+          "why": null
+        },
+        "worstP99Us": 74.99998435378075,
+        "maxUs": 10085.00000089407,
+        "exceedAccept": {
+          "count": 220,
+          "fraction": 0.0005608882430175788
+        },
+        "depth": {
+          "dispatches": 392235,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 38952,
+          "atOneFraction": 0.09930781291827603,
+          "queuedFraction": 0.9006921870817239
+        },
+        "little": 0.9792116666414465,
+        "dutyMin": 0.9788980871332723,
+        "rho": 0.2757967405047121,
+        "overlap": {
+          "processes": 4,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 400339,
+          "p50": 3,
+          "p01": 1,
+          "min": 1,
+          "max": 4,
+          "atOne": 39830,
+          "atOneFraction": 0.09949068164730392,
+          "queuedFraction": 0.9005093183526961
+        },
+        "depthRamp": {
+          "dispatches": 0,
+          "p50": 0,
+          "p01": 0,
+          "min": 0,
+          "max": 0,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 0
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 327,
+          "meanMs": 10.000825688077724,
+          "p50Ms": 10,
+          "p99Ms": 11,
+          "p999Ms": 19,
+          "maxMs": 19.08999999985099,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 5,
+          "saturateAt": 4,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515600726,
+          "releasedWall": 1794515600804,
+          "deadlineWall": 1794515603804,
+          "allLeftWall": 1794515603882,
+          "goToReleaseMs": 78,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 4 vs 3",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 3 vs floor 2",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "not read below N=16: the per-process wake-latency gap is too large a share of the cycle here (q_frac 0.901)",
+              "evaluated": false
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.979",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 3 vs little*N 3.92",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.979, calls min/mean 97835/98059",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 0 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 99.6%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": [
+            "A2c queued_fraction >= 0.95"
+          ]
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=4",
+        "accounting": {
+          "issued": 400339,
+          "returned": 400339,
+          "ok": 399893,
+          "dispatched": 400339,
+          "replied": 400339,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 2,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 446,
+          "notEqualFraction": 0.0011140558376775682,
+          "notify0": 444,
+          "notifyWoke": 399895,
+          "raceAgreement": 0.9955156950672646,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 4,
+        "readyMs": 90.36500000022352,
+        "heartbeat": {
+          "windowMs": 3077.4350000005215,
+          "advances": 391314,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.030000001192092896,
+          "p999Ms": 0.07000000029802322,
+          "maxMs": 10.014999998733401
+        },
+        "serviceMeanUs": 2.1094247619772237,
+        "sinks": [
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 4
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 4
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 4
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.977515,
+          "meanMs": 0.00011554999972693622,
+          "maxMs": 0.17999999970197678,
+          "distinct": [
+            [
+              0,
+              195503
+            ],
+            [
+              0.004999998956918716,
+              2001
+            ],
+            [
+              0.005000000819563866,
+              2482
+            ],
+            [
+              0.014999998733401299,
+              2
+            ],
+            [
+              0.015000000596046448,
+              1
+            ],
+            [
+              0.020000001415610313,
+              2
+            ],
+            [
+              0.02500000037252903,
+              1
+            ],
+            [
+              0.029999999329447746,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          4,
+          1,
+          2,
+          3
+        ],
+        "firstGetpid": [
+          4,
+          1,
+          2,
+          3
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 7,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 16,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 490698,
+        "throughputPerS": 163566,
+        "meanUs": 96.86776795587498,
+        "p50": {
+          "us": 89.9999812245369,
+          "lowUs": 84.99998226761818,
+          "highUs": 94.99998018145561,
+          "text": "90.0[85.0,95.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 134.99997183680534,
+          "lowUs": 129.99997287988663,
+          "highUs": 139.99997079372406,
+          "text": "135.0[130.0,140.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 234.99995097517967,
+          "lowUs": 229.99995201826096,
+          "highUs": 239.9999499320984,
+          "text": "235.0[230.0,240.0]",
+          "why": null
+        },
+        "worstP99Us": 234.99995097517967,
+        "maxUs": 10289.99999910593,
+        "exceedAccept": {
+          "count": 1232,
+          "fraction": 0.0025107092346005077
+        },
+        "depth": {
+          "dispatches": 490680,
+          "p50": 13,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 436,
+          "atOneFraction": 0.0008885628107931849,
+          "queuedFraction": 0.9991114371892068
+        },
+        "little": 0.9902670833419154,
+        "dutyMin": 0.9900366334664228,
+        "rho": 0.4073594293319131,
+        "overlap": {
+          "processes": 16,
+          "releaseSpreadMs": 0,
+          "endSpreadMs": 0,
+          "overlapMs": 3000,
+          "fraction": 1
+        },
+        "depthAll": {
+          "dispatches": 523114,
+          "p50": 13,
+          "p01": 4,
+          "min": 1,
+          "max": 16,
+          "atOne": 619,
+          "atOneFraction": 0.001183298477960827,
+          "queuedFraction": 0.9988167015220392
+        },
+        "depthRamp": {
+          "dispatches": 15,
+          "p50": 13,
+          "p01": 1,
+          "min": 1,
+          "max": 15,
+          "atOne": 1,
+          "atOneFraction": 0.06666666666666667,
+          "queuedFraction": 0.9333333333333333
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 356,
+          "meanMs": 10.112429775281946,
+          "p50Ms": 10,
+          "p99Ms": 19,
+          "p999Ms": 33,
+          "maxMs": 33.29999999888241,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 17,
+          "saturateAt": 16,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515605128,
+          "releasedWall": 1794515605345,
+          "deadlineWall": 1794515608345,
+          "allLeftWall": 1794515608436,
+          "goToReleaseMs": 217,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 16 vs 12",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 13 vs floor 8",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 0.999",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.990",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 13 vs little*N 15.84",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.990, calls min/mean 30491/30669",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 100.00% (release spread 0 ms, end spread 0 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 98.2%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "ACCEPT",
+        "why": "p99 235.0 us + 1 quantum < 500 us",
+        "accounting": {
+          "issued": 523114,
+          "returned": 523114,
+          "ok": 522353,
+          "dispatched": 523114,
+          "replied": 523114,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 14,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 761,
+          "notEqualFraction": 0.0014547498250859277,
+          "notify0": 747,
+          "notifyWoke": 522367,
+          "raceAgreement": 0.9816031537450722,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 16,
+        "readyMs": 233.25999999977648,
+        "heartbeat": {
+          "windowMs": 3090.4150000009686,
+          "advances": 484689,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.029999999329447746,
+          "p999Ms": 0.06999999843537807,
+          "maxMs": 10.054999999701977
+        },
+        "serviceMeanUs": 2.490489645353638,
+        "sinks": [
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 16
+          },
+          {
+            "notEqual": false,
+            "publishedBeforePark": false,
+            "r0": 16
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 16
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.97653,
+          "meanMs": 0.00012557500006631016,
+          "maxMs": 1.2200000006705523,
+          "distinct": [
+            [
+              0,
+              195306
+            ],
+            [
+              0.004999998956918716,
+              2053
+            ],
+            [
+              0.005000000819563866,
+              2629
+            ],
+            [
+              0.009999999776482582,
+              4
+            ],
+            [
+              0.015000000596046448,
+              1
+            ],
+            [
+              0.02500000037252903,
+              3
+            ],
+            [
+              0.04999999888241291,
+              1
+            ],
+            [
+              0.07499999925494194,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          16,
+          5,
+          10,
+          1,
+          3,
+          12,
+          8,
+          2,
+          9,
+          11,
+          15,
+          13,
+          14,
+          6,
+          4,
+          7
+        ],
+        "firstGetpid": [
+          16,
+          5,
+          10,
+          1,
+          3,
+          12,
+          8,
+          2,
+          9,
+          11,
+          15,
+          13,
+          14,
+          6,
+          4,
+          7
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 19,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 64,
+        "quantumUs": 4.999998956918716,
+        "quantumGuard": {
+          "ok": true,
+          "quantumUs": 4.999998956918716,
+          "offReference": true
+        },
+        "count": 486613,
+        "throughputPerS": 162204.33333333334,
+        "meanUs": 393.16601693758815,
+        "p50": {
+          "us": 364.9999238550663,
+          "lowUs": 359.9999248981476,
+          "highUs": 369.999922811985,
+          "text": "365.0[360.0,370.0]",
+          "why": null
+        },
+        "p95": {
+          "us": 479.9998998641968,
+          "lowUs": 474.99990090727806,
+          "highUs": 484.9998988211155,
+          "text": "480.0[475.0,485.0]",
+          "why": null
+        },
+        "p99": {
+          "us": 1029.9997851252556,
+          "lowUs": 1024.9997861683369,
+          "highUs": 1034.9997840821743,
+          "text": "1030.0[1025.0,1035.0]",
+          "why": null
+        },
+        "worstP99Us": 1074.999775737524,
+        "maxUs": 13730.000000447035,
+        "exceedAccept": {
+          "count": 20941,
+          "fraction": 0.043034197606722384
+        },
+        "depth": {
+          "dispatches": 486424,
+          "p50": 60,
+          "p01": 43,
+          "min": 1,
+          "max": 64,
+          "atOne": 26,
+          "atOneFraction": 5.345130996825815e-05,
+          "queuedFraction": 0.9999465486900317
+        },
+        "little": 0.9964567447919302,
+        "dutyMin": 0.9964622189418115,
+        "rho": 0.5271758614126205,
+        "overlap": {
+          "processes": 64,
+          "releaseSpreadMs": 1,
+          "endSpreadMs": 1,
+          "overlapMs": 2999,
+          "fraction": 0.9996666666666667
+        },
+        "depthAll": {
+          "dispatches": 616277,
+          "p50": 60,
+          "p01": 42,
+          "min": 1,
+          "max": 64,
+          "atOne": 65,
+          "atOneFraction": 0.00010547205234010031,
+          "queuedFraction": 0.9998945279476599
+        },
+        "depthRamp": {
+          "dispatches": 77,
+          "p50": 44,
+          "p01": 2,
+          "min": 2,
+          "max": 63,
+          "atOne": 0,
+          "atOneFraction": 0,
+          "queuedFraction": 1
+        },
+        "saturated": true,
+        "hbGapKernel": {
+          "count": 472,
+          "meanMs": 10.936652542376038,
+          "p50Ms": 10,
+          "p99Ms": 39,
+          "p999Ms": 41.5,
+          "maxMs": 41.89000000059605,
+          "over": 0,
+          "topMs": 128
+        },
+        "barrier": {
+          "want": 65,
+          "saturateAt": 64,
+          "windowMs": 3000,
+          "phase": "done",
+          "armedWall": 1794515610245,
+          "releasedWall": 1794515611097,
+          "deadlineWall": 1794515614097,
+          "allLeftWall": 1794515614189,
+          "goToReleaseMs": 852,
+          "failed": null
+        },
+        "gates": {
+          "rows": [
+            {
+              "name": "A2a depth_max >= 0.75N",
+              "pass": true,
+              "detail": "max 64 vs 48",
+              "evaluated": true
+            },
+            {
+              "name": "A2b depth_p50 >= max(2, 0.5N)",
+              "pass": true,
+              "detail": "p50 60 vs floor 32",
+              "evaluated": true
+            },
+            {
+              "name": "A2c queued_fraction >= 0.95",
+              "pass": true,
+              "detail": "q_frac 1.000",
+              "evaluated": true
+            },
+            {
+              "name": "A3 |little-1| <= 0.15",
+              "pass": true,
+              "detail": "little 0.996",
+              "evaluated": true
+            },
+            {
+              "name": "A4 estimators agree within 25%",
+              "pass": true,
+              "detail": "depth_p50 60 vs little*N 63.77",
+              "evaluated": true
+            },
+            {
+              "name": "A5 duty_min >= 0.95 and fairness >= 0.2x mean",
+              "pass": true,
+              "detail": "duty 0.996, calls min/mean 7564/7603",
+              "evaluated": true
+            },
+            {
+              "name": "A8 the window reached N outstanding calls",
+              "pass": true,
+              "detail": "yes, after the ramp",
+              "evaluated": true
+            },
+            {
+              "name": "A7 windows overlap >= 0.98 of the window",
+              "pass": true,
+              "detail": "overlap 99.97% (release spread 1 ms, end spread 1 ms)",
+              "evaluated": true
+            },
+            {
+              "name": "A9 race agreement >= 0.95",
+              "pass": true,
+              "detail": "agreement 100.0%",
+              "evaluated": true
+            }
+          ],
+          "pass": true,
+          "failed": [],
+          "notEvaluated": []
+        },
+        "verdict": "NOT THE BAR",
+        "why": "the bar is read at N=16, not N=64",
+        "accounting": {
+          "issued": 616277,
+          "returned": 616277,
+          "ok": 616058,
+          "dispatched": 616277,
+          "replied": 616277,
+          "identity": true,
+          "beyondTop": 0,
+          "spurious": 0,
+          "seqSkip": 0,
+          "timedOutButReplied": 0,
+          "timedOut": 0,
+          "hostGone": 0,
+          "rlenFault": 0,
+          "notEqual": 219,
+          "notEqualFraction": 0.00035535968403818414,
+          "notify0": 219,
+          "notifyWoke": 616058,
+          "raceAgreement": 1,
+          "badCallId": 0,
+          "lateReply": 0,
+          "dropped": 0
+        },
+        "fingerprintsAgree": true,
+        "isolatedProcesses": 64,
+        "readyMs": 736.484999999404,
+        "heartbeat": {
+          "windowMs": 3090.089999999851,
+          "advances": 481379,
+          "p50Ms": 0.005000000819563866,
+          "p99Ms": 0.029999999329447746,
+          "p999Ms": 0.07499999925494194,
+          "maxMs": 5.669999999925494
+        },
+        "serviceMeanUs": 3.250072612605626,
+        "sinks": [
+          {
+            "pid": 15,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 62,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 63,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 8,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 2,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 64,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 54,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 45,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 53,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 55,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 29,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 30,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 14,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 17,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 36,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 25,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 44,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 10,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 46,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 33,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 16,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 49,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 37,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 43,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 7,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 60,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 39,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 19,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 32,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 20,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 41,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 11,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 9,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 1,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 56,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 22,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 26,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 12,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 57,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 13,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 38,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 5,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 59,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 18,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 28,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 4,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 35,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 3,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 51,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 50,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 21,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 27,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 6,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 61,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 40,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 24,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 48,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 58,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 23,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 52,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 31,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 34,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 47,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          },
+          {
+            "pid": 42,
+            "sinkBytes": 1179385,
+            "sinkSum": 3522965394,
+            "sinkWrites": 21,
+            "sentBytes": 1179385,
+            "sentSum": 3522965394
+          }
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "forced": [
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 15
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 15
+          },
+          {
+            "notEqual": true,
+            "publishedBeforePark": true,
+            "r0": 15
+          }
+        ],
+        "overflow": {
+          "zero": 0,
+          "exact": 65404,
+          "sentBytes": 1179385,
+          "sentSum": 3522965394,
+          "overReturned": 65405,
+          "overCalls": 2,
+          "megabyteWrote": 1048576,
+          "megabyteCalls": 17,
+          "rawOverLength": -28,
+          "rawOverR1": -1
+        },
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999998956918716,
+          "zeroFraction": 0.97384,
+          "meanMs": 0.00013902499985881148,
+          "maxMs": 0.47000000067055225,
+          "distinct": [
+            [
+              0,
+              194768
+            ],
+            [
+              0.004999998956918716,
+              2301
+            ],
+            [
+              0.005000000819563866,
+              2900
+            ],
+            [
+              0.009999999776482582,
+              5
+            ],
+            [
+              0.014999998733401299,
+              4
+            ],
+            [
+              0.015000000596046448,
+              2
+            ],
+            [
+              0.019999999552965164,
+              3
+            ],
+            [
+              0.020000001415610313,
+              1
+            ]
+          ]
+        },
+        "pids": [
+          15,
+          62,
+          63,
+          8,
+          2,
+          64,
+          54,
+          45,
+          53,
+          55,
+          29,
+          30,
+          14,
+          17,
+          36,
+          25,
+          44,
+          10,
+          46,
+          33,
+          16,
+          49,
+          37,
+          43,
+          7,
+          60,
+          39,
+          19,
+          32,
+          20,
+          41,
+          11,
+          9,
+          1,
+          56,
+          22,
+          26,
+          12,
+          57,
+          13,
+          38,
+          5,
+          59,
+          18,
+          28,
+          4,
+          35,
+          3,
+          51,
+          50,
+          21,
+          27,
+          6,
+          61,
+          40,
+          24,
+          48,
+          58,
+          23,
+          52,
+          31,
+          34,
+          47,
+          42
+        ],
+        "firstGetpid": [
+          15,
+          62,
+          63,
+          8,
+          2,
+          64,
+          54,
+          45,
+          53,
+          55,
+          29,
+          30,
+          14,
+          17,
+          36,
+          25,
+          44,
+          10,
+          46,
+          33,
+          16,
+          49,
+          37,
+          43,
+          7,
+          60,
+          39,
+          19,
+          32,
+          20,
+          41,
+          11,
+          9,
+          1,
+          56,
+          22,
+          26,
+          12,
+          57,
+          13,
+          38,
+          5,
+          59,
+          18,
+          28,
+          4,
+          35,
+          3,
+          51,
+          50,
+          21,
+          27,
+          6,
+          61,
+          40,
+          24,
+          48,
+          58,
+          23,
+          52,
+          31,
+          34,
+          47,
+          42
+        ],
+        "firstGetpidOk": true,
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 67,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      },
+      {
+        "n": 128,
+        "invalid": true,
+        "verdict": "INVALID",
+        "why": "kernel-starved-children: 128/129 ready in 10000 ms; the kernel did not yield between spawn and first use",
+        "faults": [],
+        "instrumented": true,
+        "machine": {
+          "hardwareConcurrency": 12,
+          "platform": "macOS",
+          "agents": 131,
+          "dpr": 1,
+          "chrome": "157.0.8103.52"
+        }
+      }
+    ],
+    "errors": [],
+    "faults": [],
+    "preflight": {
+      "ok": true,
+      "missing": [],
+      "graph": [
+        "/src/abi.mjs",
+        "/src/kernel/kernel.mjs",
+        "/src/kernel/table.mjs",
+        "/src/kernel/files.mjs",
+        "/src/kernel/calls.mjs",
+        "/src/libos/process.mjs",
+        "/src/libos/syscall.mjs",
+        "/bench/syscall-contention/summarise.mjs",
+        "/bench/syscall-contention/loop.mjs",
+        "/bench/syscall-contention/bars.json"
+      ]
+    },
+    "pageFingerprint": 1780549064,
+    "agreementSelfTest": {
+      "identical": 1,
+      "disjoint": 0,
+      "half": 0.5,
+      "unobserved": null,
+      "ok": true
+    },
+    "machine": {
+      "hardwareConcurrency": 12,
+      "platform": "macOS",
+      "agents": 4,
+      "dpr": 1
+    },
+    "config": {
+      "rearmMs": 50,
+      "hbPeriodMs": 10,
+      "hbMissLimit": 3,
+      "deathThresholdMs": 200,
+      "busyCeilingMs": 150,
+      "procCap": 128,
+      "maxInline": 65404,
+      "windowMs": 3000,
+      "call": "getpid",
+      "payloadBytes": 64,
+      "warmupCalls": 2000,
+      "bars": {
+        "accept_p99_us": 500,
+        "kill_p99_us": 2000,
+        "bar_n": 16,
+        "liveness_bound_factor": 1.2,
+        "liveness_poll_slack_ms": 1000,
+        "quiescence_max_workers": 0
+      }
+    },
+    "kernelFingerprint": 1780549064,
+    "cfgEcho": {
+      "bench": 1,
+      "stallUs": 0,
+      "thinkUs": 0,
+      "truncateOverflow": false,
+      "spawnThenPark": false,
+      "depth": true
+    },
+    "kernelIsolated": true,
+    "chrome": "157.0.8103.52",
+    "quiescence": {
+      "ok": true,
+      "workers": 0,
+      "limit": 0,
+      "census": {
+        "page": 1,
+        "browser_ui": 1
+      },
+      "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+    },
+    "run": 3,
+    "quiescencePerCell": [
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      },
+      {
+        "ok": true,
+        "workers": 0,
+        "limit": 0,
+        "census": {
+          "page": 1,
+          "browser_ui": 1
+        },
+        "how": "CDP Target.getTargets, counting targets of type 'worker' (a dedicated worker: this bench's kernel or one of its processes) before the page is navigated"
+      }
+    ],
+    "liveness": null
+  }
+]

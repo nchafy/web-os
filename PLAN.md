@@ -468,10 +468,13 @@ becomes normative:
    remedy is the general one: concurrency inside an app costs a second process, charged against
    the cap. **Free to write down, and it changes the cap arithmetic for every app not yet
    designed** — so this is first in the queue.
-2. **The per-process event backlog has no bound and no defined overflow** — constraint 9's unnamed
-   sibling. A process parked in `Atomics.wait` cannot drain, so the kernel must buffer, unbounded.
-   HelenOS's answer: a fixed in-flight budget with a synchronous `ELIMIT`, as part of the ABI
-   contract rather than an implementation detail.
+2. ~~**The per-process event backlog has no bound and no defined overflow.**~~ **Promoted out of
+   this queue into M1 (e).** I had filed it as "constraint 9's unnamed sibling"; web-os-builder
+   pointed out that is an understatement. Constraint 9's overflow is bounded by one 64 KiB SAB and
+   visible at the call site. This one grows without limit on the *kernel's own heap* while the
+   process that caused it is asleep and cannot drain — reintroducing the renderer-death failure
+   mode that constraint 17's cap exists to prevent, with no cap on it. It wants the ABI contract,
+   so it lands with M1's other table fields.
 3. **Capabilities that can only narrow** — the credential carries `caps` with nothing reading it.
    A bitmask in the process table, a `pledge`-shaped call that only clears bits, checked at
    dispatch. The asserted invariant is **monotonicity**, not a symptom. This is a genuine boundary
