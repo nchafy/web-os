@@ -436,6 +436,11 @@ class Control:
     EMPTY_ROOT = "empty-root"
     PATCHED = "patched"
     KERNEL_STALL = "kernel-stall"
+    #: M1 (negative control). Removes the SIGPEND check at the dispatcher's syscall entry so
+    #: Ctrl-C-style signals cannot land; proof (e) in www/m1.html is the one that must fail.
+    #: Installed at boot through the cfg.noSigpend hook, which refuses unless the page asked for
+    #: a bench boot (src/kernel/kernel.mjs, same discipline as installStall).
+    NO_SIGPEND = "no-sigpend"
     ONCE = "once"
 
 
@@ -450,6 +455,7 @@ CONTROL_RUNS = {
     Control.EMPTY_ROOT: ("empty-root",),
     Control.PATCHED: ("patched-required", "patched-optional"),
     Control.KERNEL_STALL: ("kernel-stall",),
+    Control.NO_SIGPEND: ("no-sigpend",),
 }
 
 
@@ -1599,6 +1605,30 @@ SYSCALL_LABELS = (
     "served m0.html",
 )
 
+#: Every label check_m1 records, in body order. Fourteen; one more if the added expectation
+#: lands on the ratchet in scripts/check_floors.json via --bless.
+M1_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "abi fingerprint published",
+    "proof_a ok",
+    "proof_b ok",
+    "proof_c ok",
+    "proof_d ok",
+    "proof_d within bound",
+    "proof_e ok",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m1.html",
+)
+
+#: The two labels the no-sigpend control turns red. `verdict is ok` goes with proof_e because the
+#: aggregate verdict reads the all-ok of every proof; naming only proof_e would let a verdict
+#: regression (e.g. a page that forgets to AND the five proofs) pass under this control.
+_NO_SIGPEND_FAILS = ("proof_e ok", "verdict is ok")
+
 #: The one expectation the kernel-stall control is named for; everything else it must leave
 #: standing is derived. Named here because the control is scored on WHICH expectation fails: a
 #: 2 ms stall that turned the check red by breaking the accounting identity, or by starving the
@@ -1628,6 +1658,11 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "the measurement does not happen. BROKEN is the capability going away, which is "
                 "why this is declared and not a FAIL - a FAIL would claim a number was taken "
                 "and found wanting",
+        ), "m1": Expect(
+            UNMEASURABLE,
+            why="same mechanism as syscall: the kernel's SAB is not constructible without "
+                "COOP/COEP, so www/m1.html aborts before any proof runs. UNMEASURABLE rather "
+                "than FAIL for the same reason - a FAIL would claim four verdicts were taken.",
         ), "boot": Expect(
             Outcome.FAIL,
             failed=_NO_ISOLATION_FAILS,
@@ -1684,6 +1719,31 @@ CONTROLS: Dict[str, NegativeControl] = {
             # All 30: a control that must leave the check passing is a control under which every
             # label holds, so there is nothing to choose between here.
             held=BOOT_LABELS,
+        )},
+    ),
+    "no-sigpend": NegativeControl(
+        name="no-sigpend",
+        why="noSigpend=1: the dispatcher's SIGPEND check at syscall entry is removed, so a "
+            "signal raised while the process is between syscalls cannot land. The one "
+            "www/m1.html proof the control is NAMED FOR is proof (e): the intr program's next "
+            "clock_nanosleep returns -EINTR and the program exits(99); without the check, it "
+            "sleeps forever and the harness times out. Everything else - the four headline "
+            "proofs - is deliberately not affected, because the SIGKILL path reaps through "
+            "terminate() regardless, the cap refusal is pure allocator arithmetic, and the "
+            "kernel-dead liveness runs through the heartbeat.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_sigpend", "1"),),
+        expects={"m1": Expect(
+            Outcome.FAIL,
+            why="without the SIGPEND check, proof (e) cannot fire -EINTR. The verdict row goes "
+                "red because the aggregate is 'every proof ok', so naming only proof_e would let "
+                "a check that quietly deleted the verdict pass. Both labels are the control's "
+                "subject; nothing else is.",
+            failed=_NO_SIGPEND_FAILS,
+            # Everything else, derived from the inventory. An added expectation enters `held` on
+            # the first run rather than being silently unscored.
+            held=held_rest(M1_LABELS, _NO_SIGPEND_FAILS),
         )},
     ),
     "kernel-stall": NegativeControl(
@@ -2360,6 +2420,128 @@ def check_syscall(env: Env) -> None:
         "than this tree")
 
     env.shoot("syscall")
+
+
+#: Everything check_m1 reads, in one round trip. The five proofs each carry an `ok` and an
+#: `evidence` object; the evidence is read back into the failure message rather than summarised in
+#: the page, so a failing proof says what it saw and not merely that it failed.
+READ_M1 = """(() => {
+  const M = globalThis.M1 || {}
+  const p = M.proofs || {}
+  const one = (x) => x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: JSON.stringify(x.evidence || {}) }
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    fingerprint: String(M.pageFingerprint || ''),
+    cfg: JSON.stringify(M.config || {}),
+    faults: (M.faults || []).map((f) => String(f.pid) + ': ' + String(f.why)),
+    errors: (M.errors || []).map(String),
+    proof_a: one(p.proof_a), proof_b: one(p.proof_b), proof_c: one(p.proof_c),
+    proof_d: one(p.proof_d), proof_e: one(p.proof_e),
+  }
+})()"""
+
+M1_SHAPE = {
+    "state": str, "why": str, "verdict": str, "isolated": bool, "kernelIsolated": bool,
+    "fingerprint": str, "cfg": str, "faults": list, "errors": list,
+}
+
+M1_DOCUMENT = "/www/m1.html"
+
+#: The page's own terminal state. 'aborted' is the isolation refusal and 'error' is a page that
+#: threw; both are terminal and which one it was is the check body's business, not the runner's.
+M1_READY = ("(() => { const s = globalThis.M1 && globalThis.M1.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+
+@check(
+    name="m1",
+    milestone="m1",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SIGPEND),
+    # Fixed by M1_LABELS, not by what the page produced: a page that ran no proof records five
+    # failing expectations rather than passing on an absent object.
+    labels=M1_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M1_DOCUMENT,
+    ready_expr=M1_READY,
+    ready_what="globalThis.M1.state reaching done, aborted or error (www/m1.html)",
+    # Five proofs, each booting its own kernel so one cannot carry state into another, and proof
+    # (d) deliberately waits out a kernel death. Bounded, because a wedged kernel must end as a
+    # BROKEN check with a reason rather than a suite that never returns.
+    ready_timeout=120.0,
+    refusal_expr="globalThis.M1 && globalThis.M1.state",
+    refusal_want="aborted",
+    note="negative controls: --negative no-sigpend removes the SIGPEND check at syscall entry, "
+         "which must turn proof (e) red - a signal raised on a parked process must stop being "
+         "seen - while every other proof holds; --negative no-isolation must come out BROKEN, "
+         "because the kernel's SAB does not exist there and no proof can be taken at all",
+)
+def check_m1(env: Env) -> None:
+    got = env.read(READ_M1, M1_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m1.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable(
+            "www/m1.html reached state %r rather than 'done' though the runner waited %.1fs, so "
+            "no proof completed." % (got["state"], env.ready_wait_s))
+
+    # Anti-vacuity first: a page that produced no cell cannot have proved anything, and a fault
+    # means N processes became N-1 while the proofs were being taken.
+    env.expect("cell reported", (got["verdict"] != "", len(got["faults"])), (True, 0))
+    if got["faults"]:
+        env.note("process faults during the proofs: %s" % "; ".join(got["faults"]))
+    if got["errors"]:
+        env.note("page errors: %s" % "; ".join(got["errors"]))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("abi fingerprint published", bool(got["fingerprint"]),
+                    "the page published no ABI fingerprint, so there is nothing to say the page "
+                    "and the kernel agree about the ABI")
+
+    # The four proofs M1 owes, plus (e) for the signal path the no-sigpend control is named for.
+    # Each is read as its own expectation so a control can be scored on WHICH one moved.
+    for name in ("proof_a", "proof_b", "proof_c", "proof_d", "proof_e"):
+        p = got[name]
+        if p is None:
+            env.expect_that("%s ok" % name, False,
+                            "%s never ran, so its claim is untested" % name)
+            continue
+        env.expect_that("%s ok" % name, p["ok"],
+                        "%s failed; the page's own evidence: %s" % (name, p["evidence"]))
+
+    # Proof (d) owes a NUMBER, not just a pass: constraint 56 sets the bound at
+    # REARM_MS x (HB_MISS_LIMIT + 1) and M0 measured -EIO at 168-189 ms against it. A proof that
+    # passed while taking 10 s would be a different claim.
+    d = got["proof_d"]
+    env.expect_that(
+        "proof_d within bound", d is not None and d["ok"] and "ms" in d["evidence"],
+        "proof (d) must report the milliseconds from kernel death to -EIO so the 200 ms bound in "
+        "constraint 56 is checked against a figure rather than asserted. Evidence: %s"
+        % (d["evidence"] if d else "proof did not run"))
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+    env.note("config: %s" % got["cfg"])
+
+    document = env.request(env.document)
+    env.expect("document COOP", document.headers.get("Cross-Origin-Opener-Policy"),
+               "same-origin")
+    env.expect("document COEP", document.headers.get("Cross-Origin-Embedder-Policy"),
+               "require-corp")
+    env.expect_that(
+        "served m1.html", env.served_matches_disk(M1_DOCUMENT),
+        "the bytes served for %s differ from the file on disk, so this run measured something "
+        "other than this tree" % M1_DOCUMENT)
+
+    env.shoot("m1")
 
 
 # ======================================================================================

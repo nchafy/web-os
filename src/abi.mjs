@@ -52,6 +52,20 @@ const INTS = {
   // the control is supposed to leave alone.
   IDLE_PARK: 20,
 
+  // A scratch word a PROGRAM may advance and the page may read, so a test can observe that a
+  // process reached a particular phase without asking it to make a syscall. M1's proof (e) needs
+  // exactly that: it must raise a signal while the process is computing, and a process that had
+  // to report its progress by syscall would be in a syscall when the signal arrived.
+  // Kernel-neutral: nothing in src/kernel reads or writes it.
+  P_PROGRESS: 21,
+
+  // M1, item (f). The SAB frame header carries a MAGIC and a VERSION, four bytes each, written
+  // once by the kernel at spawn and asserted once by the libos at init. Four bytes impossible to
+  // retrofit later — AROS's ABI v1 break was ten years of forks on representation decisions that
+  // were cheaper to pin here than to grow around. Two reserved words, nothing else moves.
+  H_MAGIC: 22,
+  H_VERSION: 23,
+
   // The one variable-length argument: byte 128, laid out [u32 len][bytes].
   SAB_BYTES: SAB_BYTES_,
   BYTE_OFF: BYTE_OFF_,
@@ -80,7 +94,21 @@ const INTS = {
   // reverse of how their raw costs read.
   SYS_open: 3,
   SYS_fsync: 4,
-  NSYS: 5,
+  // M1. Append-only, never renumber. 5..14 are the ten process calls of this milestone's build;
+  // 15 is the perform() escape hatch (item (f)), reserved now so a future ABI growth has one
+  // slot it can route a new call through without widening NSYS or shifting any number.
+  SYS_spawn: 5,
+  SYS_exit: 6,
+  SYS_waitpid: 7,
+  SYS_kill: 8,
+  SYS_sigaction: 9,
+  SYS_setpgid: 10,
+  SYS_sched_yield: 11,
+  SYS_getppid: 12,
+  SYS_getpgid: 13,
+  SYS_setsid: 14,
+  SYS_perform: 15,
+  NSYS: 16,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -144,14 +172,59 @@ const INTS = {
 
   // docs/ABI.md: the DOM object behind a host fd was destroyed. 77..99 stay reserved for WASI.
   EHOSTGONE: 100,
+
+  // ---- M1 ----------------------------------------------------------------------------------
+
+  // The MAGIC the kernel writes into H_MAGIC and the libos asserts once at init. Four ASCII bytes
+  // in little-endian — 'wSBO' — chosen because it is impossible to collide with an accidental
+  // zero or an uninitialised memory pattern. If this ever has to change, do it by adding a second
+  // magic next to this one, not by rewriting this.
+  SAB_MAGIC: 0x4f425377,
+  SAB_VERSION: 1,
+
+  // Signals the kernel delivers through SIGPEND. One bit each, so SIGPEND is 32 signals wide.
+  // POSIX numbers, not WASI's: the former is what every existing program expects.
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGABRT: 6,
+  SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13,
+  SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGCONT: 18, SIGSTOP: 19,
+  SIGTSTP: 20, SIGTTIN: 21, SIGTTOU: 22, SIGWINCH: 28,
+
+  // sigaction dispositions. SIG_DFL and SIG_IGN are handled by the kernel at delivery; SIG_HANDLE
+  // tells the kernel "a handler exists in the process, set the bit and let it drain at syscall
+  // entry".
+  SIG_DFL: 0, SIG_IGN: 1, SIG_HANDLE: 2,
+
+  // waitpid flags + status encoding. r1 carries the status; the kernel is the only writer of it,
+  // because terminate() leaves the dying worker no way to report (item (c)).
+  WNOHANG: 1,
+  // r1 = (kind << 8) | (0..255). Kind separates a clean exit from a signal death because without
+  // that distinction waitpid cannot tell "ran to completion with code 0" from "SIGKILL'd before
+  // it could run" — identical from a process that is already gone.
+  STAT_EXITED: 0,
+  STAT_KILLED: 1,
+
+  // The capability bitmask (item (a)). Named bits reserved for the credentials M6 narrows; M1
+  // asserts only MONOTONICITY, so a widening after an initial narrowing must fail.
+  CAP_ALL: -1,  // every bit set, as a 32-bit signed value — i.e. 0xffffffff as an i32
+
+  // Per-fd in-flight budget (item (e)). Charged per fd — not per process, not per event source —
+  // because the fd is already the unit `poll()` waits on (constraint 42) and the unit `close()`
+  // releases. The errno is ENOBUFS: the published WASI number for "no buffer space", which is
+  // what head-of-line blocking on one fd is. 64 is a budget, not a measurement: enough that no
+  // normal caller sees it, few enough that one pathological caller cannot pin 64 KiB of kernel
+  // state per fd. The invariant lives in the fd table; the number can be tuned.
+  FD_INFLIGHT_CAP: 64,
+
 };
 
 export const {
   SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR,
   A0, A1, A2, A3, A4, A5, A6, A7, R0, R1, KDOWN_SEEN, KDOWN_MS,
-  IDLE_PARK,
+  IDLE_PARK, P_PROGRESS, H_MAGIC, H_VERSION,
   SAB_BYTES, BYTE_OFF, DATA_OFF, LEN_I32, MAX_INLINE,
-  SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync, NSYS,
+  SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
+  SYS_spawn, SYS_exit, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid,
+  SYS_sched_yield, SYS_getppid, SYS_getpgid, SYS_setsid, SYS_perform, NSYS,
   ST_RETURN, ST_INTR, ST_KDOWN,
   F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN,
   PROC_CAP, A_SHM, CALLID_WRAP,
@@ -160,7 +233,12 @@ export const {
   G_THINK_US, G_STALL_US, G_READY, G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI,
   W_PRE, W_OPEN, W_CLOSED, W_DONE,
   K_BOOT, K_UP, K_PANIC,
-  EHOSTGONE,
+  EHOSTGONE, SAB_MAGIC, SAB_VERSION,
+  SIGHUP, SIGINT, SIGQUIT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM,
+  SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH,
+  SIG_DFL, SIG_IGN, SIG_HANDLE,
+  WNOHANG, STAT_EXITED, STAT_KILLED,
+  CAP_ALL, FD_INFLIGHT_CAP,
 } = INTS;
 
 /**
@@ -174,8 +252,14 @@ export const IO_WRITE = "io-write";
 export const IO_FSYNC = "io-fsync";
 export const IO_CLOSE = "io-close";
 
-/** Indexed by syscall number, so a number and its printed name cannot drift. */
-export const SYS_NAME = Object.freeze(["getpid", "write", "clock_nanosleep", "open", "fsync"]);
+/** Indexed by syscall number, so a number and its printed name cannot drift. The kernel reads
+ *  this array at boot to derive its dispatch table and assert every declared call has a handler
+ *  (item (f)): the dispatch table is DERIVED from this, not written separately. */
+export const SYS_NAME = Object.freeze([
+  "getpid", "write", "clock_nanosleep", "open", "fsync",
+  "spawn", "exit", "waitpid", "kill", "sigaction", "setpgid",
+  "sched_yield", "getppid", "getpgid", "setsid", "perform",
+]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
 //
@@ -218,6 +302,20 @@ export const ENOSYS = E.ENOSYS;
 export const ENOTSUP = E.ENOTSUP;
 export const EPERM = E.EPERM;
 export const ESRCH = E.ESRCH;
+export const ECHILD = E.ECHILD;
+export const ECONNABORTED = E.ECONNABORTED;
+
+/**
+ * The two errnos M1 gives a name to, DERIVED from the table rather than written as an index.
+ *
+ * Both were correct as literals — `ELIMIT_ERRNO: 42` really is ENOBUFS and `TEARDOWN_ERRNO: 13`
+ * really is ECONNABORTED. They are derived anyway, because a literal index is a second place the
+ * table's shape is recorded, and the first reader to re-check these by hand got it wrong in the
+ * safe direction: off by one, because `ERRNO_NAMES` begins at ESUCCESS = 0 and has 77 entries.
+ * Deriving removes the thing that has to be counted.
+ */
+export const ELIMIT_ERRNO = E.ENOBUFS;
+export const TEARDOWN_ERRNO = E.ECONNABORTED;
 
 /** Signals 1..31 occupy one bit each in SIGPEND. */
 export function SIG_BIT(sig) {
@@ -315,10 +413,18 @@ export function selfTest() {
   if (LEN_I32 * 4 !== BYTE_OFF) fail("the length word is not at BYTE_OFF");
   if (DATA_OFF !== BYTE_OFF + 4) fail("the byte payload does not start after the length word");
   if (DATA_OFF + MAX_INLINE !== SAB_BYTES) fail("a MAX_INLINE payload does not fit the SAB");
-  if (R1 >= LEN_I32 || KDOWN_MS >= LEN_I32 || IDLE_PARK >= LEN_I32) {
+  if (R1 >= LEN_I32 || KDOWN_MS >= LEN_I32 || IDLE_PARK >= LEN_I32
+      || H_VERSION >= LEN_I32) {
     fail("the register file overlaps the byte region");
   }
   if (IDLE_PARK === KDOWN_SEEN || IDLE_PARK === KDOWN_MS) fail("IDLE_PARK aliases a live word");
+  if (H_MAGIC === IDLE_PARK || H_VERSION === IDLE_PARK || H_MAGIC === H_VERSION
+      || H_MAGIC === KDOWN_SEEN || H_MAGIC === KDOWN_MS
+      || H_VERSION === KDOWN_SEEN || H_VERSION === KDOWN_MS) {
+    fail("H_MAGIC/H_VERSION alias a live word");
+  }
+  if ((SAB_MAGIC | 0) === 0) fail("SAB_MAGIC must be non-zero so a fresh SAB fails the check");
+  if (SAB_VERSION < 1) fail("SAB_VERSION must be at least 1");
   if (G_DEADLINE_HI * 4 >= GLOBAL_BYTES) fail("a globals word is past the end of the globals SAB");
   if (W_PRE !== 0) fail("W_PRE must be 0: a fresh globals SAB is all zeroes and that is pre-window");
   if (new Set([W_PRE, W_OPEN, W_CLOSED, W_DONE]).size !== 4) {
@@ -334,6 +440,18 @@ export function selfTest() {
   if (ERRNO_NAMES.some((n) => !n)) fail("errno table has a hole");
   if (E.ESUCCESS !== 0 || E.ENOTCAPABLE !== 76) fail("errno table endpoints moved");
   if (E.EHOSTGONE !== 100) fail("EHOSTGONE is not 100");
+
+  // The named errnos must BE the errnos they are named for, so neither a derivation nor a future
+  // literal can drift from the table. 0 is ESUCCESS and the table has 77 entries, which is the
+  // off-by-one every hand count here has made.
+  if (ELIMIT_ERRNO !== E.ENOBUFS) fail("ELIMIT_ERRNO is not ENOBUFS");
+  if (TEARDOWN_ERRNO !== E.ECONNABORTED) fail("TEARDOWN_ERRNO is not ECONNABORTED");
+  if (ERRNO_NAMES[ELIMIT_ERRNO] !== "ENOBUFS") {
+    fail(`errno ${ELIMIT_ERRNO} is ${ERRNO_NAMES[ELIMIT_ERRNO]}, not ENOBUFS`);
+  }
+  if (ERRNO_NAMES[TEARDOWN_ERRNO] !== "ECONNABORTED") {
+    fail(`errno ${TEARDOWN_ERRNO} is ${ERRNO_NAMES[TEARDOWN_ERRNO]}, not ECONNABORTED`);
+  }
   for (const [name, value] of Object.entries({
     EAGAIN, EBADF, EINTR, EINVAL, EIO, ENOSYS, ENOTSUP, EPERM, ESRCH,
   })) {

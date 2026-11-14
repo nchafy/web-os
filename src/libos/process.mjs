@@ -9,6 +9,7 @@
 import { ABI_FINGERPRINT, SIG_BIT } from "../abi.mjs";
 import {
   initSyscall, syscall, write, r1of, rawWriteLength, probeNotEqual, samples, resetSamples,
+  publishProgress,
   observeHeartbeat, barrierArrive, barrierDepart, barrierCounters,
 } from "./syscall.mjs";
 
@@ -85,7 +86,8 @@ self.onmessage = async (ev) => {
       pid = m.pid;
       myIndex = (m.cfg && m.cfg.index) | 0;
       clock = measureClock((m.cfg && m.cfg.clockReads) || 200000);
-      initSyscall({ ctl, u8, g, port, pid, quantumMs: clock.quantumMs, onsignal });
+      initSyscall({ ctl, u8, g, port, pid, quantumMs: clock.quantumMs, onsignal,
+        noSigpend: !!(m.cfg && m.cfg.noSigpend) });
       // The program's own commands arrive on the port, the same channel its syscalls leave by.
       port.onmessage = (e) => onCommand(e.data);
       // THE IMAGE THE KERNEL LOADED, never a path this process goes and gets. A process that
@@ -123,7 +125,7 @@ function onCommand(m) {
     // What the program receives, and nothing else. No SAB, no port, no handle.
     const env = {
       syscall, write, r1of, rawWriteLength, probeNotEqual, samples, resetSamples,
-      observeHeartbeat, barrierArrive, barrierDepart, barrierCounters,
+      observeHeartbeat, barrierArrive, barrierDepart, barrierCounters, publishProgress,
       pid, index: myIndex, argv: m.argv || [], envp: m.envp || {},
     };
     const data = program.run(env, m);

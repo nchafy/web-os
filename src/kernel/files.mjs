@@ -26,15 +26,21 @@ export class FileTable {
     return (fd >= 0 && fd < this.fds.length ? this.fds[fd] : null) ?? null;
   }
 
-  /** Lowest free fd, POSIX-style. */
+  /** Lowest free fd, POSIX-style. Initialises the per-fd in-flight count (M1 item (e)): the
+   *  budget is charged per fd because the fd is already the unit poll() waits on (constraint 42)
+   *  and `close()` releases, so a floods-one-queue process gets ELIMIT on THAT fd and keeps
+   *  servicing its pipe. A description can be shared across fds (dup, dup2), so the counter
+   *  lives on the description — one budget per underlying resource, not per handle. */
   add(description, atLeast = 0) {
     let fd = atLeast;
     while (fd < this.fds.length && this.fds[fd]) fd += 1;
+    if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
     return fd;
   }
 
   set(fd, description) {
+    if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
   }
 
