@@ -22,8 +22,8 @@ checks is a wish.
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
-| **M1** | **Process lifecycle, signals, hard cap** | 4 | | ⬜ **next** |
-| M2a | A host-runnable kernel, fuzzable codecs | 1 | | ⬜ |
+| M1 | Process lifecycle, signals, hard cap | 4 | 1 | ✅ done — a spinner dies on End Process |
+| **M2a** | **A host-runnable kernel, fuzzable codecs** | 1 | | ⬜ **next** |
 | M2 | VFS core on OPFS | 8 | | ⬜ |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
@@ -270,7 +270,76 @@ restating rather than assuming the contention win pays for it.
 
 ---
 
-## M1 — Process lifecycle, signals, hard cap · 4 days · ~1100 LoC
+## M1 — Process lifecycle, signals, hard cap · ✅ done · est 4 d, actual 1
+
+**The headline holds: a process in `for(;;){}` with no syscalls dies on End Process.** Reaped 2.4 ms
+after the kill, through `Worker.terminate()`, with the record carrying STAT_KILLED/SIGKILL — because
+a spinner never reaches a syscall entry and so can never drain SIGPEND (constraint 21). That is the
+thing webxp could not do and the reason this project exists.
+
+All five proofs pass and the negative control is exact: `--negative no-sigpend` turns **2 of 14
+expectations red and leaves 12 intact** — proof (e) and the verdict, nothing else.
+
+| proof | result |
+|---|---|
+| (a) compute-bound process dies on End Process | reaped in 2.4 ms, STAT_KILLED/SIGKILL |
+| (b) `kill -9` under contention | 16 of 16 reaped in 7.2 ms |
+| (c) the 129th spawn fails cleanly | refused by the cap, 128 live, constraint 17 |
+| (d) kernel dies, parked processes return `EIO` | 8 of 8, 205–263 ms, no page reload |
+| (e) a signal reaches a *computing* process at the next syscall entry | exit 99 |
+
+### Three things the work changed, each found by a proof failing
+
+**Signal delivery needed BOTH paths, and only one existed.** `raiseOne` set the SIGPEND bit and
+stopped. A process parked in `clock_nanosleep` would sleep out its full duration and notice the bit
+at the *next* entry — which for a blocking read is never. `docs/ABI.md` decision 1 already specified
+the other half: the kernel sets STATUS=ST_INTR, bumps SEQ, notifies, and drops the late reply by
+CALLID. That is now wired, reusing `setTimer`'s identity check.
+
+**The entry check observed signals instead of delivering them.** `drainSignals()` read the bit,
+cleared it, recorded it — and let the syscall proceed. So a signal raised at a *running* process was
+seen and discarded. It returns `-EINTR` now, without issuing the call. Any bit present means
+interrupt, because the kernel never sets SIGPEND for a signal it is dropping (`SIG_IGN` returns
+before the store) or one that is fatal by default (those reap instead), so the disposition is
+already applied kernel-side.
+
+**Proof (d) was asserting the wrong direction.** It bounded how LATE a fault may be and said nothing
+about how early. Constraint 46 forbids faulting a process on elapsed time alone, so a process that
+declared a live kernel dead *before* the threshold is the real defect — and nothing was checking it.
+It now asserts all three: every process faults, none faults early, and the slowest is within the
+threshold plus two re-arms. The second re-arm is scheduler slip, measured: alone on the machine every
+process lands at 205–215 ms, but sharing a browser with the rest of the suite some slip a whole
+extra 50 ms (257, 256, 263 against 212–214 for their siblings in the same run).
+
+### What the negative control cost to make honest
+
+The control passed at first while proving nothing, twice, and both times the gate caught it.
+
+Proof (e) originally raised a signal at a process parked in `clock_nanosleep`, so the kernel
+delivered it by interrupting the in-flight call — a path that never consults the entry check. With
+`no_sigpend=1` the process still exited 99. Pointing the proof at a *computing* process fixed that,
+and then raising repeatedly broke it again: a raise that lands while a call is in flight takes the
+ST_INTR path, so with enough raises one always got through.
+
+The isolated form is a long compute slice (~10 ms of arithmetic against a ~15 µs syscall, so the
+in-flight fraction is near 0.15%) plus **one** raise, sent after the process publishes progress
+through `P_PROGRESS` — a new SAB word a program advances *without* a syscall, because a process that
+reported progress by syscall would be inside one when the signal arrived.
+
+### Also landed
+
+Items (a)–(f) from the preamble: the monotonic `caps` bitmask; `sid`, the leader link and `setsid`,
+with SIGHUP/SIGTTIN/SIGTTOU explicitly **not** claimed until M4; `waitpid` distinguishing
+STAT_EXITED from STAT_KILLED; two-phase teardown answering every outstanding call before asserting
+the count is zero; the per-fd in-flight budget with `ELIMIT`; and the ABI growth mechanism — SAB
+magic and version asserted at libos init, reserved numbers, a `perform()` hatch, and a dispatch
+table **derived** from `src/abi.mjs` at boot with an assertion that every declared call has a
+handler. No generator and no build step.
+
+`ELIMIT_ERRNO` and `TEARDOWN_ERRNO` are derived from the errno table rather than written as
+indices. Both literals were correct; the first reader to re-check them by hand got them wrong,
+because `ERRNO_NAMES` starts at ESUCCESS = 0 and has 77 entries. Deriving removes the thing that
+has to be counted.
 
 > **Four additions from `docs/research/09-hobbyist-os-actions.md`, all because the process-table
 > layout is set here and reworking it later is the expensive version.** Sources are in that file;
