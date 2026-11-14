@@ -6,16 +6,19 @@
 // an impossibility, and bench/syscall-contention asserts the rule by grepping this directory.
 
 import {
-  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1,
+  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7,
+  H_MAGIC, H_VERSION, SAB_MAGIC, SAB_VERSION, LEN_I32, DATA_OFF,
   ST_RETURN, ST_INTR, ST_KDOWN, SIG_BIT,
   GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,
   G_THINK_US, G_STALL_US, G_READY,
   G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
   K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
-  EINTR, EINVAL, ENOSYS, EIO, ABI_FINGERPRINT, packI64,
+  EINTR, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO,
+  SIGKILL, SIGTERM, SIGINT, SIGHUP, SIG_DFL, SIG_IGN, SIG_HANDLE,
+  STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
-import { ProcTable, RUNNING, ZOMBIE } from "./table.mjs";
-import { makeSink, installTruncateOverflow, openFile } from "./files.mjs";
+import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
+import { makeSink, installTruncateOverflow, openFile, KIND_OPS } from "./files.mjs";
 import { buildCalls, installStall, PENDING } from "./calls.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
@@ -289,6 +292,35 @@ function onSyscallNoDepth(p, posted) {
   kCalls += 1;
 }
 
+/** The M1 negative control. Removes the SIGPEND check at syscall entry; Ctrl-C must stop
+ *  working. Re-runnable — it is wired in the existing style (installStall, installTruncateOverflow
+ *  are boot-time wrappers gated on bench=1 so the headline path carries no control branch), and
+ *  the page refuses to arm it without bench=1. */
+function onSyscallNoSigpend(p, posted) {
+  const tIn = now();
+  const callid = Atomics.load(p.ctl, CALLID);
+  if (posted !== callid) {
+    badCallId += 1;
+    fail(p, EINVAL);
+    return;
+  }
+  const nr = p.ctl[NR];
+  // No SIGPEND check here — M1's negative control. A process in an interruptible syscall must
+  // now be left alone. Ctrl-C pathway is broken by removing one line, and that is exactly the
+  // shape proof the control exists for.
+  const h = CALLS[nr];
+  if (h === undefined) {
+    fail(p, ENOSYS);
+    return;
+  }
+  p.calls += 1;
+  p.inflight = { nr, callid, seq: p.seq, abort: null };
+  const r = h(p);
+  if (r !== PENDING) finish(p, r);
+  kServiceMs += now() - tIn;
+  kCalls += 1;
+}
+
 let dispatch = onSyscall;
 
 // ---------------------------------------------------------------------- the program loader
@@ -374,6 +406,10 @@ function spawn(image, programCfg, index = 0) {
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
   slot.ctl[UID] = slot.uid;
+  // M1 (f). The frame header magic+version, written once. The libos reads it once at init and
+  // panics on mismatch — four bytes impossible to retrofit after a program is shipped.
+  slot.ctl[H_MAGIC] = SAB_MAGIC | 0;
+  slot.ctl[H_VERSION] = SAB_VERSION | 0;
 
   // The I/O worker reads write payloads straight out of this SAB, so a write is a message with
   // three integers and no copy. That is safe for one specific reason: the calling process is
@@ -408,7 +444,9 @@ function spawn(image, programCfg, index = 0) {
       uid: slot.uid,
       // The image, not a path to fetch: the program text has already crossed the wire once.
       image: image.imageUrl,
-      cfg: { ...programCfg, index },
+      // The M1 negative control travels to the process, because the entry check it
+      // removes lives in the process's own stub (constraint 16).
+      cfg: { ...programCfg, index, noSigpend: !!cfg.noSigpend },
     },
     [channel.port2],
   );
@@ -676,6 +714,226 @@ function kstats() {
   };
 }
 
+// ---------------------------------------------------------------------------- M1 lifecycle
+//
+// Everything below is item (c), (d) and the shape proof (a)/(b)/(c)/(d) exercise. The shape:
+//
+//   kill(target, sig) -> raise SIGPEND bit; SIGKILL and SIGTERM-with-SIG_DFL are instantly
+//     fatal and go through reap() with STAT_KILLED.
+//   exit() -> reap() with STAT_EXITED.
+//   reap() is the TEARDOWN point (item (d)): it answers every outstanding call on this process
+//     with -TEARDOWN_ERRNO, closes every fd (which fires each kind's close op), raises the
+//     child to ZOMBIE, wakes any parent parked in waitpid, and schedules terminate() plus a
+//     delayed slot-free quarantine (constraint 14: a worker runs on ~2 s).
+//   The invariant item (d) asks for, asserted after phase one: ZERO outstanding calls on this
+//     process. If any remain, it is a dispatch defect.
+
+const TERM_QUARANTINE_MS = 2200;
+
+/** Answer any in-flight call for this process with -errno. One writer of SEQ/STATUS still:
+ *  reply(). The outstanding-count invariant is what makes this cheap and checkable. */
+function answerInflight(slot, errno) {
+  if (!slot.inflight || !slot.ctl) return 0;
+  // ST_RETURN carries a numeric return; the errno convention is r0 < 0 && r1 === -1.
+  reply(slot, -errno, -1, ST_RETURN);
+  return 1;
+}
+
+/** M1 (d). Teardown, two phases. Phase 1 answers every outstanding call with -ECONNABORTED and
+ *  closes every fd (which releases the per-fd budget and runs each kind's close op). Phase 2
+ *  asserts the outstanding-count is zero. Phase 3 — delayed — terminates the worker and frees
+ *  the slot after the quarantine. The assertion is the point of writing this at teardown rather
+ *  than scattering it across handlers. */
+function teardown(slot) {
+  // Phase 1: outstanding calls.
+  const hadInflight = answerInflight(slot, TEARDOWN_ERRNO);
+
+  // Phase 1b: fd closure. Walk fds explicitly, not FileTable.close, because close() returns
+  // -EBADF on an already-null slot and we are iterating; a double-close would fire if a kind's
+  // close op shared descriptions across fds. Going through the table by refcount is the one
+  // right way.
+  const seen = new Set();
+  for (let fd = 0; fd < slot.fds.fds.length; fd += 1) {
+    const d = slot.fds.fds[fd];
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    slot.fds.fds[fd] = null;
+    if (--d.refs <= 0) {
+      try {
+        KIND_OPS[d.kind]?.close?.(d);
+      } catch (e) {
+        // A close op that throws must not stop teardown. The leak is recorded by the kernel's
+        // own panic path if it mattered; here it must not block the slot being reaped.
+      }
+    }
+  }
+  // Signal any parent parked in waitpid. The parent's slot still holds the waiter list; the
+  // first matching parent is answered with (child.pid, status).
+  if (slot.ppid) {
+    const parent = table.get(slot.ppid);
+    if (parent && parent.inflight && parent.inflight.waitingFor !== undefined) {
+      const waited = parent.inflight.waitingFor;
+      if (waited === -1 || waited === slot.pid) {
+        const status = packStatus(slot.exitKind, slot.exitValue);
+        reply(parent, slot.pid, status, ST_RETURN);
+        parent.inflight = null;
+      }
+    }
+  }
+  // Phase 2: assert. A process whose inflight is still non-null after phase 1 ran answerInflight
+  // is a dispatch defect — a handler added without calling reply() through the kernel surface.
+  // This is the only time that count is still knowable, which is exactly why item (d) puts the
+  // assertion here.
+  if (slot.inflight !== null) {
+    post({ t: "teardown-leak", pid: slot.pid, kind: slot.exitKind, value: slot.exitValue,
+      inflight: String(slot.inflight && slot.inflight.nr) });
+  }
+  return { hadInflight };
+}
+
+/** Pack (kind, value) into r1, documented once here so a reader only has to find it in one
+ *  place. The split exists because a clean exit of 0 and a SIGZERO kill (there is none) would
+ *  otherwise have the same r1. */
+function packStatus(kind, value) {
+  return ((kind & 0xff) << 8) | (value & 0xff);
+}
+
+/** The final step of a death: terminate the worker, keep the slot around for the quarantine,
+ *  then free it. The pid is quarantined while the worker runs on (constraint 14: 2004-2051 ms),
+ *  because reusing the pid earlier would let a stale postMessage reach a different process. */
+function scheduleFree(slot) {
+  try { if (IO) IO.unregister(slot.pid); } catch (e) { /* unregister is best-effort */ }
+  try { if (slot.worker) slot.worker.terminate(); } catch (e) { /* already gone is fine */ }
+  setTimeout(() => {
+    if (table && table.byPid.get(slot.pid) === slot) table.free(slot);
+  }, TERM_QUARANTINE_MS);
+}
+
+/** Record the exit reason on the slot and run the teardown pipeline. This is the single entry
+ *  point for both a clean exit (STAT_EXITED, code) and a signal kill (STAT_KILLED, signum). */
+function reap(slot, kind, value) {
+  if (!slot || slot.state === ZOMBIE) return;
+  table.recordExit(slot, kind, value);
+  teardown(slot);
+  scheduleFree(slot);
+  post({ t: "reaped", pid: slot.pid, kind, value });
+}
+
+/** Reply directly with (pid, status): the only call that uses r1 as a value rather than as the
+ *  error sentinel. Reply via reply() and return PENDING so the dispatcher does not overwrite r1
+ *  with the zero finish() would publish. */
+function reapForParent(parent, child) {
+  const status = packStatus(child.exitKind, child.exitValue);
+  // Remove from live so a follow-up waitpid returns -ECHILD. The physical slot sticks around
+  // until scheduleFree's quarantine times out.
+  if (table.byPid.get(child.pid) === child) {
+    table.byPid.delete(child.pid);
+    table.live.delete(child);
+  }
+  reply(parent, child.pid, status, ST_RETURN);
+  return PENDING;
+}
+
+function firstZombieChild(parent, askedPid) {
+  for (const slot of table.live) {
+    if (slot.ppid !== parent.pid) continue;
+    if (askedPid !== -1 && slot.pid !== askedPid) continue;
+    if (slot.state === ZOMBIE) return slot;
+  }
+  return null;
+}
+
+function hasChild(parent, askedPid) {
+  for (const slot of table.live) {
+    if (slot.ppid !== parent.pid) continue;
+    if (askedPid !== -1 && slot.pid !== askedPid) continue;
+    return true;
+  }
+  return false;
+}
+
+/** Record that this parent is parked on a (child pid or any). teardown() reads `waitingFor` to
+ *  decide which wakes which. The inflight object is the SAME shape every other PENDING handler
+ *  uses — this is the one source of truth for cancellation, so a terminated parent's parked
+ *  wait is also torn down by answerInflight, with -ECONNABORTED, as its invariant requires. */
+function parkParent(parent, askedPid) {
+  parent.inflight.waitingFor = askedPid;
+}
+
+/** Raise a signal bit on the target. SIGKILL and SIGSTOP are unmaskable. The caller's own kill
+ *  may deliver to a pgid (target < 0), and to self (target === pid). Returns 0 or -errno. */
+function deliverSignal(caller, target, sig) {
+  if (target === 0) {
+    // Whole process group of caller.
+    for (const m of table.pgidMembers(caller.pgid)) raiseOne(m, sig);
+    return 0;
+  }
+  if (target < 0) {
+    const pgid = -target;
+    const members = table.pgidMembers(pgid);
+    if (!members.length) return -ESRCH;
+    for (const m of members) raiseOne(m, sig);
+    return 0;
+  }
+  const t = table.get(target);
+  if (!t) return -ESRCH;
+  raiseOne(t, sig);
+  return 0;
+}
+
+function raiseOne(slot, sig) {
+  // SIGKILL: fatal, no mask, no handler, done. The process may be parked in Atomics.wait and
+  // that is exactly the case constraint 16 names — SIGPEND is checked at syscall entry, but a
+  // compute-bound process issues no syscalls, so SIGKILL is also where terminate() fires. The
+  // headline M1 delivers is a process in for(;;){} that dies on End Process, and this is that
+  // path.
+  if (sig === SIGKILL) {
+    reap(slot, STAT_KILLED, SIGKILL);
+    return;
+  }
+  // Otherwise: set the bit. drainSignals() in the process libos reads it at syscall entry and
+  // the handler disposition is consulted by the next syscall. A SIGTERM with SIG_DFL and no
+  // handler installed is still fatal (POSIX); a SIGINT with SIG_IGN is dropped at raise.
+  const disp = slot.sigDisp.get(sig) ?? SIG_DFL;
+  if (disp === SIG_IGN) return;
+  if (disp === SIG_DFL) {
+    // The POSIX default for the signals M1 can reasonably name. Fatal for TERM/INT/HUP.
+    if (sig === SIGTERM || sig === SIGINT || sig === SIGHUP) {
+      reap(slot, STAT_KILLED, sig);
+      return;
+    }
+  }
+  // SIG_HANDLE or a non-fatal default: the bit goes in SIGPEND and the process drains at syscall
+  // entry. Constraint 16: a process parked in Atomics.wait cannot service postMessage, so this
+  // is the only delivery path.
+  if (!slot.ctl) return;
+  Atomics.or(slot.ctl, SIGPEND, SIG_BIT(sig));
+
+  // AND IF A CALL IS ALREADY IN FLIGHT, INTERRUPT IT. Setting the bit alone is not delivery:
+  // a process parked in a PENDING call — clock_nanosleep is the one M1 exercises — would sleep
+  // out its full duration and only notice the bit at the NEXT syscall entry, which for a blocking
+  // read or a long sleep is never. docs/ABI.md decision 1 is explicit that the kernel sets the
+  // bit, sets STATUS=ST_INTR, bumps SEQ and notifies, and drops the late reply by CALLID; intr()
+  // is that, and setTimer()'s seq check is what discards the timer's own late reply.
+  //
+  // Without this, proof (e) times out: the signal is pending and nothing is waiting to read it.
+  if (slot.inflight) intr(slot);
+}
+
+/** M1's in-kernel spawn. Called via SYS_spawn, which gets the (not-yet-decoded) argv/envp
+ *  through the byte region. For M1 we only spawn against a URL recorded on the SpawnSpec; the
+ *  shape of the byte region is pinned in docs/ABI.md and M2 fleshes it out.
+ *
+ *  A minimal M1 contract: a0 = programUrl length, byte region starts with that string, no argv,
+ *  no envp. That is enough for proof (c) (spawn to the 129th) and does not pretend to be more. */
+function spawnChild(caller) {
+  // For M1 the shell is NOT yet present, so SYS_spawn from a process is not expected to be
+  // exercised by proof (a-d). The page's own `spawn` message is what the four proofs use (the
+  // existing path in handle("spawn")). This handler exists so SYS_spawn is reachable, dispatched
+  // through the derived table at boot, and the slot number cannot drift.
+  return -ENOSYS;
+}
+
 // ---------------------------------------------------------------------------- boot
 
 function post(m) {
@@ -724,11 +982,23 @@ async function handle(m) {
         IO = makeIo(new Worker(new URL("./io-worker.mjs", import.meta.url), { type: "module" }));
         IO.boot();
       }
+      // k.table is a getter in the surface below, so handlers see the live ProcTable rather
+      // than a snapshot taken before anything was spawned. The alternative — passing `table`
+      // directly — would capture the initial value and break every spawn after the kernel's
+      // own test rig recreated the table.
       CALLS = buildCalls({
         reply, fail, setTimer, later,
         opfsRoot: () => OPFS_ROOT,
         io: IO,
         ioInline: !!cfg.ioInline,
+        get table() { return table; },
+        reap,
+        reapForParent,
+        firstZombieChild,
+        hasChild,
+        parkParent,
+        deliverSignal,
+        spawnChild,
       });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
@@ -742,6 +1012,13 @@ async function handle(m) {
         installTruncateOverflow();
       }
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
+      if (cfg.noSigpend) {
+        // The M1 negative control. Refuses unless the page asked for a bench boot, the same
+        // discipline installStall applies: a hook a later change could leave armed is worse
+        // than one requiring a hand edit, so bench=1 is the gate.
+        if (cfg.bench !== 1) throw new Error("noSigpend requires bench=1");
+        dispatch = onSyscallNoSigpend;
+      }
       setInterval(tick, HB_PERIOD_MS);
       lastTick = now();
       Atomics.store(g, G_KSTATE, K_UP);
@@ -776,7 +1053,18 @@ async function handle(m) {
     case "raise": {
       const p = table.get(m.pid);
       if (!p) return;
-      Atomics.or(p.ctl, SIGPEND, SIG_BIT(m.sig));
+      // Goes through the one raise path, which honours SIGKILL (terminate + reap), the handler
+      // table, and the SIGPEND bit. Before M1 this flipped the bit directly, which was correct
+      // for M0 (no SIGKILL semantics yet) and would silently drop SIGKILL now.
+      raiseOne(p, m.sig | 0);
+      return;
+    }
+    case "end-process": {
+      // The UI's "End Process" button. Equivalent to kill(-SIGKILL, pid): reap immediately,
+      // terminate() the worker, quarantine the pid. Proof (a).
+      const p = table.get(m.pid);
+      if (!p) return;
+      reap(p, STAT_KILLED, SIGKILL);
       return;
     }
     case "expose":

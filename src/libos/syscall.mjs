@@ -8,6 +8,8 @@
 
 import {
   SEQ, STATUS, RLEN, SIGPEND, CALLID, NR, A0, R0, R1, KDOWN_SEEN, KDOWN_MS, IDLE_PARK,
+  P_PROGRESS,
+  H_MAGIC, H_VERSION, SAB_MAGIC, SAB_VERSION,
   LEN_I32, DATA_OFF, MAX_INLINE,
   ST_RETURN, ST_INTR, ST_KDOWN,
   REARM_MS, HB_MISS_LIMIT, G_HEARTBEAT, G_INFLIGHT, G_THINK_US,
@@ -31,7 +33,7 @@ const C = {
   issued: 0, returned: 0,
   ok: 0, notEqual: 0, spurious: 0, timedOut: 0, timedOutButReplied: 0,
   hostGone: 0, seqSkip: 0, intr: 0, kdown: 0, rlenFault: 0,
-  signalsDrained: 0, signalBits: 0,
+  signalsDrained: 0, signalBits: 0, interruptedAtEntry: 0,
   forcedNotEqual: 0, forcedOther: 0,
 };
 
@@ -104,6 +106,21 @@ let onsignal = null;
  * masked bits. The seam exists at M0 so M1's negative control (remove this call, Ctrl-C must stop
  * working) has something to remove.
  */
+/**
+ * The SIGPEND check at syscall entry (constraint 16). Returns the bits it drained, because a
+ * pending signal must INTERRUPT the call rather than merely be noticed before it.
+ *
+ * It returned nothing at first, and that was the defect M1's negative control was built to catch:
+ * the bit was read, cleared, recorded, and the syscall then proceeded normally, so a signal raised
+ * at a RUNNING process was seen and discarded. Measured with the `entry` program — 400 rounds of
+ * arithmetic with a SIGINT raised in the middle — the process never observed it and ran to
+ * completion.
+ *
+ * Any bit present here means "interrupt": the kernel does not set SIGPEND for a signal it is
+ * dropping (SIG_IGN returns before the store) or for one that is fatal by default (those reap the
+ * process instead), so the disposition has already been applied kernel-side and the stub does not
+ * need to know it.
+ */
 function drainSignals() {
   const bits = Atomics.exchange(ctl, SIGPEND, 0);
   if (bits !== 0) {
@@ -111,6 +128,7 @@ function drainSignals() {
     C.signalBits |= bits;
     if (onsignal) onsignal(bits);
   }
+  return bits;
 }
 
 // ---------------------------------------------------------------------------- think time
@@ -128,6 +146,9 @@ function drainSignals() {
  * iteration inside the thing being measured.
  */
 let think = () => {};
+
+/** M1's negative control: skip the SIGPEND check at syscall entry entirely. */
+let noSigpendCheck = false;
 
 // ---------------------------------------------------------------------------- the park
 
@@ -212,8 +233,22 @@ export function syscall(
   nr, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0,
   src = null, srcOff = 0, srcLen = 0,
 ) {
-  drainSignals();
-  think();
+  // The entry check, and it interrupts rather than observes. A pending bit returns -EINTR WITHOUT
+  // issuing the call, which is what makes Ctrl-C reach a process that is computing rather than
+  // parked — the parked case is handled kernel-side by ST_INTR (docs/ABI.md decision 1).
+  //
+  // The bits are already cleared by the exchange, so the caller's next syscall proceeds: a program
+  // that answers -EINTR by calling exit() is not interrupted again on the way out.
+  if (noSigpendCheck) {
+    // The M1 negative control: skip the entry check entirely. Ctrl-C must stop working for a
+    // process that is not parked, which is the claim constraint 16 makes.
+    think();
+  } else if (drainSignals() !== 0) {
+    C.interruptedAtEntry += 1;
+    return -EINTR;
+  } else {
+    think();
+  }
   if (kernelDown) return -EIO;
 
   ctl[A0] = a0 | 0; ctl[A0 + 1] = a1 | 0; ctl[A0 + 2] = a2 | 0; ctl[A0 + 3] = a3 | 0;
@@ -417,12 +452,35 @@ export function barrierCounters() {
 
 // ---------------------------------------------------------------------------- init and readout
 
+/**
+ * Advance the program-visible progress word. NOT a syscall: it is a plain atomic store into the
+ * process's own SAB, so a program can say "I reached phase N" without being inside a syscall when
+ * an observer reacts. M1's proof (e) needs that distinction — see bench/m1-lifecycle/program.mjs.
+ */
+export function publishProgress(n) {
+  Atomics.store(ctl, P_PROGRESS, n | 0);
+}
+
 export function initSyscall(opts) {
   ctl = opts.ctl;
   u8 = opts.u8;
   g = opts.g;
   port = opts.port;
   myPid = opts.pid;
+  noSigpendCheck = !!opts.noSigpend;
+  // M1 (f). Four bytes, read once. A kernel that wrote the wrong magic, or a stale SAB from a
+  // kernel running a previous ABI version, fails here rather than six calls in as a wrong reply.
+  const seenMagic = Atomics.load(ctl, H_MAGIC);
+  const seenVersion = Atomics.load(ctl, H_VERSION);
+  if ((seenMagic | 0) !== (SAB_MAGIC | 0)) {
+    throw new Error(`syscall.mjs: SAB magic ${seenMagic} != ${SAB_MAGIC}; this is an ABI break `
+      + "that MAGIC/VERSION exist to catch. Refuse to start rather than execute against a frame "
+      + "a kernel might read differently.");
+  }
+  if (seenVersion !== SAB_VERSION) {
+    throw new Error(`syscall.mjs: SAB version ${seenVersion} != ${SAB_VERSION}; a kernel one `
+      + "step ahead of this stub would read the registers at different offsets.");
+  }
   setQuantum(opts.quantumMs);
   // Boot-time specialisation, not a per-call branch: the headline path contains no control
   // branch at all, so "your flags perturbed the measurement" is not available as an objection.
