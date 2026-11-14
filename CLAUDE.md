@@ -84,6 +84,7 @@ mockups/
   shoot.py          renders both and fails on a JS error
 src/
   abi.mjs         every integer both sides agree on, and nothing else   ← see below
+  fs/             the filesystem codecs: PURE over byte arrays, all I/O at the edges  ← see below
   kernel/         the only privileged code
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
   wm/             userland window manager                (empty until M7)
@@ -97,6 +98,14 @@ SAB offset must have exactly one definition imported on both sides, and the kern
 are precisely the two sides — so the file can belong to neither. It holds integers and pure codecs,
 performs no I/O and closes over no capability, which is why a process may import it. Do not move it
 under `kernel/` (a process must not import kernel code) and do not give it behaviour.
+
+**`src/fs/` is pure for a reason that is a standing constraint, not a style.** The journal replay
+path is a parser over possibly-torn bytes, which is a fuzz target — and it is only a fuzz target
+while it runs in plain Node in milliseconds. `scripts/fsfuzz.py` runs 10,000 torn journals in about
+three seconds because nothing in `src/fs/` touches OPFS, a SAB or a Worker. **A codec that reaches
+for storage inside its parse path breaks that gate**, which is the intended alarm: the alternative
+is M2a decaying into a second implementation maintained beside the real one. All I/O lives at the
+edges, in `src/kernel/`.
 
 The predecessor is a sibling checkout at `../webxp`, and also
 <https://github.com/nchafy/webxp>. Several milestones port code from it. **If `../webxp` is not
@@ -210,6 +219,8 @@ scripts/serve.py --no-isolation     # omit the headers, to prove a check fails w
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
 scripts/check.py --controls         # what negative controls exist and what each proves
+scripts/fsfuzz.py                   # the fs codecs under Node + 10k torn journals (no browser)
+scripts/check_links.py              # every path reference in the authored docs resolves
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 
