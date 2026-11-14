@@ -23,8 +23,8 @@ checks is a wish.
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
 | M1 | Process lifecycle, signals, hard cap | 4 | 1 | ✅ done — a spinner dies on End Process |
-| **M2a** | **A host-runnable kernel, fuzzable codecs** | 1 | | ⬜ **next** |
-| M2 | VFS core on OPFS | 8 | | ⬜ |
+| M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
+| **M2** | **VFS core on OPFS** | 8 | | ⬜ **next** |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
@@ -464,7 +464,52 @@ refused a 129th spawn, and the bench's mislabelling of that refusal is what expo
 
 ---
 
-## M2a — A host-runnable kernel, before M2 · 1 day
+## M2a — A host-runnable kernel, before M2 · ✅ done · est 1 d, actual 0.5
+
+**10,000 torn and bit-flipped journals: 0 crashes, 0 silent acceptances.** With the CRC check
+removed, the same corpus yields **2,767** silent acceptances and the first one is case 0 — so the
+clean run is evidence rather than an absence. `scripts/fsfuzz.py` is the gate; it runs in about
+three seconds with no browser.
+
+**Built, and these are M2's real codecs rather than test doubles:** `src/fs/crc32.mjs` (pinned to
+the published CRC-32/ISO-HDLC check value 0xCBF43926, plus the empty-input case so a table that
+happened to suit nine bytes is not mistaken for a correct one), `src/fs/journal.mjs` (record codec
+and replay) and `src/fs/superblock.mjs`. `bench/fs-fuzz/hosttest.mjs` is 24 assertions under plain
+Node: every refusal reason named, both tear shapes, and the superblock slot logic.
+
+**The scope condition held and is now structural.** `src/fs/` is pure over byte arrays with all I/O
+at the edges in `src/kernel/`, so the fuzz target costs nothing to keep. If a future codec reaches
+for a sync access handle inside its parse path, `fsfuzz.py` stops running — which is the intended
+alarm rather than a silent decay into a second implementation.
+
+### What the codec does that a replay path usually gets wrong
+
+- **The CRC covers the header, not just the payload.** A flipped length field is therefore caught.
+  Covering only the payload would let a corrupt length through, and a length is the field a parser
+  is most dangerous about trusting — it is checked against `MAX_PAYLOAD` before it is used for any
+  arithmetic, and nothing is allocated on the strength of it.
+- **A refusal is a named reason, never a bare false**: short header, bad magic, bad length, short
+  payload, bad CRC, non-zero reserved. Replay reports *which* tear it found and how many bytes it
+  discarded, because constraint 28 requires surfacing a bad image rather than reseeding.
+- **Both tear shapes are tested separately**, since they take different branches: a tear inside a
+  header cannot read a length at all, while one after it has a length that over-runs the buffer.
+- **A sequence gap stops replay.** Records after a missing one are not later records; they are
+  records whose predecessor is gone, and applying them would build state nobody wrote.
+- **Three superblock slots, newest valid wins.** Against two alternating slots a bad write to the
+  older one during a commit can leave zero valid copies (Phantom's argument). A corrupt newest slot
+  falls back and *says so*; no valid slot is a refusal, not a reseed. The generation counter and the
+  major/minor version are in the format now because neither can be added once it holds user data —
+  a reader one step ahead refuses rather than guesses.
+
+**Proof.** `scripts/fsfuzz.py` — host tests 24/24, fuzz 10,000 cases clean.
+**Negative control, two of them.** `--no-crc` finds 2,767 silent acceptances, so the fuzzer can
+fail. And the *gate* was shown to fail: with the CRC comparison deleted from the codec in a scratch
+tree, `fsfuzz.py` exits 1 reporting 2 failed host tests and 547 silent acceptances — it catches a
+defect in the code, not only its own switch.
+
+**Residual, stated:** 64-bit fields are `BigInt` throughout, rendered as decimal strings only at the
+JSON boundary. A u64 inode number silently losing precision as a double is the defect that would be
+hardest to find later.
 
 Ordering finding, not a preference: this is cheaper before M2 than after it.
 
