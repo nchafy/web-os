@@ -22,6 +22,10 @@ import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./fil
 import { buildCalls, installStall, PENDING } from "./calls.mjs";
 import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mjs";
 import { makeInlineIo } from "./io-inline.mjs";
+import { TraceRing, TR_ENTER, TR_EXIT, TRACE_DEFAULT_BYTES } from "./trace.mjs";
+import { MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV } from "../fs/mounts.mjs";
+import { makeProcFS } from "./procfs.mjs";
+import { makeDevFS } from "./devfs.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -40,6 +44,11 @@ let STORE = null;
 let QUOTA = null;
 let mountReport = null;
 let table = null;
+/** M3. The syscall trace ring, and the mount table. Both are built at boot and both are null
+ *  before it, which is why every use of `trace` is guarded: a kernel that has not booted still
+ *  dispatches the page's own messages. */
+let trace = null;
+let mounts = null;
 let hb = 0;
 let kServiceMs = 0;
 let kCalls = 0;
@@ -137,6 +146,21 @@ let noteCount = 0;
  * call's r0.
  */
 function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
+  // THE EXIT RECORD, written here because `reply` is the one place a call concludes: fail, intr,
+  // finish and every async settlement all funnel through it, so one call site covers them all.
+  //
+  // IT CARRIES ITS CALL'S ENTRY TIME, not the time of the exit, and that is a measured trade
+  // rather than an oversight. A clock read here would cost more than the record: measured on this
+  // machine, `performance.now()` is 69.0 ns and `Date.now()` 52.9 ns against a 19.4 ns record
+  // (`node bench/m3-trace/probe.mjs`, Node 18.20.2 darwin/arm64). The dispatcher already holds
+  // `tIn`, so the pair costs nothing. CONSEQUENCE, stated so nobody derives a wrong number from
+  // it: SYSCALL DURATION IS NOT AVAILABLE FROM THE TRACE. Order is, from the monotonic `seq`.
+  // Latency comes from the kernel's own service accounting and M0's histogram, which measure it
+  // properly. A future milestone wanting durations in the trace should have the dispatcher write
+  // a third record after its existing end-of-dispatch `now()`, which is also free.
+  if (trace && p.inflight) {
+    trace.put(TR_EXIT, p.pid, p.inflight.nr, p.inflight.callid, r0 | 0, rlen | 0, p.inflight.t);
+  }
   const ctl = p.ctl;
   ctl[R0] = r0 | 0;
   ctl[R1] = r1 | 0;
@@ -341,7 +365,10 @@ function onSyscall(p, posted) {
   // enter the window histogram. Its cost is instrumentation, and --no-depth is what prices it.
   if (Atomics.load(g, G_WINDOW) === W_OPEN) depthTarget[bucket] += 1;
   p.calls += 1;
-  p.inflight = { nr, callid, seq: p.seq, abort: null };
+  p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
+  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
+  // read -- see reply() for why that is the whole design of the record's time field.
+  if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
   // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
@@ -372,7 +399,10 @@ function onSyscallNoDepth(p, posted) {
     return;
   }
   p.calls += 1;
-  p.inflight = { nr, callid, seq: p.seq, abort: null };
+  p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
+  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
+  // read -- see reply() for why that is the whole design of the record's time field.
+  if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
   // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
@@ -404,7 +434,10 @@ function onSyscallNoSigpend(p, posted) {
     return;
   }
   p.calls += 1;
-  p.inflight = { nr, callid, seq: p.seq, abort: null };
+  p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
+  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
+  // read -- see reply() for why that is the whole design of the record's time field.
+  if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
   // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
@@ -502,6 +535,9 @@ function spawn(image, programCfg, index = 0) {
   slot.sab = new SharedArrayBuffer(SAB_BYTES);
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
+  // M3. What `/proc/<pid>/cmdline` reports. The image carries the URL it was loaded from, and
+  // this is the only point at which the kernel still has it.
+  slot.cmdline = (image && image.url) || "";
   // THE PROCESS'S IDENTITY, set at spawn and read per call by every path syscall (constraint 29).
   // A spawn that did not take one would make every process root, and then the mode bits a check
   // asserts are bits nothing ever consults.
@@ -1192,6 +1228,46 @@ async function handle(m) {
         mountReport = { mountable: MOUNT_REFUSE, problems: [{ what: "opfs",
           why: `the I/O worker has no OPFS root: ${ioWhy || opfsWhy || "unknown"}` }] };
       }
+      // M3. The syscall trace ring, before the mount table because `/dev` reads it.
+      //
+      // Sized from cfg only under bench=1, same gate as every other control hook: an undersized
+      // ring is M3's third negative control and a hook a later change could leave armed is worse
+      // than one needing a hand edit. `enforce: false` is what lets the control go below the
+      // 16 MiB floor, and nothing else may pass it.
+      if (cfg.traceBytes) {
+        if (cfg.bench !== 1) throw new Error("traceBytes requires bench=1");
+        trace = new TraceRing(cfg.traceBytes | 0, { enforce: false });
+      } else {
+        trace = new TraceRing(TRACE_DEFAULT_BYTES);
+      }
+
+      // M3. THE MOUNT TABLE, static at boot (MILESTONES.md M3). There is no SYS_mount: a process
+      // cannot mount, which is the narrowest possible form of docs/LEARNING-MODE.md §6's rule that
+      // `mount` must never accept a caller-supplied URL.
+      //
+      // Built only when the volume mounted. A kernel with no filesystem has no root to hang
+      // `/proc` off, and a mount table whose root was absent would answer every path call with a
+      // confusing ENOENT instead of the honest -EIO the store already returns.
+      if (STORE && STORE.vfs) {
+        mounts = new MountTable();
+        mounts.add("/", {
+          fs: STORE.vfs,
+          type: FS_OPFS,
+          // The volume's own read-only verdict (constraint 28: a bad superblock mounts read-only
+          // and reports). One renderer: the write paths test the mount flag, not two sources.
+          flags: STORE.readOnly ? MNT_RO : 0,
+        });
+        const procFs = makeProcFS({
+          table: () => table,
+          mounts: () => mounts,
+        });
+        const devFs = makeDevFS({ trace: () => trace });
+        // setDev AFTER add, because the table assigns the number — a filesystem that chose its
+        // own device number would be a second place uniqueness had to hold.
+        procFs.setDev(mounts.add("/proc", { fs: procFs, type: FS_PROC, flags: MNT_RO }).dev);
+        devFs.setDev(mounts.add("/dev", { fs: devFs, type: FS_DEV, flags: MNT_RO }).dev);
+      }
+
       // k.table is a getter in the surface below, so handlers see the live ProcTable rather
       // than a snapshot taken before anything was spawned. The alternative — passing `table`
       // directly — would capture the initial value and break every spawn after the kernel's
@@ -1207,6 +1283,10 @@ async function handle(m) {
         parkParent,
         deliverSignal,
         spawnChild,
+        // M3. Getters, not values: the mount table is built after this object is described in
+        // source order and a captured null would make every path call -EIO.
+        get mounts() { return mounts; },
+        get trace() { return trace; },
       });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses

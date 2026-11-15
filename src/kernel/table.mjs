@@ -42,6 +42,10 @@ class Slot {
     // docs/ABI.md's path group lists no `chdir`, and M3's `/proc/<pid>/cwd` is what makes it
     // observable, so the field is here and the call that moves it is M3's.
     this.cwd = "/";
+    // M3. The program this process is running, for `/proc/<pid>/cmdline`. Recorded by `spawn`
+    // because the kernel is the only thing that knows it: the process is handed an image, not a
+    // path, and a process that reported its own cmdline could report any string it liked.
+    this.cmdline = "";
     // The two reply scratch words a handler may set; cleared at every dispatch. kernel.mjs's
     // finish() reads them. See docs/ABI.md's fstat, readdir, statfs and seek.
     this.rlen = 0;
