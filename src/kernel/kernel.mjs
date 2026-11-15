@@ -14,7 +14,8 @@ import {
   G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
   K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
   EINTR, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO,
-  SIGKILL, SIGTERM, SIGINT, SIGHUP, SIG_DFL, SIG_IGN, SIG_HANDLE,
+  SIGKILL, SIGTERM, SIGINT, SIGHUP, SIGPIPE, SIG_DFL, SIG_IGN, SIG_HANDLE,
+  F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2, ENOEXEC, decodeSpawnRequest,
   STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
@@ -30,6 +31,7 @@ import { mountProvider, USR_ENTRIES } from "./providerfs.mjs";
 import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
+import { installPipeKernel } from "./pipe.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -51,6 +53,16 @@ let table = null;
 /** M3. The syscall trace ring, and the mount table. Both are built at boot and both are null
  *  before it, which is why every use of `trace` is guarded: a kernel that has not booted still
  *  dispatches the page's own messages. */
+/**
+ * The signals whose SIG_DFL disposition is to kill.
+ *
+ * DATA, not a condition, so M4's negative control removes a row at boot and the headline path
+ * carries one Set lookup either way. SIGPIPE's membership is what makes `yes | head -1` terminate:
+ * without it a writer whose reader has gone only gets the SIGPEND bit, which `drainSignals`
+ * discards at the next syscall entry, and it loops forever on a write that keeps failing.
+ */
+const FATAL_DEFAULT = new Set([SIGTERM, SIGINT, SIGHUP, SIGPIPE]);
+
 let trace = null;
 let mounts = null;
 /** What happened to the /usr provider mount. Reported, never swallowed: a /usr that
@@ -536,9 +548,27 @@ let goCount = 0;
  * 157.0.8103.38). A kernel that spawned and parked would hang for a full re-arm interval and be
  * misread as a syscall-latency problem, which is why that failure is reported under its own name.
  */
-function spawn(image, programCfg, index = 0) {
+function spawn(image, programCfg, index = 0, parent = null) {
   const slot = table.alloc();
   if (typeof slot === "number") return slot;   // -EAGAIN, the hard cap (constraint 17)
+
+  // M4. WHAT A CHILD INHERITS. Until now nothing did: `ppid` was initialised to 0 and assigned
+  // nowhere, so `waitpid` could only ever return -ECHILD, `parkParent` and teardown's parent-wake
+  // were unreachable, and `setpgid`'s "or your child" clause could never be true. Every process
+  // was also its own process group and its own session, which makes `kill(-pgid)` unable to reach
+  // a pipeline — and "Ctrl-C during `sleep 100 | cat` kills both" is one of M4's own proofs.
+  //
+  // The pgid and sid come from the PARENT and never from the caller's request. A page-spawned
+  // process has no parent and stays its own group and session, which is what a process started by
+  // the supervisor should be.
+  if (parent) {
+    slot.ppid = parent.pid;
+    slot.pgid = parent.pgid;
+    slot.sid = parent.sid;
+    slot.cwd = parent.cwd;
+    slot.uid = parent.uid;
+    slot.gid = parent.gid;
+  }
 
   slot.sab = new SharedArrayBuffer(SAB_BYTES);
   slot.ctl = new Int32Array(slot.sab);
@@ -664,9 +694,28 @@ function onProcessMessage(slot, m) {
       return;
     }
     Atomics.add(g, G_READY, 1);
+    // M4. A child created by SYS_spawn runs itself: the page never sends it a `go`, because the
+    // page does not know it exists. Armed by spawnChild and fired here, which is the first moment
+    // the child's program is loaded.
+    if (slot.pendingGo) {
+      const go = slot.pendingGo;
+      slot.pendingGo = null;
+      slot.port.postMessage({ t: "go", ...go });
+    }
     return;
   }
   if (m.t === "result") {
+    // M4. A PROCESS-SPAWNED CHILD EXITS; it does not join the page's result batch.
+    //
+    // `results` and `goCount` are the page's accounting for a `go` IT issued, and a child the page
+    // never spawned would make `results.length >= goCount` fire early and hand the page a batch
+    // containing a process it did not ask about. A child that finished its program has exited, so
+    // it is reaped — which is what makes its status available to the parent's `waitpid`.
+    if (slot.ppid) {
+      const code = (m.data && Number.isInteger(m.data.exit)) ? m.data.exit : 0;
+      reap(slot, STAT_EXITED, code);
+      return;
+    }
     const sink = slot.fds.get(1);
     // THE KERNEL'S OWN FIELDS GO LAST, so a program cannot overwrite them.
     //
@@ -1141,7 +1190,11 @@ function raiseOne(slot, sig) {
   if (disp === SIG_IGN) return;
   if (disp === SIG_DFL) {
     // The POSIX default for the signals M1 can reasonably name. Fatal for TERM/INT/HUP.
-    if (sig === SIGTERM || sig === SIGINT || sig === SIGHUP) {
+    // SIGPIPE JOINS THE FATAL LIST, and it is what makes `yes | head -1` terminate. POSIX's
+    // default disposition for SIGPIPE is to kill, and without it a writer whose reader has gone
+    // sees only the bit — which `drainSignals` discards at the next syscall entry — and loops
+    // forever on a write that keeps failing. M4's negative control is to take it back out.
+    if (FATAL_DEFAULT.has(sig)) {
       reap(slot, STAT_KILLED, sig);
       return;
     }
@@ -1170,11 +1223,105 @@ function raiseOne(slot, sig) {
  *  A minimal M1 contract: a0 = programUrl length, byte region starts with that string, no argv,
  *  no envp. That is enough for proof (c) (spawn to the 129th) and does not pretend to be more. */
 function spawnChild(caller) {
-  // For M1 the shell is NOT yet present, so SYS_spawn from a process is not expected to be
-  // exercised by proof (a-d). The page's own `spawn` message is what the four proofs use (the
-  // existing path in handle("spawn")). This handler exists so SYS_spawn is reachable, dispatched
-  // through the derived table at boot, and the slot number cannot drift.
-  return -ENOSYS;
+  // THE CALL THAT REPLACES `fork` (constraint 20, decision D5). `spawn` + `pipe` + `setpgid` is
+  // the whole of process creation here, and M5's shell executor is specified against exactly this
+  // shape: "posix_spawn-shaped file actions".
+  //
+  // The request is bytes, decoded by the one codec both sides import (`decodeSpawnRequest`). It
+  // returns null for anything malformed rather than throwing, because this is process-controlled
+  // input being parsed on the kernel thread and a throw here is a process faulting the kernel —
+  // the defect class M3's review found three of.
+  const length = Atomics.load(caller.ctl, LEN_I32);
+  if (length <= 0 || length > MAX_INLINE) return -EINVAL;
+  const req = decodeSpawnRequest(new Uint8Array(caller.bytes.subarray(DATA_OFF, DATA_OFF + length)));
+  if (!req) return -EINVAL;
+
+  // VALIDATE THE FILE ACTIONS AGAINST THE CALLER'S TABLE BEFORE ANYTHING IS ALLOCATED. A dup2
+  // naming an fd the caller does not hold is EBADF, and finding that out after the worker has
+  // started means tearing down a process that should never have existed.
+  for (const act of req.actions) {
+    if (act.op === SPAWN_DUP2 && !caller.fds.get(act.a)) return -EBADF;
+  }
+
+  // The image load is a fetch, so the call cannot answer on the dispatch thread. `later` carries
+  // the seq guard: if the caller is interrupted or reaped while the program is loading, the child
+  // is still created and the answer is dropped — which is why the child is reaped in that arm
+  // rather than left running with nobody holding its pid.
+  later(caller, async () => {
+    let image;
+    try {
+      image = await programImage(req.path);
+    } catch (error) {
+      // A program that will not load is ENOEXEC, not EIO: the path resolved and the bytes were
+      // not a program this kernel can run.
+      noteOut(`spawn ${req.path}: ${error && error.message}`);
+      return -ENOEXEC;
+    }
+    const childPid = spawn(image, { argv: req.argv }, 0, caller);
+    if (childPid < 0) return childPid;             // -EAGAIN, the cap
+    const child = table.get(childPid);
+    if (!child) return -EAGAIN;
+
+    // FD INHERITANCE, then the actions, in that order — which is posix_spawn's own order and the
+    // reason a shell can say "dup the pipe onto 1, then close the pipe fd". The child starts with
+    // the caller's whole table, each description's refcount raised, and the actions rearrange it.
+    //
+    // fds 1 and 2 were already pointed at a fresh sink by `spawn`; inheriting over them is
+    // correct, because a child of a process with a redirected stdout must get the redirection.
+    for (let fd = 0; fd < caller.fds.fds.length; fd += 1) {
+      const d = caller.fds.get(fd);
+      if (!d) continue;
+      const existing = child.fds.get(fd);
+      if (existing) {
+        // The sink `spawn` installed. Drop our reference to it before the inherited description
+        // takes the slot, or it leaks a refcount nothing will ever close.
+        child.fds.close(fd);
+      }
+      d.refs += 1;
+      child.fds.set(fd, d);
+    }
+    for (const act of req.actions) {
+      if (act.op === SPAWN_DUP2) {
+        const src = child.fds.get(act.a);
+        if (!src) continue;             // validated above against the caller; a prior CLOSE may have taken it
+        if (act.a === act.b) continue;  // dup2(fd, fd) is a no-op that must not drop a refcount
+        if (child.fds.get(act.b)) child.fds.close(act.b);
+        src.refs += 1;
+        child.fds.set(act.b, src);
+      } else {
+        if (child.fds.get(act.a)) child.fds.close(act.a);
+      }
+    }
+    // A pipe description now held by the child must count the child's end. Done after the actions
+    // so a CLOSEd end is not counted, and before the worker runs so the child cannot read from a
+    // pipe whose writer count has not yet been raised.
+    countPipeEnds(child);
+    // ARM THE RUN ON THE CHILD'S OWN `ready`, rather than polling for it. The worker is already
+    // constructed and loading its image; `onProcessMessage`'s ready arm posts this `go` the moment
+    // the child says it is initialised, so there is no sleep and no window in which the child
+    // could be told to run before its program exists.
+    child.pendingGo = { mode: "park", argv: req.argv };
+    return child.pid;
+  });
+  return PENDING;
+}
+
+/**
+ * Raise the pipe refcounts for every pipe description a slot ended up holding.
+ *
+ * A pipe's `readers`/`writers` are counts of OPEN DESCRIPTIONS, and the fd table's own refcount
+ * cannot serve: two fds on one description are one open end, and `close` on the last fd is what
+ * the pipe must see. So the pipe is counted per DISTINCT description, which is what the `seen`
+ * set is for — the same deduplication teardown's fd sweep does, for the same reason.
+ */
+function countPipeEnds(slot) {
+  const seen = new Set();
+  for (const d of slot.fds.fds) {
+    if (!d || seen.has(d)) continue;
+    seen.add(d);
+    if (d.kind === F_PIPE_R) d.pipe.readers += 1;
+    else if (d.kind === F_PIPE_W) d.pipe.writers += 1;
+  }
 }
 
 // ---------------------------------------------------------------------------- boot
@@ -1386,7 +1533,21 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("truncateOverflow requires bench=1");
         installTruncateOverflow();
       }
+      // M4. The two kernel operations a pipe performs on a process, injected rather than imported:
+      // `pipe.mjs` is imported BY this file, so the reverse would be a cycle. `reply` is the
+      // single writer of SEQ/STATUS/RLEN, so a pipe waking a reader goes through the same release
+      // every other answer does, and `raiseOne` is the one place a disposition is consulted.
+      installPipeKernel({ reply, raise: raiseOne });
+
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
+      // M4's negative control. Stop delivering a fatal SIGPIPE and `yes | head -1` must HANG:
+      // head exits, the pipe loses its reader, and yes keeps writing into a pipe nobody reads.
+      // Same discipline as installStall and noSigpend — refused unless the page asked for a
+      // bench boot, so a hook a later change could leave armed is not possible silently.
+      if (cfg.noSigpipe) {
+        if (cfg.bench !== 1) throw new Error("noSigpipe requires bench=1");
+        FATAL_DEFAULT.delete(SIGPIPE);
+      }
       // M2's negative control, both stages. Same discipline as installStall: a hook a later change
       // could leave armed is worse than one requiring a hand edit, so bench=1 is the gate, and the
       // echoed cfg above is how each proves it was applied.

@@ -817,9 +817,10 @@ process cannot mount at all.
 
 ## M4 — Pipes, pty, line discipline · 5 days · ~1000 LoC
 
-**Build.** `pipe2`, `dup2`, process groups, and the line discipline **in the kernel** —
+**Build.** `pipe2`, process groups, and the line discipline **in the kernel** —
 `ICANON`, `ECHO`, `ISIG`, `VINTR`/`VQUIT`/`VSUSP` — so Ctrl-C raises `SIGINT` on the foreground
-group even when the UI is wedged. Every byte of IPC crosses the kernel (15).
+group even when the UI is wedged. The pipe work reuses the `dup2` M2 already shipped
+(`SYS_dup2: 38` in `src/abi.mjs`). Every byte of IPC crosses the kernel (15).
 
 **Proof.** `yes | head -1` terminates; Ctrl-C during `sleep 100 | cat` kills both; a writer killed
 with `-9` makes its blocked reader return 0 (EOF), and a blocked writer whose reader died gets

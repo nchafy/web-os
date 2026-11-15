@@ -46,6 +46,9 @@ class Slot {
     // because the kernel is the only thing that knows it: the process is handed an image, not a
     // path, and a process that reported its own cmdline could report any string it liked.
     this.cmdline = "";
+    // M4. A `go` armed by SYS_spawn and fired when this process reports ready. A child created by
+    // a process runs itself; the page never sends it a go because the page does not know it exists.
+    this.pendingGo = null;
     // The two reply scratch words a handler may set; cleared at every dispatch. kernel.mjs's
     // finish() reads them. See docs/ABI.md's fstat, readdir, statfs and seek.
     this.rlen = 0;
