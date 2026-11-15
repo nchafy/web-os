@@ -1,0 +1,17 @@
+import json,sys
+d=json.load(open('/private/tmp/claude-503/-Users-chafyni-claude/e856c39e-d35f-4194-90b6-733ab8574dcd/tasks/wcgououxd.output'))
+print("KEYS:",list(d.keys()))
+for r in d.get('explored',[]):
+    print("\n"+"="*70)
+    print("TOPIC:",r.get('topic','?')[:160])
+    print("\nSUMMARY:",r.get('summary',''))
+    print("\nFINDINGS:",len(r.get('findings',[])))
+    print("\nREUSABLE:")
+    for x in r.get('reusable',[]) or []: print("  -",x)
+    print("\nGOTCHAS:")
+    for x in r.get('gotchas',[]) or []: print("  !",x)
+    print("\nUNKNOWN:")
+    for x in r.get('could_not_determine',[]) or []: print("  ?",x)
+print("\n"+"#"*70)
+print("MISSING:",d.get('missing'))
+print("\nCRITIQUE:\n",d.get('critique',''))
