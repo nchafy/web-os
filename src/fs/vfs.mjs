@@ -69,6 +69,10 @@ const MESSAGES = {
   ENOSPC: "No space left on device",
   ENAMETOOLONG: "File name too long",
   EBUSY: "Device or resource busy",
+  // M3. docs/ABI.md's path group already lists NODEV, and `mount` is the call that raises it: a
+  // filesystem type nobody implements. Without the row the code would reach a process as -EIO,
+  // which says "the disk failed" about a typo in a mount row.
+  ENODEV: "No such device",
   EFBIG: "File too large",
   EMLINK: "Too many links",
   EROFS: "Read-only file system",
