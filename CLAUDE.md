@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 102 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 112 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 17 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  102 normative constraints  ← cite these
+  CONSTRAINTS.md  112 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -84,8 +84,10 @@ mockups/
   shoot.py          renders both and fails on a JS error
 src/
   abi.mjs         every integer both sides agree on, and nothing else   ← see below
-  fs/             the filesystem codecs AND the mount table: PURE, all I/O at the edges  ← see below
+  fs/             the filesystem codecs, the mount table and the byte ring: PURE  ← see below
   kernel/         the only privileged code
+    pipe.mjs      the pipe: a kernel-side buffer, and the EOF/EPIPE asymmetry
+    pty.mjs       the pty and the line discipline. Ctrl-C lives here, not in the terminal app
     synth.mjs     ONE adapter for every generated filesystem; a new one is two functions
     procfs.mjs    /proc, regenerated per read from the live process table — never cached
     devfs.mjs     /dev, and the one renderer /dev/trace and the page both read

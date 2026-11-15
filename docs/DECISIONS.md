@@ -366,6 +366,32 @@ the bytes and that length is stable for the life of the fd — which is also why
 
 *Evidence: measured. Constraint 74.*
 
+## D20 · A `poll` timeout rescans, and the wake control widens to match
+
+**Decided:** a parked `poll` rescans its set before answering a timeout, and `--negative
+no-poll-wake` removes re-evaluation in BOTH places — the wake hooked on `reply` and the timeout's
+rescan. **Rejected:** keeping the timeout's stale publish so the control stays narrow; asserting
+the wake's LATENCY instead.
+
+A timeout republished the revents its last scan produced. Those are all zero by construction — a
+scan finding anything ready answers instead of parking — so a readiness that arrived without a
+`reply` was reported as "nothing became ready", which the caller cannot distinguish from the
+truth. Teardown's fd sweep was exactly that case (constraint 115).
+
+Rescanning fixes it and costs the control its subject: measured, `--negative no-poll-wake` went
+from 3 red to **0 red in 9.30 s** — the poll was answered correctly, five seconds late, by the
+timeout. A control that breaks nothing a check can see is not a control, and the harness refused
+it rather than reporting green.
+
+Asserting latency was the other way out and is worse: it is a timing assertion in a suite that has
+none, and it would flake on the machine that runs it.
+
+So the flag governs both. The control is named for re-evaluation, re-evaluation happens in two
+places, and with neither of them a parked `poll` cannot report truth — which is the claim
+constraint 42 actually makes.
+
+*Evidence: measured. Constraints 115, 116.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

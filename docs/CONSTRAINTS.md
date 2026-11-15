@@ -802,3 +802,131 @@ cancellation design.
     drops the answer when the caller has moved on, so the child was created, armed to run, and its
     pid returned to nobody. The comment claimed a reap that did not exist. It is now reaped where
     it is still the kernel's to undo.
+
+## What M4b built, and what it found
+
+103. **DEFECT (fixed) — teardown decremented an fd refcount ONCE PER DESCRIPTION, not per fd.**
+    The sweep deduplicated by description, on the reasoning that "a dup'd description is closed
+    once" — which the refcount already guarantees, since `--d.refs <= 0` fires exactly once. What
+    the dedup actually did was LEAK a reference: `FileTable.add`, `.set` and `dup2` all raise
+    `refs` once per fd and `FileTable.close` lowers it once per fd, so a process holding one
+    description on two fds left `refs` at 1 forever. **Harmless until M4b**, because the only
+    shared description was the sink and its close is a no-op. With a pty slave on fd 0 and fd 1 —
+    which is what a terminal stage holds — the slave end never closed, `slaves` never reached 0,
+    and the master's reader parked on an EOF that could never arrive. No error anywhere: the
+    symptom was a process stuck in `read`, and the kernel's park dump is what located it.
+104. **A pty's two ends are two description kinds, because the directions are not symmetric.**
+    `write(master)` is INPUT and runs the line discipline; `write(slave)` is OUTPUT and goes
+    straight to the master's queue. `read(slave)` takes processed input, in canonical mode only
+    whole lines; `read(master)` takes the program's output plus the echo. One kind with a direction
+    flag would make every op branch on it.
+105. **The line discipline's ORDER is load-bearing: signals, then editing, then echo, then
+    buffering.** A signal character echoed before it was recognised leaves a stray `^C` in the
+    output; one buffered first is delivered to the program as data. Neither shows up as an error —
+    both show up as a terminal that behaves oddly. `bench/m4b-pty/probe.mjs` demonstrates both
+    mutations failing.
+106. **`ICANON` and `ECHO` semantics are specified in NO authored document.** `MILESTONES.md` M4
+    specifies exactly one behaviour of the discipline: ISIG with VINTR must raise SIGINT on the
+    foreground group even when the UI is wedged. Everything else — line buffering, ERASE, KILL,
+    VEOF, CR LF echo, the destructive backspace-space-backspace — is **POSIX's default taken as an
+    assumption**, and `src/kernel/pty.mjs` says so where it is implemented rather than presenting
+    it as design. `docs/ABI.md` additionally requires `VMIN` and `VTIME` in the struct; they are
+    carried and **no behaviour reads them**, which is stated at the declaration.
+107. **A pty with no foreground group DROPS a signal rather than broadcasting it.** `fgPgid` 0
+    means "nobody". The alternative — delivering Ctrl-C to every process when the terminal has no
+    foreground group — is a keystroke killing the system.
+108. **`ioctl` implements exactly two requests**, `TIOCGPGRP` and `TIOCSPGRP`, and answers -EINVAL
+    for the rest. POSIX carries `tcgetpgrp`/`tcsetpgrp` through `ioctl`, so inventing a syscall for
+    a fact `ioctl` already names would be new ABI surface for nothing. A `TIOCSPGRP` naming a group
+    that does not exist is ESRCH, and one in another session is EPERM — otherwise a process could
+    aim a terminal's Ctrl-C across a session boundary.
+109. **`poll` is required by constraint 42 and is absent from `MILESTONES.md` M4's build list.**
+    The constraint is normative — "`poll()` MUST be the single wait primitive over fds" — because a
+    process has one futex word and one outstanding call, so one terminal plus a pipe cannot
+    otherwise wake it. M4b implements it for that reason. Parked polls live in ONE list,
+    re-evaluated from `reply` because that is the single funnel every state change passes through;
+    a new pollable kind therefore cannot forget to notify. The list holds at most one entry per
+    process, so the sweep is O(processes polling) — constraint 18's O(interested), not O(N).
+110. **A `poll` that times out must publish its `revents` before answering**, which is why it has
+    its own timer rather than `setTimer`'s. `setTimer` replies 0 itself, and only the poll handler
+    knows the record layout.
+111. **`SIGWINCH` is raised only when the size actually CHANGED.** A program re-asserting the size
+    it already has has not been resized, and a spurious SIGWINCH makes every full-screen program
+    redraw.
+112. **One ring implementation, `src/fs/ring.mjs`.** It was inline in the pipe until the pty needed
+    three more queues, and four hand-written rings is four places for the wrap to be wrong — a push
+    that straddles the end of the buffer is two copies, and the second is the one a hand-written
+    ring forgets. Pure, so `fsfuzz.py` lints it.
+113. **A resource and its accounting are acquired in the order that cannot leak.** `dup` raised the
+    description's refcount and THEN asked for an fd, so a table at `OPEN_MAX` answered -EMFILE with
+    the count permanently one high — and a kind's `close` op fires only when the last reference
+    goes, so it never fired. A pipe whose writer count never drops leaves its reader parked on an
+    EOF that cannot arrive, which is constraint 92's deadlock reached by a different route. The
+    same shape in `open`'s async arm leaked an OPFS **sync access handle**, which is an exclusive
+    lock per file: a retryable errno made one file unopenable by any process for the lifetime of
+    the page. Take the slot first, then the reference; release the host resource on every arm that
+    can still fail.
+114. **A handler's own side effect may answer its call, and the second reply must be dropped at the
+    funnel.** A pty operation signals the foreground group, and a fresh pty's foreground group is
+    its OPENER's — so a resize issued before a shell has moved it raises SIGWINCH on the process
+    making the call. `raiseOne` interrupts the in-flight call, and `finish` then replied to the
+    handler's return as well: two SEQ bumps and two `G_INFLIGHT` decrements for one call, which
+    drives the depth gauge negative and breaks the issued == replied identity `check_syscall`
+    asserts. The guard is in `finish`, which all three dispatchers and `later` return through, so
+    a handler added later cannot forget it. The drop is COUNTED (`answeredDuringCall`) rather than
+    silent, because a guard that hides the class it prevents is the next defect.
+115. **Readiness that changes without a `reply` must wake parked polls explicitly.** Constraint 109
+    hooks the wake on `reply` so no pollable kind can forget it, and teardown is the one path that
+    moves readiness and does not reply — its only `reply` runs BEFORE the fd sweep that drops a
+    pipe's `writers` or a pty's `slaves` to 0. A peer parked in `poll` over a dying process's pipe
+    waited out its own timeout, or waited forever where it had asked to block, for an event that
+    had already happened. The sweep now wakes polls after `pollForget`.
+116. **A negative `poll` timeout is INFINITE.** `poll(NULL, 0, -1)` was answered 0 immediately,
+    which is a busy-wait where the caller asked to block — the one shape where a program spins the
+    kernel by doing exactly what POSIX says. It parks with an empty set instead, which no fd can
+    make ready, so only a signal or teardown ends it.
+117. **"Parked" is not a state name.** `/proc/<pid>/status`'s `state` is `running` for every process
+    that is not a zombie, so two checks asserting a process was blocked in `read` and in `poll`
+    were asserting only that it had not exited — and sampled it immediately after the write that
+    was meant to park it, so they raced it too. Parked is TWO facts: a call outstanding (`calls`
+    one ahead of `replies`) and WHICH call. The syscall number is published in `status` for that
+    reason, and the checks wait for it rather than sampling once.
+118. **An iteration cap is not a wait.** The stage behind the milestone's headline behaviour —
+    Ctrl-C reaching a process spinning in a compute loop — spun for 200,000 iterations and then
+    exited normally, which on this machine beat the orchestrator's keystroke about 1 run in 4. The
+    proof then failed with `killed: false, code: 0`. A process that must be alive when an event
+    arrives is bounded by WALL CLOCK, and the ceiling is the error path: returning at all is the
+    failure, so it names itself in the exit code.
+119. **A fix in a module is unverified until the path a user reaches calls it.** `Pty.writable`
+    answered POLLOUT correctly from the day it was written and `pollOne` still carried an
+    unconditional `revents |= POLLOUT`, so the kernel's `poll` kept telling a slave with a full
+    16 KiB output ring that it could write. A unit probe calling the new method directly passed,
+    and the one caller that mattered had not been changed. This is constraint 100's rule — a
+    mechanism with no live caller is unverified — in the harder form: a mechanism with a TEST
+    caller and no production caller looks verified.
+120. **`d.get(a) == d.get(b)` passes when both are absent**, because `None == None`. Two clauses in
+    `check_m4b` compared a measured errno to the constant it should equal, with both travelling in
+    the same evidence object — so one typo in the page would have removed both halves together and
+    left the clause green. A comparison between two fields read out of a reported object asserts
+    presence first.
+121. **A bench page that boots a kernel per proof should SHUT EACH ONE DOWN, not just terminate
+    it** — and doing so did NOT fix the flake it was reached for, which is the more useful half of
+    this entry. `worker.terminate()` on the kernel orphans every process worker the kernel
+    created: a terminated worker's nested workers are collected eventually, not promptly, and
+    `www/m4b.html` boots thirteen kernels. So the kernel answers a `shutdown` message by reaping
+    every live slot through the path `end-process` already uses, and the page waits for the
+    acknowledgement before it terminates. That is right on its own terms.
+    **It is not the cause of the flake.** `www/m4b.html` reports BROKEN with a page-level
+    `timed out waiting for spawned` about 1 run in 12, and the rate was unchanged by the sweep:
+    11 of 12 with it, 11 of 12 without it, and **11 of 12 on the committed tree at 11 proofs
+    rather than 13** — so it is not the proof count either. Measured with
+    `scripts/check.py --only m4b` in loops of 12, Chrome killed and 1 s given to exit between
+    runs. THE CAUSE IS NOT IDENTIFIED. It fails closed: the harness reports a run it could not
+    measure, never a pass.
+122. **A proof whose failure mode is a HANG reports nothing.** The fd-table proof asks through
+    `poll` with a deadline and not through `read`, because a leaked description reference leaves
+    the reader with no EOF to see — a `read` would park forever, ending the check as BROKEN with
+    no expectations, indistinguishable from a harness fault. Where an infinite park is the only
+    way to assert the thing (teardown's wake, which a finite timeout's own rescan would answer),
+    the ORCHESTRATOR owns the deadline: it waits a bounded number of rounds, kills the stage, and
+    reports `wokenByTeardown: false`. A check has to be able to fail, not wedge.
