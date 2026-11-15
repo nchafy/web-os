@@ -24,11 +24,12 @@ import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mj
 import { makeInlineIo } from "./io-inline.mjs";
 import { TraceRing, TR_ENTER, TR_EXIT, TRACE_DEFAULT_BYTES } from "./trace.mjs";
 import {
-  MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV, FS_PROVIDER,
+  MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV, FS_PROVIDER, FS_TMPFS,
 } from "../fs/mounts.mjs";
 import { mountProvider, USR_ENTRIES } from "./providerfs.mjs";
 import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
+import { TmpFS } from "./tmpfs.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -860,6 +861,9 @@ function m3State() {
       : [],
     usr: usrReport,
     trace: trace ? trace.stats() : null,
+    tmp: mounts && mounts.at("/tmp")
+      ? { bytes: mounts.at("/tmp").fs.bytes, limit: mounts.at("/tmp").fs.limit }
+      : null,
   };
 }
 
@@ -1310,6 +1314,12 @@ async function handle(m) {
         // own device number would be a second place uniqueness had to hold.
         procFs.setDev(mounts.add("/proc", { fs: procFs, type: FS_PROC, flags: MNT_RO }).dev);
         devFs.setDev(mounts.add("/dev", { fs: devFs, type: FS_DEV, flags: MNT_RO }).dev);
+
+        // `/tmp`: WRITABLE, and the only mount besides the root that is. It carries
+        // `durable: false`, so `metaOp` applies an op and returns 0 without journalling — a
+        // record describing the OPFS volume would be a record of an op that did not happen there.
+        const tmpFs = new TmpFS({ now: () => Date.now() });
+        tmpFs.setDev(mounts.add("/tmp", { fs: tmpFs, type: FS_TMPFS }).dev);
 
         // `/usr` ON THE PROVIDER INTERFACE. Awaited, because the mount reads its manifest over the
         // network and MILESTONES.md M3 requires the mount itself to refuse rather than come up

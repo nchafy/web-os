@@ -25,8 +25,8 @@ checks is a wish.
 | M1 | Process lifecycle, signals, hard cap | 4 | 1 | ✅ done — a spinner dies on End Process |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
-| **M3** | **`/proc`, `/dev`, mounts, provider iface, /dev/trace** | 4 | | ⬜ **next** |
-| M4 | Pipes, pty, line discipline | 5 | | ⬜ |
+| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
+| **M4** | **Pipes, pty, line discipline** | 5 | | ⬜ **next** |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
@@ -66,12 +66,19 @@ first 30 days they are the only visible thing:
 
 | | Folds into | Est | Why now |
 |---|---|---|---|
-| `/dev/trace` ring + dropped-record counter | M3 | 1 d | Measured at **4 ns/record** — 0.03% of a syscall. Tracing is free, and it is the debugger for everything after it. |
+| `/dev/trace` ring + dropped-record counter | M3 | 1 d | **Re-measured at 19.4 ns/record** (the 4 ns below was ~5× low) — 0.28% of a syscall at two records per call. Tracing is still free enough to be always on, and it is the debugger for everything after it. `docs/CONSTRAINTS.md` 72. |
 | `top` and `strace` as real programs | M5 | 2 d | A live syscall histogram on day 3 is a better M0 deliverable than a number in a terminal. |
 
 The trace ring needs **≥16 MiB** and a visible dropped-record counter: a 1 MiB ring holds 32,768
 records and wraps every 0.5 s at full syscall rate, and a view that silently drops records shows a
 clean picture of a broken system.
+
+**Both figures above were re-measured in M3 and one of them was wrong.** A record is 19.4 ns, not
+4 ns, because the original estimate did not include a clock read — `Date.now()` alone is 52.9 ns and
+`performance.now()` 69.0 ns, which is 85% of a self-timing record. The fix was to pass the
+dispatcher's existing timestamps in rather than to accept the cost, so the shipped record reads no
+clock. The 32-byte record size is confirmed and is now asserted against this document by
+`src/kernel/trace.mjs`'s `selfTest`. `docs/CONSTRAINTS.md` 72–73.
 
 ---
 
@@ -660,53 +667,151 @@ passes either way it was testing nothing.
 
 ---
 
-## M3 — `/proc`, `/dev`, mounts · 4 days · ~700 LoC
+## M3 — `/proc`, `/dev`, mounts · ✅ done · est 4 d, actual 1 · **ACCEPT**
 
-Was 2 days. Carries two things folded in from option D because they are OS work rather than
-pedagogy, and because building them later means building them twice.
-
-**Build.** Longest-prefix mount table, static at boot: `/` OPFS rw, `/usr` read-only, `/tmp`
-tmpfs, `/proc` and `/dev` generated on read. `/proc/<pid>/{status,cmdline,cwd,fd/<n>}` is ~120
-lines and is the clearest demonstration that a process is a first-class object.
-
-**Folded in (a): `/usr` mounts on the provider interface, not a one-off driver.** +1 d. The
-original plan had a bespoke `httpimg` driver here and a general provider table later in option D.
-That is the same work twice. So `/usr` is the *first consumer* of a provider table that is data,
-not code:
+**Verdict: ACCEPT.** All five build items are done and verified. All three proofs pass, each of the
+three negative controls moves a named subset of expectations and nothing else, and the nine findings
+an adversarial review returned are fixed with a check per fixed defect.
 
 ```
-{ id, url template, range strategy, max object, auth: 'none' }
+scripts/check.py                      5 checks, 222 expectations (m3: 55)
+scripts/check.py --prove-failure      exit 0 — all 217 invert and fire
+scripts/check.py --negative proc-cache   m3 fail: 3 red, 47 intact
+scripts/check.py --negative usr-404      m3 fail: 4 red, 46 intact
+scripts/check.py --negative trace-tiny   m3 fail: 4 red, 46 intact
+bench/m3-synth/probe.mjs              84 host assertions (/proc, /dev, no browser)
+bench/m3-provider/probe.mjs           70 host assertions (the table, SSRF, /usr)
+bench/m3-trace/probe.mjs              40 host assertions + the record cost
+bench/m3-tmpfs/probe.mjs              61 host assertions (/tmp, no browser)
+scripts/fsfuzz.py                     129 fs host tests (was 91), src/fs/ still pure
 ```
 
-Measured 2026-11-12: `cdn.jsdelivr.net` and `raw.githubusercontent.com` both serve genuine ranged
-block reads with `Content-Range` and CORS, so the default needs no account and no bucket.
-`unpkg.com` ignores `Range` and is unusable. `docs/LEARNING-MODE.md` §5.
+The headline page run is **3.3 s** for twelve sections. Every assertion is taken from inside a process
+worker through real syscalls: reading the generators on the kernel's own thread would prove they
+work and nothing about whether a process can reach them, which is the whole of what this milestone
+builds.
 
-**Folded in (b): `/dev/trace`.** +1 d. A ring buffer the kernel writes two records into per
-syscall, measured at **4 ns a record** — 0.03% of a 14 µs syscall, so tracing is always on. This
-is the debugger for every milestone after it, which is why it is here and not at the end.
+### What was built
 
-**Proof.** Three:
-1. `ls /proc` enumerates live pids; kill one and its directory vanishes.
-2. **A capability probe per provider** — a ranged GET returns exactly the requested byte count
-   with `Content-Range`, and CORS is present. A provider that silently stops supporting `Range`
-   must fail the build, not degrade a mount.
-3. `/dev/trace` replays a known syscall sequence, and the dropped-record counter is visible.
+**The mount table** is `src/fs/mounts.mjs`, pure and in `src/fs/` for that reason — resolution is a
+total function over a path and a table, so `fsfuzz.py` drives it without a browser. Longest prefix
+is taken on **component boundaries, never on the string**: a string match puts `/usrlocal` inside
+the `/usr` mount, which reads fine and writes to the wrong volume. Mutating `resolve` to a
+string-prefix match fails exactly the four host labels naming `/usrlocal` and `/usrx`.
 
-**Negative control.** Three, one per proof:
-1. Serve a cached `/proc` listing instead of regenerating — the killed pid must linger and the
-   check must fail.
-2. Point a provider at a 404 — the mount must fail loudly, never silently serve an empty `/usr`.
-3. Undersize the trace ring to 64 KiB at full syscall rate — the dropped-record counter must go
-   non-zero **and be displayed**. A trace that silently drops records shows a clean picture of a
-   broken system.
+Device numbers start at 1, which is load-bearing: `encodeFilestat` writes `st.dev || 0`, so a zero
+device and a filesystem that never set one would be the same bytes. `FST_DEV` stops being a literal
+zero, and that is what makes the table observable from userland — `stat` on `/`, `/proc` and
+`/dev/trace` reports three distinct devices.
 
-**Note the sizing.** A 1 MiB ring holds 32,768 records and wraps every 0.5 s at full syscall
-rate. Ship ≥16 MiB if the scrubber (D7) is ever wanted.
+**Resolution happens once, at the kernel edge.** The cwd join and then the mount lookup, in that
+order, in `resolveMount` — asking which filesystem owns `../x` has no answer. The twelve path
+syscalls keep one renderer each through `metaOp` and `metaRead`, and a read-only mount refuses in
+one place. The two-path calls (`rename`, `link`) require both ends on one mount and answer EXDEV
+otherwise, which is POSIX's own answer and what `mv` expects.
 
-**`mount` must never accept a caller-supplied URL** — a provider id and a path, resolved against
-the committed table, and nothing else. Otherwise every process gets an SSRF primitive, and M6
-deletes `fetch` precisely to prevent that.
+**`/proc` and `/dev` are one adapter**, `src/kernel/synth.mjs`, so each filesystem is a pair of pure
+functions over a relative path rather than fourteen VFS methods. Adding a generated file is a row in
+a table. A generated file is `F_SYNTH` — a row in the existing `KIND_OPS` table — so `read(2)` is
+the same call for `/proc/<pid>/status` as for a real file, and answers with no round trip.
+
+**The provider table** is data: `{id, template, range, maxObject, auth}`. `/usr` is its first
+consumer. A process cannot reach it at all — there is no `SYS_mount` — and `urlFor` is the only
+place a request URL is built, from a committed template whose origin is a literal. Path validation
+is a **closed list** rather than escaping, because escaping answers "can I make this safe" and this
+answers "is this a filesystem path": scheme, authority, percent-encoding, dotdot, NUL, query and
+fragment each refused by name. Reducing it to a dotdot substring check lets through 15 of the 17
+refusals, including the cloud metadata endpoint and a localhost admin port.
+
+**The trace ring** writes two records per syscall and reads no clock — see the corrections below.
+`dropped` is derived from how far the ring has been lapped, not accumulated, so there is no counter
+to forget to increment and no way for it to disagree with the ring's contents.
+
+### The three proofs, and what each control moved
+
+| | Proof | Control | Moves |
+| --- | --- | --- | --- |
+| 1 | `ls /proc` enumerates live pids; a killed one's directory vanishes | `proc-cache` serves a cached listing | 3 labels — the listing ones. `stat` and `open` stay live and their refusals HOLD, which says which of the two routes the proof tested |
+| 2 | a ranged GET returns exactly the requested bytes with `Content-Range` | `usr-404` points the manifest at a missing object | 4 labels. The MOUNT fails and records why; the probe itself still passes, because a missing object does not remove the provider's `Range` support |
+| 3 | `/dev/trace` replays a known syscall sequence, counter visible | `trace-tiny` builds the ring at 64 KiB | 4 labels. `dropped` goes to 6,315 and `undersized` to true, while **"the counter is displayed" HOLDS** — that split is the whole control |
+
+Proof 1 asserts **two transitions, not one**, because POSIX has two: a killed-but-unreaped process
+is a ZOMBIE and still has a `/proc` entry, and the entry goes when the slot is freed. This kernel
+frees it after the ~2.2 s terminate quarantine, so the wait is a bounded, paced poll on the real
+listing — 40 × 150 ms — and not a sleep, which would pass for a `/proc` that had never listed the
+pid at all.
+
+### What the proofs caught, and the corrections on the record
+
+Four defects, three of them found by the checks rather than by reading.
+
+1. **The kernel spread a program's data over its own stamped fields**, so a program returning a
+   field called `pid` relabelled its result row: a `go` dispatched to pid 1 came back as pid 2 and
+   the page could not find its row. The dispatch log said `to=1` while the result said `pid: 2`.
+   Beyond the confusion it is a forgery surface. Constraint 75.
+2. **`truncate` was missed when the path calls moved onto the mount table.** It resolves its own
+   path, so `truncate("/proc/1/status")` answered ENOENT about a file the caller had just read.
+   Caught only because the read-only proof asserts **every mutation's errno separately** — a single
+   "it refused" would have passed.
+3. **A `stat` of `/dev/trace` consumed trace records**, because size and content each re-ran the
+   generator. The ring's reader cursor was the cause and is gone. Constraint 74.
+4. **`statfs` ignored the path the ABI gives it**, so `statfs("/proc")` would have reported the OPFS
+   volume's numbers. The path is now optional — absent means the root mount — which keeps every
+   existing caller working.
+
+Two measurements corrected a figure in this file: the trace record is **19.4 ns, not 4 ns**
+(constraint 72), and a volatile generated file **publishes no size** because a published one is
+already stale (constraint 74).
+
+Two harness defects my own changes exposed, both fixed in the harness rather than worked around:
+the served-witness treated a **206 as a file the tree does not serve**, which turned every `/usr`
+mount into 14 witness failures; and the dead-allowance note was computed **per serving**, so a 404
+only one root serves was reported as deletable while the same run forgave its console error two
+lines later.
+
+### `/tmp` reuses the VFS
+
+A tmpfs needs the whole POSIX surface the VFS already implements over an in-memory inode table, so
+`src/kernel/tmpfs.mjs` is a `VFS` instance plus a `Map` from inode to bytes, and `F_TMP` is a
+writable synchronous description kind. Writing a second filesystem would have been two renderers of
+one fact and the second would be the one with the permission bug. It is bounded at 64 MiB for the
+same reason the process table is capped: one process must not be able to exhaust the renderer's heap
+and take every other process with it.
+
+### What the review found
+
+The change went to an independent critic with the artifact and the acceptance criteria and not the
+conclusion, as the method above prescribes. It returned **nine findings and a prose error; all ten
+verified against the code and all are fixed.** Three were reachable from an unprivileged process and
+faulted the kernel worker, which is the class M3 was least likely to find by reading:
+
+| | Finding |
+| --- | --- |
+| HIGH | `/dev/<any Object.prototype key>` was a readable phantom file. `/dev/constructor` put an object where bytes were expected, and `read(2)` on it threw a TypeError out of a handler the dispatcher does not wrap — **two syscalls to fault the kernel**. `procfs` and `providers` already guarded their table lookups; `devfs` was the one that did not |
+| HIGH | `seek(SEEK_END)` on a `/tmp` **directory** fd asked a directory for its byte length and threw. Now EISDIR |
+| HIGH | `O_APPEND` on a tmpfs resolved its offset **once at open** — the exact defect `calls.mjs` already documents for the OPFS path, where it was measured losing a writer's four bytes. The offset is now resolved per write |
+| MEDIUM | the read-only test moved from the live volume to a **boot-time mount flag**, so after `store.mjs` demotes the volume at runtime (constraint 28) a `mkdir` mutated the in-memory tree and *then* returned EROFS. The durable mount asks the store now |
+| MEDIUM | `..` was stripped **lexically** at the kernel edge, so a `..` through a nonexistent or non-directory component stopped failing and one through a symlink resolved against the name. The root mount gets the path with `..` intact |
+| MEDIUM | `unlink` on an open `/tmp` file freed its bytes while a description still held it, and the comment asserted that state was unreachable. It is reachable in three syscalls; ESTALE now, matching the OPFS volume |
+| LOW ×3 | `TR_TIME`'s comment claimed a cross-agent clock the value does not have; a comment described a `pwrite` refusal the ops table does not make while calling the real guard redundant; `statfs` discarded the filesystem's own `bsize` and `namemax` |
+
+Every one of the first six is now a row in `bench/m3-fs/program.mjs`'s `regress` mode, taken through
+real syscalls — none of the ten original sections reached any of them.
+
+**The lesson worth keeping:** the two findings that mattered most were both *a comment asserting an
+invariant the code did not have*. A confident comment is not evidence, and the critic read the code
+instead.
+
+### What is not done
+
+There is no `chdir`, so every cwd is `/` — constraint 81. `/usr` costs its whole size in memory and
+the mount is atomic, which is what makes control 2 possible and is not a design for a large volume —
+constraint 78. A symlink cannot cross a mount (77) and a `..` that lands in another mount is lexical
+(84), which are one gap in two guises: the walk does not consult the mount table. **The mountpoints
+have no backing directory, so `ls /` does not list them (85)** — a defect, with the fix named.
+
+`mount` never accepts a caller-supplied URL, and the narrowest form of that rule is what shipped: a
+process cannot mount at all.
 
 ---
 

@@ -6,8 +6,11 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, EBADF, EINVAL, MAX_INLINE, fnv1a, FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, EBADF, EINVAL, O_APPEND, MAX_INLINE, fnv1a,
+  FNV1A_BASIS,
 } from "../abi.mjs";
+// For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
+import { errnoOfFsError } from "./store.mjs";
 
 /** Indexed by kind. A kind with no entry is -ENOSYS, which is the honest state of a call the
  *  kernel has not implemented — never a silent zero. */
@@ -151,6 +154,74 @@ registerKind(F_SYNTH, {
     // Nothing to release: the bytes are a plain Uint8Array the garbage collector owns. This exists
     // so `FileTable.close` has an op to call rather than reaching the `?.` and silently doing
     // nothing, which would hide a kind that genuinely needed a release.
+    return 0;
+  },
+});
+
+/**
+ * F_TMP: a file on a tmpfs. Bytes in a kernel-side Map, keyed by inode.
+ *
+ * SYNCHRONOUS like F_SYNTH and WRITABLE like F_FILE, which is why it is its own row rather than a
+ * flag on either: there is no handle to open and nothing to await, so a /tmp write costs one
+ * syscall, and a kind that had to branch on "is this one writable" would be the abstraction
+ * needing a flag to tell its callers apart.
+ *
+ * The description carries `fs` (the TmpFS) and `ino`. It does NOT carry the bytes — F_SYNTH's
+ * snapshot-at-open is right for a generated file and wrong here, because two descriptions on one
+ * tmpfs inode must see each other's writes, exactly as two descriptions on one real file do.
+ */
+registerKind(F_TMP, {
+  // THE ERRNO BOUNDARY IS HERE. TmpFS throws FsError, as the VFS it is built on does; the
+  // dispatcher has no try/catch around a handler, so a throw that escaped this row would reach
+  // `self.onerror` and panic the kernel instead of returning -ENOSPC to the caller that filled
+  // the filesystem. A full tmpfs is a normal condition and must be an errno.
+  write(d, u8, offset, length, p, at) {
+    // THE APPEND OFFSET IS RESOLVED HERE, PER WRITE, and never cached at open. Two O_APPEND
+    // descriptions on one tmpfs file must not both start at the same end — see the comment in
+    // calls.mjs's tmpfs open arm for the measurement that rule comes from. A positional `pwrite`
+    // honours its explicit offset even under O_APPEND, which is POSIX and what the OPFS path does.
+    let from;
+    if (at !== undefined) from = at;
+    else if (d.flags & O_APPEND) from = d.fs.size(d.ino);
+    else from = d.pos;
+    if (from < 0) return -EINVAL;
+    let n;
+    try {
+      n = d.fs.write(d.ino, from, u8.subarray(offset, offset + length));
+    } catch (error) {
+      return errnoOfFsError(error);
+    }
+    if (at === undefined) d.pos = from + n;
+    return n;
+  },
+  read(d, p, dstOff, length, at) {
+    const from = at === undefined ? d.pos : at;
+    if (from < 0) return -EINVAL;
+    let n;
+    try {
+      n = d.fs.read(d.ino, from, length, p.bytes, dstOff);
+    } catch (error) {
+      return errnoOfFsError(error);
+    }
+    if (at === undefined) d.pos = from + n;
+    return n;
+  },
+  fsync() {
+    // A tmpfs has no durable store, so there is nothing to force and 0 is the honest answer
+    // rather than -ENOSYS: `fsync` on a tmpfs file SUCCEEDS everywhere, and a program that
+    // checked the return would otherwise treat a correct no-op as a failure.
+    return 0;
+  },
+  truncate(d, size) {
+    try {
+      return d.fs.truncate(d.ino, size);
+    } catch (error) {
+      return errnoOfFsError(error);
+    }
+  },
+  close() {
+    // Nothing to release. The bytes outlive the description and go when the last link does,
+    // which is `unlink`'s job — the same contract as a real file.
     return 0;
   },
 });

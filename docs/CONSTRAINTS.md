@@ -573,3 +573,116 @@ recorded decision with a cost. A **structural** item needs a mechanism M2 does n
     append is in flight and report a torn record on a healthy volume. Low: the figure it produces is
     conservative in the safe direction — it reports a problem that is not there, rather than missing
     one that is.
+
+## What M3 measured
+
+Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro unless a row names a different harness. The two
+trace figures were taken under **Node 18.20.2 on darwin/arm64**, not in Chrome, and say so — the
+numbers are of one typed-array write loop, which is the same shape of work in both agents, but the
+figure has not been retaken in the browser.
+
+72. **A trace record costs 19.4 ns when the timestamp is passed in, and 56.0 ns when the record
+    reads its own clock.** `Date.now()` is 52.9 ns and `performance.now()` is 69.0 ns, against nine
+    typed-array stores at 9.0 ns — so the clock read is 85% of a self-timing record. The dispatcher
+    already reads `performance.now()` twice per syscall for its own service accounting, so entry
+    and exit hand those two values to the ring and the trace adds **no clock read at all**.
+    `node bench/m3-trace/probe.mjs`.
+    **This corrects `MILESTONES.md` M3's 4 ns figure, which is ~5× low.** The conclusion it
+    supported survives and the arithmetic changes: two records per syscall is 38.8 ns against a
+    14 µs syscall, so tracing costs **0.28%** rather than 0.03%, and is still cheap enough to be
+    always on with no flag.
+73. **A record is 32 bytes, and that is derived rather than chosen.** `MILESTONES.md` M3 states a
+    1 MiB ring holds 32,768 records, and 1 MiB / 32,768 is 32. `src/kernel/trace.mjs`'s `selfTest`
+    asserts the two agree, so a layout change fires an assertion instead of leaving a normative
+    document wrong. The 16 MiB floor is 524,288 records.
+74. **A generated file whose content is computed per read cannot publish a size.** `stat` on
+    `/proc/<pid>/status` reported 147 bytes and the following `read` returned 145: the file carries
+    the process's syscall counters, so reading it advances them and the generator ran twice with
+    different answers. Such a file therefore reports **size 0**, which is what Linux's own `/proc`
+    does. `fstat` on an open description reports an exact size, because the bytes were snapshotted
+    at `open` and that length is stable for the life of the fd — the two calls answer differently
+    on purpose. `www/m3.html` proof `proc_files`; `src/kernel/synth.mjs` `#info`.
+75. **The kernel's account of a process must be stamped after the program's data, never before.**
+    The result row spread a program's return over `pid`, `calls`, `replies` and `errors`, so a
+    program returning a field called `pid` relabelled its own row — a `go` dispatched to pid 1 came
+    back as pid 2. Beyond the confusion, it is a forgery surface: those four fields are the
+    kernel's statement about a process and a process must not be able to write them.
+    `src/kernel/kernel.mjs`, the `result` arm.
+76. **The harness is a storage provider, so `scripts/serve.py` must serve byte ranges.**
+    `src/kernel/providers.mjs`'s `local` row points at the page's own origin, and before this the
+    server answered a ranged request with 200 and the whole file — the `unpkg.com` failure of
+    constraint-adjacent note in `docs/LEARNING-MODE.md` §5, reproduced locally. The capability probe
+    correctly refused to mount `/usr` over it. Single ranges only; multipart and unsatisfiable
+    ranges are 416. `scripts/check.py`'s recording handler subclasses that one, so both gained it,
+    and the witness counts 206 as served — a 206 body is a fragment and is deliberately not
+    byte-compared against disk.
+
+## What M3 left open, on the record
+
+Same three kinds as M2's list above: a **defect** is wrong and unfixed, a **permitted** behaviour is
+a recorded decision with a cost, a **structural** item needs a mechanism M3 does not own.
+
+77. **STRUCTURAL — a symlink cannot cross a mount.** A symlink is resolved inside the filesystem
+    that holds it, so one on the OPFS volume pointing into `/proc` resolves against the OPFS volume
+    and reaches ENOENT. Closing it means the walk itself consulting the mount table at every
+    component, which `src/kernel/calls.mjs`'s `resolveMount` does once, at the edge, before the
+    walk. Nothing in M3 crosses a mount by symlink. `SynthFS.lstat` throws EIO rather than return a
+    LINK node, so a generated filesystem that grew a symlink would fail loudly instead of
+    half-working.
+78. **PERMITTED — `/usr` costs its whole size in memory, and the mount is atomic.** Every object in
+    the manifest is read at boot and held; a refusal anywhere refuses the whole mount. That is what
+    makes the second negative control possible — "the mount must fail loudly, never silently serve
+    an empty `/usr`" — and it is **not** a design for a large read-only volume. A real one wants the
+    lazy ranged read `providers.mjs` already implements, a cache, and a description kind that can
+    block on it. `src/kernel/providerfs.mjs` says so where the policy is set.
+79. **PERMITTED — `/proc/<pid>/cwd` and `/proc/<pid>/fd/<n>` are files, not symlinks.** Linux makes
+    both symlinks. They are files holding the facts here because constraint 77 means a generated
+    symlink could not be followed, and because an fd on a pipe or a window has no path to point at
+    in the first place.
+80. **PERMITTED — `/tmp` reuses the VFS, so POSIX semantics have one implementation.**
+    `src/kernel/tmpfs.mjs` is a `VFS` instance for the metadata plus a `Map` from inode to bytes,
+    and `F_TMP` is a writable synchronous description kind. Writing a second filesystem would have
+    been two renderers of one fact, and the second would be the one with the permission bug. The
+    size goes through the VFS's own `OP.COMMIT` rather than a poke at `inode.size`, so that field
+    keeps one writer. It is bounded (64 MiB by default, ENOSPC past it) because a tmpfs with no
+    limit lets one process exhaust the renderer's heap and take every other process with it — the
+    same argument as constraint 17's process cap. **The sticky bit is stored and not enforced:**
+    the root is 0o1777 as `/tmp` is everywhere, and the VFS has no sticky rule, so the mode is
+    honest and the protection is not.
+81. **STRUCTURAL — there is no `chdir`, so every process's cwd is `/`.** `src/kernel/table.mjs`
+    records that the `cwd` field is M2's and the call that moves it is M3's; M3 made the field
+    OBSERVABLE through `/proc/<pid>/cwd` and did not add the call. The field is read live, so a
+    `chdir` would be a handler and nothing else — `absoluteOf` in `calls.mjs` already resolves every
+    relative path against `p.cwd`.
+82. **PERMITTED — a directory cannot be opened without `O_DIRECTORY`, which diverges from Linux.**
+    `src/fs/vfs.mjs`'s `openDecision` refuses a directory with EISDIR unless `dirOk` is set, and M3
+    made `src/kernel/synth.mjs` match it so this system has ONE answer to "can I open a directory".
+    On Linux `open(dir, O_RDONLY)` succeeds and `read` on the fd is EISDIR; here the refusal moves
+    to `open`. The divergence is the VFS's and predates M3 — the generated filesystems followed
+    POSIX until M3 noticed the two disagreeing, with `ls /proc` working without the flag and
+    `ls /tmp` not. The stricter rule won because it is the established semantics of a shipped
+    milestone, and because a caller that has to remember which mount it is on has no portable `ls`
+    at all. Reconciling it with POSIX means changing the VFS and re-verifying M2.
+83. **PERMITTED — unlinking an open `/tmp` file frees its bytes, and the description then
+    answers ESTALE.** POSIX keeps an unlinked file alive until the last descriptor closes. M2
+    decided not to for the OPFS volume and to refuse consistently under one name instead
+    (`src/abi.mjs` ESTALE), and the tmpfs matches it — a filesystem that chose differently would
+    make the behaviour of an unlinked open file depend on which mount it was on. Reachable in three
+    syscalls: open, write, unlink, read. `bench/m3-tmpfs/probe.mjs` asserts all three refusals.
+    An earlier comment in `#bytesOf` claimed this state meant a kernel bug, which was wrong, and
+    the review that caught it is why the assertion exists.
+84. **STRUCTURAL — a `..` whose lexically-normalized form lands in another mount is resolved
+    lexically.** The mount lookup must normalize to pick a mount — without walking the tree there
+    is no way to know which subtree a `..` lands in — so `stat("/nonexistent/../tmp")` SUCCEEDS,
+    while `stat("/nonexistent/../")` correctly answers ENOENT because it stays on the root volume
+    and the VFS walks it per component. The root mount is handed the path with `..` intact for
+    exactly that reason (`src/kernel/calls.mjs` `resolveMount`); every other mount has no symlinks,
+    so the lexical answer is the right one there. Same family as constraint 77: the walk does not
+    consult the mount table. `bench/m3-fs/program.mjs` `regress` asserts both halves.
+85. **DEFECT — the mountpoints have no backing directory, so `ls /` does not show them.**
+    `/proc`, `/dev`, `/tmp` and `/usr` exist in the mount table and not in the root volume's
+    directory, so a `readdir` of `/` lists neither. Every path INTO them resolves, because the
+    mount table is consulted before the walk. Fixing it means either creating the directories on
+    the volume at boot — which a read-only mount cannot do — or having `readdir` splice in the
+    mountpoints rooted one level below the directory being read. The second is right and is not
+    done.

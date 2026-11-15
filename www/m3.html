@@ -56,6 +56,10 @@ const num = (k, d) => (params.has(k) ? Number(params.get(k)) : d)
 
 /* The three controls, read once. Each is echoed in M3.config so a check can assert the page
  * applied the control it was asked for rather than silently taking the headline path. */
+/* The object the capability probe asks for and must be refused. ONE path, shared with the
+ * usr_404 control below, and declared in check.py's ALLOWED_404 as the deliberate 404 it is. */
+const MISSING = 'src/does-not-exist.mjs'
+
 const CFG = {
   procCache: params.get('proc_cache') === '1',
   usr404: params.get('usr_404') === '1',
@@ -72,7 +76,7 @@ globalThis.M3.proofs = {
   proc_list: null, proc_vanish: null, proc_files: null,
   provider_probe: null, usr_mount: null,
   trace_seq: null, trace_dropped: null,
-  mount_table: null, devices: null, readonly: null,
+  mount_table: null, devices: null, readonly: null, tmpfs: null, regress: null,
 }
 
 
@@ -209,7 +213,7 @@ async function main () {
     /* A GENUINE 404 from the harness's own server: a real provider id, a path that is not there.
      * Pointing at an unknown provider id would test the id lookup instead, which is a different
      * refusal and not the one the control is about. */
-    boot.usrEntries = [{ name: 'lib/missing.mjs', path: 'src/libos/does-not-exist.mjs' }]
+    boot.usrEntries = [{ name: 'lib/missing.mjs', path: MISSING }]
   }
 
   const k = kernelBoot(boot)
@@ -250,7 +254,7 @@ async function main () {
     const local = await probeProvider('local', 'src/abi.mjs', { want: 64 })
     /* The refusals must work too, or a passing probe proves only that something returned bytes.
      * A path that is not there must come back bad-status, not ok. */
-    const missing = await probeProvider('local', 'src/does-not-exist.mjs', { want: 64 })
+    const missing = await probeProvider('local', MISSING, { want: 64 })
     const remote = []
     if (CFG.probeRemote) {
       for (const id of REMOTE_PROVIDERS) {
@@ -428,6 +432,34 @@ async function main () {
         available: tr.available, undersized: tr.undersized, shown: tr.shown,
         rowsRendered: tr.rows, issued: CFG.fill, firstRows: tr.firstRows,
       },
+    }
+
+    /* ------------------------------------------------ /tmp, the one writable non-root mount -- */
+    const tmp = await runPid(k, reader, 'tmpfs', ['tmpfs'])
+    say('/tmp: ' + tmp.rows.length + ' calls, ' +
+      (tmp.ok ? 'all ok' : 'failed: ' + tmp.failed.join(', ')))
+    P.tmpfs = {
+      ok: !!tmp.ok,
+      evidence: {
+        rows: tmp.rows,
+        failed: tmp.failed,
+        calls: tmp.rows.length,
+        // Echoed from the kernel so the mount's own accounting is visible beside the syscalls.
+        mounted: st.rows.some((r) => r.path === '/tmp'),
+        writable: st.rows.some((r) => r.path === '/tmp' && !r.readOnly),
+        notDurable: st.rows.some((r) => r.path === '/tmp' && !r.durable),
+      },
+    }
+
+    /* ------------------------------------------- the review's findings, as syscalls ---------- */
+    /* Each of these faulted the kernel or lost a caller's bytes, and none of the ten sections
+     * above reached any of them. A fixed bug becomes a check that would have caught it. */
+    const rg = await runPid(k, reader, 'regress', ['regress'])
+    say('regress: ' + rg.rows.length + ' calls, ' +
+      (rg.ok ? 'all ok' : 'failed: ' + rg.failed.join(', ')))
+    P.regress = {
+      ok: !!rg.ok,
+      evidence: { rows: rg.rows, failed: rg.failed, calls: rg.rows.length },
     }
 
     globalThis.M3.config = {

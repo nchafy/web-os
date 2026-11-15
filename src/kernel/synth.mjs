@@ -218,9 +218,18 @@ export class SynthFS {
   openDecision(cred, rel, opts = {}) {
     if (opts.create || opts.wantW) throw new FsError(this.#mutErrno, rel);
     const n = this.#need(rel);
-    // O_DIRECTORY is a REFUSAL for a non-directory, never a requirement for a directory: a
-    // directory opens for reading either way, because `readdir` needs that fd and `read` on it is
-    // EISDIR. Getting this backwards would make `ls /proc` impossible.
+    // THE SAME RULE THE VFS APPLIES, so this system has one answer to "can I open a directory".
+    //
+    // `src/fs/vfs.mjs`'s `openDecision` refuses a directory without `O_DIRECTORY` with EISDIR, and
+    // this followed POSIX instead until M3 noticed the two disagreeing — `ls /proc` worked without
+    // the flag and `ls /tmp` did not. ONE behaviour beats the more correct one here: the VFS's is
+    // the established semantics of a shipped milestone with 92 expectations resting on it, and a
+    // caller that has to remember which mount it is on has no portable `ls` at all.
+    //
+    // It diverges from Linux, where `open(dir, O_RDONLY)` succeeds and `read` on the fd is EISDIR.
+    // The divergence is the VFS's and predates M3; constraint 82 records it rather than leaving
+    // the next reader to rediscover it.
+    if (n.type === DIR && !opts.dirOk) throw new FsError("EISDIR", rel);
     if (opts.dirOk && n.type !== DIR) throw new FsError("ENOTDIR", rel);
     const info = this.#info(rel, n);
     return {

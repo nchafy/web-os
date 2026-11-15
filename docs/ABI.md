@@ -130,6 +130,21 @@ is permanently unreachable, and the kernel's own check is the only gate.
 `utimes(atime_ns, mtime_ns)` · `truncate(lo, hi)` · `statfs` · `realpath` ·
 `mount(src, type, dst, optsB)` / `umount(dst)` — longest-prefix table, `/` always OPFS
 
+**M3: neither call is implemented, and that is the design rather than a gap.** The table is static
+at boot, so a process cannot mount at all — which is the narrowest possible form of the rule that
+`mount` must never accept a caller-supplied URL (`docs/LEARNING-MODE.md` §6). When these do land,
+`src` is a **provider id** resolved against the committed table in `src/kernel/providers.mjs`, never
+a URL: otherwise every process holds an SSRF primitive aimed at the browser's network position, and
+M6 deletes `fetch` from the process realm precisely to prevent that.
+
+`statfs`'s path is **optional**. An empty byte region means the root mount, which is what the libos
+stub has always sent and means "this filesystem"; a path names the mount that owns it. Making it
+mandatory would break every existing caller, and ignoring it would make `statfs("/proc")` report the
+OPFS volume's numbers — the one thing a mount table exists to stop.
+
+Longest prefix is taken on **component boundaries, not on the string**. `/usrlocal` is not inside
+the `/usr` mount.
+
 errno set: NOENT NOTDIR ISDIR EXIST NOTEMPTY ACCES PERM NAMETOOLONG LOOP XDEV ROFS NOSPC INVAL
 MFILE IO BUSY NODEV
 
