@@ -160,7 +160,19 @@ VIEWPORT_SCALE = 2.0
 #: request path the server recorded, never on a substring of a console message. An entry nothing
 #: requested is reported as a dead allowance in the trailer's notes, so the list cannot accrue
 #: unnoticed; an entry that now answers 200 IS a failure, because it would pre-forgive a real 404.
-ALLOWED_404 = ("/favicon.ico",)
+#: A 404 the suite forgives, keyed on the path. M3's provider capability probe deliberately asks
+#: for an object that is not there, because a probe that only ever saw a present object could not
+#: show it refuses a missing one — so the 404 is the measurement, not an accident. One path, used
+#: by both the probe and the usr-404 control, so there is one allowance rather than two.
+PROBE_MISSING_PATH = "/src/does-not-exist.mjs"
+ALLOWED_404 = ("/favicon.ico", PROBE_MISSING_PATH)
+
+#: Statuses that mean the server served what was asked for. 206 joined 200 when scripts/serve.py
+#: learned single byte ranges: the `local` storage provider is this server, so a ranged block read
+#: is a SUCCESS and counting it as "a file this tree does not serve" turned every /usr mount into
+#: 14 witness failures. A 206 body is a FRAGMENT, so it is deliberately not byte-compared against
+#: disk below — comparing a 64-byte range to a 36 kB file would fail for the wrong reason.
+SERVED_OK = (200, 206)
 
 
 # ======================================================================================
@@ -456,6 +468,23 @@ class Control:
     #: image's CRC checks are removed, so a torn tail is ACCEPTED. The torn-journal proof must
     #: start passing a bad image; if it passed either way it was testing nothing.
     NO_CRC = "no-crc"
+    #: M3, proof 1's control. `/proc`'s pid listing is served from a cache taken on first read
+    #: instead of regenerated, through the cfg.procCache hook (src/kernel/procfs.mjs), which the
+    #: kernel refuses without a bench boot. A killed pid must then LINGER in the listing.
+    #:
+    #: It caches the LISTING ONLY, not the per-pid lookup, and that is deliberately narrow: the
+    #: listing is what `ls /proc` reads, so a cache there is the realistic mistake, and leaving
+    #: `stat` live shows which of the two routes the proof was actually testing.
+    PROC_CACHE = "proc-cache"
+    #: M3, proof 2's control. `/usr`'s manifest is pointed at an object that is not there, so the
+    #: provider answers 404. The MOUNT must fail and say so; an empty `/usr` that mounted
+    #: successfully is the failure this control exists to forbid.
+    USR_404 = "usr-404"
+    #: M3, proof 3's control. The trace ring is built at 64 KiB instead of 16 MiB, below the floor
+    #: trace.mjs enforces, through the cfg.traceBytes hook. At full syscall rate the ring is lapped
+    #: and the dropped-record counter must go non-zero AND STILL BE DISPLAYED — which is why the
+    #: "counter is displayed" label is in this control's HELD list and not its failed one.
+    TRACE_TINY = "trace-tiny"
     ONCE = "once"
 
 
@@ -473,6 +502,9 @@ CONTROL_RUNS = {
     Control.NO_SIGPEND: ("no-sigpend",),
     Control.NO_COW_ORDER: ("no-cow-order",),
     Control.NO_CRC: ("no-crc",),
+    Control.PROC_CACHE: ("proc-cache",),
+    Control.USR_404: ("usr-404",),
+    Control.TRACE_TINY: ("trace-tiny",),
 }
 
 
@@ -1233,6 +1265,13 @@ class Report:
         self.results: List[Result] = []
         self.witness_failures: List[str] = []
         self.witness_notes: List[str] = []
+        #: ALLOWED_404 paths some serving in this run actually requested. ACROSS SERVINGS,
+        #: because a phase binds two servers with different roots and a path only one of
+        #: them serves is not a dead allowance. Deciding per-serving reported M3's
+        #: deliberate 404 probe as deletable while the same run was forgiving its console
+        #: error two lines further down — two statements about one path that contradicted
+        #: each other.
+        self.allowance_seen: set = set()
         self.witness_lines: List[str] = []
         self.console_allowed: List[str] = []
 
@@ -1266,7 +1305,8 @@ class Report:
         if not paths:
             found.append(
                 "the server recorded no responses at all, so the page never loaded from it")
-        unexpected = [s for s in responses if s.status != 200 and s.path not in ALLOWED_404]
+        unexpected = [s for s in responses
+                      if s.status not in SERVED_OK and s.path not in ALLOWED_404]
         for served in unexpected:
             found.append(
                 "GET %s returned %d and is not in ALLOWED_404 - the page asked for a file this "
@@ -1281,13 +1321,10 @@ class Report:
         for path in ALLOWED_404:
             statuses = sorted({s.status for s in responses if s.path == path})
             if not statuses:
-                # A note, not a failure. A page that supplies its own favicon, or a Chrome that
-                # stops probing for one, is a healthy tree; turning the suite red at exit 1 - the
-                # code for "a product expectation failed" - and then printing "see the lines
-                # marked FAIL" when there are none is the harness lying about its own subject.
-                self.witness_notes.append(
-                    "ALLOWED_404 allows %s and nothing requested it during this run, so the "
-                    "allowance is dead and can be deleted" % path)
+                # Nothing to say yet: another serving in this phase may have requested it. The
+                # dead-allowance note is emitted once, from `allowance_notes`, after every
+                # serving has been witnessed.
+                pass
             elif 404 not in statuses:
                 # Keyed on the status, not on the request: an allowance for a path that now
                 # answers 200 pre-forgives a genuine future 404 on it, and reporting it as
@@ -1296,14 +1333,19 @@ class Report:
                     "ALLOWED_404 allows a 404 on %s but this run recorded %s, so the allowance "
                     "no longer describes anything and would pre-forgive a real 404"
                     % (path, ", ".join(str(s) for s in statuses)))
-            elif ("GET %s 404" % path) not in self.console_allowed:
-                self.console_allowed.append("GET %s 404" % path)
+            else:
+                self.allowance_seen.add(path)
+                if ("GET %s 404" % path) not in self.console_allowed:
+                    self.console_allowed.append("GET %s 404" % path)
         distinct = len({s.path for s in responses if s.status == 200})
+        ranged = len([s for s in responses if s.status == 206])
         self.witness_lines.append(
-            "  served    %s%d responses, %d unexpected non-200, %d of %d distinct 200 paths "
-            "byte-identical to %s/"
-            % (("[%s] " % label) if label else "", len(responses), len(unexpected),
-               distinct - len(mismatched), distinct, _relative(serving.canonical)))
+            "  served    %s%d responses, %d unexpected non-%s, %d of %d distinct 200 paths "
+            "byte-identical to %s/%s"
+            % (("[%s] " % label) if label else "", len(responses),
+               len(unexpected), "/".join(str(c) for c in SERVED_OK),
+               distinct - len(mismatched), distinct, _relative(serving.canonical),
+               (", %d ranged (206, fragments, not byte-compared)" % ranged) if ranged else ""))
         self.witness_failures.extend(found)
         return found
 
@@ -1321,8 +1363,23 @@ class Report:
                               (" (%s)" % entry.url) if entry.url else ""))
         return out
 
+    def allowance_notes(self) -> None:
+        """A note per ALLOWED_404 path no serving in this run requested.
+
+        A note, not a failure. A page that supplies its own favicon, or a Chrome that stops
+        probing for one, is a healthy tree; turning the suite red at exit 1 — the code for "a
+        product expectation failed" — and then printing "see the lines marked FAIL" when there are
+        none is the harness lying about its own subject.
+        """
+        for path in ALLOWED_404:
+            if path not in self.allowance_seen:
+                self.witness_notes.append(
+                    "ALLOWED_404 allows %s and no serving requested it during this run, so the "
+                    "allowance is dead and can be deleted" % path)
+
     def trailer(self) -> None:
         counts = self.tally()
+        self.allowance_notes()
         for line in self.witness_lines:
             print(line)
         for line in self.witness_notes:
@@ -2030,6 +2087,148 @@ _NO_SIGPEND_FAILS = ("proof_e ok", "verdict is ok")
 _STALL_FAILS = ("p50 under the regression bar", "p99 under the tail ceiling")
 _STALL_HOLDS = held_rest(SYSCALL_LABELS, _STALL_FAILS)
 
+
+# ======================================================================================
+# M3 — /proc, /dev, mounts, the provider interface, /dev/trace
+# ======================================================================================
+
+#: Clause-level, not one label per section, and for the reason M2's are: a control must be scored
+#: on WHICH expectations move. "proc_vanish ok" alone could not distinguish a cached listing from
+#: a /proc that never listed the pid at all.
+M3_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # The mount table, which everything else sits on.
+    "mount_table ok",
+    "the table has a root, /proc and /dev",
+    "every mount reports a distinct non-zero device",
+    "only the OPFS root is durable",
+    # PROOF 1.
+    "proc_list ok",
+    "proc_list enumerates the live pids",
+    "proc_list shows the reading process itself",
+    "proc_list reports every pid as a directory",
+    "proc_vanish ok",
+    "proc_vanish the killed pid left the listing",
+    "proc_vanish stat refuses with ENOENT",
+    "proc_vanish open refuses with ENOENT",
+    "proc_vanish the survivor is still listed",
+    "proc_files ok",
+    "proc_files status reports the pid",
+    "proc_files status reports the state",
+    "proc_files cmdline is NUL-terminated",
+    "proc_files cwd is readable",
+    "proc_files the fd directory lists the open fds",
+    "proc_files a volatile file publishes no size",
+    "proc_files fstat reports the snapshot length",
+    # PROOF 2.
+    "provider_probe ok",
+    "provider_probe a ranged GET returns the exact byte count",
+    "provider_probe Content-Range is present",
+    "provider_probe a missing object is refused",
+    "provider_probe the missing object is refused as a bad status",
+    "usr_mount ok",
+    "usr_mount /usr is in the mount table",
+    "usr_mount every manifest entry was read",
+    # PROOF 3.
+    "trace_seq ok",
+    "trace_seq the known sequence is in the trace",
+    "trace_seq entry and exit are both recorded",
+    "trace_seq the record sequence is monotonic",
+    "trace_dropped ok",
+    "trace_dropped the counter is displayed",
+    "trace_dropped the ring dropped nothing",
+    "trace_dropped the ring meets the 16 MiB floor",
+    # The table and the read-only rule, observed from userland rather than from the kernel.
+    "devices ok",
+    "devices stat reports three distinct devices",
+    "readonly ok",
+    "readonly every mutation on /proc is refused",
+    "readonly every refusal is EROFS",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m3.html",
+)
+
+M3_DOCUMENT = "/www/m3.html"
+
+#: `fill` is the syscall count the trace proof issues. 4,000 is far short of the 16 MiB ring's
+#: 524,288 records and far past the 64 KiB control's 2,048, which is what makes one number serve
+#: both phases.
+M3_FILL = 4000
+
+M3_READY = ("(() => { const s = globalThis.M3 && globalThis.M3.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M3 = """(() => {
+  const M = globalThis.M3 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    fingerprint: Number(M.kernelFingerprint || 0),
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    mount_table: one(P.mount_table),
+    proc_list: one(P.proc_list),
+    proc_vanish: one(P.proc_vanish),
+    proc_files: one(P.proc_files),
+    provider_probe: one(P.provider_probe),
+    usr_mount: one(P.usr_mount),
+    trace_seq: one(P.trace_seq),
+    trace_dropped: one(P.trace_dropped),
+    devices: one(P.devices),
+    readonly: one(P.readonly),
+  }
+})()"""
+
+M3_SHAPE = {
+    "state": str, "why": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "fingerprint": int,
+    "cfg": dict, "errors": list, "faults": list, "notes": list,
+    "mount_table": (dict, type(None)),
+    "proc_list": (dict, type(None)),
+    "proc_vanish": (dict, type(None)),
+    "proc_files": (dict, type(None)),
+    "provider_probe": (dict, type(None)),
+    "usr_mount": (dict, type(None)),
+    "trace_seq": (dict, type(None)),
+    "trace_dropped": (dict, type(None)),
+    "devices": (dict, type(None)),
+    "readonly": (dict, type(None)),
+}
+
+#: Which labels each M3 control must move. Hand-listed because the POINT of a control is that it
+#: moves a NAMED subset; `held` is derived from these by held_rest, which refuses a label the
+#: check cannot record.
+_PROC_CACHE_FAILS = (
+    "proc_vanish ok",
+    "proc_vanish the killed pid left the listing",
+    "verdict is ok",
+)
+_USR_404_FAILS = (
+    "usr_mount ok",
+    "usr_mount /usr is in the mount table",
+    "usr_mount every manifest entry was read",
+    "verdict is ok",
+)
+_TRACE_TINY_FAILS = (
+    "trace_dropped ok",
+    "trace_dropped the ring dropped nothing",
+    "trace_dropped the ring meets the 16 MiB floor",
+    "verdict is ok",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -2056,6 +2255,12 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "COOP/COEP, so no filesystem is mounted and www/m2.html aborts before any proof "
                 "runs. Measured: state 'aborted' in 0.0 s. UNMEASURABLE rather than FAIL, because "
                 "a FAIL would claim three proofs were taken and found wanting.",
+        ), "m3": Expect(
+            UNMEASURABLE,
+            why="the same mechanism once more: without COOP/COEP there is no SAB, so the kernel "
+                "never boots, there is no mount table to read and www/m3.html aborts before a "
+                "process exists. UNMEASURABLE rather than FAIL, because a FAIL would claim /proc "
+                "was enumerated and found wrong.",
         ), "boot": Expect(
             Outcome.FAIL,
             failed=_NO_ISOLATION_FAILS,
@@ -2192,6 +2397,84 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "proofs (a) and (c) must be untouched",
             failed=_NO_CRC_FAILS,
             held=held_rest(M2_LABELS, _NO_CRC_FAILS),
+        )},
+    ),
+    "proc-cache": NegativeControl(
+        name="proc-cache",
+        why="proc_cache=1: `/proc`'s pid listing is taken ONCE and served from a cache instead of "
+            "regenerated per read (src/kernel/procfs.mjs, the cfg.procCache hook, which the "
+            "kernel refuses without a bench boot). A killed pid must then LINGER in `ls /proc`, "
+            "which is the one thing proof 1 is about.\n"
+            "IT CACHES THE LISTING AND NOT THE PER-PID LOOKUP, deliberately. `ls /proc` reads the "
+            "listing, so a cache there is the realistic mistake; leaving `stat` live means the "
+            "`stat refuses with ENOENT` and `open refuses with ENOENT` labels HOLD, and that "
+            "separation is what says which of the two routes the proof was testing. Measured on "
+            "the host test first (bench/m3-synth/probe.mjs): the same cache moves exactly `a "
+            "reaped pid is gone from the listing` and `the survivors are still there`.\n"
+            "The vanish poll is bounded at 40 x 150 ms rather than spinning, because a tight "
+            "15 s spin under this control issued enough syscalls to lap even the 16 MiB trace "
+            "ring and ALSO failed trace_dropped — and a control that breaks a proof it is not "
+            "about verifies nothing.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("proc_cache", "1"),),
+        expects={"m3": Expect(
+            Outcome.FAIL,
+            why="the killed pid must still be in the listing, while every other section holds — "
+                "including the two per-pid refusals, which this control does not touch",
+            failed=_PROC_CACHE_FAILS,
+            held=held_rest(M3_LABELS, _PROC_CACHE_FAILS),
+        )},
+    ),
+    "usr-404": NegativeControl(
+        name="usr-404",
+        why="usr_404=1: `/usr`'s manifest is pointed at `src/libos/does-not-exist.mjs`, a GENUINE "
+            "404 from the harness's own server. The mount must FAIL and record why; an empty "
+            "`/usr` that mounted successfully is what MILESTONES.md M3 forbids in as many words — "
+            "'the mount must fail loudly, never silently serve an empty /usr'.\n"
+            "A REAL 404 AND NOT AN UNKNOWN PROVIDER ID: pointing at a provider that does not "
+            "exist would exercise the id lookup, which is a different refusal (ENODEV from "
+            "urlFor) and not the one this control is about.\n"
+            "The refusal leaves no `/usr` row in the mount table at all, so a path under it falls "
+            "through to the root volume and answers ENOENT — the truth — rather than resolving "
+            "into an empty directory that reads like a working but bare volume. The reason "
+            "reaches the page on the note channel and is asserted there.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("usr_404", "1"),),
+        expects={"m3": Expect(
+            Outcome.FAIL,
+            why="/usr must be absent from the table with a recorded reason, and the capability "
+                "probe itself must still PASS: the probe is about the provider's Range support, "
+                "which a missing object does not remove",
+            failed=_USR_404_FAILS,
+            held=held_rest(M3_LABELS, _USR_404_FAILS),
+        )},
+    ),
+    "trace-tiny": NegativeControl(
+        name="trace-tiny",
+        why="trace_bytes=65536: the trace ring is built at 64 KiB — 2,048 records — instead of "
+            "the 16 MiB floor trace.mjs enforces, through the cfg.traceBytes hook with "
+            "`enforce: false`, which is the only caller permitted below the floor. The proof then "
+            "issues 4,000 syscalls, so the ring is lapped and the dropped-record counter must go "
+            "NON-ZERO.\n"
+            "AND IT MUST STILL BE DISPLAYED, which is why `trace_dropped the counter is "
+            "displayed` is in this control's HELD list rather than its failed one. That split is "
+            "the whole control: MILESTONES.md M3 requires the counter to go non-zero *and* be "
+            "visible, and a ring that silently dropped records would show a clean picture of a "
+            "broken system. The counter is read out of `/dev/trace`'s own header by a process, so "
+            "a reader cannot obtain the records without also obtaining the count of the ones it "
+            "is missing.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("trace_bytes", "65536"),),
+        expects={"m3": Expect(
+            Outcome.FAIL,
+            why="dropped must be non-zero and the ring must report itself undersized, while the "
+                "counter stays visible and the known-sequence proof still holds — the sequence is "
+                "read from the newest records, which a lapped ring still has",
+            failed=_TRACE_TINY_FAILS,
+            held=held_rest(M3_LABELS, _TRACE_TINY_FAILS),
         )},
     ),
     "kernel-stall": NegativeControl(
@@ -4743,6 +5026,218 @@ def main(argv: Optional[List[str]] = None) -> int:
 #: Gate I5's instrument. A Check that is never registered and never run: status() reads nothing
 #: from it but the Result's outcome, and building one here is what lets I5 ask about a FAIL
 #: without needing a phase that produced one.
+
+@check(
+    name="m3",
+    milestone="m3",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.PROC_CACHE, Control.USR_404,
+              Control.TRACE_TINY),
+    labels=M3_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M3_DOCUMENT + "?fill=" + str(M3_FILL),
+    ready_expr=M3_READY,
+    ready_what="globalThis.M3.state reaching done, aborted or error (www/m3.html)",
+    # The headline run is 2.7 s measured. The bound is generous against a shared browser and is
+    # still a BOUND: the proof waits on a ~2.2 s terminate quarantine and polls for it, so a
+    # kernel that never freed the slot must end as a BROKEN check with a reason rather than a
+    # suite that never returns.
+    ready_timeout=180.0,
+    refusal_expr="globalThis.M3 && globalThis.M3.state",
+    refusal_want="aborted",
+    note="ten sections: the mount table and its device numbers; proof 1 as three sections — the "
+         "listing, the killed pid's directory going, and the four per-pid files; proof 2 as the "
+         "provider capability probe plus the /usr mount that depends on it; proof 3 as the known "
+         "syscall sequence and the dropped-record counter; then the table and the read-only rule "
+         "observed from USERLAND through stat and through every mutation in turn. Every "
+         "assertion is taken from inside a process worker through real syscalls — reading the "
+         "generators on the kernel's own thread would prove they work and nothing about whether "
+         "a process can reach them. "
+         "negative controls, one per proof: --negative proc-cache serves a cached /proc listing "
+         "and the killed pid must linger; --negative usr-404 points the provider manifest at a "
+         "missing object and the MOUNT must fail rather than serve an empty /usr; --negative "
+         "trace-tiny builds the ring at 64 KiB and the dropped counter must go non-zero WHILE "
+         "STAYING VISIBLE, which is why the 'counter is displayed' label is held and not failed. "
+         "--negative no-isolation must come out BROKEN: the kernel's SAB does not exist there, so "
+         "nothing is mounted and no proof can be taken.",
+)
+def check_m3(env: Env) -> None:
+    got = env.read(READ_M3, M3_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m3.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m3.html aborted: %s. The kernel's SAB is not constructible without cross-origin "
+            "isolation, so there is no mount table and no proof to take."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m3.html never reached a terminal state (state=%r)" % got["state"])
+
+    # Anti-vacuity FIRST, as every check here does: a page that produced no section must record
+    # failing expectations rather than pass on an absent object.
+    sections = ("mount_table", "proc_list", "proc_vanish", "proc_files", "provider_probe",
+                "usr_mount", "trace_seq", "trace_dropped", "devices", "readonly")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        """One section's evidence, or an empty mapping.
+
+        A section the page never produced has already failed `cell reported`; returning {} here
+        means its clause labels record a failure too rather than raising and losing the rest of
+        the inventory, which `run_one` would report as a label-set mismatch.
+        """
+        row = got[name]
+        return (row or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- the mount table ----------------------------------------------------------------
+    mt = ev("mount_table")
+    env.expect_that("mount_table ok", section_ok("mount_table"), mt)
+    paths = mt.get("paths") or []
+    env.expect_that("the table has a root, /proc and /dev",
+                    all(x in paths for x in ("/", "/proc", "/dev")), paths)
+    env.expect_that("every mount reports a distinct non-zero device",
+                    mt.get("devsDistinct") is True and mt.get("anyZeroDev") is False, mt)
+    env.expect_that("only the OPFS root is durable",
+                    mt.get("rootDurable") is True and mt.get("procDurable") is False, mt)
+
+    # ---- PROOF 1 -----------------------------------------------------------------------
+    pl = ev("proc_list")
+    env.expect_that("proc_list ok", section_ok("proc_list"), pl)
+    pids = pl.get("pids") or []
+    env.expect_that("proc_list enumerates the live pids",
+                    pl.get("reader") in pids and pl.get("victim") in pids, pl)
+    env.expect_that("proc_list shows the reading process itself", pl.get("sawSelf") is True, pl)
+    env.expect_that("proc_list reports every pid as a directory",
+                    pl.get("allPidsAreDirs") is True, pl)
+
+    pv = ev("proc_vanish")
+    env.expect_that("proc_vanish ok", section_ok("proc_vanish"), pv)
+    env.expect_that("proc_vanish the killed pid left the listing",
+                    pv.get("stillListed") is False,
+                    "pid %s, polled %s time(s), live %s"
+                    % (pv.get("victim"), pv.get("polls"), pv.get("livePids")))
+    env.expect_that("proc_vanish stat refuses with ENOENT",
+                    pv.get("statRefusedENOENT") is True, pv.get("statErrno"))
+    env.expect_that("proc_vanish open refuses with ENOENT",
+                    pv.get("openRefusedENOENT") is True, pv.get("openErrno"))
+    env.expect_that("proc_vanish the survivor is still listed",
+                    pv.get("readerStillListed") is True, pv)
+
+    pf = ev("proc_files")
+    env.expect_that("proc_files ok", section_ok("proc_files"), pf)
+    env.expect_that("proc_files status reports the pid",
+                    pf.get("statusPid") == (pl.get("reader")), pf.get("statusPid"))
+    env.expect("proc_files status reports the state", pf.get("state"), "running")
+    env.expect_that("proc_files cmdline is NUL-terminated",
+                    isinstance(pf.get("cmdline"), str) and pf["cmdline"].endswith("\x00"),
+                    pf.get("cmdline"))
+    env.expect("proc_files cwd is readable", pf.get("cwd"), "/")
+    env.expect_that("proc_files the fd directory lists the open fds",
+                    bool(pf.get("fds")), pf.get("fds"))
+    # The volatile-size contract, both halves. A published size would be stale by the time the
+    # caller read it, so the path call publishes none; the fd call holds a snapshot and reports
+    # its exact length.
+    env.expect_that("proc_files a volatile file publishes no size",
+                    pf.get("statPublishesNoSize") is True
+                    and pf.get("readIsNonEmpty") is True,
+                    {"statSize": pf.get("statSize"), "readBytes": pf.get("readBytes")})
+    env.expect_that("proc_files fstat reports the snapshot length",
+                    pf.get("fstatMatchesRead") is True,
+                    {"fstatSize": pf.get("fstatSize"), "fdReadBytes": pf.get("fdReadBytes")})
+
+    # ---- PROOF 2 -----------------------------------------------------------------------
+    pp = ev("provider_probe")
+    env.expect_that("provider_probe ok", section_ok("provider_probe"), pp)
+    env.expect_that("provider_probe a ranged GET returns the exact byte count",
+                    pp.get("exactByteCount") is True, pp.get("local"))
+    env.expect_that("provider_probe Content-Range is present",
+                    pp.get("contentRangePresent") is True, pp.get("local"))
+    env.expect_that("provider_probe a missing object is refused",
+                    pp.get("missingObjectRefused") is True, pp.get("missingObjectWhy"))
+    # WHICH refusal, not just that one happened. `providers.mjs` separates a bad status from an
+    # unreachable host on purpose — a 404 and a dead network are different problems and the
+    # browser withholds the reason for the second — so a probe that reported "unreachable" for a
+    # present server would be the wrong diagnosis passing as the right one.
+    #
+    # The 404 itself needs no claiming here: it is declared in ALLOWED_404, which is what adds it
+    # to the run's forgiven-console list. An earlier version asserted a console error had arrived
+    # and was brittle for a reason worth recording — a 404 is a SUCCESSFUL fetch at the network
+    # level, `fetch` resolves with status 404, and Chrome does not reliably log anything.
+    env.expect("provider_probe the missing object is refused as a bad status",
+               pp.get("missingObjectWhy"), "bad-status")
+
+    um = ev("usr_mount")
+    env.expect_that("usr_mount ok", section_ok("usr_mount"), um)
+    env.expect_that("usr_mount /usr is in the mount table", um.get("mounted") is True,
+                    {"mounted": um.get("mounted"), "code": um.get("refusalCode"),
+                     "why": um.get("refusalWhy")})
+    usr = um.get("usr") or {}
+    env.expect_that("usr_mount every manifest entry was read",
+                    usr.get("ok") is True and (usr.get("bytes") or 0) > 0, usr)
+
+    # ---- PROOF 3 -----------------------------------------------------------------------
+    ts = ev("trace_seq")
+    env.expect_that("trace_seq ok", section_ok("trace_seq"), ts)
+    env.expect_that("trace_seq the known sequence is in the trace",
+                    ts.get("sequenceFound") is True,
+                    {"at": ts.get("sequenceFoundAt"), "tail": ts.get("tail")})
+    env.expect_that("trace_seq entry and exit are both recorded",
+                    ts.get("sawEnterAndExit") is True, ts.get("tail"))
+    env.expect_that("trace_seq the record sequence is monotonic",
+                    ts.get("seqMonotonic") is True, ts)
+
+    td = ev("trace_dropped")
+    env.expect_that("trace_dropped ok", section_ok("trace_dropped"), td)
+    # HELD under trace-tiny: the counter must be visible whether or not it is zero.
+    env.expect_that("trace_dropped the counter is displayed",
+                    td.get("droppedDisplayed") is True, td)
+    env.expect_that("trace_dropped the ring dropped nothing", td.get("dropped") == 0,
+                    {"dropped": td.get("dropped"), "written": td.get("written"),
+                     "capacity": td.get("capacity")})
+    env.expect_that("trace_dropped the ring meets the 16 MiB floor",
+                    (td.get("bytes") or 0) >= 16 * 1024 * 1024
+                    and td.get("undersized") is False,
+                    {"bytes": td.get("bytes"), "undersized": td.get("undersized")})
+
+    # ---- the table and the read-only rule, from userland --------------------------------
+    dv = ev("devices")
+    env.expect_that("devices ok", section_ok("devices"), dv)
+    env.expect_that("devices stat reports three distinct devices",
+                    dv.get("distinctDevices") == 3 and dv.get("anyZeroDevice") is False,
+                    dv.get("statDevs"))
+
+    ro = ev("readonly")
+    env.expect_that("readonly ok", section_ok("readonly"), ro)
+    env.expect_that("readonly every mutation on /proc is refused",
+                    ro.get("allRefused") is True, ro.get("rows"))
+    env.expect_that("readonly every refusal is EROFS", ro.get("allEROFS") is True,
+                    {"errnos": ro.get("errnos"), "EROFS": ro.get("EROFS")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    # The wire, as every check here ends: the document's own headers and a byte-for-byte witness
+    # that the page served is the page on disk.
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m3.html", env.served_matches_disk(env.document),
+                    "the m3.html served does not match www/m3.html on disk")
+
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
                       labels=("-",), min_expectations=1,
                       requires_isolation=False, no_invert_reason="",

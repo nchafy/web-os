@@ -323,6 +323,49 @@ the built code with two real file descriptions — not by review, and not by a m
 
 ---
 
+## D18 · A generated filesystem is read-only, and there is one adapter for all of them
+
+**Decided:** `/proc` and `/dev` are each a pair of pure functions — `lookup(rel)` and `list(rel)` —
+behind one `SynthFS` adapter that renders every read method and refuses every mutation with one
+configured errno. **Rejected:** a procfs and a devfs each implementing the VFS surface; a writable
+`/proc`.
+
+Fourteen methods implemented twice is fourteen chances for one of them to answer when the other
+refuses. The failure that shape produces is specific and bad: a `chmod` on `/proc/<pid>/status` that
+returns 0 and forgets, so a caller believes a permission it does not have. One refusal site means
+the question "can this be written" has one answer.
+
+Adding a generated FILE is then a row in a table, and adding a generated FILESYSTEM is two
+functions. `/usr` is the third user of the same adapter with a different content source, which is
+the evidence the abstraction is at the right altitude — the second caller justifies it and the third
+means it was overdue.
+
+**Known ceiling:** a `SynthFS` holds its whole content in memory per read, and `/usr` holds its
+whole volume. That is the right trade for files measured in hundreds of bytes and the wrong one for
+a large read-only volume, which wants the lazy ranged read `providers.mjs` already implements.
+Constraint 78.
+
+*Evidence: judgement, with one measurement. Constraints 74, 77–79.*
+
+## D19 · A volatile generated file publishes no size
+
+**Decided:** `stat` on a file whose content is computed per read reports size 0; `fstat` on an open
+description reports the snapshot's exact length. **Rejected:** publishing a size from `stat`;
+caching the content so the two agree.
+
+Measured: `stat` on `/proc/<pid>/status` reported 147 bytes and the following `read` returned 145.
+The file carries the process's syscall counters, so reading it advances them — any size this call
+published would be stale before the caller used it. Linux's `/proc` reports 0 for the same reason.
+
+Caching to make them agree was the other way out and is worse: it is exactly what M3's first
+negative control breaks, because a cached `/proc` keeps a killed process visible.
+
+The two calls differing is the useful part. `fstat` CAN answer exactly, because `open` snapshotted
+the bytes and that length is stable for the life of the fd — which is also why a process reading
+`/proc/<pid>/status` in two `read()` calls sees one coherent process rather than half of each.
+
+*Evidence: measured. Constraint 74.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record
