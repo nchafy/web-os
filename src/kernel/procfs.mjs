@@ -111,9 +111,26 @@ export function makeProcFS(ctx) {
     const t = ctx.table();
     return t ? t.get(pid) : undefined;
   };
+
+  /**
+   * M3's FIRST NEGATIVE CONTROL: serve a cached listing instead of regenerating.
+   *
+   * `ctx.cache` is false in every real boot and the kernel refuses to set it without bench=1, so
+   * the headline path carries one `if` on a constant and no behaviour. It is a runtime flag rather
+   * than a hand edit for the reason the handoff gives: a fix that cannot be switched off has not
+   * been shown to be the fix, and a control needing a hand edit is a control nobody re-runs.
+   *
+   * What it must break: a killed pid must LINGER in `ls /proc`. If it does not, the proof that a
+   * dead process's directory vanishes was never testing a live read.
+   */
+  let cached = null;
   const livePids = () => {
     const t = ctx.table();
     if (!t) return [];
+    if (ctx.cache) {
+      if (cached === null) cached = [...t.live].map((s) => s.pid).sort((a, b) => a - b);
+      return cached;
+    }
     return [...t.live].map((s) => s.pid).sort((a, b) => a - b);
   };
 
@@ -136,7 +153,8 @@ export function makeProcFS(ctx) {
 
     if (parts.length === 0) return { type: DIR };
     if (parts.length === 1 && parts[0] === "mounts") {
-      return { type: FILE, content: mountsText() };
+      // Volatile: a mount can be added or removed, so a published size could go stale.
+      return { type: FILE, content: mountsText(), volatile: true };
     }
 
     // Everything below here is addressed by pid. A non-numeric first component is ENOENT, not a
@@ -156,13 +174,13 @@ export function makeProcFS(ctx) {
         if (n === null) return null;
         const d = slot.fds.get(n);
         if (!d) return null;
-        return { type: FILE, content: fdLine(d) };
+        return { type: FILE, content: fdLine(d), volatile: true };
       }
       return null;
     }
 
     if (parts.length === 2 && Object.prototype.hasOwnProperty.call(PID_FILES, parts[1])) {
-      return { type: FILE, content: PID_FILES[parts[1]](slot) };
+      return { type: FILE, content: PID_FILES[parts[1]](slot), volatile: true };
     }
     return null;
   };

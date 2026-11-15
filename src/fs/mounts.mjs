@@ -82,6 +82,12 @@ export class MountTable {
     if (!fs) throw new FsError("EINVAL", path, "mount has no filesystem");
     const row = Object.freeze({
       path, fs, type, flags: flags | 0, dev: this.#nextDev, readOnly: (flags & MNT_RO) !== 0,
+      // WHETHER A MUTATION ON THIS MOUNT HAS TO BE JOURNALLED. True only for the OPFS volume,
+      // which is the only filesystem with durable state behind it. Without this the kernel's one
+      // metadata-mutation path has no way to tell "applied in memory, nothing to record" from
+      // "applied and must be recorded", and it would either refuse every write to a tmpfs or
+      // append journal records describing a volume the op did not happen on.
+      durable: type === FS_OPFS,
     });
     this.#nextDev += 1;
     this.#rows.set(path, row);

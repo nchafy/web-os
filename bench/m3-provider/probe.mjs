@@ -6,6 +6,8 @@
 import {
   PROVIDERS, REMOTE_PROVIDERS, REJECTED_PROVIDERS, urlFor, probeProvider, readRange, PROBE,
 } from "../../src/kernel/providers.mjs";
+import { mountProvider, USR_ENTRIES } from "../../src/kernel/providerfs.mjs";
+import { DIR, FILE } from "../../src/fs/vfs.mjs";
 
 const results = [];
 const check = (name, got, want) => {
@@ -133,6 +135,75 @@ check("a negative offset is EINVAL", fneg, "EINVAL");
 let fzero = "";
 try { await readRange("local", "x", 0, 0, { fetchImpl: stub(206, {}, []) }); } catch (e) { fzero = e.code; }
 check("a zero length is EINVAL", fzero, "EINVAL");
+
+
+// ---- /usr mounted on a provider ---------------------------------------------------------
+// THE SUBJECT IS THE MOUNT REFUSING LOUDLY. MILESTONES.md M3's second negative control: point a
+// provider at a 404 and the mount must fail, never silently serve an empty /usr. Four ways it can
+// fail -- a 404 on the probe object, a 404 on a later object, a provider that ignores Range, and
+// an unreachable host -- each asserted by its own errno and message.
+
+// A provider that serves ranged reads correctly.
+const good = async (url, init) => {
+  const m = /bytes=(\d+)-(\d+)/.exec(init.headers.Range);
+  const want = Number(m[2]) - Number(m[1]) + 1;
+  const body = new Uint8Array(Math.min(want, 500)).fill(65);
+  return { status: 206, headers: { get: (h) => h === "Content-Range" ? `bytes 0-${body.length-1}/500` : null },
+           arrayBuffer: async () => body.buffer };
+};
+const { fs, report } = await mountProvider({ id: "local", fetchImpl: good });
+check("the mount reports its provider", report.provider, "local");
+check("and how many entries it read", report.entries, USR_ENTRIES.length);
+checkThat("and how many bytes", report.bytes > 0, report.bytes);
+check("the mount root is a directory", fs.stat({}, "/").type, DIR);
+check("implied directories exist", fs.listRel("/").map(e=>e.name).sort(), ["include","lib"]);
+check("lib lists its files", fs.listRel("/lib").map(e=>e.name).sort(), ["process.mjs","syscall.mjs"]);
+check("a file is a file", fs.stat({}, "/lib/syscall.mjs").type, FILE);
+checkThat("a file has bytes", fs.bytesAt("/lib/syscall.mjs").length > 0, "empty");
+check("mode is r-xr-xr-x", fs.stat({}, "/lib/syscall.mjs").mode, 0o555);
+check("/usr refuses a write with EROFS", code(() => fs.unlink({}, "/lib/syscall.mjs")), "EROFS");
+check("an absent file is ENOENT", code(() => fs.stat({}, "/lib/nope.mjs")), "ENOENT");
+
+// THE CONTROL: a 404 on one object must refuse the WHOLE mount, not serve an empty /usr.
+const probeOk404 = async (url, init) => {
+  if (url.includes("syscall.mjs")) {
+    const body = new Uint8Array(64).fill(65);
+    return { status: 206, headers: { get: () => "bytes 0-63/500" }, arrayBuffer: async () => body.buffer };
+  }
+  return { status: 404, headers: { get: () => null }, arrayBuffer: async () => new ArrayBuffer(0) };
+};
+let threw = "";
+try { await mountProvider({ id: "local", fetchImpl: probeOk404 }); }
+catch (e) { threw = `${e.code}:${e.message}`; }
+checkThat("a 404 on a manifest object refuses the mount", threw.startsWith("EIO"), threw || "NO THROW");
+checkThat("and names the object that failed", threw.includes("process.mjs"), threw);
+
+// A 404 on the probe object itself.
+const all404 = async () => ({ status: 404, headers: { get: () => null }, arrayBuffer: async () => new ArrayBuffer(0) });
+let t2 = "";
+try { await mountProvider({ id: "local", fetchImpl: all404 }); } catch (e) { t2 = `${e.code}:${e.message}`; }
+checkThat("a 404 on the probe refuses the mount", t2.startsWith("ENODEV"), t2 || "NO THROW");
+checkThat("and says the probe failed", t2.includes("capability probe"), t2);
+
+// A provider that ignores Range (the unpkg failure) must refuse the mount, not degrade it.
+const ignoresRange = async () => ({ status: 200, headers: { get: () => null },
+  arrayBuffer: async () => new Uint8Array(999).buffer });
+let t3 = "";
+try { await mountProvider({ id: "local", fetchImpl: ignoresRange }); } catch (e) { t3 = `${e.code}:${e.message}`; }
+checkThat("a provider ignoring Range refuses the mount", t3.startsWith("ENODEV"), t3 || "NO THROW");
+checkThat("and names range-ignored", t3.includes("range-ignored"), t3);
+
+// An unreachable provider.
+const dead = async () => { throw new TypeError("Failed to fetch"); };
+let t4 = "";
+try { await mountProvider({ id: "local", fetchImpl: dead }); } catch (e) { t4 = `${e.code}:${e.message}`; }
+checkThat("an unreachable provider refuses the mount with EIO", t4.startsWith("EIO"), t4 || "NO THROW");
+
+// An unknown provider, and an empty manifest.
+let t5 = ""; try { await mountProvider({ id: "nope", fetchImpl: good }); } catch (e) { t5 = e.code; }
+check("an unknown provider is ENODEV", t5, "ENODEV");
+let t6 = ""; try { await mountProvider({ id: "local", entries: [], fetchImpl: good }); } catch (e) { t6 = e.code; }
+check("an empty manifest is EINVAL", t6, "EINVAL");
 
 const failed = results.filter((r) => !r.ok);
 console.log(JSON.stringify({

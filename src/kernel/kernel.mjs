@@ -23,9 +23,12 @@ import { buildCalls, installStall, PENDING } from "./calls.mjs";
 import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mjs";
 import { makeInlineIo } from "./io-inline.mjs";
 import { TraceRing, TR_ENTER, TR_EXIT, TRACE_DEFAULT_BYTES } from "./trace.mjs";
-import { MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV } from "../fs/mounts.mjs";
+import {
+  MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV, FS_PROVIDER,
+} from "../fs/mounts.mjs";
+import { mountProvider, USR_ENTRIES } from "./providerfs.mjs";
 import { makeProcFS } from "./procfs.mjs";
-import { makeDevFS } from "./devfs.mjs";
+import { makeDevFS, renderTrace } from "./devfs.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -49,6 +52,10 @@ let table = null;
  *  dispatches the page's own messages. */
 let trace = null;
 let mounts = null;
+/** What happened to the /usr provider mount. Reported, never swallowed: a /usr that
+ *  failed its capability probe must be visible as a refusal rather than as an empty
+ *  directory. */
+let usrReport = null;
 let hb = 0;
 let kServiceMs = 0;
 let kCalls = 0;
@@ -660,7 +667,20 @@ function onProcessMessage(slot, m) {
   }
   if (m.t === "result") {
     const sink = slot.fds.get(1);
+    // THE KERNEL'S OWN FIELDS GO LAST, so a program cannot overwrite them.
+    //
+    // They used to go first, with `...m.data` spread over them, and a program returning a field
+    // called `pid` therefore replaced the kernel's stamp with its own number. Found the hard way:
+    // bench/m3-fs/program.mjs's `procgone` returns the pid it was ASKED about, so a result from
+    // pid 1 arrived labelled pid 2 and the page could not find its own row. The dispatch log said
+    // `to=1` while the result said `pid: 2`, which is as confusing a pair of facts as this
+    // codebase has produced.
+    //
+    // It is also the right order on principle: `pid`, `calls`, `replies` and `errors` are the
+    // kernel's account of a process, and a process must not be able to forge them. The program's
+    // data is its own; where the two collide, the kernel wins.
     results.push({
+      ...m.data,
       pid: slot.pid,
       calls: slot.calls,
       replies: slot.replies,
@@ -668,7 +688,6 @@ function onProcessMessage(slot, m) {
       sinkBytes: sink ? sink.bytes : 0,
       sinkSum: sink ? sink.sum : 0,
       sinkWrites: sink ? sink.writes : 0,
-      ...m.data,
     });
     if (results.length >= (goCount || table.live.size)) {
       post({ t: "results", results, kernel: kstats() });
@@ -820,6 +839,28 @@ function pairs(hist) {
   const out = [];
   for (let i = 0; i < hist.length; i += 1) if (hist[i]) out.push([i, hist[i]]);
   return out;
+}
+
+/**
+ * M3's own account of itself: the mount table, the trace ring's counters, and what happened to
+ * `/usr`.
+ *
+ * `usr` is the load-bearing field here, for the same reason `mode` is in `fsState` below. A `/usr`
+ * that failed its capability probe must be visible as a REFUSAL where a reader meets it. An empty
+ * `/usr` and a `/usr` nobody could mount look identical from a directory listing, and the second
+ * negative control is exactly that confusion.
+ */
+function m3State() {
+  return {
+    mounted: !!mounts,
+    rows: mounts
+      ? mounts.rows().map((r) => ({
+        path: r.path, type: r.type, dev: r.dev, readOnly: r.readOnly, durable: r.durable,
+      }))
+      : [],
+    usr: usrReport,
+    trace: trace ? trace.stats() : null,
+  };
 }
 
 /**
@@ -1257,15 +1298,51 @@ async function handle(m) {
           // and reports). One renderer: the write paths test the mount flag, not two sources.
           flags: STORE.readOnly ? MNT_RO : 0,
         });
+        if (cfg.procCache && cfg.bench !== 1) throw new Error("procCache requires bench=1");
         const procFs = makeProcFS({
           table: () => table,
           mounts: () => mounts,
+          // M3's first negative control. False in every real boot.
+          cache: cfg.procCache === true,
         });
         const devFs = makeDevFS({ trace: () => trace });
         // setDev AFTER add, because the table assigns the number — a filesystem that chose its
         // own device number would be a second place uniqueness had to hold.
         procFs.setDev(mounts.add("/proc", { fs: procFs, type: FS_PROC, flags: MNT_RO }).dev);
         devFs.setDev(mounts.add("/dev", { fs: devFs, type: FS_DEV, flags: MNT_RO }).dev);
+
+        // `/usr` ON THE PROVIDER INTERFACE. Awaited, because the mount reads its manifest over the
+        // network and MILESTONES.md M3 requires the mount itself to refuse rather than come up
+        // empty. A refusal is RECORDED AND REPORTED, never swallowed: `usrReport` is what the page
+        // reads, and a kernel whose `/usr` failed still boots with the rest of the tree intact —
+        // the honest state, since nothing in M3 depends on `/usr` existing.
+        //
+        // The provider id comes from cfg only under bench=1, same gate as every other control
+        // hook. `usrProvider: "missing"` is how the second negative control points it at a 404.
+        const usrId = cfg.usrProvider ? (() => {
+          if (cfg.bench !== 1) throw new Error("usrProvider requires bench=1");
+          return cfg.usrProvider;
+        })() : "local";
+        if (cfg.usrMount !== false) {
+          try {
+            const mounted = await mountProvider({
+              id: usrId,
+              entries: cfg.usrEntries || USR_ENTRIES,
+            });
+            mounted.fs.setDev(
+              mounts.add("/usr", { fs: mounted.fs, type: FS_PROVIDER, flags: MNT_RO }).dev);
+            usrReport = { ok: true, ...mounted.report };
+          } catch (error) {
+            // LOUD, and specifically not a mount. There is no `/usr` row in the table, so a path
+            // under it falls to the root volume and answers ENOENT — which is the truth — rather
+            // than resolving into an empty directory that looks like a working but bare volume.
+            usrReport = {
+              ok: false, provider: usrId,
+              code: error.code || "EIO", why: String(error.message || error),
+            };
+            noteOut(`/usr not mounted: ${usrReport.code} ${usrReport.why}`);
+          }
+        }
       }
 
       // k.table is a getter in the surface below, so handlers see the live ProcTable rather
@@ -1385,6 +1462,14 @@ async function handle(m) {
       // outlive this worker: whether each parked process concluded the kernel was gone. Nothing
       // privileged crosses — a SAB is the channel, and the page already holds the globals one.
       post({ t: "exposed", procs: [...table.live].map((p) => ({ pid: p.pid, sab: p.sab })) });
+      return;
+    case "m3-state":
+      post({ t: "m3-state", m3: m3State() });
+      return;
+    case "trace-read":
+      // The trace as TEXT, through the same renderer `/dev/trace` uses, so the page and a process
+      // cannot be shown two different traces. One renderer of one fact.
+      post({ t: "trace-read", text: renderTrace(trace, { limit: (m.limit | 0) || 256 }) });
       return;
     case "stats":
       post({ t: "stats", kernel: kstats() });
