@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 71 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 81 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 17 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  71 normative constraints  ← cite these
+  CONSTRAINTS.md  81 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -84,8 +84,14 @@ mockups/
   shoot.py          renders both and fails on a JS error
 src/
   abi.mjs         every integer both sides agree on, and nothing else   ← see below
-  fs/             the filesystem codecs: PURE over byte arrays, all I/O at the edges  ← see below
+  fs/             the filesystem codecs AND the mount table: PURE, all I/O at the edges  ← see below
   kernel/         the only privileged code
+    synth.mjs     ONE adapter for every generated filesystem; a new one is two functions
+    procfs.mjs    /proc, regenerated per read from the live process table — never cached
+    devfs.mjs     /dev, and the one renderer /dev/trace and the page both read
+    trace.mjs     the syscall trace ring. Reads no clock; see constraint 72
+    providers.mjs the provider table as DATA, and the only place a request URL is built
+    providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
   wm/             userland window manager                (empty until M7)
 www/
@@ -208,6 +214,13 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   passes with the blur switched off. Sample across a high-contrast seam and assert the gradient.
   (50)
 - **A threshold on a continuous input gets hysteresis, and both edges get checked.**
+- **A control must move a NAMED subset of expectations**, declared in its `Expect(failed=..)`. A
+  control satisfied by any failure verifies nothing. M3's first control spun a poll loop hard enough
+  to lap the trace ring and so also failed a proof it was not about; the poll was paced rather than
+  the control re-scoped.
+- **Assert each refusal's errno separately.** A single "it refused" passes for a filesystem that
+  refused for the wrong reason. M3's `truncate` answered ENOENT where it owed EROFS, and only the
+  per-call assertion caught it.
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 
