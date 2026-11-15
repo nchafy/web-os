@@ -135,7 +135,10 @@ const INTS = {
   SYS_statfs: 36,
   SYS_dup: 37,
   SYS_dup2: 38,
-  NSYS: 39,
+  // M4. Append-only, never renumbered. `dup` and `dup2` above are M2's and the pipe work reuses
+  // them rather than adding a second way to move an fd.
+  SYS_pipe2: 39,
+  NSYS: 40,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -293,6 +296,30 @@ const INTS = {
   // state per fd. The invariant lives in the fd table; the number can be tuned.
   FD_INFLIGHT_CAP: 64,
 
+  // ---- M4 ----------------------------------------------------------------------------------
+
+  /**
+   * One pipe's buffer, in bytes.
+   *
+   * NO DOCUMENT SPECIFIED THIS. 65536 is chosen because it is just above MAX_INLINE (65404), so a
+   * single maximal write fits in an empty pipe and a caller never has to split a write the ABI
+   * allowed it to make.
+   *
+   * NO ATOMIC-WRITE GUARANTEE IS CLAIMED, at any size. POSIX guarantees a write under `PIPE_BUF`
+   * is atomic against other writers; this does not, and a caller needing atomicity must not infer
+   * it from the name. Stated here because `PIPE_BUF` is the constant a reader expects to find and
+   * its absence is the answer.
+   *
+   * A write that would exceed the remaining space blocks until a reader drains it. A write larger
+   * than the whole capacity makes progress in pieces rather than deadlocking.
+   */
+  PIPE_CAPACITY: 65536,
+
+  // `spawn`'s file actions, posix_spawn-shaped. The two a shell needs and no more: a case that
+  // does not exist yet must not get a parameter (CLAUDE.md, general enough and no further).
+  SPAWN_DUP2: 1,
+  SPAWN_CLOSE: 2,
+
 };
 
 export const {
@@ -306,7 +333,7 @@ export const {
   SYS_close, SYS_read, SYS_pread, SYS_pwrite, SYS_seek, SYS_fstat, SYS_ftruncate,
   SYS_mkdir, SYS_rmdir, SYS_unlink, SYS_rename, SYS_symlink, SYS_readlink, SYS_link,
   SYS_stat, SYS_lstat, SYS_chmod, SYS_chown, SYS_readdir, SYS_truncate, SYS_statfs,
-  SYS_dup, SYS_dup2, NSYS,
+  SYS_dup, SYS_dup2, SYS_pipe2, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -328,6 +355,7 @@ export const {
   SIG_DFL, SIG_IGN, SIG_HANDLE,
   WNOHANG, STAT_EXITED, STAT_KILLED,
   CAP_ALL, FD_INFLIGHT_CAP,
+  PIPE_CAPACITY, SPAWN_DUP2, SPAWN_CLOSE,
 } = INTS;
 
 /**
@@ -395,7 +423,7 @@ export const SYS_NAME = Object.freeze([
   "close", "read", "pread", "pwrite", "seek", "fstat", "ftruncate",
   "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink", "link",
   "stat", "lstat", "chmod", "chown", "readdir", "truncate", "statfs",
-  "dup", "dup2",
+  "dup", "dup2", "pipe2",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
@@ -459,6 +487,12 @@ export const EFBIG = E.EFBIG;
 export const EBUSY = E.EBUSY;
 export const EXDEV = E.EXDEV;
 export const ESPIPE = E.ESPIPE;
+/** M4. A program that resolved and is not a program this kernel can run. `spawn`'s answer, and
+ *  deliberately not EIO: EIO says the storage failed, which is a different afternoon. */
+export const ENOEXEC = E.ENOEXEC;
+/** M4. The writer's half of docs/ABI.md decision 5: a write whose last reader went gets this AND
+ *  SIGPIPE. Derived from the table like every other name here, never written as an index. */
+export const EPIPE = E.EPIPE;
 export const EOVERFLOW = E.EOVERFLOW;
 /** Every operation on a file description whose inode is gone. POSIX has no errno for it because
  *  POSIX never reaches the state: it keeps an unlinked file alive until the last descriptor
@@ -596,6 +630,89 @@ export const ABI_FINGERPRINT = (() => {
 })();
 
 /**
+ * `spawn`'s request, as bytes. A FIFTH pure codec, here for the reason the other four are: the
+ * process encodes it and the kernel decodes it, so there is one definition of the layout.
+ *
+ * Layout, little-endian, every length a u32:
+ *   [u32 pathLen][path UTF-8]
+ *   [u32 argc]  then argc x ([u32 len][UTF-8])
+ *   [u32 nActions] then nActions x [u32 op][i32 a][i32 b]
+ *
+ * WHY A CODEC AND NOT JSON. The byte region is bytes and the kernel must not run a parser over
+ * process-controlled input that can throw in a hundred places; a fixed layout with explicit
+ * lengths fails in one place, on a length that does not fit, and `decodeSpawnRequest` returns null
+ * rather than throwing. A kernel that threw on a malformed spawn would be a process faulting the
+ * kernel, which is the defect class M3's review found three of.
+ */
+export function encodeSpawnRequest({ path, argv = [], actions = [] }) {
+  const enc = new TextEncoder();
+  const pathBytes = enc.encode(path);
+  const argvBytes = argv.map((a) => enc.encode(String(a)));
+  let size = 4 + pathBytes.length + 4;
+  for (const a of argvBytes) size += 4 + a.length;
+  size += 4 + actions.length * 12;
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  let at = 0;
+  dv.setUint32(at, pathBytes.length, true); at += 4;
+  out.set(pathBytes, at); at += pathBytes.length;
+  dv.setUint32(at, argvBytes.length, true); at += 4;
+  for (const a of argvBytes) {
+    dv.setUint32(at, a.length, true); at += 4;
+    out.set(a, at); at += a.length;
+  }
+  dv.setUint32(at, actions.length, true); at += 4;
+  for (const act of actions) {
+    dv.setUint32(at, act.op >>> 0, true); at += 4;
+    dv.setInt32(at, act.a | 0, true); at += 4;
+    dv.setInt32(at, act.b | 0, true); at += 4;
+  }
+  return out;
+}
+
+/**
+ * The inverse. Returns null for ANY malformed input — a short buffer, a length that runs past the
+ * end, a path of zero bytes, an unknown action op. Null and not a throw: see the codec's note.
+ */
+export function decodeSpawnRequest(bytes) {
+  const dec = new TextDecoder("utf-8", { fatal: false });
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const need = (at, n) => at + n <= bytes.length;
+  let at = 0;
+  if (!need(at, 4)) return null;
+  const pathLen = dv.getUint32(at, true); at += 4;
+  if (pathLen === 0 || !need(at, pathLen)) return null;
+  const path = dec.decode(bytes.subarray(at, at + pathLen)); at += pathLen;
+  if (path.includes("\0")) return null;
+  if (!need(at, 4)) return null;
+  const argc = dv.getUint32(at, true); at += 4;
+  // A bound, not a guess: argv is carried in one 64 KiB byte region, so an argc past what could
+  // fit is a malformed request rather than a large one.
+  if (argc > 4096) return null;
+  const argv = [];
+  for (let i = 0; i < argc; i += 1) {
+    if (!need(at, 4)) return null;
+    const n = dv.getUint32(at, true); at += 4;
+    if (!need(at, n)) return null;
+    argv.push(dec.decode(bytes.subarray(at, at + n))); at += n;
+  }
+  if (!need(at, 4)) return null;
+  const nActions = dv.getUint32(at, true); at += 4;
+  if (nActions > 1024) return null;
+  const actions = [];
+  for (let i = 0; i < nActions; i += 1) {
+    if (!need(at, 12)) return null;
+    const op = dv.getUint32(at, true); at += 4;
+    const a = dv.getInt32(at, true); at += 4;
+    const b = dv.getInt32(at, true); at += 4;
+    if (op !== SPAWN_DUP2 && op !== SPAWN_CLOSE) return null;
+    if (a < 0 || (op === SPAWN_DUP2 && b < 0)) return null;
+    actions.push({ op, a, b });
+  }
+  return { path, argv, actions };
+}
+
+/**
  * Derivation and shape assertions, run at module load in both agents.
  *
  * Load-bearing: these fire on the change that breaks them rather than leaving a wrong number to
@@ -651,7 +768,7 @@ export function selfTest() {
     fail(`errno ${TEARDOWN_ERRNO} is ${ERRNO_NAMES[TEARDOWN_ERRNO]}, not ECONNABORTED`);
   }
   for (const [name, value] of Object.entries({
-    EAGAIN, EBADF, EINTR, EINVAL, EIO, ENOSYS, ENOTSUP, EPERM, ESRCH,
+    EAGAIN, EBADF, EINTR, EINVAL, EIO, ENOSYS, ENOTSUP, EPERM, ESRCH, EPIPE,
   })) {
     if (ERRNO_NAMES[value] !== name) fail(`${name} does not index back to itself`);
   }
@@ -716,6 +833,43 @@ export function selfTest() {
     fail("the boot-lock backoff must start inside its budget");
   }
   if (DIRENT_HEADER % 4 !== 0) fail("a dirent header that is not 4-byte aligned unaligns its u64");
+
+  // M4. The spawn codec round-trips, and REFUSES rather than throws. The refusal half is the
+  // load-bearing one: this decodes process-controlled bytes in the kernel, and a throw there is a
+  // process faulting the kernel.
+  const spawnWant = {
+    path: "/usr/bin/sh",
+    argv: ["sh", "-c", "yes | head -1"],
+    actions: [{ op: SPAWN_DUP2, a: 3, b: 1 }, { op: SPAWN_CLOSE, a: 3, b: 0 }],
+  };
+  const spawnRound = decodeSpawnRequest(encodeSpawnRequest(spawnWant));
+  if (!spawnRound) fail("a well-formed spawn request did not decode");
+  if (spawnRound.path !== spawnWant.path) fail("spawn path did not round-trip");
+  if (spawnRound.argv.join("\u0000") !== spawnWant.argv.join("\u0000")) {
+    fail("spawn argv did not round-trip");
+  }
+  if (spawnRound.actions.length !== 2 || spawnRound.actions[0].a !== 3
+      || spawnRound.actions[0].b !== 1 || spawnRound.actions[1].op !== SPAWN_CLOSE) {
+    fail("spawn file actions did not round-trip");
+  }
+  if (decodeSpawnRequest(new Uint8Array(0)) !== null) fail("an empty spawn request decoded");
+  if (decodeSpawnRequest(new Uint8Array(3)) !== null) fail("a 3-byte spawn request decoded");
+  // A declared length that runs past the buffer.
+  const liar = new Uint8Array(8);
+  new DataView(liar.buffer).setUint32(0, 999, true);
+  if (decodeSpawnRequest(liar) !== null) fail("a spawn request with an over-long path decoded");
+  // A zero-length path.
+  const noPath = new Uint8Array(12);
+  if (decodeSpawnRequest(noPath) !== null) fail("a spawn request with no path decoded");
+  // An unknown action op.
+  const badOp = encodeSpawnRequest({ path: "/x", argv: [], actions: [{ op: 99, a: 0, b: 0 }] });
+  if (decodeSpawnRequest(badOp) !== null) fail("a spawn request with an unknown action decoded");
+  // A negative fd in an action.
+  const badFd = encodeSpawnRequest({ path: "/x", argv: [], actions: [{ op: SPAWN_DUP2, a: -1, b: 1 }] });
+  if (decodeSpawnRequest(badFd) !== null) fail("a spawn request with a negative fd decoded");
+  if (PIPE_CAPACITY <= MAX_INLINE) {
+    fail(`a pipe capacity of ${PIPE_CAPACITY} cannot hold one maximal ${MAX_INLINE} B write`);
+  }
 
   if (!ABI_FINGERPRINT) fail("fingerprint is zero");
   return ABI_FINGERPRINT;

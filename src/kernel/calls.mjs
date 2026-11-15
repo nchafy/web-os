@@ -11,15 +11,16 @@ import {
   A0, A1, A2, A3, LEN_I32, DATA_OFF, MAX_INLINE, NSYS, SYS_NAME,
   EBADF, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, EINTR, ECHILD, ESRCH,
   ENOENT, ENOTDIR, EISDIR, EACCES, ENAMETOOLONG, EROFS, ESPIPE, EOVERFLOW, EMFILE,
-  ELIMIT_ERRNO, STAT_EXITED, STAT_KILLED, WNOHANG,
+  ELIMIT_ERRNO, FD_INFLIGHT_CAP, STAT_EXITED, STAT_KILLED, WNOHANG,
   SIGKILL, SIGSTOP, SIG_DFL, SIG_IGN, SIG_HANDLE, SIG_BIT,
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE, F_SYNTH, F_TMP, EXDEV,
+  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EXDEV,
   encodeFilestat, unpackI64, packI64,
 } from "../abi.mjs";
 import { KIND_OPS } from "./files.mjs";
+import { Pipe } from "./pipe.mjs";
 import { errnoOfFsError } from "./store.mjs";
 import {
   DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath,
@@ -61,7 +62,12 @@ function settle(k, p, r) {
  * budget bug. Documented so it is not discovered twice.
  */
 function chargeFd(d) {
-  if ((d.inflight | 0) >= (d.cap | 0 || 64)) return -ELIMIT_ERRNO;
+  // FD_INFLIGHT_CAP, imported. This read `d.cap | 0 || 64` with the 64 written here as a
+  // literal — a second copy of an ABI constant on the kernel side of the boundary, which is
+  // the exact defect CLAUDE.md's one-source-of-truth rule names. Nothing sets `d.cap`, so a
+  // per-description override is kept as the hook it was meant to be and the fallback is now
+  // the declaration.
+  if ((d.inflight | 0) >= (d.cap | 0 || FD_INFLIGHT_CAP)) return -ELIMIT_ERRNO;
   d.inflight = (d.inflight | 0) + 1;
   return 0;
 }
@@ -289,6 +295,27 @@ function mountReadOnly(k, mount) {
 }
 
 /**
+ * A PARKED call. `null` from an ops row means "not answered now; the kind holds a record and will
+ * reply to it when an event unblocks it" — a pipe read with no data, a pipe write with no space.
+ *
+ * `null` MUST be tested before the thenable check and before any numeric use, because `null >= 0`
+ * is true and `null | 0` is 0: left to fall through, a parked read answered the caller with 0,
+ * which on a pipe means EOF. A reader that was supposed to wait would have seen end-of-file.
+ *
+ * THE PER-FD BUDGET IS RELEASED AT THE PARK, and that is a decision rather than an oversight. The
+ * budget (FD_INFLIGHT_CAP) bounds outstanding kernel I/O per description, and `chargeFd`'s own
+ * comment names "a kernel that never settles would hold a slot forever" as its hazard — a parked
+ * pipe read is exactly that, by design and indefinitely. What bounds parked records instead is
+ * the process table: a process has one futex word and one outstanding call, so a pipe can hold at
+ * most one record per process and processes are capped by constraint 17. Holding the charge would
+ * instead make the 65th blocking reader on a shared pipe get ENOBUFS, which is a different and
+ * undocumented contract.
+ */
+function isParked(r) {
+  return r === null;
+}
+
+/**
  * A directory read, dispatched from an fd rather than a path.
  *
  * `metaRead`'s sibling: same error translation, same dispatch-thread answer, but the filesystem
@@ -345,6 +372,10 @@ HANDLERS.write = (p, k) => {
   const charged = chargeFd(d);
   if (charged < 0) return charged;
   const r = ops.write(d, p.bytes, DATA_OFF, length, p);
+  if (isParked(r)) {
+    dischargeFd(d);
+    return PENDING;
+  }
   if (r && typeof r.then === "function") {
     k.later(p, () => r.finally(() => dischargeFd(d)));
     return PENDING;
@@ -538,6 +569,10 @@ HANDLERS.read = (p, k) => {
   const charged = chargeFd(d);
   if (charged < 0) return charged;
   const r = ops.read(d, p, DATA_OFF, length);
+  if (isParked(r)) {
+    dischargeFd(d);
+    return PENDING;
+  }
   if (r && typeof r.then === "function") {
     k.later(p, () => r.then((n) => {
       dischargeFd(d);
@@ -585,6 +620,12 @@ function atOffset(p, k, which) {
   const r = which === "read"
     ? ops.read(d, p, DATA_OFF, length, offset)
     : ops.write(d, p.bytes, DATA_OFF, length, p, offset);
+  if (isParked(r)) {
+    // No kind parks on a positional call today: a pipe has no position and answers ESPIPE above.
+    // Named rather than left to fall through, because `null` here would answer the caller 0.
+    dischargeFd(d);
+    return -EINVAL;
+  }
   if (r && typeof r.then === "function") {
     k.later(p, () => r.then((n) => {
       dischargeFd(d);
@@ -941,6 +982,42 @@ HANDLERS.readdir = (p, k) => {
  * `df` print a number that is not a measurement of anything. `blocks` and `bfree` are therefore
  * bytes, and the quota is whatever the browser reported at boot.
  */
+/**
+ * pipe2(flags) -> read fd in r0, WRITE FD IN r1.
+ *
+ * Two fds from one call, which is why `r1` carries the second: docs/ABI.md's IPC group specifies
+ * exactly this shape. `p.r1` is the reply scratch word, cleared per dispatch, so a handler that
+ * sets it and returns a number gets both published by `finish`.
+ *
+ * The two descriptions share one `Pipe` and each counts itself on it. The SLOT is recorded on each
+ * description because the pipe replies to parked calls itself and needs the process to reply to —
+ * and `dup2` into another process is impossible, so a description's slot cannot go stale while the
+ * description lives.
+ */
+HANDLERS.pipe2 = (p, k) => {
+  const flags = p.ctl[A0] | 0;
+  // No flags are implemented. O_NONBLOCK and O_CLOEXEC are the two POSIX defines, and both are
+  // real behaviour this does not have: refusing an unknown flag is the honest answer and keeps a
+  // caller from assuming non-blocking semantics it will not get.
+  if (flags !== 0) return -EINVAL;
+  const pipe = new Pipe();
+  const rd = { kind: F_PIPE_R, refs: 1, flags: O_RDONLY, pipe, slot: p, inflight: 0 };
+  const wr = { kind: F_PIPE_W, refs: 1, flags: O_WRONLY, pipe, slot: p, inflight: 0 };
+  const rfd = p.fds.add(rd);
+  if (rfd < 0) return rfd;
+  const wfd = p.fds.add(wr);
+  if (wfd < 0) {
+    // The read end is already installed, so a failure here must undo it or the caller leaks an fd
+    // it was never told about.
+    p.fds.close(rfd);
+    return wfd;
+  }
+  pipe.readers = 1;
+  pipe.writers = 1;
+  p.r1 = wfd;
+  return rfd;
+};
+
 HANDLERS.statfs = (p, k) => {
   if (!k.store || !k.store.vfs) return -EIO;
   // THE PATH IS OPTIONAL, and that is a compatibility decision rather than a loose interface.

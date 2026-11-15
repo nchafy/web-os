@@ -108,7 +108,7 @@ is permanently unreachable, and the kernel's own check is the only gate.
 ## fd
 
 `close(a0)` → 0 · BADF
-`read(a0, n)` → count · BADF INTR PIPE ISDIR IO AGAIN
+`read(a0, n)` → count · BADF INTR ISDIR IO AGAIN
 `write(a0, byteregion)` → count · BADF INTR PIPE NOSPC FBIG
 `pread` / `pwrite` — add a (lo, hi) offset, add SPIPE
 `seek(a0, offlo, offhi, whence)` → newoff · BADF SPIPE INVAL OVERFLOW
@@ -157,6 +157,15 @@ MFILE IO BUSY NODEV
 `shutdown(fd, how)` → 0
 `shm_create(bytes)` → shmid (a separate growable SAB, via `maxByteLength`)
 `shm_attach(shmid)` → 0 · NOMEM INVAL SRCH
+
+**A pipe holds 65536 B**, declared once as `PIPE_CAPACITY` in `src/abi.mjs`. The number is just
+above `MAX_INLINE` (65404), so one maximal single write fits in an empty pipe and a caller never has
+to split a write it was allowed to make.
+
+**No write is atomic, at any size.** POSIX guarantees that a write under `PIPE_BUF` is indivisible;
+this implementation does not, and a caller that needs atomicity must not rely on it. A write that
+would exceed the remaining space blocks until a reader drains it, and a write larger than the
+capacity makes progress in pieces — it does not deadlock.
 
 ## host
 
@@ -244,13 +253,23 @@ and decrements refcounts.
 Getting this backwards makes `yes | head -1` either hang or report a spurious error, so it is worth
 restating: readers see EOF, writers see EPIPE.
 
+The fd group listed `PIPE` in `read`'s errno set, and that was wrong: `read` never returns
+`-EPIPE`. `write` keeps it, because that is the direction EPIPE belongs to.
+
 ---
 
-## Known weak point
+## The weakest point in the cancellation design, measured
 
-Whether `Atomics.notify` can interrupt a worker that is inside a *synchronous OPFS call* rather
-than inside `Atomics.wait`. By inspection of the two APIs it cannot, which would mean a `read()`
-against a slow file is **not** interruptible even though this document marks it INTR-capable.
+**`Atomics.notify` cannot interrupt a thread inside a synchronous OPFS read.** It woke **0
+workers**, against a baseline where the same notify woke 1 worker parked in `Atomics.wait` with a
+0.15 ms wake latency. A thread inside a synchronous call is not in `Atomics.wait`, so there is
+nothing to wake.
 
-Untested. It is the weakest point in the cancellation design and wants half a day of measurement
-before M4. See `../MILESTONES.md` §Open experiments.
+**`read()` is INTR-capable as this document claims anyway, because of where the handles live.**
+Since M0b the sync access handles are in the kernel's I/O worker, so the *calling* process parks in
+`Atomics.wait` and is fully interruptible: the kernel replies `ST_INTR` and drops the late answer by
+CALLID. The I/O worker's read runs to completion and its result is discarded. What a signal waits
+for is the chunk in flight — **10 µs p99** at the 64 KiB `MAX_INLINE` cap, 0.005 ms median.
+
+The design was already right, for a reason the original question did not consider. Harness
+`bench/m4-intr/probe.py`; recorded as `docs/CONSTRAINTS.md` constraints 86–89.

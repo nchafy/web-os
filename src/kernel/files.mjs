@@ -6,8 +6,8 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, EBADF, EINVAL, O_APPEND, MAX_INLINE, fnv1a,
-  FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, O_APPEND,
+  MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
 import { errnoOfFsError } from "./store.mjs";
@@ -223,6 +223,48 @@ registerKind(F_TMP, {
     // Nothing to release. The bytes outlive the description and go when the last link does,
     // which is `unlink`'s job — the same contract as a real file.
     return 0;
+  },
+});
+
+/**
+ * F_PIPE_R and F_PIPE_W: the two ends of a pipe, as two rows.
+ *
+ * TWO KINDS AND NOT ONE WITH A DIRECTION FLAG. The ops table is how `read(2)` and `write(2)` find
+ * their behaviour, so a single kind would need every op to branch on the flag — the abstraction
+ * needing a parameter to tell its callers apart that CLAUDE.md says to split. As two rows, the
+ * read end simply has no `write` and the write end no `read`, and the table's own contract (a
+ * missing op is -ENOSYS) delivers the refusal with no code at all.
+ *
+ * `null` from `Pipe.read`/`Pipe.write` means PARKED: the call is not answered now and the pipe
+ * holds a record it will reply to from whichever event unblocks it. `calls.mjs` turns that into
+ * PENDING. Constraint 88: a blocking call parks on SEQ and never inside a synchronous call.
+ */
+registerKind(F_PIPE_R, {
+  read(d, p, dstOff, length, at) {
+    // A pipe has no position, so an explicit offset is meaningless rather than ignorable. ESPIPE
+    // is what POSIX says and `calls.mjs` already refuses pread on a kind without a position; this
+    // is the second line of that defence, for a caller that reached the op directly.
+    if (at !== undefined) return -ESPIPE;
+    return d.pipe.read(d.slot, d.slot.seq, p.bytes, dstOff, length);
+  },
+  close(d) {
+    return d.pipe.close(true);
+  },
+});
+
+registerKind(F_PIPE_W, {
+  write(d, u8, offset, length, p, at) {
+    if (at !== undefined) return -ESPIPE;
+    return d.pipe.write(d.slot, d.slot.seq, u8.subarray(offset, offset + length));
+  },
+  fsync() {
+    // A pipe has nothing to force. 0 rather than -ENOSYS, for the reason the tmpfs gives: `fsync`
+    // on a pipe succeeds everywhere, and a program that checked the return would otherwise treat
+    // a correct no-op as a failure.
+    return 0;
+  },
+  close(d) {
+    return d.pipe.close(false);
   },
 });
 
