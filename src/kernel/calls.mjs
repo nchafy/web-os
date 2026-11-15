@@ -192,12 +192,11 @@ function metaOp(p, k, path, decide) {
   } catch (error) {
     return errnoOfFsError(error);
   }
-  if (at.mount.fs !== k.store.vfs) {
-    // Reached only if a generated filesystem ever returns an op record instead of throwing.
-    // Named rather than passed to the journal, which would append a record describing a volume
-    // the op did not happen on.
-    return op === null ? 0 : -EROFS;
-  }
+  // A MOUNT WITH NO DURABLE STATE HAS NOTHING TO JOURNAL. The op was applied in memory by the
+  // filesystem's own method and that is the whole of it — a tmpfs mkdir is complete when it
+  // returns. Journaling it would append a record describing the OPFS volume, where it did not
+  // happen, and replay would then invent a directory on the wrong filesystem.
+  if (!at.mount.durable) return 0;
   // `null` is a legal no-op: rename of a name onto itself. POSIX says that succeeds.
   if (op === null) return 0;
   const { freed, ...record } = op;
@@ -700,13 +699,25 @@ HANDLERS.truncate = (p, k) => {
   const size = Number(unpackI64(p.ctl[A0], p.ctl[A1]));
   if (!Number.isSafeInteger(size) || size < 0) return -EINVAL;
   if (!k.store || !k.store.vfs) return -EIO;
-  if (k.store.readOnly) return -EROFS;
+  // THE FOURTH CHOKE POINT, and the one that was missed. `truncate` resolves its own path rather
+  // than going through metaOp or metaRead, so it needed the mount lookup adding by hand — and
+  // without it a `truncate("/proc/1/status")` resolved against the OPFS volume and came back
+  // ENOENT, which says "no such file" about a file the caller had just read. Measured by
+  // bench/m3-fs/program.mjs's `readonly` mode, which asserts every mutation's errno separately
+  // for exactly this reason: a single "it refused" would have passed.
+  const at = resolveMount(p, k, path);
+  if (typeof at === "number") return at;
+  if (at.mount.readOnly) return -EROFS;
   let decision;
   try {
-    decision = k.store.vfs.openDecision(credOf(p), path, { cwd: p.cwd, wantW: true });
+    decision = at.mount.fs.openDecision(credOf(p), at.rel, { wantW: true });
   } catch (error) {
     return errnoOfFsError(error);
   }
+  // A generated filesystem cannot reach here: `openDecision` with wantW throws on every one of
+  // them. Asserted rather than assumed, because the three lines below hand the decision to the
+  // blob store and a synthetic decision has no blob.
+  if (decision.synth) return -EROFS;
   // A path truncate is an open, a truncate and a close. Expressed as those three rather than as a
   // fourth way to reach a blob, so the COW rule has one implementation.
   k.later(p, async () => {

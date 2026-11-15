@@ -127,11 +127,25 @@ checkThat("a /dev file reports /dev's device",
 checkThat("the two generated mounts have different devices", proc.dev !== dev.dev,
   `both ${proc.dev}`);
 
-// ---- stat and read must agree on size ---------------------------------------------------
+// ---- a VOLATILE file publishes no size --------------------------------------------------
+// Linux's own /proc does this, and the measurement behind it is in SynthFS's `#info`: a stat
+// then a read of /proc/<pid>/status disagreed by two bytes, because the file carries the
+// process's syscall counters and reading it advanced them. Any published number is stale.
 for (const rel of [`/${a.pid}/status`, `/${a.pid}/cmdline`, `/${a.pid}/cwd`, "/mounts"]) {
-  check(`stat and read agree on the size of ${rel.replace(String(a.pid), "<pid>")}`,
-    proc.stat({}, rel).size, proc.bytesAt(rel).length);
+  const label = rel.replace(String(a.pid), "<pid>");
+  check(`${label} publishes no size`, proc.stat({}, rel).size, 0);
+  checkThat(`${label} still reads real bytes`, proc.bytesAt(rel).length > 0,
+    "a zero size must not mean an empty file");
 }
+// A STABLE generated file publishes its real size, so the zero above is a statement about
+// volatility and not about generated files in general.
+check("/dev/zero publishes its real size", dev.stat({}, "/zero").size, dev.bytesAt("/zero").length);
+check("/dev/null publishes zero because it IS empty", dev.stat({}, "/null").size, 0);
+check("/dev/trace publishes no size", dev.stat({}, "/trace").size, 0);
+checkThat("/dev/trace still reads real bytes", dev.bytesAt("/trace").length > 0, "empty trace");
+// A directory still reports its entry count.
+checkThat("a directory reports its entry count",
+  proc.stat({}, "/").size === proc.listRel("/").length, proc.stat({}, "/").size);
 
 // ---- PROOF 3: /dev/trace, and the dropped counter ---------------------------------------
 check("/dev lists its devices", dev.listRel("/").map((e) => e.name), ["trace", "null", "zero"]);

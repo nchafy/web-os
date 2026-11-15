@@ -41,6 +41,39 @@ EXTRA_TYPES = {
 }
 
 
+#: The sentinel `_send_range` returns when the request is not a range it serves AND it has sent
+#: no response, so `send_head` may fall through to the whole-file path. A bare `None` cannot carry
+#: that: `None` is also what `send_head` returns after it HAS answered (a 404 or a 416), and
+#: conflating the two would send a second set of headers onto an answered request.
+_RANGE_PASS = object()
+
+
+class _Limited:
+    """A file object that stops after `remaining` bytes.
+
+    `SimpleHTTPRequestHandler.do_GET` hands whatever `send_head` returns to
+    `shutil.copyfileobj`, which reads to EOF. A plain seek would therefore send the rest of the
+    file after the requested range — a 206 carrying more bytes than it promised, which is the
+    exact failure the capability probe in `src/kernel/providers.mjs` refuses a provider for.
+    """
+
+    def __init__(self, fp, remaining):
+        self._fp = fp
+        self._remaining = remaining
+
+    def read(self, size=-1):
+        if self._remaining <= 0:
+            return b""
+        if size is None or size < 0 or size > self._remaining:
+            size = self._remaining
+        chunk = self._fp.read(size)
+        self._remaining -= len(chunk)
+        return chunk
+
+    def close(self):
+        self._fp.close()
+
+
 class Handler(SimpleHTTPRequestHandler):
     isolate = True
 
@@ -53,7 +86,74 @@ class Handler(SimpleHTTPRequestHandler):
         if any(seg.startswith(".") and seg not in ("", ".") for seg in path.split("/")):
             self.send_error(404, "Not Found")
             return None
+        if self.headers.get("Range"):
+            handled = self._send_range(self.headers["Range"])
+            # None means "not a range this server serves" AND no response sent, so fall through
+            # to the whole-file path. A range that WAS handled, or refused with 416, has already
+            # answered and must not be answered twice.
+            if handled is not _RANGE_PASS:
+                return handled
         return super().send_head()
+
+    def _send_range(self, header):
+        """Serve one byte range, or refuse.
+
+        THIS EXISTS BECAUSE THE HARNESS IS A STORAGE PROVIDER. `src/kernel/providers.mjs` mounts
+        `/usr` over a provider that must serve genuine ranged block reads, and the `local`
+        provider is this server — so a check of the provider interface against a server that
+        ignored `Range` would be testing nothing, and `mountProvider`'s capability probe correctly
+        refused to mount at all. Measured 2026-11-15: before this, a ranged request for 64 B
+        returned 200 with the whole file, which is the `unpkg.com` failure
+        (docs/LEARNING-MODE.md §5) reproduced locally.
+
+        Single range only, which is all a block device needs. A multipart range is refused rather
+        than silently answered with the first part.
+        """
+        import os as _os
+        import re as _re
+        path = self.translate_path(self.path)
+        if _os.path.isdir(path):
+            return _RANGE_PASS
+        m = _re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+        if not m or (not m.group(1) and not m.group(2)):
+            # Not a form this server handles. Answering the whole file would be a 200 for a
+            # ranged request, so refuse explicitly instead.
+            self.send_error(416, "Requested Range Not Satisfiable")
+            return None
+        try:
+            fp = open(path, "rb")
+        except OSError:
+            self.send_error(404, "File not found")
+            return None
+        try:
+            size = _os.fstat(fp.fileno()).st_size
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else size - 1
+            else:
+                # A suffix range: the last N bytes.
+                start = max(0, size - int(m.group(2)))
+                end = size - 1
+            if start >= size or start > end:
+                fp.close()
+                self.send_response(416, "Requested Range Not Satisfiable")
+                self.send_header("Content-Range", "bytes */%d" % size)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            end = min(end, size - 1)
+            length = end - start + 1
+            fp.seek(start)
+            self.send_response(206, "Partial Content")
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Range", "bytes %d-%d/%d" % (start, end, size))
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return _Limited(fp, length)
+        except Exception:
+            fp.close()
+            raise
 
     def list_directory(self, path):
         # Hide what send_head already refuses: a listing that advertises .git and then 404s

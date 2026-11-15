@@ -80,7 +80,9 @@ export function makeDevFS(ctx) {
     // even though the write path refuses a generated filesystem today. `/dev/trace` is 0o444: it
     // is a kernel log, and a process that could write it could forge a syscall record.
     const mode = parts[0] === "trace" ? 0o444 : 0o666;
-    return { type: FILE, content: make(), mode };
+    // `trace` grows with every syscall, including the ones this read takes, so it publishes no
+    // size. `null` and `zero` are fixed and publish theirs.
+    return { type: FILE, content: make(), mode, volatile: parts[0] === "trace" };
   };
 
   const list = (rel) => (relParts(rel).length === 0 ? Object.keys(FILES) : null);

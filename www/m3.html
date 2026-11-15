@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M3 — /proc, /dev, mounts</title>
+<style>
+  body { background: #111; color: #ddd; font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 16px; }
+  pre { white-space: pre-wrap; }
+  .ok { color: #8f8; }
+  .bad { color: #f88; }
+</style>
+</head>
+<body>
+<pre id="log">M3 starting…</pre>
+
+<!-- A CLASSIC script, before the module, for the reason m2.html gives: a 404 anywhere in the
+     module graph must still leave check.py a readable object to report, rather than a page whose
+     global never existed and whose failure reads as "the harness could not evaluate". -->
+<script>
+  globalThis.M3 = {
+    state: 'starting',
+    isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+
+<script type="module">
+/**
+ * M3's page harness: /proc, /dev, the mount table, and the provider mount.
+ *
+ * THREE PROOFS, each with its own negative control, which is the pairing MILESTONES.md M3 specifies
+ * and the part that is easy to get wrong:
+ *
+ *   1. `ls /proc` enumerates live pids, and killing one makes its directory vanish.
+ *      CONTROL ?proc_cache=1 — serve a cached listing; the killed pid must linger.
+ *   2. A capability probe per provider: a ranged GET returns exactly the requested byte count with
+ *      Content-Range, and CORS is present.
+ *      CONTROL ?usr_404=1 — point the manifest at a missing object; the mount must fail loudly.
+ *   3. /dev/trace replays a known syscall sequence and the dropped-record counter is visible.
+ *      CONTROL ?trace_bytes=65536 — undersize the ring at full syscall rate; dropped must go
+ *      non-zero AND be displayed.
+ *
+ * Every assertion is taken from INSIDE A PROCESS, through real syscalls (bench/m3-fs/program.mjs).
+ * Reading the generators on the kernel's own thread would prove they work and nothing about
+ * whether a process can reach them, which is the whole of what M3 builds.
+ */
+
+import { E, DT_DIR } from '/src/abi.mjs'
+import { PROVIDERS, REMOTE_PROVIDERS, probeProvider, PROBE } from '/src/kernel/providers.mjs'
+import { USR_ENTRIES } from '/src/kernel/providerfs.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const num = (k, d) => (params.has(k) ? Number(params.get(k)) : d)
+
+/* The three controls, read once. Each is echoed in M3.config so a check can assert the page
+ * applied the control it was asked for rather than silently taking the headline path. */
+const CFG = {
+  procCache: params.get('proc_cache') === '1',
+  usr404: params.get('usr_404') === '1',
+  traceBytes: num('trace_bytes', 0),
+  fill: num('fill', 4000),
+  probeRemote: params.get('probe_remote') === '1',
+}
+
+Object.assign(globalThis.M3, { isolated: self.crossOriginIsolated === true })
+
+/* Pre-declared with every key null, as m2.html does: a renamed or absent section then reads as
+ * absent rather than as a section that ran and produced nothing. */
+globalThis.M3.proofs = {
+  proc_list: null, proc_vanish: null, proc_files: null,
+  provider_probe: null, usr_mount: null,
+  trace_seq: null, trace_dropped: null,
+  mount_table: null, devices: null, readonly: null,
+}
+
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M3.state = 'aborted'
+  globalThis.M3.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No figures. Run scripts/serve.py WITHOUT --no-isolation.'
+  out.className = 'bad'
+  say(globalThis.M3.why)
+} else {
+  main().catch((e) => {
+    globalThis.M3.state = 'error'
+    globalThis.M3.why = String((e && e.stack) || e)
+    say(globalThis.M3.why)
+  })
+}
+
+const PROGRAM = '/bench/m3-fs/program.mjs'
+
+class KernelFail extends Error {}
+
+function kernelBoot(cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map()
+  const pending = []
+  const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M3.kernelIsolated = m.isolated === true
+      globalThis.M3.kernelFingerprint = m.abiFingerprint
+    }
+    if (m.t === 'fault') {
+      globalThis.M3.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M3.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    /* An io-note is a refusal nobody awaited. The /usr mount refusal arrives here on purpose —
+     * the control's whole subject is that it is LOUD — so it is recorded rather than counted as
+     * an error that would fail the run. */
+    if (m.t === 'io-note') globalThis.M3.notes.push(m.why)
+    const w = waiters.get(m.t)
+    if (w) { waiters.delete(m.t); w(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M3.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, timeoutMs = 20000) => new Promise((resolve, reject) => {
+    if (abort) return reject(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return resolve(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => {
+      waiters.delete(t)
+      reject(new Error('timed out waiting for ' + t))
+    }, timeoutMs)
+    waiters.set(t, (m) => {
+      clearTimeout(timer)
+      if (m instanceof Error) reject(m); else resolve(m)
+    })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m), events, pids: [] }
+}
+
+
+/** Spawn one process with its own argv. uid 1000, so no permission check is passed by bypassing it. */
+async function spawnProcess (k, argv, cfg = {}) {
+  k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+    cfg: { argv, uid: 1000, gid: 1000, ...cfg }, readyTimeoutMs: 20000 })
+  const spawned = await k.expect('spawned', 20000)
+  if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+  const ready = await k.expect('ready', 20000)
+  if (ready.starved) throw new Error('ready starved: ' + ready.why)
+  k.pids.push(spawned.pids[0])
+  return spawned.pids[0]
+}
+
+async function runPid (k, pid, what, argv = null, timeoutMs = 60000) {
+  k.post({ t: 'go', go: argv ? { mode: 'park', pid, argv } : { mode: 'park', pid } })
+  let results
+  try {
+    results = await k.expect('results', timeoutMs)
+  } catch (e) {
+    throw new Error('pid ' + pid + ' (' + what + ') produced no results in ' + timeoutMs +
+      ' ms: ' + (e && e.message))
+  }
+  const row = results.results.find((r) => r.pid === pid)
+  if (!row) {
+    throw new Error('pid ' + pid + ' (' + what + ') produced no result row; the message carried pids ' + JSON.stringify(results.results.map((r) => r.pid)) + ' and modes ' + JSON.stringify(results.results.map((r) => r.mode)))
+  }
+  /* The ROW, not `row.data`: the kernel SPREADS the program's return into the row beside its own
+   * per-process counters (src/kernel/kernel.mjs, the `result` arm), so there is no `data` key to
+   * reach through. Reaching for one read as undefined and every field off it threw. */
+  return row
+}
+
+async function once (k, argv, what, timeoutMs) {
+  return runPid(k, await spawnProcess(k, argv), what, null, timeoutMs)
+}
+
+async function shut (k) {
+  for (const pid of k.pids) {
+    if (pid > 0) k.post({ t: 'kill', pid, signal: 9 })
+  }
+  k.worker.terminate()
+}
+
+async function main () {
+  const t0 = performance.now()
+  say('M3: /proc, /dev, mounts' + (CFG.procCache || CFG.usr404 || CFG.traceBytes
+    ? '  [CONTROL: ' + [CFG.procCache && 'proc_cache', CFG.usr404 && 'usr_404',
+      CFG.traceBytes && ('trace_bytes=' + CFG.traceBytes)].filter(Boolean).join(' ') + ']'
+    : ''))
+
+  /* The controls ride on the BOOT cfg, with bench=1, which is the gate every control hook in this
+   * kernel is behind. A page that asked for a control without bench=1 gets a kernel that throws
+   * at boot rather than one that quietly takes the headline path. */
+  const boot = { bench: 1 }
+  if (CFG.procCache) boot.procCache = true
+  if (CFG.traceBytes) boot.traceBytes = CFG.traceBytes
+  if (CFG.usr404) {
+    /* A GENUINE 404 from the harness's own server: a real provider id, a path that is not there.
+     * Pointing at an unknown provider id would test the id lookup instead, which is a different
+     * refusal and not the one the control is about. */
+    boot.usrEntries = [{ name: 'lib/missing.mjs', path: 'src/libos/does-not-exist.mjs' }]
+  }
+
+  const k = kernelBoot(boot)
+  globalThis.M3.events = k.events
+  const P = globalThis.M3.proofs
+  try {
+    const up = await k.expect('up', 30000)
+    globalThis.M3.up = { isolated: up.isolated, fs: up.fs && up.fs.mode }
+
+    k.post({ t: 'm3-state' })
+    const st = (await k.expect('m3-state')).m3
+    globalThis.M3.m3 = st
+    say('mounts: ' + st.rows.map((r) => r.path + '(' + r.type + ',dev' + r.dev + ')').join(' '))
+
+    /* ---------------------------------------------------------------- the mount table ----- */
+    const byPath = Object.fromEntries(st.rows.map((r) => [r.path, r]))
+    const devs = st.rows.map((r) => r.dev)
+    P.mount_table = {
+      ok: !!(byPath['/'] && byPath['/proc'] && byPath['/dev']
+        && byPath['/'].type === 'opfs' && !byPath['/'].readOnly
+        && byPath['/proc'].readOnly && byPath['/dev'].readOnly
+        && byPath['/'].durable && !byPath['/proc'].durable
+        && new Set(devs).size === devs.length && !devs.includes(0)),
+      evidence: {
+        rows: st.rows,
+        paths: st.rows.map((r) => r.path).sort(),
+        devsDistinct: new Set(devs).size === devs.length,
+        anyZeroDev: devs.includes(0),
+        rootDurable: byPath['/'] ? byPath['/'].durable : null,
+        procDurable: byPath['/proc'] ? byPath['/proc'].durable : null,
+      },
+    }
+
+    /* ----------------------------------------------------- PROOF 2: the capability probe --- */
+    /* Run from the page against the LOCAL provider, which is the harness's own server. A probe
+     * that needed the public internet would fail on a train and say nothing about this code. The
+     * remote rows are probed only under ?probe_remote=1 and reported separately. */
+    const local = await probeProvider('local', 'src/abi.mjs', { want: 64 })
+    /* The refusals must work too, or a passing probe proves only that something returned bytes.
+     * A path that is not there must come back bad-status, not ok. */
+    const missing = await probeProvider('local', 'src/does-not-exist.mjs', { want: 64 })
+    const remote = []
+    if (CFG.probeRemote) {
+      for (const id of REMOTE_PROVIDERS) {
+        remote.push({ id, ...(await probeProvider(id, 'npm/jquery@3.7.1/package.json', { want: 64 })) })
+      }
+    }
+    P.provider_probe = {
+      ok: local.ok && local.bytes === 64 && !!local.contentRange && !missing.ok
+        && missing.why === PROBE.STATUS,
+      evidence: {
+        local: { ok: local.ok, why: local.why, bytes: local.bytes, contentRange: local.contentRange },
+        // CORS is implicit in a resolved cross-origin fetch and explicit in a same-origin one:
+        // the local provider is same-origin, so a 206 with the right byte count IS the capability.
+        exactByteCount: local.bytes === 64,
+        contentRangePresent: !!local.contentRange,
+        missingObjectRefused: !missing.ok,
+        missingObjectWhy: missing.why,
+        providers: Object.keys(PROVIDERS),
+        remote,
+      },
+    }
+
+    /* --------------------------------------------------------- PROOF 2: the /usr mount ----- */
+    /* The headline path mounts /usr and the control points it at a 404. `ok` asserts the MOUNT
+     * SUCCEEDED, so the control makes this expectation fail — which is the whole point: a mount
+     * that failed must not look like a mount that came up empty. */
+    P.usr_mount = {
+      ok: !!(st.usr && st.usr.ok && st.usr.entries === USR_ENTRIES.length && st.usr.bytes > 0),
+      evidence: {
+        usr: st.usr,
+        mounted: st.rows.some((r) => r.path === '/usr'),
+        // Under the control there must be a REASON recorded, not just an absence.
+        refusalCode: st.usr && !st.usr.ok ? st.usr.code : null,
+        refusalWhy: st.usr && !st.usr.ok ? st.usr.why : null,
+        notes: globalThis.M3.notes.slice(),
+      },
+    }
+
+    /* ------------------------------------------------- PROOF 1: ls /proc, and the vanish --- */
+    const reader = await spawnProcess(k, ['proclist'])
+    const victim = await spawnProcess(k, ['proclist'])
+    const listed = await runPid(k, reader, 'proclist')
+    say('/proc: ' + listed.names.join(' '))
+    P.proc_list = {
+      ok: !!(listed.ok && listed.sawSelf && listed.allDirs
+        && listed.pids.includes(reader) && listed.pids.includes(victim)
+        && listed.names.includes('mounts')),
+      evidence: {
+        pids: listed.pids, names: listed.names, sawSelf: listed.sawSelf,
+        reader, victim, allPidsAreDirs: listed.allDirs,
+      },
+    }
+
+    /* The four files M3 names, read through open/read/close from inside a process. */
+    const files = await runPid(k, reader, 'procread', ['procread', String(reader)])
+    P.proc_files = {
+      ok: !!(files.ok && files.pidMatches && files.statusState === 'running'
+        && files.cmdlineNulTerminated && files.cmdline.includes('m3-fs/program.mjs')
+        && files.cwd === '/' && files.fds.length > 0 && files.fd1
+        && files.statPublishesNoSize && files.readIsNonEmpty && files.fstatMatchesRead
+        && files.isReg),
+      evidence: {
+        statusPid: files.statusPid, state: files.statusState, cmdline: files.cmdline,
+        cwd: files.cwd, fds: files.fds, fd1: files.fd1,
+        statSize: files.statSize, statPublishesNoSize: files.statPublishesNoSize,
+        fstatSize: files.fstatSize, fdReadBytes: files.fdReadBytes,
+        fstatMatchesRead: files.fstatMatchesRead,
+        readBytes: files.readBytes, readIsNonEmpty: files.readIsNonEmpty,
+        isRegularFile: files.isReg, uid: files.status && files.status.uid,
+      },
+    }
+
+    /* THE SUBJECT. End the victim, then watch its directory go.
+     *
+     * TWO TRANSITIONS, because POSIX has two and collapsing them would assert the wrong thing: a
+     * killed-but-unreaped process is a ZOMBIE and still has a /proc entry, and the entry goes when
+     * the slot is freed. This kernel frees it after a ~2.2 s terminate quarantine
+     * (TERM_QUARANTINE_MS), so the wait is a BOUNDED POLL on the real listing rather than a sleep
+     * — a sleep would pass for a /proc that had simply never listed the pid. */
+    k.post({ t: 'end-process', pid: victim })
+    await k.expect('reaped', 10000)
+    const zombie = await runPid(k, reader, 'procread', ['procread', String(victim)])
+    let gone = null
+    /* BOUNDED IN ITERATIONS AND PACED, not a tight spin.
+     *
+     * The first version polled as fast as it could for 15 s. Under the ?proc_cache=1 control the
+     * pid never vanishes, so it ran ~7,000 process round trips and issued enough syscalls to lap
+     * even the 16 MiB trace ring — which made that control ALSO fail `trace_dropped`. A control
+     * that breaks a proof it is not about cannot verify its own subject, so the loop is paced:
+     * what is being waited on is a ~2.2 s kernel timer, and nothing observes it sooner than it
+     * fires. 40 polls at 150 ms is a 6 s budget against that 2.2 s. */
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+    const MAX_POLLS = 40
+    let polls = 0
+    while (polls < MAX_POLLS) {
+      polls += 1
+      gone = await runPid(k, reader, 'procgone', ['procgone', String(victim)])
+      if (!gone.inListing) break
+      await wait(150)
+    }
+    say('victim ' + victim + ': zombie=' + (zombie.statusState || zombie.ok) +
+      ' gone=' + (gone && !gone.inListing) + ' after ' + polls + ' poll(s)')
+    P.proc_vanish = {
+      ok: !!(gone && !gone.inListing && gone.statRefused && gone.openRefused
+        && gone.livePids.includes(reader)),
+      evidence: {
+        victim,
+        // The zombie step is evidence, not an assertion: a kernel that freed the slot before the
+        // page could look would report ENOENT here and is not wrong to.
+        zombieState: zombie.statusState || null,
+        zombieReadable: zombie.ok,
+        stillListed: gone ? gone.inListing : null,
+        statErrno: gone ? gone.statErrno : null,
+        openErrno: gone ? gone.openErrno : null,
+        statRefusedENOENT: gone ? gone.statRefused : null,
+        openRefusedENOENT: gone ? gone.openRefused : null,
+        readerStillListed: gone ? gone.livePids.includes(reader) : null,
+        livePids: gone ? gone.livePids : null,
+        polls,
+      },
+    }
+
+    /* ------------------------------------------------------------ the table, from userland -- */
+    const mt = await runPid(k, reader, 'mounts', ['mounts'])
+    const dv = await runPid(k, reader, 'devices',
+      ['devices', ['/', '/proc', '/dev/trace'].join('\0')])
+    P.devices = {
+      ok: !!(mt.ok && mt.devsDistinct && mt.rootIsRw && mt.procIsRo
+        && dv.ok && dv.distinct === 3 && !dv.anyZero),
+      evidence: {
+        mountRows: mt.rows, mountPaths: mt.paths, mountDevsDistinct: mt.devsDistinct,
+        statDevs: dv.rows, distinctDevices: dv.distinct, anyZeroDevice: dv.anyZero,
+      },
+    }
+
+    /* /proc refuses every mutation, each with its own errno. */
+    const ro = await runPid(k, reader, 'readonly',
+      ['readonly', '/proc/' + reader + '/status'])
+    P.readonly = {
+      ok: !!(ro.ok && ro.allRefused && ro.allRofs),
+      evidence: { rows: ro.rows, allRefused: ro.allRefused, allEROFS: ro.allRofs,
+        errnos: ro.errnos, EROFS: E.EROFS },
+    }
+
+    /* ------------------------------------------- PROOF 3: /dev/trace replays a sequence ---- */
+    const seq = await runPid(k, reader, 'knownseq', ['knownseq'])
+    say('trace: ' + seq.myRecords + ' of my records, sequence at ' + seq.sequenceFoundAt)
+    P.trace_seq = {
+      ok: !!(seq.ok && seq.getpidAgreed && seq.sequenceFound && seq.seqMonotonic
+        && seq.sawEnterAndExit && seq.grewBy >= 6),
+      evidence: {
+        getpidAgreed: seq.getpidAgreed, sequenceFound: seq.sequenceFound,
+        sequenceFoundAt: seq.sequenceFoundAt, myRecords: seq.myRecords,
+        grewBy: seq.grewBy, seqMonotonic: seq.seqMonotonic,
+        sawEnterAndExit: seq.sawEnterAndExit, tail: seq.tail,
+      },
+    }
+
+    /* PROOF 3's counter. Lap the ring with cheap syscalls, then read the header back.
+     *
+     * The page does NOT branch on the control. It always asserts dropped === 0 and always asserts
+     * the counter was DISPLAYED. The control undersizes the ring, which makes the first fail and
+     * leaves the second holding — which is exactly "the counter must go non-zero AND be
+     * displayed", expressed as two expectations rather than one. */
+    await runPid(k, reader, 'tracefill', ['tracefill', String(CFG.fill)], 120000)
+    const tr = await runPid(k, reader, 'devtrace', ['devtrace'])
+    say('trace ring: ' + tr.bytes + ' B, written ' + tr.written + ', dropped ' + tr.dropped +
+      ', undersized ' + tr.undersized)
+    P.trace_dropped = {
+      ok: !!(tr.ok && tr.droppedPresent && tr.dropped === 0 && !tr.undersized
+        && tr.bytes >= 16 * 1024 * 1024 && tr.written > CFG.fill && tr.rows > 0),
+      evidence: {
+        bytes: tr.bytes, capacity: tr.capacity, written: tr.written,
+        dropped: tr.dropped, droppedDisplayed: tr.droppedPresent,
+        available: tr.available, undersized: tr.undersized, shown: tr.shown,
+        rowsRendered: tr.rows, issued: CFG.fill, firstRows: tr.firstRows,
+      },
+    }
+
+    globalThis.M3.config = {
+      procCache: CFG.procCache, usr404: CFG.usr404, traceBytes: CFG.traceBytes,
+      fill: CFG.fill, probeRemote: CFG.probeRemote,
+      // Echoed from the kernel, so a control is proved APPLIED rather than merely requested.
+      kernelTraceBytes: tr.bytes, kernelUsrOk: !!(st.usr && st.usr.ok),
+    }
+  } finally {
+    await shut(k)
+  }
+
+  const sections = Object.entries(globalThis.M3.proofs)
+  const ran = sections.filter(([, v]) => v !== null)
+  globalThis.M3.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
+    ? 'ok' : 'FAIL'
+  globalThis.M3.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  say('verdict ' + globalThis.M3.verdict + ' in ' + Math.round(globalThis.M3.ms) + ' ms')
+  out.className = globalThis.M3.verdict === 'ok' ? 'ok' : 'bad'
+  globalThis.M3.state = 'done'
+}
+</script>
+</body>
+</html>

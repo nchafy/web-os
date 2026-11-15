@@ -53,6 +53,8 @@ function node(raw) {
     content: raw.content,
     target: raw.target,
     size: raw.size,
+    // Whether this file's content changes between one read and the next. See `#info`.
+    volatile: raw.volatile === true,
   };
 }
 
@@ -129,13 +131,27 @@ export class SynthFS {
    * `bytesAt`, a single `stat` ran the generator twice.
    */
   #info(rel, n) {
-    const size = n.size !== undefined
-      ? n.size
-      : (n.type === DIR
-        ? (this.#list(rel) || []).length
-        : (n.type === LINK
-          ? ENCODER.encode(n.target || "").length
-          : contentLength(n.content)));
+    // A VOLATILE FILE DOES NOT PUBLISH A SIZE, and reports 0 — which is what Linux's own `/proc`
+    // does, for the reason measured here rather than taken on faith.
+    //
+    // `/proc/<pid>/status` contains the process's syscall counters, so READING IT CHANGES IT. A
+    // `stat` then a `read` ran the generator twice and disagreed: 147 bytes published, 145 bytes
+    // returned, because the counters had grown a digit in between (measured 2026-11-15,
+    // www/m3.html proof `proc_files`). Any number this call published would already be stale, so
+    // it publishes none and a caller reads to EOF.
+    //
+    // `fstat` on an OPEN description is the opposite case and reports an exact size: the bytes
+    // were snapshotted at `open`, so that length is both knowable and stable for the life of the
+    // fd. The two calls answer differently on purpose.
+    const size = n.volatile
+      ? 0
+      : (n.size !== undefined
+        ? n.size
+        : (n.type === DIR
+          ? (this.#list(rel) || []).length
+          : (n.type === LINK
+            ? ENCODER.encode(n.target || "").length
+            : contentLength(n.content))));
     return {
       ino: synthIno(this.dev, rel),
       dev: this.dev,
