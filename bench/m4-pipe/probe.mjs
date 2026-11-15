@@ -223,6 +223,88 @@ const ENC = new TextEncoder(), DEC = new TextDecoder();
     replies);
 }
 
+// ---- A FATAL SIGPIPE ANSWERS THE CALL, so the pipe must NOT answer it again -------------
+//
+// The earlier fake `raise` did not reap, so this whole class was invisible: a fatal SIGPIPE reaps
+// the slot, teardown's `answerInflight` replies, and a pipe that then returned an errno produced
+// TWO replies for one call. `reply` is the single writer of G_INFLIGHT, so the depth gauge drifts
+// negative and the issued == replied identity the syscall check asserts breaks.
+{
+  // A raise that behaves like a FATAL one: nulls `inflight` and bumps `seq`, which is exactly what
+  // `reap` -> `teardown` -> `answerInflight` -> `reply` does to a slot.
+  const reaped = [];
+  installPipeKernel({
+    reply: (slot, r0, r1, status, rlen) => {
+      replies.push({ pid: slot.pid, r0, r1, status, rlen });
+      slot.seq += 1;
+    },
+    raise: (slot, sig) => {
+      signals.push({ pid: slot.pid, sig });
+      if (sig === SIGPIPE) {
+        reaped.push(slot.pid);
+        slot.inflight = null;      // answerInflight replied
+        slot.seq += 1;             // and that reply bumped the sequence
+      }
+    },
+  });
+
+  // (a) the SYNCHRONOUS path: a write with no reader at all.
+  reset();
+  const pipe = new Pipe(8);
+  pipe.readers = 1; pipe.writers = 1;
+  const w = makeSlot();
+  w.inflight = { nr: 1 };          // a call is in flight, as it is during a real write
+  pipe.close(true);                // the reader goes
+  const r = pipe.write(w, w.seq, ENC.encode("x"));
+  check("a write whose fatal SIGPIPE killed the writer returns null, not an errno", r, null);
+  check("and the pipe did not reply", replies.length, 0);
+  check("the signal was raised", signals.length, 1);
+  check("and it is counted as a kill rather than an errno", pipe.report().killedByEpipe, 1);
+
+  // (b) the PARKED path: a writer already blocked when its reader goes.
+  reset();
+  const pipe2 = new Pipe(4);
+  pipe2.readers = 1; pipe2.writers = 1;
+  const w2 = makeSlot();
+  w2.inflight = { nr: 1 };
+  pipe2.write(w2, w2.seq, new Uint8Array(4));
+  w2.seq += 1;                     // that write was answered
+  w2.inflight = { nr: 1 };         // a second write is now in flight
+  check("the writer parks", pipe2.write(w2, w2.seq, new Uint8Array(2)), null);
+  reset();
+  pipe2.close(true);               // the reader dies while the writer waits
+  check("a parked writer killed by its own SIGPIPE is not replied to twice", replies.length, 0);
+  check("the signal reached it", signals.filter((s) => s.sig === SIGPIPE).length, 1);
+  check("and it is counted", pipe2.report().killedByEpipe, 1);
+  check("no writer is left waiting", pipe2.report().waitingWriters, 0);
+
+  // (c) a SURVIVING writer — SIGPIPE ignored or handled — still gets its errno.
+  reset();
+  installPipeKernel({
+    reply: (slot, r0, r1, status, rlen) => {
+      replies.push({ pid: slot.pid, r0, r1, status, rlen }); slot.seq += 1;
+    },
+    raise: (slot, sig) => { signals.push({ pid: slot.pid, sig }); },   // non-fatal: nothing reaped
+  });
+  const pipe3 = new Pipe(8);
+  pipe3.readers = 1; pipe3.writers = 1;
+  const w3 = makeSlot();
+  w3.inflight = { nr: 1 };
+  pipe3.close(true);
+  check("a writer that SURVIVES its SIGPIPE gets -EPIPE", pipe3.write(w3, w3.seq, ENC.encode("x")),
+    -EPIPE);
+  check("and nothing was counted as a kill", pipe3.report().killedByEpipe, 0);
+}
+
+// Restore the plain kernel for the remaining cases.
+reset();
+installPipeKernel({
+  reply: (slot, r0, r1, status, rlen) => {
+    replies.push({ pid: slot.pid, r0, r1, status, rlen }); slot.seq += 1;
+  },
+  raise: (slot, sig) => { signals.push({ pid: slot.pid, sig }); },
+});
+
 // ---- the default capacity holds one maximal write ---------------------------------------
 {
   const pipe = new Pipe();

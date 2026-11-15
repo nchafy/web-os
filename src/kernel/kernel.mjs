@@ -6,17 +6,14 @@
 // an impossibility, and bench/syscall-contention asserts the rule by grepping this directory.
 
 import {
-  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7,
-  H_MAGIC, H_VERSION, SAB_MAGIC, SAB_VERSION, LEN_I32, DATA_OFF,
-  ST_RETURN, ST_INTR, ST_KDOWN, SIG_BIT,
-  GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,
-  G_THINK_US, G_STALL_US, G_READY,
-  G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
-  K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
-  EINTR, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO,
-  SIGKILL, SIGTERM, SIGINT, SIGHUP, SIGPIPE, SIG_DFL, SIG_IGN, SIG_HANDLE,
-  F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2, ENOEXEC, SYS_NAME, decodeSpawnRequest,
-  STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
+  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7, H_MAGIC,
+  H_VERSION, SAB_MAGIC, SAB_VERSION, LEN_I32, DATA_OFF, ST_RETURN, ST_INTR, ST_KDOWN, SIG_BIT,
+  GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT, G_THINK_US,
+  G_STALL_US, G_READY, G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN,
+  W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
+  ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
+  SIGPIPE, SIGABRT, SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
+  ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
 import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./files.mjs";
@@ -751,7 +748,13 @@ function onProcessMessage(slot, m) {
     // `dropped 1` as the only trace.
     const fault = { pid: slot.pid, why: String(m.why) };
     faults.push(fault);
-    slot.state = ZOMBIE;
+    // THROUGH `reap`, not by setting ZOMBIE here. Assigning the state directly left `exitKind` at
+    // -1, so `packStatus(-1, 0)` gave a parent's `waitpid` a status meaning neither exited nor
+    // killed — and, worse, teardown never ran, so the faulted process kept its fds open and a
+    // pipeline peer parked on an EOF that could never arrive. That is constraint 92's symptom
+    // reachable by any child whose program throws. SIGABRT is what a POSIX process gets for
+    // dying on its own fault.
+    reap(slot, STAT_KILLED, SIGABRT);
     post({ t: "fault", ...fault, kernel: kstats() });
     return;
   }
@@ -1101,7 +1104,13 @@ function scheduleFree(slot) {
   try { if (IO) IO.unregister(slot.pid); } catch (e) { /* unregister is best-effort */ }
   try { if (slot.worker) slot.worker.terminate(); } catch (e) { /* already gone is fine */ }
   setTimeout(() => {
-    if (table && table.byPid.get(slot.pid) === slot) table.free(slot);
+    // BY SLOT IDENTITY IN THE ALLOCATION ARRAY, not by a `byPid` lookup. `detachChild` removes the
+    // pid so a second `waitpid` cannot find the child, and this used to key its free on the entry
+    // that had just been removed — so `table.free` never ran, `slots[index]` stayed non-null
+    // forever and the SAB, ctl and worker were never released. After PROC_CAP such children every
+    // `spawn` returns -EAGAIN permanently. The waitpid path had the same ordering and became
+    // reachable the moment `ppid` started being assigned.
+    if (table && table.slots[slot.index] === slot) table.free(slot);
   }, TERM_QUARANTINE_MS);
 }
 
@@ -1264,9 +1273,9 @@ function spawnChild(caller) {
   }
 
   // The image load is a fetch, so the call cannot answer on the dispatch thread. `later` carries
-  // the seq guard: if the caller is interrupted or reaped while the program is loading, the child
-  // is still created and the answer is dropped — which is why the child is reaped in that arm
-  // rather than left running with nobody holding its pid.
+  // the seq guard, which DROPS an answer whose caller has moved on — so the child it created must
+  // be reaped here rather than left running with nobody holding its pid.
+  const seqAtSpawn = caller.seq;
   later(caller, async () => {
     let image;
     try {
@@ -1298,7 +1307,13 @@ function spawnChild(caller) {
         child.fds.close(fd);
       }
       d.refs += 1;
-      child.fds.set(fd, d);
+      if (child.fds.set(fd, d) < 0) {
+        // The caller held an fd past the ceiling, which `FileTable.add` and `dup2` now refuse —
+        // so this is unreachable rather than tolerable. Undo the reference and stop inheriting
+        // rather than leave a refcount nothing will close.
+        d.refs -= 1;
+        break;
+      }
     }
     for (const act of req.actions) {
       if (act.op === SPAWN_DUP2) {
@@ -1307,19 +1322,29 @@ function spawnChild(caller) {
         if (act.a === act.b) continue;  // dup2(fd, fd) is a no-op that must not drop a refcount
         if (child.fds.get(act.b)) child.fds.close(act.b);
         src.refs += 1;
-        child.fds.set(act.b, src);
+        if (child.fds.set(act.b, src) < 0) {
+          // Unreachable: `decodeSpawnRequest` refuses an action naming an fd past OPEN_MAX. Not
+          // swallowed, because a refcount raised and then dropped on the floor is a description
+          // that never closes.
+          src.refs -= 1;
+          continue;
+        }
       } else {
         if (child.fds.get(act.a)) child.fds.close(act.a);
       }
     }
-    // A pipe description now held by the child must count the child's end. Done after the actions
-    // so a CLOSEd end is not counted, and before the worker runs so the child cannot read from a
-    // pipe whose writer count has not yet been raised.
     // ARM THE RUN ON THE CHILD'S OWN `ready`, rather than polling for it. The worker is already
     // constructed and loading its image; `onProcessMessage`'s ready arm posts this `go` the moment
     // the child says it is initialised, so there is no sleep and no window in which the child
     // could be told to run before its program exists.
     child.pendingGo = { mode: "park", argv: req.argv };
+    // THE CALLER MAY BE GONE. `later`'s seq guard would drop this answer silently, leaving a child
+    // running that nobody holds the pid of — and the comment above promised a reap that did not
+    // exist. Checked here, where the child is still ours to undo.
+    if (!caller.ctl || caller.seq !== seqAtSpawn) {
+      reap(child, STAT_KILLED, SIGKILL);
+      return -EINTR;
+    }
     return child.pid;
   });
   return PENDING;

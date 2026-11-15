@@ -22,6 +22,7 @@
 
 import {
   E, O_RDONLY, O_WRONLY, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGKILL, SIGPIPE, MAX_INLINE,
+  packI64,
 } from "../../src/abi.mjs";
 
 const ENC = new TextEncoder();
@@ -34,17 +35,28 @@ const SPIN_CAP = 200000;
 
 /* ----------------------------------- the stages ----------------------------------------- */
 
+/**
+ * `yes`: write forever and DO NOT CHECK THE RETURN, which is the program the control is about.
+ *
+ * Breaking on a negative return made the control's documented failure mode unobservable: with
+ * SIGPIPE non-fatal the first write after `head` exits returns -EPIPE, the loop exited, and
+ * `hitCap` was never true — so "`yes | head -1` must hang" was asserted by a mechanism that
+ * never ran. A writer that ignores the error is what hangs, and it is also the naive program
+ * every shell pipeline actually contains.
+ */
 function yesStage(env) {
   const buf = ENC.encode("y\n");
   let writes = 0;
   let last = 0;
+  let errors = 0;
   for (; writes < SPIN_CAP; writes += 1) {
     last = env.fs.write(1, buf);
-    if (last < 0) break;
+    if (last < 0) errors += 1;
   }
   return {
-    ok: true, writes, lastErrno: last < 0 ? -last : 0,
-    // TRUE means the writer was never stopped — which is the hang M4's negative control produces.
+    ok: true, writes, errors, lastErrno: last < 0 ? -last : 0,
+    // TRUE means the writer was never stopped — the hang the control produces, bounded so it
+    // reports rather than taking the harness's timeout with no information.
     hitCap: writes >= SPIN_CAP,
   };
 }
@@ -83,9 +95,18 @@ function blockreaderStage(env) {
   };
 }
 
+/** Sleep long enough to be KILLED rather than to finish. `clock_nanosleep` takes (lo, hi)
+ *  nanoseconds and this passed (0, 0) — a 0 ns sleep, which `setTimer(p, 0)` answers on the next
+ *  macrotask. The stage therefore exited on its own, and the two proofs that kill it were racing
+ *  worker startup instead of signalling a parked process. 30 s; the orchestrator always kills it
+ *  first, and a stage that somehow outlives its orchestrator is a bounded leak rather than a hang. */
+const SLEEP_NS = 30 * 1000 * 1000 * 1000;
+
 function sleeperStage(env) {
-  const r = env.syscall(2, 0, 0, 0);     // clock_nanosleep, (lo, hi) ns
-  return { ok: true, result: r };
+  const [lo, hi] = packI64(SLEEP_NS);
+  const r = env.syscall(2, lo, hi, 0);
+  // Reached only if the sleep was interrupted or completed; a killed process never gets here.
+  return { ok: true, result: r, errno: r < 0 ? -r : 0 };
 }
 
 function fillwriterStage(env) {
@@ -132,9 +153,41 @@ function stage(env, mode, { stdin = -1, stdout = -1, close = [] } = {}) {
  */
 function ensureStdin(env) {
   const fd = env.fs.open("/dev/zero", O_RDONLY);
+  // A FAILURE MUST STOP THE PROOF. Ignoring it left fd 0 free, so `pipe2` handed back fd 0 as the
+  // read end and every stage that treats 0 as stdin wired the pipeline backwards — the proof would
+  // then fail for a reason that is not its subject, or pass by luck.
+  if (fd < 0) throw new Error(`ensureStdin: open /dev/zero failed with errno ${-fd}`);
   // Anything other than 0 means fd 0 was already open, which is fine: close the duplicate.
   if (fd > 0) env.fs.close(fd);
   return fd;
+}
+
+/**
+ * Wait until `pid` has issued at least one syscall, so it is INSIDE its blocking call.
+ *
+ * NOT A SLEEP. A fixed wait raced worker startup: a stage that had not reached its `read` or its
+ * `clock_nanosleep` yet was signalled while still SPAWNING, so the proof killed two processes that
+ * had never run and proved nothing about a parked one. `/proc/<pid>/status` carries the syscall
+ * count (M3), and for every stage here the first syscall IS the blocking one.
+ */
+function awaitStarted(env, pid, rounds = 200) {
+  const buf = new Uint8Array(512);
+  for (let i = 0; i < rounds; i += 1) {
+    const fd = env.fs.open(`/proc/${pid}/status`, O_RDONLY);
+    if (fd < 0) return { ok: false, why: `status open errno ${-fd}`, rounds: i };
+    const n = env.fs.read(fd, buf);
+    env.fs.close(fd);
+    if (n > 0) {
+      const text = DEC.decode(buf.subarray(0, n));
+      const calls = /calls:\t(\d+)/.exec(text);
+      if (calls && Number(calls[1]) >= 1) return { ok: true, rounds: i, calls: Number(calls[1]) };
+    }
+    // 2 ms between looks. Short enough that the proofs stay fast, long enough that the polling
+    // itself does not dominate the kernel's dispatch.
+    const [lo, hi] = packI64(2000000);
+    env.syscall(2, lo, hi, 0);
+  }
+  return { ok: false, why: "never issued a syscall", rounds };
 }
 
 function pBasic(env) {
@@ -184,30 +237,53 @@ function pGroup(env) {
   const pipe = env.proc.pipe2();
   if (typeof pipe === "number") return { ok: false, why: `pipe2 ${-pipe}` };
   const { rfd, wfd } = pipe;
-  // A new process group for the pipeline, which is what a shell does and what makes one signal
-  // reach every stage. The children inherit it at spawn.
-  const pgid = env.proc.setpgid(0, 0);
   const sleeper = stage(env, "sleeper", { stdout: wfd, close: [rfd, wfd] });
   const catter = stage(env, "catter", { stdin: rfd, close: [rfd, wfd] });
   env.fs.close(rfd);
   env.fs.close(wfd);
-  // CTRL-C, as the line discipline will deliver it: one signal to the whole foreground group.
-  // Negative pid is the group. The orchestrator is in the group too, so it signals the two
-  // children by pid instead — a process that killed its own group would kill itself and the
-  // proof would have nobody left to report it.
-  const k1 = env.proc.kill(sleeper, SIGINT);
-  const k2 = env.proc.kill(catter, SIGINT);
+  if (sleeper < 0 || catter < 0) return { ok: false, why: `spawn ${sleeper} ${catter}` };
+
+  /* THE PIPELINE GETS ITS OWN PROCESS GROUP, and the orchestrator stays out of it.
+   *
+   * This used to send two separate `kill(pid, SIGINT)` calls, so the proof passed on a mechanism
+   * unrelated to the one the milestone claims: `deliverSignal`'s target < 0 branch and the pgid
+   * inheritance this milestone added were never exercised at all. And `setpgid(0, 0)` on the
+   * orchestrator was a no-op, because a page-spawned process already has pgid == pid.
+   *
+   * A shell puts the pipeline in a new group precisely so ONE signal reaches every stage without
+   * touching the shell. `setpgid` permits it because both stages are this process's children. */
+  const g1 = env.proc.setpgid(sleeper, sleeper);
+  const g2 = env.proc.setpgid(catter, sleeper);
+
+  /* WAIT UNTIL BOTH ARE ACTUALLY INSIDE THEIR BLOCKING CALL. Signalling immediately killed two
+   * processes that were still SPAWNING — they had never run, never piped and never parked, so the
+   * proof proved nothing. `/proc/<pid>/status` is how that becomes observable rather than slept on. */
+  const started = [awaitStarted(env, sleeper), awaitStarted(env, catter)];
+
+  // READ THE GROUPS BACK BEFORE THE KILL. Asking after it returns -ESRCH: the stages have been
+  // reaped and detached by then, so the measurement has to be taken while they exist.
+  const stagePgids = [env.proc.getpgid(sleeper), env.proc.getpgid(catter)];
+
+  // CTRL-C, as the line discipline will deliver it: ONE signal, to the whole foreground group.
+  const killed = env.proc.kill(-sleeper, SIGINT);
   const sStat = env.proc.waitpid(sleeper);
   const cStat = env.proc.waitpid(catter);
   return {
-    ok: typeof sleeper === "number" && sleeper > 0 && typeof catter === "number" && catter > 0,
-    myPgid: env.proc.getpgid(0), setpgid: pgid,
+    ok: sleeper > 0 && catter > 0 && started.every((s) => s.ok),
+    myPgid: env.proc.getpgid(0),
     sleeperPid: sleeper, catterPid: catter,
-    killResults: [k1, k2],
+    setpgidResults: [g1, g2],
+    // The group both stages were moved into, read back from the kernel rather than assumed.
+    stagePgids,
+    started,
+    // ONE kill, negative pid. 0 means the group was found and every member signalled.
+    groupKillResult: killed,
     sleeper: sStat, catter: cStat,
-    // BOTH died, and by the signal rather than by running out of work.
     bothKilledByInt: !!(sStat && sStat.killed && sStat.code === SIGINT
       && cStat && cStat.killed && cStat.code === SIGINT),
+    // The orchestrator must have SURVIVED its own pipeline's Ctrl-C, which is the thing putting
+    // the stages in their own group buys.
+    orchestratorSurvived: true,
     SIGINT,
   };
 }
@@ -224,16 +300,17 @@ function pKillWriter(env) {
   const reader = stage(env, "blockreader", { stdin: rfd, close: [rfd, wfd] });
   env.fs.close(rfd);
   env.fs.close(wfd);
-  // Give the reader a moment to reach its blocking read. A sleep, and the honest instrument:
-  // "the reader is parked inside read()" is not observable from here.
-  env.syscall(2, 50000000, 0, 0);          // clock_nanosleep 50 ms
+  // WAIT UNTIL THE READER IS INSIDE ITS READ, observed rather than slept for. A fixed 50 ms raced
+  // worker startup: the stage could be signalled before it had issued a syscall at all.
+  const readerStarted = awaitStarted(env, reader);
   const k = env.proc.kill(writer, SIGKILL);
   const rStat = env.proc.waitpid(reader);
   const wStat = env.proc.waitpid(writer);
   return {
-    ok: typeof writer === "number" && writer > 0 && typeof reader === "number" && reader > 0,
+    ok: writer > 0 && reader > 0 && readerStarted.ok,
     writerPid: writer, readerPid: reader, killResult: k,
     reader: rStat, writer: wStat,
+    readerStarted,
     SIGKILL,
   };
 }
@@ -248,14 +325,16 @@ function pKillReader(env) {
   const reader = stage(env, "sleeper", { stdin: rfd, close: [rfd, wfd] });
   env.fs.close(rfd);
   env.fs.close(wfd);
-  env.syscall(2, 100000000, 0, 0);         // 100 ms, long enough for the writer to fill and park
+  // The writer must be PARKED on a full pipe before its reader goes, or the proof is about a
+  // write that never blocked. Observed through /proc, not slept for.
+  const writerStarted = awaitStarted(env, writer);
   const k = env.proc.kill(reader, SIGKILL);
   const wStat = env.proc.waitpid(writer);
   const rStat = env.proc.waitpid(reader);
   return {
-    ok: typeof writer === "number" && writer > 0 && typeof reader === "number" && reader > 0,
+    ok: writer > 0 && reader > 0 && writerStarted.ok,
     writerPid: writer, readerPid: reader, killResult: k,
-    writer: wStat, reader: rStat,
+    writer: wStat, reader: rStat, writerStarted,
     // The writer must have died of SIGPIPE. -EPIPE is what it would have SEEN; a SIG_DFL SIGPIPE
     // is fatal, so it usually never gets to see it — which is the point.
     writerKilledBySigpipe: !!(wStat && wStat.killed && wStat.code === SIGPIPE),

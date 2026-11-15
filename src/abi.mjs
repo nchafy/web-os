@@ -315,6 +315,17 @@ const INTS = {
    */
   PIPE_CAPACITY: 65536,
 
+  /**
+   * The highest fd a process may hold, plus one. POSIX's `OPEN_MAX`.
+   *
+   * LOAD-BEARING, not tidiness. The fd table is a plain array indexed by fd, so a `dup2` or a
+   * spawn file action naming fd 2^30 grew it to a billion entries — and `spawn`'s inheritance loop
+   * and `teardown`'s fd sweep both run `for (fd = 0; fd < fds.length; fd++)` ON THE KERNEL THREAD.
+   * One process could therefore wedge the kernel for everyone, which constraint 56 gives it 200 ms
+   * to do before every parked process declares the kernel dead. EMFILE is the POSIX answer.
+   */
+  OPEN_MAX: 1024,
+
   // `spawn`'s file actions, posix_spawn-shaped. The two a shell needs and no more: a case that
   // does not exist yet must not get a parameter (CLAUDE.md, general enough and no further).
   SPAWN_DUP2: 1,
@@ -350,12 +361,13 @@ export const {
   W_PRE, W_OPEN, W_CLOSED, W_DONE,
   K_BOOT, K_UP, K_PANIC,
   EHOSTGONE, SAB_MAGIC, SAB_VERSION,
-  SIGHUP, SIGINT, SIGQUIT, SIGKILL, SIGUSR1, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM,
+  SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGKILL, SIGUSR1, SIGUSR2, SIGSEGV,
+  SIGPIPE, SIGALRM, SIGTERM,
   SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGWINCH,
   SIG_DFL, SIG_IGN, SIG_HANDLE,
   WNOHANG, STAT_EXITED, STAT_KILLED,
   CAP_ALL, FD_INFLIGHT_CAP,
-  PIPE_CAPACITY, SPAWN_DUP2, SPAWN_CLOSE,
+  PIPE_CAPACITY, OPEN_MAX, SPAWN_DUP2, SPAWN_CLOSE,
 } = INTS;
 
 /**
@@ -706,7 +718,10 @@ export function decodeSpawnRequest(bytes) {
     const a = dv.getInt32(at, true); at += 4;
     const b = dv.getInt32(at, true); at += 4;
     if (op !== SPAWN_DUP2 && op !== SPAWN_CLOSE) return null;
-    if (a < 0 || (op === SPAWN_DUP2 && b < 0)) return null;
+    // A CEILING ON BOTH, not just a sign check. An unbounded target fd is what let a file action
+    // grow the child's fd array without limit; see OPEN_MAX.
+    if (a < 0 || a >= OPEN_MAX) return null;
+    if (op === SPAWN_DUP2 && (b < 0 || b >= OPEN_MAX)) return null;
     actions.push({ op, a, b });
   }
   return { path, argv, actions };
@@ -867,6 +882,16 @@ export function selfTest() {
   // A negative fd in an action.
   const badFd = encodeSpawnRequest({ path: "/x", argv: [], actions: [{ op: SPAWN_DUP2, a: -1, b: 1 }] });
   if (decodeSpawnRequest(badFd) !== null) fail("a spawn request with a negative fd decoded");
+  // The ceiling, both ends. An unbounded target fd grew a child's fd array to a billion entries
+  // and the kernel then swept it twice.
+  const hugeTo = encodeSpawnRequest({
+    path: "/x", argv: [], actions: [{ op: SPAWN_DUP2, a: 1, b: 1 << 30 }],
+  });
+  if (decodeSpawnRequest(hugeTo) !== null) fail("a spawn action past OPEN_MAX decoded");
+  const hugeFrom = encodeSpawnRequest({
+    path: "/x", argv: [], actions: [{ op: SPAWN_CLOSE, a: OPEN_MAX, b: 0 }],
+  });
+  if (decodeSpawnRequest(hugeFrom) !== null) fail("a spawn close at OPEN_MAX decoded");
   if (PIPE_CAPACITY <= MAX_INLINE) {
     fail(`a pipe capacity of ${PIPE_CAPACITY} cannot hold one maximal ${MAX_INLINE} B write`);
   }

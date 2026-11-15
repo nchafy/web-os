@@ -11,7 +11,7 @@ import {
   A0, A1, A2, A3, LEN_I32, DATA_OFF, MAX_INLINE, NSYS, SYS_NAME,
   EBADF, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, EINTR, ECHILD, ESRCH,
   ENOENT, ENOTDIR, EISDIR, EACCES, ENAMETOOLONG, EROFS, ESPIPE, EOVERFLOW, EMFILE,
-  ELIMIT_ERRNO, FD_INFLIGHT_CAP, STAT_EXITED, STAT_KILLED, WNOHANG,
+  ELIMIT_ERRNO, FD_INFLIGHT_CAP, OPEN_MAX, STAT_EXITED, STAT_KILLED, WNOHANG,
   SIGKILL, SIGSTOP, SIG_DFL, SIG_IGN, SIG_HANDLE, SIG_BIT,
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
@@ -359,7 +359,22 @@ const HANDLERS = {};
 
 HANDLERS.getpid = (p) => p.pid;
 HANDLERS.getppid = (p) => p.ppid;
-HANDLERS.getpgid = (p) => p.pgid;
+/**
+ * getpgid(pid) — THE TARGET's group, not the caller's.
+ *
+ * This ignored its argument and always returned `p.pgid`, so a shell could not ask which group it
+ * had just put a pipeline into. Latent until M4: with no pgid inheritance every process was its
+ * own group, so the caller's answer was indistinguishable from the target's for every pid that
+ * existed. 0 means self, which is POSIX.
+ */
+HANDLERS.getpgid = (p, k) => {
+  const pid = p.ctl[A0] | 0;
+  if (pid === 0 || pid === p.pid) return p.pgid;
+  if (pid < 0) return -EINVAL;
+  const target = k.table.get(pid);
+  if (!target) return -ESRCH;
+  return target.pgid;
+};
 
 HANDLERS.write = (p, k) => {
   const fd = p.ctl[A0];
@@ -761,6 +776,11 @@ HANDLERS.dup2 = (p, k) => {
   const to = p.ctl[A1] | 0;
   if (!d) return -EBADF;
   if (to < 0) return -EBADF;
+  // THE CEILING, CHECKED BEFORE THE CLOSE. An unbounded target grew the fd array without limit,
+  // and `spawn`'s inheritance loop and teardown's sweep then walk its whole length on the kernel
+  // thread. Refused first, so a rejected dup2 does not close the caller's existing fd on the way
+  // out. See OPEN_MAX.
+  if (to >= OPEN_MAX) return -EMFILE;
   if (to === (p.ctl[A0] | 0)) return to;
   // The close of the fd being replaced may commit a staged generation, so it returns a promise and
   // dup2 must WAIT for it. Returning before it settled would let the caller write through the new
@@ -976,13 +996,6 @@ HANDLERS.readdir = (p, k) => {
 };
 
 /**
- * statfs: [u64 blocks][u64 bfree][u64 files][u64 ffree][u32 bsize][u32 namemax], 40 bytes.
- *
- * The block size is 1 — OPFS has no block device under it, and inventing a 4 KiB one would make
- * `df` print a number that is not a measurement of anything. `blocks` and `bfree` are therefore
- * bytes, and the quota is whatever the browser reported at boot.
- */
-/**
  * pipe2(flags) -> read fd in r0, WRITE FD IN r1.
  *
  * Two fds from one call, which is why `r1` carries the second: docs/ABI.md's IPC group specifies
@@ -1021,6 +1034,13 @@ HANDLERS.pipe2 = (p, k) => {
   return rfd;
 };
 
+/**
+ * statfs: [u64 blocks][u64 bfree][u64 files][u64 ffree][u32 bsize][u32 namemax], 40 bytes.
+ *
+ * The block size is 1 — OPFS has no block device under it, and inventing a 4 KiB one would make
+ * `df` print a number that is not a measurement of anything. `blocks` and `bfree` are therefore
+ * bytes, and the quota is whatever the browser reported at boot.
+ */
 HANDLERS.statfs = (p, k) => {
   if (!k.store || !k.store.vfs) return -EIO;
   // THE PATH IS OPTIONAL, and that is a compatibility decision rather than a loose interface.

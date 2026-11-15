@@ -191,12 +191,24 @@ async function main () {
 
   /* ---- PROOF 2: one signal kills every stage of the pipeline ---------------------------- */
   const grp = await runProof('p_group', boot)
-  say('p_group: sleeper ' + JSON.stringify(grp.sleeper) + ' catter ' + JSON.stringify(grp.catter))
+  say('p_group: pgids ' + JSON.stringify(grp.stagePgids) + ' (mine ' + grp.myPgid +
+    '), one kill(-pgid) -> ' + grp.groupKillResult +
+    '; sleeper ' + JSON.stringify(grp.sleeper) + ' catter ' + JSON.stringify(grp.catter))
   P.group_signal = {
-    ok: !!(grp.ok && grp.bothKilledByInt),
+    ok: !!(grp.ok && grp.bothKilledByInt && grp.groupKillResult === 0
+      && grp.stagePgids && grp.stagePgids[0] === grp.sleeperPid
+      && grp.stagePgids[1] === grp.sleeperPid
+      && grp.myPgid !== grp.sleeperPid),
     evidence: {
       myPgid: grp.myPgid, sleeperPid: grp.sleeperPid, catterPid: grp.catterPid,
-      killResults: grp.killResults,
+      setpgidResults: grp.setpgidResults,
+      // Both stages in ONE group, read back from the kernel, and the orchestrator OUTSIDE it.
+      stagePgids: grp.stagePgids,
+      orchestratorOutsideTheGroup: grp.myPgid !== grp.sleeperPid,
+      // ONE kill with a negative pid is what was issued.
+      groupKillResult: grp.groupKillResult,
+      // Both stages were observed inside their blocking call before the signal.
+      started: grp.started,
       sleeper: grp.sleeper, catter: grp.catter,
       bothKilledByInt: grp.bothKilledByInt, SIGINT: grp.SIGINT,
     },
@@ -212,6 +224,8 @@ async function main () {
       writer: kw.writer, reader: kw.reader,
       writerWasKilled: !!(kw.writer && kw.writer.killed),
       readerExitedCleanly: !!(kw.reader && kw.reader.exited),
+      // The reader was observed inside its read before the writer was killed.
+      readerStarted: kw.readerStarted,
     },
   }
 
@@ -224,6 +238,8 @@ async function main () {
       writerPid: kr.writerPid, readerPid: kr.readerPid, killResult: kr.killResult,
       writer: kr.writer, reader: kr.reader,
       writerKilledBySigpipe: kr.writerKilledBySigpipe, SIGPIPE: kr.SIGPIPE,
+      // The writer was observed parked on a full pipe before its reader was killed.
+      writerStarted: kr.writerStarted,
     },
   }
 

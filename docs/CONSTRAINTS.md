@@ -764,3 +764,41 @@ cancellation design.
     before any numeric use.** `null >= 0` is true and `null | 0` is 0, so a parked read left to
     fall through answered the caller 0 — which on a pipe means EOF. A reader that was supposed to
     wait would have seen end-of-file.
+97. **DEFECT (fixed) — `detachChild` before `scheduleFree` made a process slot unreclaimable.**
+    `scheduleFree`'s timer freed the slot only `if (table.byPid.get(slot.pid) === slot)`, and
+    `detachChild` had just removed that entry — so `table.free` never ran, `slots[index]` stayed
+    non-null forever and the SAB, ctl and worker were never released. After `PROC_CAP` such
+    children every `spawn` returns `-EAGAIN` permanently. The headline path reaches it: a parent
+    parked in `waitpid` while its child exits. The free is now keyed on slot identity in the
+    allocation array. `reapForParent` had the same ordering and became reachable with constraint 90.
+98. **DEFECT (fixed) — a fatal SIGPIPE answered the call, and the pipe then answered it again.**
+    `#epipe` raised the signal and returned `-EPIPE`; a SIG_DFL SIGPIPE reaps the slot, so
+    teardown's `answerInflight` had already replied. The handler's return produced a SECOND
+    `reply()` for one call. `reply` is the single writer of `G_INFLIGHT`, so the depth gauge drifted
+    negative and `depthAll[bucket]` was indexed with a negative bucket; `replies` and `errors` were
+    double-counted, breaking the issued == replied identity the `syscall` check asserts. The parked
+    path had the same bug with a weaker guard — it tested `ctl`, which `table.free` nulls two
+    seconds later, instead of the sequence. Both now return the file's "already answered" signal.
+    **The host probe could not see either, because its fake `raise` did not reap.** A fake that is
+    gentler than the real thing tests a world that does not exist.
+99. **DEFECT (fixed) — `getpgid` ignored its argument and returned the caller's group.** So a shell
+    could not ask which group it had just put a pipeline into. Latent until constraint 90: with no
+    pgid inheritance every process was its own group, which made the caller's answer
+    indistinguishable from the target's for every pid that existed.
+100. **An fd ceiling is load-bearing, not tidiness.** `OPEN_MAX` is 1024. The fd table is a plain
+    array indexed by fd, so a `dup2` or a `spawn` file action naming fd 2^30 grew it to a billion
+    entries — and `spawn`'s inheritance loop and `teardown`'s fd sweep both walk `fds.length` ON
+    THE KERNEL THREAD. One process could therefore wedge the kernel for everyone, which constraint
+    56 gives it 200 ms to do before every parked process declares the kernel dead. Enforced in
+    `FileTable.add` and `.set`, in `dup2`, and in `decodeSpawnRequest`. `pipe2`'s own `if (rfd < 0)`
+    guards were dead branches until this existed: there was no EMFILE path at all.
+101. **DEFECT (fixed) — a faulting process became a ZOMBIE without `recordExit` or teardown.** The
+    fault arm assigned the state directly, so `exitKind` stayed -1 and `packStatus(-1, 0)` gave a
+    parent's `waitpid` a status meaning neither exited nor killed. Worse, teardown never ran, so the
+    faulted process kept its fds open and a pipeline peer parked on an EOF that could never arrive —
+    constraint 92's symptom, reachable by any child whose program throws. It now goes through
+    `reap` with SIGABRT.
+102. **DEFECT (fixed) — an interrupted `spawn` left an orphan child running.** `later`'s seq guard
+    drops the answer when the caller has moved on, so the child was created, armed to run, and its
+    pid returned to nobody. The comment claimed a reap that did not exist. It is now reaped where
+    it is still the kernel's to undo.

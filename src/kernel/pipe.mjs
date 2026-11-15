@@ -61,7 +61,12 @@ export class Pipe {
     this.waitingReaders = [];
     this.waitingWriters = [];
     /** Counters, so a check can assert on the mechanism rather than only on the outcome. */
-    this.stats = { written: 0, read: 0, readerParks: 0, writerParks: 0, eof: 0, epipe: 0, stale: 0 };
+    this.stats = {
+      written: 0, read: 0, readerParks: 0, writerParks: 0, eof: 0, epipe: 0, stale: 0,
+      // Writers whose SIGPIPE was FATAL, so their call was answered by teardown and this file
+      // must not answer it again. The number that makes the double-reply bug assertable.
+      killedByEpipe: 0,
+    };
   }
 
   get free() {
@@ -170,6 +175,17 @@ export class Pipe {
     // The signal first. A SIG_DFL SIGPIPE is fatal, so the writer usually never sees the errno —
     // which is what makes `yes | head -1` terminate rather than loop on a failing write.
     if (K) K.raise(slot, SIGPIPE);
+    // AND IF THAT KILLED IT, THE CALL IS ALREADY ANSWERED. A fatal raise reaps the slot, and
+    // teardown's `answerInflight` replies -ECONNABORTED — so returning an errno here produced a
+    // SECOND reply for one call. `reply` is the single writer of G_INFLIGHT, so the depth gauge
+    // drifted negative and `depthAll[bucket]` was indexed with a negative bucket; `replies` and
+    // `errors` were double-counted, breaking the issued == replied identity the syscall check
+    // asserts. `null` is this file's "already handled, do not reply" signal, which `calls.mjs`
+    // turns into PENDING.
+    if (slot.inflight === null) {
+      this.stats.killedByEpipe += 1;
+      return null;
+    }
     return -EPIPE;
   }
 
@@ -228,19 +244,29 @@ export class Pipe {
       // 0, not a decrement: this op fires once, when the last reference to the read description
       // goes. See the field's note.
       this.readers = 0;
-      if (this.readers === 0) {
-        // Every parked writer gets -EPIPE and SIGPIPE. Drained into a local first: `#epipe`
-        // raises a signal that can reap the slot, which mutates nothing here but makes iterating
-        // the live array while replying into it harder to reason about than it needs to be.
+      {
+        // Every parked writer gets -EPIPE and SIGPIPE. Drained into a local first: raising a
+        // signal can reap the slot, and iterating the live array while replying into it is harder
+        // to reason about than it needs to be.
+        //
+        // No `if` here: the line above ASSIGNS 0, so testing it was always true. The condition
+        // read as if `close` refcounted, which is the model constraint 92 records as wrong.
         const waiting = this.waitingWriters;
         this.waitingWriters = [];
         for (const w of waiting) {
           if (!this.#live(w)) continue;
           this.stats.epipe += 1;
           if (K) K.raise(w.slot, SIGPIPE);
-          // The slot may now be a zombie. `reply` is guarded on `ctl`, and raise-then-reply is
-          // the same order the unparked path uses.
-          if (w.slot.ctl) K.reply(w.slot, -EPIPE, -1, ST_RETURN, 0);
+          // RE-CHECK LIVENESS BY SEQUENCE, not by `ctl`. A fatal SIGPIPE reaps the slot, and
+          // teardown answers the parked write with -ECONNABORTED and bumps `seq` — but `ctl` is
+          // nulled only by `table.free`, two seconds later, so a `ctl` guard let the reply through
+          // and the call was answered twice. `#live` compares the seq the record was taken at,
+          // which is the same guard `later()` uses.
+          if (this.#live(w)) {
+            K.reply(w.slot, -EPIPE, -1, ST_RETURN, 0);
+          } else {
+            this.stats.killedByEpipe += 1;
+          }
         }
       }
       return 0;

@@ -6,8 +6,8 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, O_APPEND,
-  MAX_INLINE, fnv1a, FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, EMFILE,
+  O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
 import { errnoOfFsError } from "./store.mjs";
@@ -37,14 +37,27 @@ export class FileTable {
   add(description, atLeast = 0) {
     let fd = atLeast;
     while (fd < this.fds.length && this.fds[fd]) fd += 1;
+    // EMFILE, which until M4 was unreachable: `pipe2`'s own `if (rfd < 0)` guard was a dead
+    // branch because nothing here had a ceiling. See OPEN_MAX.
+    if (fd >= OPEN_MAX) return -EMFILE;
     if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
     return fd;
   }
 
+  /**
+   * Install a description at an EXPLICIT fd. `dup2` and `spawn`'s file actions.
+   *
+   * THE CEILING IS LOAD-BEARING HERE. This writes into a plain array indexed by fd, so a `dup2` to
+   * fd 2^30 grew the array to a billion entries — and `spawn`'s inheritance loop and `teardown`'s
+   * fd sweep both walk `fds.length` on the kernel thread, so one process could wedge the kernel
+   * for everyone. Returns -EMFILE rather than throwing, because the callers are syscall handlers.
+   */
   set(fd, description) {
+    if (fd < 0 || fd >= OPEN_MAX) return -EMFILE;
     if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
+    return fd;
   }
 
   close(fd) {

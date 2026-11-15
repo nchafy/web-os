@@ -2269,6 +2269,8 @@ M4_LABELS = (
     "and the reader exited cleanly",
     # PROOF: one signal kills every stage.
     "group_signal ok",
+    "both stages share one process group, and the orchestrator is outside it",
+    "one kill(-pgid) signalled the group",
     "both stages died of SIGINT",
     # PROOF: a killed writer gives its blocked reader EOF, not an errno.
     "killed_writer_eof ok",
@@ -5481,9 +5483,20 @@ def check_m4(env: Env) -> None:
     # ---- PROOF: one signal kills every stage of the pipeline ------------------------------
     gs = ev("group_signal")
     env.expect_that("group_signal ok", section_ok("group_signal"), gs)
+    # THE GROUP IS THE SUBJECT. Two separate kill(pid) calls passed this section while
+    # `deliverSignal`'s target < 0 branch and the pgid inheritance M4 added went untested.
+    pgids = gs.get("stagePgids") or []
+    env.expect_that("both stages share one process group, and the orchestrator is outside it",
+                    len(pgids) == 2 and pgids[0] == gs.get("sleeperPid")
+                    and pgids[1] == gs.get("sleeperPid")
+                    and gs.get("orchestratorOutsideTheGroup") is True,
+                    {"stagePgids": pgids, "sleeperPid": gs.get("sleeperPid"),
+                     "myPgid": gs.get("myPgid"), "setpgid": gs.get("setpgidResults")})
+    env.expect_that("one kill(-pgid) signalled the group", gs.get("groupKillResult") == 0,
+                    gs.get("groupKillResult"))
     env.expect_that("both stages died of SIGINT", gs.get("bothKilledByInt") is True,
                     {"sleeper": gs.get("sleeper"), "catter": gs.get("catter"),
-                     "SIGINT": gs.get("SIGINT")})
+                     "started": gs.get("started"), "SIGINT": gs.get("SIGINT")})
 
     # ---- PROOF: a killed writer gives its blocked reader EOF, not an errno ----------------
     kw = ev("killed_writer_eof")
