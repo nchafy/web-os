@@ -2147,6 +2147,13 @@ M3_LABELS = (
     "readonly ok",
     "readonly every mutation on /proc is refused",
     "readonly every refusal is EROFS",
+    # /tmp, the one writable mount besides the root.
+    "tmpfs ok",
+    "tmpfs /tmp is mounted writable and not durable",
+    "tmpfs every call succeeded",
+    # The review's findings, each as the syscalls that tripped it.
+    "regress ok",
+    "regress no finding reopened",
     "verdict is ok",
     "document COOP",
     "document COEP",
@@ -2189,6 +2196,8 @@ READ_M3 = """(() => {
     trace_dropped: one(P.trace_dropped),
     devices: one(P.devices),
     readonly: one(P.readonly),
+    tmpfs: one(P.tmpfs),
+    regress: one(P.regress),
   }
 })()"""
 
@@ -2206,6 +2215,8 @@ M3_SHAPE = {
     "trace_dropped": (dict, type(None)),
     "devices": (dict, type(None)),
     "readonly": (dict, type(None)),
+    "tmpfs": (dict, type(None)),
+    "regress": (dict, type(None)),
 }
 
 #: Which labels each M3 control must move. Hand-listed because the POINT of a control is that it
@@ -2428,7 +2439,7 @@ CONTROLS: Dict[str, NegativeControl] = {
     ),
     "usr-404": NegativeControl(
         name="usr-404",
-        why="usr_404=1: `/usr`'s manifest is pointed at `src/libos/does-not-exist.mjs`, a GENUINE "
+        why="usr_404=1: `/usr`'s manifest is pointed at `src/does-not-exist.mjs`, a GENUINE "
             "404 from the harness's own server. The mount must FAIL and record why; an empty "
             "`/usr` that mounted successfully is what MILESTONES.md M3 forbids in as many words — "
             "'the mount must fail loudly, never silently serve an empty /usr'.\n"
@@ -5079,7 +5090,8 @@ def check_m3(env: Env) -> None:
     # Anti-vacuity FIRST, as every check here does: a page that produced no section must record
     # failing expectations rather than pass on an absent object.
     sections = ("mount_table", "proc_list", "proc_vanish", "proc_files", "provider_probe",
-                "usr_mount", "trace_seq", "trace_dropped", "devices", "readonly")
+                "usr_mount", "trace_seq", "trace_dropped", "devices", "readonly", "tmpfs",
+                "regress")
     env.expect_that(
         "cell reported",
         all(got[name] is not None for name in sections),
@@ -5227,6 +5239,25 @@ def check_m3(env: Env) -> None:
                     ro.get("allRefused") is True, ro.get("rows"))
     env.expect_that("readonly every refusal is EROFS", ro.get("allEROFS") is True,
                     {"errnos": ro.get("errnos"), "EROFS": ro.get("EROFS")})
+
+    tm = ev("tmpfs")
+    env.expect_that("tmpfs ok", section_ok("tmpfs"), tm.get("failed"))
+    env.expect_that("tmpfs /tmp is mounted writable and not durable",
+                    tm.get("mounted") is True and tm.get("writable") is True
+                    and tm.get("notDurable") is True, tm)
+    # Per-call, so a failure names the syscall. A single "it worked" would pass for a tmpfs that
+    # wrote correctly and forgot a chmod.
+    env.expect_that("tmpfs every call succeeded",
+                    not (tm.get("failed") or []),
+                    {"failed": tm.get("failed"), "calls": tm.get("calls")})
+
+    rg = ev("regress")
+    env.expect_that("regress ok", section_ok("regress"), rg.get("failed"))
+    # Named, so a reopened defect says WHICH. These are the three uncaught-throw paths an
+    # unprivileged process could reach, the append bug, and the dotdot semantics.
+    env.expect_that("regress no finding reopened",
+                    not (rg.get("failed") or []),
+                    {"failed": rg.get("failed"), "calls": rg.get("calls")})
 
     env.expect("verdict is ok", got["verdict"], "ok")
 

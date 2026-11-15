@@ -639,14 +639,50 @@ a recorded decision with a cost, a **structural** item needs a mechanism M3 does
     both symlinks. They are files holding the facts here because constraint 77 means a generated
     symlink could not be followed, and because an fd on a pipe or a window has no path to point at
     in the first place.
-80. **STRUCTURAL — `/tmp` is not mounted.** `MILESTONES.md` M3's build list names a tmpfs at `/tmp`
-    and it is the one item of the five not delivered. None of M3's three proofs or three negative
-    controls touches it. What it needs beyond what exists: a writable in-memory filesystem, and a
-    writable description kind — `F_SYNTH` is a read-only snapshot by construction. The mount table
-    is already ready for it: a row carries `durable: false`, and `metaOp` returns 0 without
-    journalling for a mount with no durable state, which is exactly a tmpfs's contract.
+80. **PERMITTED — `/tmp` reuses the VFS, so POSIX semantics have one implementation.**
+    `src/kernel/tmpfs.mjs` is a `VFS` instance for the metadata plus a `Map` from inode to bytes,
+    and `F_TMP` is a writable synchronous description kind. Writing a second filesystem would have
+    been two renderers of one fact, and the second would be the one with the permission bug. The
+    size goes through the VFS's own `OP.COMMIT` rather than a poke at `inode.size`, so that field
+    keeps one writer. It is bounded (64 MiB by default, ENOSPC past it) because a tmpfs with no
+    limit lets one process exhaust the renderer's heap and take every other process with it — the
+    same argument as constraint 17's process cap. **The sticky bit is stored and not enforced:**
+    the root is 0o1777 as `/tmp` is everywhere, and the VFS has no sticky rule, so the mode is
+    honest and the protection is not.
 81. **STRUCTURAL — there is no `chdir`, so every process's cwd is `/`.** `src/kernel/table.mjs`
     records that the `cwd` field is M2's and the call that moves it is M3's; M3 made the field
     OBSERVABLE through `/proc/<pid>/cwd` and did not add the call. The field is read live, so a
     `chdir` would be a handler and nothing else — `absoluteOf` in `calls.mjs` already resolves every
     relative path against `p.cwd`.
+82. **PERMITTED — a directory cannot be opened without `O_DIRECTORY`, which diverges from Linux.**
+    `src/fs/vfs.mjs`'s `openDecision` refuses a directory with EISDIR unless `dirOk` is set, and M3
+    made `src/kernel/synth.mjs` match it so this system has ONE answer to "can I open a directory".
+    On Linux `open(dir, O_RDONLY)` succeeds and `read` on the fd is EISDIR; here the refusal moves
+    to `open`. The divergence is the VFS's and predates M3 — the generated filesystems followed
+    POSIX until M3 noticed the two disagreeing, with `ls /proc` working without the flag and
+    `ls /tmp` not. The stricter rule won because it is the established semantics of a shipped
+    milestone, and because a caller that has to remember which mount it is on has no portable `ls`
+    at all. Reconciling it with POSIX means changing the VFS and re-verifying M2.
+83. **PERMITTED — unlinking an open `/tmp` file frees its bytes, and the description then
+    answers ESTALE.** POSIX keeps an unlinked file alive until the last descriptor closes. M2
+    decided not to for the OPFS volume and to refuse consistently under one name instead
+    (`src/abi.mjs` ESTALE), and the tmpfs matches it — a filesystem that chose differently would
+    make the behaviour of an unlinked open file depend on which mount it was on. Reachable in three
+    syscalls: open, write, unlink, read. `bench/m3-tmpfs/probe.mjs` asserts all three refusals.
+    An earlier comment in `#bytesOf` claimed this state meant a kernel bug, which was wrong, and
+    the review that caught it is why the assertion exists.
+84. **STRUCTURAL — a `..` whose lexically-normalized form lands in another mount is resolved
+    lexically.** The mount lookup must normalize to pick a mount — without walking the tree there
+    is no way to know which subtree a `..` lands in — so `stat("/nonexistent/../tmp")` SUCCEEDS,
+    while `stat("/nonexistent/../")` correctly answers ENOENT because it stays on the root volume
+    and the VFS walks it per component. The root mount is handed the path with `..` intact for
+    exactly that reason (`src/kernel/calls.mjs` `resolveMount`); every other mount has no symlinks,
+    so the lexical answer is the right one there. Same family as constraint 77: the walk does not
+    consult the mount table. `bench/m3-fs/program.mjs` `regress` asserts both halves.
+85. **DEFECT — the mountpoints have no backing directory, so `ls /` does not show them.**
+    `/proc`, `/dev`, `/tmp` and `/usr` exist in the mount table and not in the root volume's
+    directory, so a `readdir` of `/` lists neither. Every path INTO them resolves, because the
+    mount table is consulted before the walk. Fixing it means either creating the directories on
+    the volume at boot — which a read-only mount cannot do — or having `readdir` splice in the
+    mountpoints rooted one level below the directory being read. The second is right and is not
+    done.

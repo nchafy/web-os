@@ -25,7 +25,7 @@ checks is a wish.
 | M1 | Process lifecycle, signals, hard cap | 4 | 1 | ✅ done — a spinner dies on End Process |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
-| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | 🟡 done bar `/tmp` — **ACCEPT**, 50 expectations, 3 controls |
+| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | **M4** | **Pipes, pty, line discipline** | 5 | | ⬜ **next** |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
@@ -667,14 +667,14 @@ passes either way it was testing nothing.
 
 ---
 
-## M3 — `/proc`, `/dev`, mounts · ✅ done bar `/tmp` · est 4 d, actual 1 · **ACCEPT**
+## M3 — `/proc`, `/dev`, mounts · ✅ done · est 4 d, actual 1 · **ACCEPT**
 
-**Verdict: ACCEPT.** Four of the five build items are done and verified; `/tmp` is not, and is
-recorded as constraint 80 rather than quietly dropped. All three proofs pass and each of the three
-negative controls moves a named subset of expectations and nothing else.
+**Verdict: ACCEPT.** All five build items are done and verified. All three proofs pass, each of the
+three negative controls moves a named subset of expectations and nothing else, and the nine findings
+an adversarial review returned are fixed with a check per fixed defect.
 
 ```
-scripts/check.py                      5 checks, 217 expectations (m3: 50)
+scripts/check.py                      5 checks, 222 expectations (m3: 55)
 scripts/check.py --prove-failure      exit 0 — all 217 invert and fire
 scripts/check.py --negative proc-cache   m3 fail: 3 red, 47 intact
 scripts/check.py --negative usr-404      m3 fail: 4 red, 46 intact
@@ -682,10 +682,11 @@ scripts/check.py --negative trace-tiny   m3 fail: 4 red, 46 intact
 bench/m3-synth/probe.mjs              84 host assertions (/proc, /dev, no browser)
 bench/m3-provider/probe.mjs           70 host assertions (the table, SSRF, /usr)
 bench/m3-trace/probe.mjs              40 host assertions + the record cost
+bench/m3-tmpfs/probe.mjs              61 host assertions (/tmp, no browser)
 scripts/fsfuzz.py                     129 fs host tests (was 91), src/fs/ still pure
 ```
 
-The headline page run is **2.7 s** for ten sections. Every assertion is taken from inside a process
+The headline page run is **3.3 s** for twelve sections. Every assertion is taken from inside a process
 worker through real syscalls: reading the generators on the kernel's own thread would prove they
 work and nothing about whether a process can reach them, which is the whole of what this milestone
 builds.
@@ -768,12 +769,46 @@ mount into 14 witness failures; and the dead-allowance note was computed **per s
 only one root serves was reported as deletable while the same run forgave its console error two
 lines later.
 
+### `/tmp` reuses the VFS
+
+A tmpfs needs the whole POSIX surface the VFS already implements over an in-memory inode table, so
+`src/kernel/tmpfs.mjs` is a `VFS` instance plus a `Map` from inode to bytes, and `F_TMP` is a
+writable synchronous description kind. Writing a second filesystem would have been two renderers of
+one fact and the second would be the one with the permission bug. It is bounded at 64 MiB for the
+same reason the process table is capped: one process must not be able to exhaust the renderer's heap
+and take every other process with it.
+
+### What the review found
+
+The change went to an independent critic with the artifact and the acceptance criteria and not the
+conclusion, as the method above prescribes. It returned **nine findings and a prose error; all ten
+verified against the code and all are fixed.** Three were reachable from an unprivileged process and
+faulted the kernel worker, which is the class M3 was least likely to find by reading:
+
+| | Finding |
+| --- | --- |
+| HIGH | `/dev/<any Object.prototype key>` was a readable phantom file. `/dev/constructor` put an object where bytes were expected, and `read(2)` on it threw a TypeError out of a handler the dispatcher does not wrap — **two syscalls to fault the kernel**. `procfs` and `providers` already guarded their table lookups; `devfs` was the one that did not |
+| HIGH | `seek(SEEK_END)` on a `/tmp` **directory** fd asked a directory for its byte length and threw. Now EISDIR |
+| HIGH | `O_APPEND` on a tmpfs resolved its offset **once at open** — the exact defect `calls.mjs` already documents for the OPFS path, where it was measured losing a writer's four bytes. The offset is now resolved per write |
+| MEDIUM | the read-only test moved from the live volume to a **boot-time mount flag**, so after `store.mjs` demotes the volume at runtime (constraint 28) a `mkdir` mutated the in-memory tree and *then* returned EROFS. The durable mount asks the store now |
+| MEDIUM | `..` was stripped **lexically** at the kernel edge, so a `..` through a nonexistent or non-directory component stopped failing and one through a symlink resolved against the name. The root mount gets the path with `..` intact |
+| MEDIUM | `unlink` on an open `/tmp` file freed its bytes while a description still held it, and the comment asserted that state was unreachable. It is reachable in three syscalls; ESTALE now, matching the OPFS volume |
+| LOW ×3 | `TR_TIME`'s comment claimed a cross-agent clock the value does not have; a comment described a `pwrite` refusal the ops table does not make while calling the real guard redundant; `statfs` discarded the filesystem's own `bsize` and `namemax` |
+
+Every one of the first six is now a row in `bench/m3-fs/program.mjs`'s `regress` mode, taken through
+real syscalls — none of the ten original sections reached any of them.
+
+**The lesson worth keeping:** the two findings that mattered most were both *a comment asserting an
+invariant the code did not have*. A confident comment is not evidence, and the critic read the code
+instead.
+
 ### What is not done
 
-`/tmp` is not mounted — constraint 80, with what it needs. There is no `chdir`, so every cwd is `/`
-— constraint 81. `/usr` costs its whole size in memory and the mount is atomic, which is what makes
-control 2 possible and is not a design for a large volume — constraint 78. A symlink cannot cross a
-mount — constraint 77.
+There is no `chdir`, so every cwd is `/` — constraint 81. `/usr` costs its whole size in memory and
+the mount is atomic, which is what makes control 2 possible and is not a design for a large volume —
+constraint 78. A symlink cannot cross a mount (77) and a `..` that lands in another mount is lexical
+(84), which are one gap in two guises: the walk does not consult the mount table. **The mountpoints
+have no backing directory, so `ls /` does not list them (85)** — a defect, with the fix named.
 
 `mount` never accepts a caller-supplied URL, and the narrowest form of that rule is what shipped: a
 process cannot mount at all.

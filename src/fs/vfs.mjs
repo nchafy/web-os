@@ -73,6 +73,10 @@ const MESSAGES = {
   // filesystem type nobody implements. Without the row the code would reach a process as -EIO,
   // which says "the disk failed" about a typo in a mount row.
   ENODEV: "No such device",
+  // M3. An operation on a description whose inode is gone. The OPFS store already answers this
+  // (src/abi.mjs ESTALE) and the tmpfs now answers it too, so the two agree; without the row the
+  // code would reach a process as -EIO and say "the disk failed" about an unlinked file.
+  ESTALE: "Stale file handle",
   EFBIG: "File too large",
   EMLINK: "Too many links",
   EROFS: "Read-only file system",

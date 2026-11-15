@@ -74,6 +74,17 @@ export function makeDevFS(ctx) {
     const parts = relParts(rel);
     if (parts.length === 0) return { type: DIR };
     if (parts.length !== 1) return null;
+    // AN OWN-PROPERTY TEST, not a truthiness test on a lookup.
+    //
+    // `FILES` is an object literal, so it inherits Object.prototype: `FILES["toString"]` is a
+    // function and `FILES["constructor"]` is `Object`. Without this guard `/dev/toString` became a
+    // readable file containing "[object Undefined]", and `/dev/constructor` was worse — `make()`
+    // returned `{}`, so `contentLength` gave undefined, `bytesAt` handed back a plain object as
+    // the bytes, and `read(2)` on it reached `d.bytes.subarray` and threw a TypeError out of a
+    // handler the dispatcher does not wrap. Two syscalls from an unprivileged process faulted the
+    // kernel worker. `procfs.mjs` and `providers.mjs` already guard their table lookups; this was
+    // the one that did not.
+    if (!Object.prototype.hasOwnProperty.call(FILES, parts[0])) return null;
     const make = FILES[parts[0]];
     if (!make) return null;
     // `/dev/null` and `/dev/zero` are 0o666 because writing to them is the point of them existing,
