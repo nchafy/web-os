@@ -117,7 +117,7 @@ is permanently unreachable, and the kernel's own check is the only gate.
 `ftruncate(a0, lo, hi)` → 0 · BADF INVAL IO
 `dup(a0)` / `dup2(a0, a1)` → fd · BADF MFILE
 `fcntl(a0, cmd, arg)` — GETFL/SETFL only (O_NONBLOCK, O_APPEND) → val · BADF INVAL
-`ioctl(a0, req, byteregion)` → 0 · BADF NOTTY INVAL
+`ioctl(a0, req, arg)` → 0 or a value · BADF NOTTY INVAL PERM SRCH — **two requests**: `TIOCGPGRP` returns the foreground pgid, `TIOCSPGRP` takes it in `arg`. Every other request answers INVAL, which is the honest state of a call this kernel does not serve. `arg` is a REGISTER and not a byte region: both requests carry one integer, and `tty_winsize_set` takes its arguments the same way for the same reason. A request needing a record is what the byte region is there for, and none exists yet.
 `poll(nfds, byteregion = nfds × {i32 fd, u16 events, u16 revents}, timeout_ms)` → nready · BADF INTR INVAL
 
 ## path

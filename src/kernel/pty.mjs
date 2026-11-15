@@ -25,8 +25,8 @@
 
 import {
   ICANON, ECHO, ISIG, VINTR, VQUIT, VERASE, VKILL, VEOF, VSUSP,
-  PTY_INPUT_BYTES, PTY_OUTPUT_BYTES, SIGINT, SIGQUIT, SIGTSTP, SIGWINCH,
-  ST_RETURN, defaultTermios,
+  PTY_INPUT_BYTES, PTY_OUTPUT_BYTES, SIGINT, SIGQUIT, SIGTSTP, SIGWINCH, SIGPIPE,
+  EPIPE, ST_RETURN, defaultTermios,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
@@ -48,6 +48,20 @@ let defaultIsig = true;
 
 export function setPtyDefaultIsig(on) {
   defaultIsig = !!on;
+}
+
+/**
+ * M4b's fourth control: a resize no longer raises SIGWINCH.
+ *
+ * TRUE in every real boot, and the kernel refuses to clear it without a bench boot. It exists
+ * because the clause asserting the signal could not fail: it read the stage's `exited` flag,
+ * which an uninterrupted 8-second sleep also satisfies. A control has to be able to remove the
+ * signal while leaving the resize, and this is that switch.
+ */
+let winchEnabled = true;
+
+export function setPtyWinch(on) {
+  winchEnabled = !!on;
 }
 
 export class Pty {
@@ -75,14 +89,26 @@ export class Pty {
      * the opener's pgid and moved with `ioctl(TIOCSPGRP)`, which is what a shell does per pipeline.
      */
     this.fgPgid = 0;
+    /**
+     * A ^D typed while nobody is reading.
+     *
+     * `#wakeSlavesWithEof` only answered readers that were ALREADY parked, so an EOF arriving
+     * while the program was computing was dropped and its next `read` parked forever. A terminal
+     * cannot require the reader to be waiting at the moment the key is pressed.
+     *
+     * Cleared by any later input, because a ^D followed by typing is not end of file.
+     */
+    this.pendingEof = false;
     /** Open ends, 0 or 1 each, per description. Same model as the pipe: constraint 92. */
     this.masters = 0;
     this.slaves = 0;
     this.waitingMasters = [];
     this.waitingSlaves = [];
+    /** Slave writers parked on a full output ring. */
+    this.waitingWriters = [];
     this.stats = {
       inBytes: 0, outBytes: 0, echoed: 0, signals: 0, linesReady: 0,
-      erased: 0, killed: 0, discarded: 0, eof: 0, stale: 0,
+      erased: 0, killed: 0, discarded: 0, overlong: 0, eof: 0, stale: 0, writerParks: 0,
     };
   }
 
@@ -166,6 +192,9 @@ export class Pty {
           this.#commitLine();
         } else {
           this.stats.eof += 1;
+          // LATCHED, then delivered. A parked reader is answered now; one that arrives later
+          // reads the latch.
+          this.pendingEof = true;
           this.#wakeSlavesWithEof();
         }
         return true;
@@ -188,10 +217,21 @@ export class Pty {
       return false;
     }
     if (this.line.pushByte(b) === 0) {
-      // A line longer than the buffer. POSIX's answer is to deliver what there is rather than to
-      // lose the terminal; a discarded byte is counted so it is not silent.
-      this.stats.discarded += 1;
-      return false;
+      /* THE LINE BUFFER IS FULL. Deliver what there is, which is what the comment here used to
+       * claim while nothing did it: the old code counted a discard and RETURNED, so a terminating
+       * newline arriving on a full buffer was thrown away with the overflow. The line then never
+       * committed, `line` stayed full forever, every later keystroke was discarded, and the
+       * slave's read parked with no error — the terminal was permanently wedged. Measured: 4,106
+       * bytes then a newline left linePending 4096 and linesReady 0.
+       *
+       * Committing first frees the buffer, so this byte lands and a newline still terminates. */
+      this.stats.overlong += 1;
+      this.#commitLine();
+      if (this.line.pushByte(b) === 0) {
+        // The buffer is smaller than one byte, which cannot happen — counted rather than ignored.
+        this.stats.discarded += 1;
+        return false;
+      }
     }
     if (b === 10) this.#commitLine();
     return false;
@@ -221,18 +261,35 @@ export class Pty {
 
   /** write(master): INPUT. Always accepts everything — a terminal does not block the typist. */
   writeInput(src) {
+    // Typing after a ^D means the user did not mean end of file after all.
+    if (src.length > 0) this.pendingEof = false;
     for (let i = 0; i < src.length; i += 1) this.#inputByte(src[i]);
     this.stats.inBytes += src.length;
     this.#wakeSlaves();
     return src.length;
   }
 
-  /** write(slave): OUTPUT, unprocessed. Short count when the master is not draining. */
-  writeOutput(src) {
+  /**
+   * write(slave): OUTPUT, unprocessed. A count, or null meaning PARKED.
+   *
+   * THE WRITER PARKS WHEN THE RING IS FULL, as a pipe's does. This returned `push`'s count — which
+   * is 0 on a full ring — and nothing parked, so a program's output past `PTY_OUTPUT_BYTES` with a
+   * master that was not draining was LOST with no errno: `libos.write` breaks on 0 and reports a
+   * short count. A program whose terminal is not being read must block, which is what every real
+   * tty does.
+   */
+  writeOutput(slot, seq, src) {
+    this.#prune();
+    if (src.length === 0) return 0;
     const n = this.output.push(src);
-    this.stats.outBytes += n;
-    this.#wakeMasters();
-    return n;
+    if (n > 0) {
+      this.stats.outBytes += n;
+      this.#wakeMasters();
+      return n;
+    }
+    this.waitingWriters.push({ slot, seq, bytes: src.slice(), done: 0 });
+    this.stats.writerParks += 1;
+    return null;
   }
 
   /** read(slave). A count, 0 for EOF, or null meaning parked. */
@@ -240,6 +297,12 @@ export class Pty {
     this.#prune();
     if (want <= 0) return 0;
     if (!this.input.empty) return this.input.shift(into, off, want);
+    if (this.pendingEof) {
+      // A ^D that arrived before this reader did. Consumed here, so the NEXT read parks again
+      // rather than seeing a permanent end of file.
+      this.pendingEof = false;
+      return 0;
+    }
     if (this.masters === 0) {
       // The terminal is gone: EOF, as a reader whose last writer closed gets from a pipe.
       this.stats.eof += 1;
@@ -253,7 +316,12 @@ export class Pty {
   readOutput(slot, seq, into, off, want) {
     this.#prune();
     if (want <= 0) return 0;
-    if (!this.output.empty) return this.output.shift(into, off, want);
+    if (!this.output.empty) {
+      const n = this.output.shift(into, off, want);
+      // Space freed: a slave that could not fit its output may now.
+      this.#wakeWriters();
+      return n;
+    }
     if (this.slaves === 0) {
       this.stats.eof += 1;
       return 0;
@@ -265,6 +333,22 @@ export class Pty {
   #prune() {
     this.waitingSlaves = this.waitingSlaves.filter((r) => this.#live(r));
     this.waitingMasters = this.waitingMasters.filter((r) => this.#live(r));
+    this.waitingWriters = this.waitingWriters.filter((r) => this.#live(r));
+  }
+
+  /** Push what parked slave writers were holding, now that the master has drained. */
+  #wakeWriters() {
+    while (this.output.free > 0 && this.waitingWriters.length) {
+      const w = this.waitingWriters[0];
+      if (!this.#live(w)) { this.waitingWriters.shift(); continue; }
+      const n = this.output.push(w.bytes, w.done);
+      w.done += n;
+      this.stats.outBytes += n;
+      if (w.done < w.bytes.length) return;   // still short; stays parked
+      this.waitingWriters.shift();
+      K.reply(w.slot, w.done, 0, ST_RETURN, 0);
+      this.#wakeMasters();
+    }
   }
 
   #wakeSlaves() {
@@ -345,7 +429,7 @@ export class Pty {
     const changed = ws.rows !== this.winsize.rows || ws.cols !== this.winsize.cols
       || ws.xpixel !== this.winsize.xpixel || ws.ypixel !== this.winsize.ypixel;
     this.winsize = { rows: ws.rows, cols: ws.cols, xpixel: ws.xpixel, ypixel: ws.ypixel };
-    if (changed && this.fgPgid > 0 && K) {
+    if (winchEnabled && changed && this.fgPgid > 0 && K) {
       this.stats.signals += 1;
       K.signalGroup(this.fgPgid, SIGWINCH);
     }
@@ -360,6 +444,17 @@ export class Pty {
       // The terminal went away. Every parked slave reader gets EOF, which is what a program on a
       // closed terminal must see rather than an error.
       this.#wakeSlavesWithEof();
+      // And every parked slave WRITER: nothing will ever drain the output now. -EPIPE plus
+      // SIGPIPE, which is what a writer whose reader has gone gets anywhere (docs/ABI.md
+      // decision 5) — a terminal is not special here.
+      const writers = this.waitingWriters;
+      this.waitingWriters = [];
+      for (const w of writers) {
+        if (!this.#live(w)) continue;
+        this.stats.epipe = (this.stats.epipe || 0) + 1;
+        if (K) K.raise(w.slot, SIGPIPE);
+        if (this.#live(w)) K.reply(w.slot, -EPIPE, -1, ST_RETURN, 0);
+      }
       return 0;
     }
     this.slaves = 0;
@@ -388,6 +483,8 @@ export class Pty {
       inputPending: this.input.length, outputPending: this.output.length,
       linePending: this.line.length,
       waitingMasters: this.waitingMasters.length, waitingSlaves: this.waitingSlaves.length,
+      waitingWriters: this.waitingWriters.length,
+      pendingEof: this.pendingEof,
       ...this.stats,
     };
   }
@@ -396,6 +493,19 @@ export class Pty {
   readable(isMaster) {
     return isMaster
       ? (!this.output.empty || this.slaves === 0)
-      : (!this.input.empty || this.masters === 0);
+      : (!this.input.empty || this.pendingEof || this.masters === 0);
+  }
+
+  /**
+   * Whether a write on this end would make progress, which is what `poll` must report for
+   * POLLOUT.
+   *
+   * `pollOne` set POLLOUT unconditionally on the claim that "neither direction of a pty ever
+   * refuses a write". That was false for the slave once its output ring filled, so a
+   * poll-then-write loop busy-spun on the kernel thread. The master is genuinely always writable:
+   * input is never refused, because a terminal does not block the typist.
+   */
+  writable(isMaster) {
+    return isMaster ? true : this.output.free > 0;
   }
 }

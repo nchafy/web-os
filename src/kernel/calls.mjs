@@ -540,7 +540,19 @@ HANDLERS.open = (p, k) => {
     // lock (src/kernel/store.mjs `writeHeld`). Seeking here instead cost the first of two `>>`
     // writers its bytes, with every call returning success. The initial offset of an O_APPEND
     // description is 0, which is also POSIX and is what a read through an O_RDWR|O_APPEND fd needs.
-    return p.fds.add(d);
+    const fd = p.fds.add(d);
+    if (fd < 0) {
+      // THE SYNC ACCESS HANDLE GOES WITH THE FAILED OPEN. `openFd` has already taken one, and
+      // `createSyncAccessHandle` is AN EXCLUSIVE LOCK PER FILE — so returning -EMFILE without
+      // closing it left the file unopenable by anything, by any process, for the lifetime of the
+      // page. An errno the caller can retry became permanent data loss on one file.
+      //
+      // `closeFd` commits whatever is staged, and nothing is: either the O_TRUNC arm above
+      // already synced, or no write has happened on this description at all.
+      await k.store.closeFd(d);
+      return fd;
+    }
+    return fd;
   });
   return PENDING;
 };
@@ -771,8 +783,15 @@ HANDLERS.ftruncate = (p, k) => {
 HANDLERS.dup = (p) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
+  // THE REFERENCE IS TAKEN ONLY IF AN FD IS. `refs` was raised BEFORE `add`, so a table already
+  // at OPEN_MAX answered -EMFILE with the count left permanently one high — and the kind's
+  // `close` op fires only when the LAST reference goes, so it never fired at all. A pipe whose
+  // writer count never drops leaves its reader parked on an EOF that cannot arrive, which is the
+  // deadlock constraint 92 records. `dup2` already orders it this way, inside `install`.
+  const fd = p.fds.add(d);
+  if (fd < 0) return fd;
   d.refs += 1;
-  return p.fds.add(d);
+  return fd;
 };
 
 HANDLERS.dup2 = (p, k) => {
@@ -1143,7 +1162,12 @@ function pollOne(p, fd, events) {
   } else if (d.kind === F_TTY || d.kind === F_PTY_M) {
     const isMaster = d.kind === F_PTY_M;
     if (d.pty.readable(isMaster)) revents |= POLLIN;
-    revents |= POLLOUT;      // neither direction of a pty ever refuses a write
+    // ASK THE PTY. This was an unconditional POLLOUT on the claim that "neither direction of a
+    // pty ever refuses a write", which is false for the SLAVE once its 16 KiB output ring fills:
+    // a poll-then-write loop then span, told it could write and refused every time. The master
+    // is genuinely always writable — a terminal does not block the typist — and `writable` is
+    // where that asymmetry lives.
+    if (d.pty.writable(isMaster)) revents |= POLLOUT;
     if (isMaster ? d.pty.slaves === 0 : d.pty.masters === 0) revents |= POLLHUP;
   } else {
     // A regular file, a generated file, a tmpfs file and the sink are always ready: their reads
@@ -1224,7 +1248,16 @@ HANDLERS.poll = (p, k) => {
   if (nfds === 0) {
     // A poll over no fds is a sleep. Honoured rather than refused, which is POSIX.
     if (timeout === 0) return 0;
-    k.setTimer(p, timeout < 0 ? 0 : timeout);
+    if (timeout < 0) {
+      // INFINITE, which is what a negative timeout means everywhere else in this call. It read
+      // `timeout < 0 ? 0 : timeout`, so a caller asking to block until a signal arrived was
+      // answered 0 IMMEDIATELY — a busy-wait in place of a park, and the one shape where a
+      // program spins the kernel by doing exactly what POSIX says. Parked with an empty set: no
+      // fd can ever make it ready, so only a signal or teardown ends it, which is the contract.
+      pollWaiters.push({ slot: p, seq: p.seq, entries: [] });
+      return PENDING;
+    }
+    k.setTimer(p, timeout);
     return PENDING;
   }
   const length = Atomics.load(p.ctl, LEN_I32);
@@ -1260,8 +1293,16 @@ HANDLERS.poll = (p, k) => {
       if (at < 0) return;                       // already answered by a wake
       if (!p.ctl || p.seq !== seqAtDispatch) { pollWaiters.splice(at, 1); return; }
       pollWaiters.splice(at, 1);
+      // RESCAN BEFORE ANSWERING, rather than republishing the revents the last scan left. The
+      // wake is hooked on `reply` (constraint 109), so any readiness that arrives WITHOUT a reply
+      // is invisible until something rescans — teardown's fd sweep was exactly that case. A
+      // timeout that answered 0 while an fd was already readable is a lost wake reported as
+      // "nothing became ready", and the caller cannot tell the two apart.
+      // `k.pollReevaluates` is false only under the `no-poll-wake` control, which removes
+      // re-evaluation wherever it happens — see the getter in src/kernel/kernel.mjs.
+      const ready = k.pollReevaluates ? pollScan(p, entries) : 0;
       pollPublish(p, entries);
-      k.reply(p, 0, 0, ST_RETURN, entries.length * POLLFD_BYTES);
+      k.reply(p, ready, 0, ST_RETURN, entries.length * POLLFD_BYTES);
     });
   }
   return PENDING;

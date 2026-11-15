@@ -31,7 +31,7 @@ import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
-import { installPtyKernel, setPtyDefaultIsig } from "./pty.mjs";
+import { installPtyKernel, setPtyDefaultIsig, setPtyWinch } from "./pty.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -224,6 +224,15 @@ function intr(p) {
   reply(p, -EINTR, -1, ST_INTR);
 }
 
+/** Calls whose handler's own side effect answered them before the handler returned — see
+ *  `finish`. Nonzero only where a signal reached the calling process. */
+let answeredDuringCall = 0;
+
+/** M4b's third control. True in every real boot; the kernel refuses to clear it without bench=1.
+ *  With it off, a call whose handler's side effect already answered it is answered a SECOND
+ *  time — the double-reply class, restored. */
+let finishGuardEnabled = true;
+
 /**
  * A handler's numeric return, in docs/ABI.md's single-register convention.
  *
@@ -235,6 +244,27 @@ function intr(p) {
  * writer of SEQ, STATUS and RLEN.
  */
 function finish(p, r) {
+  // THE HANDLER'S OWN SIDE EFFECT MAY HAVE ANSWERED THIS CALL ALREADY, and then there is nothing
+  // left to finish. A pty operation that signals the foreground group signals the CALLER whenever
+  // the caller is in that group — and it usually is, because `pty_open` sets `fgPgid` from the
+  // opener's pgid. So `tty_winsize_set` raising SIGWINCH, or a keystroke raising SIGINT through
+  // the line discipline, reaches the process making the call; `raiseOne` interrupts its in-flight
+  // call with -EINTR (or reaps it outright), and `reply` nulls `inflight` on the way out.
+  //
+  // Replying again would be a SECOND reply for one call: two SEQ bumps, so the process can observe
+  // a reply it never issued a call for, and two G_INFLIGHT decrements, which drives the depth
+  // gauge negative and breaks the issued == replied identity `check_syscall` asserts. That is the
+  // same class that cost M4 a day through `pipe.mjs`'s fatal SIGPIPE, where the fix was local to
+  // the one path then known.
+  //
+  // GUARDED HERE AND NOT PER HANDLER, because `finish` is the single funnel: all three dispatchers
+  // and `later` return through it, so a handler added later cannot forget the guard. The frequency
+  // is counted rather than silent — a number that climbs where no signal is being delivered is a
+  // real double-reply bug, and this must not be the thing that hides it.
+  if (finishGuardEnabled && p.inflight === null) {
+    answeredDuringCall += 1;
+    return;
+  }
   if (r < 0) reply(p, r, -1);
   else reply(p, r, p.r1 | 0, ST_RETURN, p.rlen | 0);
 }
@@ -980,6 +1010,10 @@ function kstats() {
     calls: kCalls,
     serviceMeanUs: kCalls ? (kServiceMs * 1000) / kCalls : 0,
     notifyWoke, notify0, lateReply, dropped, badCallId, asyncFail, intr: intrCount,
+    // Published so the double-reply class stays assertable rather than merely prevented: a check
+    // can require this to be exactly the number of signals that reached a calling process, and a
+    // climb anywhere else is a real defect. See `finish`.
+    answeredDuringCall,
     // The note channel's count, so a bench that never asks for `fs-state` still reports it.
     notes: noteCount,
     faults: faults.slice(),
@@ -1109,6 +1143,18 @@ function teardown(slot) {
   // in calls.mjs rather than on the slot — so it is dropped explicitly. Left behind, it would be
   // skipped by the sequence guard forever and hold a reference to a freed slot.
   pollForget(slot);
+  // AND WAKE EVERY OTHER PARKED POLL. The fd sweep above changes readiness WITHOUT passing
+  // through `reply`: closing the dying process's ends drops a pipe's `writers` or a pty's
+  // `slaves` to 0, which makes a PEER's polled fd ready — POLLIN|POLLHUP on a pipe whose last
+  // writer has gone. `reply` is where the wake is hooked (constraint 109) exactly so that no kind
+  // can forget it, and teardown is the one path in the kernel that moves readiness and does not
+  // reply: its only `reply` is `answerInflight`, which runs BEFORE the sweep. So a peer parked in
+  // `poll` over a dying process's pipe waited out its own timeout, or waited forever where it had
+  // asked to block, for an event that had already happened.
+  //
+  // AFTER `pollForget`, so this process's own records are gone before anything rescans them —
+  // rescanning a dying slot's fd table is what that call exists to prevent.
+  if (pollPending()) pollWake(POLL_K);
   // Phase 2: assert. A process whose inflight is still non-null after phase 1 ran answerInflight
   // is a dispatch defect — a handler added without calling reply() through the kernel surface.
   // This is the only time that count is still knowable, which is exactly why item (d) puts the
@@ -1613,6 +1659,13 @@ async function handle(m) {
         get trace() { return trace; },
         setPollTimeout,
         signalGroup,
+        // WHETHER A PARKED `poll` IS RE-EVALUATED AT ALL. A getter, because `no-poll-wake` arms
+        // after this object is built — and the control is named for re-evaluation, which happens
+        // in TWO places: the wake hooked on `reply`, and the rescan a timeout does before it
+        // answers. Removing only the first left the timeout answering correctly 5 seconds late,
+        // so the control broke nothing a check could see and the harness refused it. One flag
+        // governs both.
+        get pollReevaluates() { return pollWakeEnabled; },
       });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
@@ -1650,6 +1703,19 @@ async function handle(m) {
       if (cfg.noPollWake) {
         if (cfg.bench !== 1) throw new Error("noPollWake requires bench=1");
         pollWakeEnabled = false;
+      }
+      // `noFinishGuard` lets `finish` reply to a call its handler's own side effect already
+      // answered: one call, two replies, two SEQ bumps and two G_INFLIGHT decrements. Reachable
+      // because a fresh pty's foreground group is its OPENER's, so a resize before the group
+      // moves signals the caller — which `p_selfwinch` is.
+      // `noWinch` leaves the resize and removes only its signal.
+      if (cfg.noWinch) {
+        if (cfg.bench !== 1) throw new Error("noWinch requires bench=1");
+        setPtyWinch(false);
+      }
+      if (cfg.noFinishGuard) {
+        if (cfg.bench !== 1) throw new Error("noFinishGuard requires bench=1");
+        finishGuardEnabled = false;
       }
       if (cfg.noSigpipe) {
         if (cfg.bench !== 1) throw new Error("noSigpipe requires bench=1");

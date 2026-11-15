@@ -27,7 +27,7 @@ checks is a wish.
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
-| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 33 expectations, 2 controls |
+| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 39 expectations, 4 controls |
 | **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
@@ -914,15 +914,23 @@ page's timeout carry the kernel's park and refcount dump: one run then read
 ## M4b — the pty, the line discipline, `poll` · ✅ done · est 2 d, actual 1 · **ACCEPT**
 
 ```
-scripts/check.py                     7 checks, 278 expectations (m4b: 33)
-scripts/check.py --prove-failure     exit 0 — all 278 invert and fire
-scripts/check.py --negative no-isig          m4b fail: 8 red, 25 intact
-scripts/check.py --negative no-poll-wake     m4b fail: 3 red, 30 intact
-bench/m4b-pty/probe.mjs              94 host assertions (the discipline, no browser)
+scripts/check.py                     7 checks, 284 expectations (m4b: 39)
+scripts/check.py --prove-failure both  exit 0 — all 284 invert and fire
+scripts/check.py --negative no-isig           m4b fail: 8 red, 31 intact
+scripts/check.py --negative no-poll-wake      m4b fail: 3 red, 36 intact
+scripts/check.py --negative no-finish-guard   m4b fail: 4 red, 35 intact
+scripts/check.py --negative no-winch          m4b fail: 6 red, 33 intact
+bench/m4b-pty/probe.mjs              124 host assertions (the discipline, no browser)
+bench/m4b-pty/controls.py            5 controls, each scored on which labels move
+scripts/fsfuzz.py                    129 host tests, 10k torn journals, no browser
 ```
 
-Ten sections over ten fresh kernels, **3.0 s**. Every byte and every signal crosses a real syscall
-from inside a real process worker.
+Eleven sections over eleven fresh kernels, **3.9 s**. Every byte and every signal crosses a real
+syscall from inside a real process worker.
+
+The expectation count went 33 → 39 and the host assertions 94 → 124 **after** the milestone was
+first called done, which is the adversarial review below. Four of the original clauses were
+passing without asserting their subject.
 
 ### What the documents specify, and what they do not
 
@@ -949,6 +957,59 @@ Both halves are proved. `poll_ready` shows it reporting readiness and answering 
 closed fd; `poll_wait` shows a process **parked** over a pipe and a terminal, woken by the one that
 became ready — and the stage reports what it saw down the pty and its verdict in its exit code, so
 the assertion is on what it observed rather than on its having finished.
+
+### The adversarial review, and the thirteen findings it returned
+
+A critic was given `src/kernel/pty.mjs`, `src/kernel/calls.mjs` and the milestone's acceptance
+criteria, and not the author's account of them (`~/.claude/rules/adversarial-review.md`). Every
+finding was reproduced against the code before being acted on. **Three of them were live defects
+that 94 passing assertions did not notice**, and each failed by STOPPING rather than by erring:
+
+| | what broke | how it presented |
+|---|---|---|
+| F1 | an over-long canonical line discarded its own terminating newline | the terminal wedged permanently; the reader parked with no error |
+| F2 | a `^D` typed before the reader arrived was dropped | a program computing when the key was pressed parked forever |
+| F8 | slave output past the 16 KiB ring returned a 0 count and nothing parked | output lost with no errno; POLLOUT was unconditional, so a poll-then-write loop span |
+
+Measured before the fix, under Node: `F1 read: null linePending 4096 linesReady 0`,
+`F2 read after unparked ^D: null`, `F8 first writeOutput: 16384 second: 0`.
+
+**F3 was the one with teeth.** A pty operation signals the foreground group, and a fresh pty's
+foreground group is its OPENER's — so a resize issued before a shell has moved it raises SIGWINCH
+on the process making the call, which interrupts that call and then replied to the handler's return
+as well. Two replies for one call. Nine of the ten existing sections could not reach it because
+`withStage` moves the group to a child first, which is what a shell does per pipeline. The guard
+is in `finish`, the funnel all three dispatchers and `later` return through (constraint 114), and
+the `self_signal` section is the proof. The drop is counted rather than silent.
+
+The rest were a leaked reference and a leaked OPFS sync handle on `-EMFILE` (constraint 113), a
+teardown sweep that changed readiness without waking parked polls (115), a `poll` timeout that
+republished a stale scan, `poll(NULL, 0, -1)` answering immediately instead of blocking (116), a
+dead `peekLast` and a docstring describing the wrong method.
+
+### Four checks that were passing without asserting their subject
+
+Worth more than the defects, because they were the reason the defects survived:
+
+- **The SIGWINCH clause could not fail.** It read the stage's `exited` flag, which is equally true
+  of a sleep that ran its full 8 seconds and returned 0. The stage now exits 0 only when its own
+  `clock_nanosleep` returned `-EINTR`, and `--negative no-winch` is what shows the clause moving.
+- **Two "parked" clauses asserted only that a process had not exited**, because
+  `/proc/<pid>/status`'s `state` is `running` for everything that is not a zombie — and they
+  sampled it immediately after the write meant to park it, so they raced it too. `status` now
+  publishes the syscall number, and the checks WAIT for a call outstanding in the named call
+  (constraint 117).
+- **Two clauses were `None == None`** — a measured errno against the constant it should equal, both
+  travelling in the same evidence object, so one typo would have taken both halves out together
+  and left the clause green (constraint 120).
+- **`Pty.writable` had no caller in the kernel.** It answered POLLOUT correctly from the day it was
+  written while `pollOne` still carried an unconditional `revents |= POLLOUT`. A unit probe calling
+  it directly passed; the one caller that mattered had not been changed (constraint 119).
+
+And a flake, found by running the headline check five times rather than once: the spinning stage
+hit its 200,000-iteration cap and exited normally before the orchestrator's keystroke arrived,
+about 1 run in 4. The ceiling is wall clock now, and returning at all is the failure
+(constraint 118).
 
 ### The defect this found, and why it had no symptom before
 

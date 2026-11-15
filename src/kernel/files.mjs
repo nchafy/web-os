@@ -307,7 +307,9 @@ registerKind(F_TTY, {
   },
   write(d, u8, offset, length, p, at) {
     if (at !== undefined) return -ESPIPE;
-    return d.pty.writeOutput(u8.subarray(offset, offset + length));
+    // `p`, the CALLING process: a slave writer parks when the output ring is full, so the pty
+    // needs the process to reply to. A description is shared, so it cannot carry one.
+    return d.pty.writeOutput(p, p.seq, u8.subarray(offset, offset + length));
   },
   fsync() {
     // Nothing to force. 0 rather than -ENOSYS, as the tmpfs and the pipe answer: `fsync` on a

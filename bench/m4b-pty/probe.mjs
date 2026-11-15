@@ -6,7 +6,7 @@
 import { Pty, installPtyKernel } from "../../src/kernel/pty.mjs";
 import {
   ICANON, ECHO, ISIG, VINTR, VQUIT, VERASE, VKILL, VEOF, VSUSP,
-  SIGINT, SIGQUIT, SIGTSTP, SIGWINCH, ST_RETURN, defaultTermios,
+  SIGINT, SIGQUIT, SIGTSTP, SIGWINCH, SIGPIPE, EPIPE, ECONNABORTED, ST_RETURN, defaultTermios,
 } from "../../src/abi.mjs";
 
 const results = [];
@@ -21,14 +21,35 @@ let nextPid = 1;
 const makeSlot = () => ({ pid: nextPid++, ctl: {}, seq: 1 });
 const replies = [];
 const groupSignals = [];
+/** Whether a raised signal is fatal, i.e. reaps the slot. Off except where a check wants it. */
+let fatalRaise = false;
 installPtyKernel({
   reply: (slot, r0, r1, status, rlen) => {
     replies.push({ pid: slot.pid, r0, r1, status, rlen }); slot.seq += 1;
   },
   signalGroup: (pgid, sig) => { groupSignals.push({ pgid, sig }); },
+  // The pty raises SIGPIPE directly at a parked slave writer whose master has gone. A fake that
+  // omitted it would make that path throw rather than be tested — and a double-reply class was
+  // invisible to M4's pipe probe for exactly that reason (constraint 98).
+  raise: (slot, sig) => {
+    groupSignals.push({ pgid: -slot.pid, sig });
+    // A SIG_DFL fatal signal REAPS: teardown answers the inflight call and bumps `seq`, which is
+    // what makes a second reply detectable. A fake that skipped this would be gentler than the
+    // real kernel and would pass a double reply (constraint 98).
+    if (fatalRaise) {
+      replies.push({ pid: slot.pid, r0: -ECONNABORTED, r1: -1, status: ST_RETURN, rlen: 0 });
+      slot.seq += 1;
+    }
+  },
 });
 const reset = () => { replies.length = 0; groupSignals.length = 0; };
 const reply = (i = 0) => replies[i] || { r0: "<no reply>", rlen: null };
+/** A signal that was never raised, as a readable value rather than an index into nothing. */
+const signal = (i = 0) => groupSignals[i] || { pgid: "<none>", sig: "<no signal>" };
+/** A parked read, as a value. `slaveRead` keeps returning null for the three checks that assert
+ *  parking by identity; everything else reads through this so a park prints instead of throwing. */
+const PARKED = { n: "<parked>", text: "<parked>" };
+const readSlave = (pty, slot, want = 4096) => slaveRead(pty, slot, want) ?? PARKED;
 const sig = (i = 0) => groupSignals[i] || { pgid: null, sig: "<no signal>" };
 /** Read the master's output as text, which is where the echo lands. */
 const outText = (pty) => {
@@ -252,13 +273,13 @@ const open = () => { const p = new Pty(); p.masters = 1; p.slaves = 1; p.fgPgid 
   const m = makeSlot();
   const buf = new Uint8Array(64);
   check("a master with no output parks", pty.readOutput(m, m.seq, buf, 0, 64), null);
-  pty.writeOutput(ENC.encode("hello from the program"));
+  pty.writeOutput(makeSlot(), 1, ENC.encode("hello from the program"));
   check("the slave's write wakes it", replies.length, 1);
   check("with the byte count", reply(0).r0, 22);
   check("and the bytes", DEC.decode(buf.subarray(0, 22)), "hello from the program");
   // Output is NOT processed: no echo, no canonical buffering, no signal scanning.
   reset();
-  pty.writeOutput(new Uint8Array([3]));
+  pty.writeOutput(makeSlot(), 1, new Uint8Array([3]));
   check("a ^C in OUTPUT is data, not a signal", groupSignals.length, 0);
 }
 
@@ -334,6 +355,111 @@ const open = () => { const p = new Pty(); p.masters = 1; p.slaves = 1; p.fgPgid 
     pty2.readable(false), "not readable");
 }
 
+// ---- THE THREE DEFECTS A REVIEW FOUND, each as the bytes that trip it ------------------
+//
+// All three passed the 94 assertions above. None produced an error: each one left a terminal that
+// simply stopped, or lost output, which is why they needed finding by reading rather than running.
+
+// (1) An over-long canonical line used to WEDGE THE TERMINAL PERMANENTLY. The push failed, the
+//     branch returned, and the terminating newline was discarded with the overflow — so the line
+//     never committed, the buffer stayed full, and every later keystroke was discarded.
+{
+  reset();
+  const pty = open();
+  const s = makeSlot();
+  const over = new Uint8Array(4106).fill(65);
+  pty.writeInput(over);
+  pty.writeInput(ENC.encode("\n"));
+  const got = readSlave(pty, s);
+  checkThat("an over-long line still delivers", got.n > 0, got);
+  check("and the line buffer is drained", pty.report().linePending, 0);
+  checkThat("and a line was committed", pty.report().linesReady >= 1, pty.report().linesReady);
+  checkThat("the overflow is counted rather than silent", pty.report().overlong >= 1,
+    pty.report().overlong);
+  // The terminal must still work afterwards, which is the property that was lost.
+  reset();
+  pty.writeInput(ENC.encode("after\n"));
+  const next = readSlave(pty, s);
+  checkThat("and the terminal still works afterwards", next.n > 0, next);
+}
+
+// (2) A ^D arriving BEFORE the reader was lost: EOF was only delivered to already-parked readers,
+//     so a program that was computing when the key was pressed parked forever.
+{
+  reset();
+  const pty = open();
+  const s = makeSlot();
+  pty.writeInput(new Uint8Array([4]));          // ^D with nobody waiting
+  check("an EOF is latched, not lost", pty.report().pendingEof, true);
+  check("so a reader arriving later sees it", readSlave(pty, s).n, 0);
+  check("and the latch is consumed", pty.report().pendingEof, false);
+  // A ^D followed by typing is not end of file.
+  reset();
+  const pty2 = open();
+  const s2 = makeSlot();
+  pty2.writeInput(new Uint8Array([4]));
+  pty2.writeInput(ENC.encode("more\n"));
+  check("typing after a ^D clears the latch", pty2.report().pendingEof, false);
+  check("and the reader gets the line, not EOF", readSlave(pty2, s2).text, "more\n");
+}
+
+// (3) Slave output past the ring was SILENTLY DROPPED: `writeOutput` returned a 0 count and
+//     nothing parked, so a program whose terminal was not being read lost its output with no
+//     errno. And `poll` claimed POLLOUT unconditionally, so a poll-then-write loop busy-spun.
+{
+  reset();
+  const pty = open();
+  const w = makeSlot();
+  check("the ring takes a full write", pty.writeOutput(w, w.seq, new Uint8Array(16384)), 16384);
+  checkThat("and is then not writable", pty.writable(false) === false, "still writable");
+  check("a further write PARKS rather than returning 0",
+    pty.writeOutput(w, w.seq, new Uint8Array(100)), null);
+  check("the writer is recorded", pty.report().waitingWriters, 1);
+  check("nothing was replied yet", replies.length, 0);
+  const drain = new Uint8Array(32768);
+  const m = makeSlot();
+  const got = pty.readOutput(m, m.seq, drain, 0, 32768);
+  check("the master's read takes the ring", got, 16384);
+  check("the master draining wakes the writer", replies.length, 1);
+  check("with its full count", reply(0).r0, 100);
+  check("and no writer is left waiting", pty.report().waitingWriters, 0);
+  checkThat("and it is writable again", pty.writable(false), "not writable");
+  // The MASTER is always writable: a terminal does not block the typist.
+  checkThat("the master is always writable", pty.writable(true), "master refused a write");
+}
+
+// (3b) Closing the master releases a parked slave writer with EPIPE: nothing will ever drain it.
+{
+  reset();
+  const pty = open();
+  const w = makeSlot();
+  pty.writeOutput(w, w.seq, new Uint8Array(16384));
+  check("the writer parks", pty.writeOutput(w, w.seq, new Uint8Array(8)), null);
+  pty.close(true);                              // the terminal goes away
+  check("closing the master replies to it", replies.length, 1);
+  check("with -EPIPE", reply(0).r0, -EPIPE);
+  check("and raises SIGPIPE at the writer", groupSignals.length, 1);
+  check("the signal is SIGPIPE", signal(0).sig, SIGPIPE);
+  check("no writer is left waiting", pty.report().waitingWriters, 0);
+}
+
+// (3c) And when that SIGPIPE is FATAL the write must NOT be answered twice. This is the class that
+//      cost M4 a day: teardown answers the parked call and bumps `seq`, so a second reply here
+//      drives the kernel's inflight gauge negative. A fake `raise` that did not reap hid it from 68
+//      passing assertions (constraint 98), so this one reaps the way the kernel does.
+{
+  reset();
+  const pty = open();
+  const w = makeSlot();
+  pty.writeOutput(w, w.seq, new Uint8Array(16384));
+  check("the writer parks", pty.writeOutput(w, w.seq, new Uint8Array(8)), null);
+  fatalRaise = true;                            // SIG_DFL SIGPIPE kills, as it does in the kernel
+  pty.close(true);
+  check("a fatal SIGPIPE answers the call once", replies.length, 1);
+  check("and that one reply is teardown's", reply(0).r0, -ECONNABORTED);
+  fatalRaise = false;
+}
+
 // ---- a stale record is never replied into ----------------------------------------------
 {
   reset();
@@ -352,5 +478,9 @@ const open = () => { const p = new Pty(); p.masters = 1; p.slaves = 1; p.fgPgid 
 const failed = results.filter((r) => !r.ok);
 console.log(JSON.stringify({
   ok: failed.length === 0, total: results.length, failed: failed.length, failures: failed,
+  // EVERY label, not only the failing ones, so `bench/m4b-pty/controls.py` can derive what HELD
+  // instead of being handed a list to maintain. A control is scored on which labels move, and a
+  // new assertion must be either declared or held — never silently outside the scoring.
+  labels: results.map((r) => r.name),
 }, null, 2));
 process.exit(failed.length ? 1 : 0);

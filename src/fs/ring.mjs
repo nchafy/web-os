@@ -14,7 +14,6 @@
 // "empty" are the same state unless a byte of capacity is sacrificed or a flag is carried; with an
 // explicit length both are answerable and the whole buffer is usable.
 
-/** Why a push took fewer bytes than offered. Not an error: POSIX's own short write. */
 export class ByteRing {
   constructor(capacity) {
     if (!Number.isInteger(capacity) || capacity <= 0) {
@@ -76,12 +75,6 @@ export class ByteRing {
     this.head = (this.head + n) % this.capacity;
     this.length -= n;
     return n;
-  }
-
-  /** The byte most recently pushed, without removing it, or -1 when empty. */
-  peekLast() {
-    if (this.empty) return -1;
-    return this.buf[(this.head + this.length - 1) % this.capacity];
   }
 
   /** Remove the most recently pushed byte. Returns it, or -1. Canonical-mode erase. */

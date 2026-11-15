@@ -16,6 +16,7 @@
 //   p_winsize     a resize raises SIGWINCH on the foreground group
 //   p_poll        one process waits on TWO fds and is woken by either
 //   p_pgrp        tcgetpgrp/tcsetpgrp move the foreground group
+//   p_selfwinch   a pty op whose signal lands on the CALLER is answered exactly once
 //
 // Stage modes:
 //   ttyline       read one line from fd 0 and report it
@@ -25,13 +26,14 @@
 
 import {
   E, O_RDONLY, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGWINCH, ISIG, ICANON, ECHO,
-  VINTR, MAX_INLINE, POLLIN, packI64,
+  VINTR, MAX_INLINE, POLLIN, packI64, SYS_read, SYS_poll,
 } from "../../src/abi.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 const SELF = "/bench/m4b-fs/program.mjs";
-const SPIN_CAP = 200000;
+/** The spin's wall-clock ceiling. Generous: it is the error path, not the expected one. */
+const SPIN_CEILING_MS = 10000;
 
 /* ----------------------------------- the stages ----------------------------------------- */
 
@@ -52,16 +54,38 @@ function ttylineStage(env) {
  */
 const SPIN_CHUNK = 20000;
 
+/**
+ * Spin, and only a signal stops it. The stage behind MILESTONES.md M4's one specified behaviour.
+ *
+ * THE CEILING IS WALL CLOCK AND NOT AN ITERATION COUNT, and that is a fix rather than a style:
+ * a 200,000-iteration cap was reached in under the time it took the orchestrator to send the
+ * keystroke, so on a fast machine the stage EXITED NORMALLY before the Ctrl-C arrived and the
+ * proof failed with `killed: false, code: 0`. Measured at 1 failure in 4 runs of
+ * `scripts/check.py --only m4b` on this machine. A check that flakes is a check that gets
+ * deleted, and the thing it was guarding is the milestone's headline.
+ *
+ * RETURNING AT ALL IS A FAILURE. A delivered SIGINT is fatal at SIG_DFL, so the kernel reaps this
+ * process inside `env.syscall(0)` and there is no normal exit from a working run. The ceiling
+ * exists so a BROKEN delivery path ends as a failing proof instead of a harness timeout — the
+ * ceiling is the error path, so it names itself in the exit code.
+ */
 function ttyspinStage(env) {
   let i = 0;
   let acc = 0;
-  for (; i < SPIN_CAP; i += 1) {
+  const t0 = performance.now();
+  for (;;) {
     acc += i % 7;
+    i += 1;
     // The syscall at which a pending signal is drained. Rare enough that the process is genuinely
-    // compute-bound between them.
-    if (i % SPIN_CHUNK === 0) env.syscall(0);
+    // compute-bound between them — which is the whole claim, since delivery travels through the
+    // SAB control word and not a message this process could not service (constraint 16).
+    if (i % SPIN_CHUNK === 0) {
+      env.syscall(0);
+      // The clock is read on the same cadence, so the spin between syscalls stays pure compute.
+      if (performance.now() - t0 > SPIN_CEILING_MS) break;
+    }
   }
-  return { ok: true, spun: i, acc, hitCap: i >= SPIN_CAP };
+  return { ok: false, spun: i, acc, neverSignalled: true, exit: 1 };
 }
 
 /**
@@ -103,7 +127,15 @@ function ttypollStage(env) {
 function ttysleepStage(env) {
   const [lo, hi] = packI64(8 * 1000 * 1000 * 1000);
   const r = env.syscall(2, lo, hi, 0);
-  return { ok: true, result: r };
+  // THE VERDICT IS THE SLEEP'S RETURN VALUE, carried in the EXIT CODE, because the kernel reaps a
+  // process-spawned child and discards its result object (see `ttypollStage`).
+  //
+  // `p_winsize` asserted only that this process EXITED, which is true of a sleep that ran its
+  // full 8 s and returned 0 — so the SIGWINCH clause passed whether or not any signal arrived and
+  // could not fail. A non-fatal signal at a parked process is observable ONLY as the park ending
+  // early with -EINTR, so that is what has to be asserted.
+  const interrupted = r === -E.EINTR;
+  return { ok: interrupted, result: r, interrupted, exit: interrupted ? 0 : 1 };
 }
 
 /* -------------------------------- orchestrator helpers ---------------------------------- */
@@ -197,8 +229,12 @@ function pCanon(env) {
   const started = awaitStarted(env, s.pid);
   // A PARTIAL LINE. In canonical mode the program must read nothing yet.
   env.fs.write(s.master, ENC.encode("par"));
+  // PARKED IN `read`, WAITED FOR rather than sampled. This read the status once, immediately,
+  // and asserted `state === "running"` — true of every process that is not a zombie, and read
+  // before the child was necessarily even at its `read`. Now it waits for the two facts that
+  // mean parked: one call outstanding, and that call being SYS_read.
+  const parked = awaitParkedIn(env, s.pid, SYS_read);
   const beforeStatus = readStatus(env, s.pid);
-  // Still parked in its read, so it has made no further call.
   env.fs.write(s.master, ENC.encode("tial\n"));
   const stat = env.proc.waitpid(s.pid);
   env.fs.close(s.master);
@@ -206,8 +242,12 @@ function pCanon(env) {
     ok: !!(started.ok && stat && stat.exited),
     pid: s.pid, started, child: stat,
     stateWhilePartial: beforeStatus.state,
-    // The child was still RUNNING (parked in read) while only half a line had been typed.
-    parkedOnPartialLine: beforeStatus.state === "running",
+    // THE CHILD WAS PARKED IN `read` while only half a line had been typed, which is what
+    // canonical mode means: the bytes are held until the line is terminated.
+    parkedOnPartialLine: parked.ok,
+    parkedIn: parked.syscall, parkedRounds: parked.rounds, parkedWhy: parked.why,
+    callsWhileParked: beforeStatus.calls, repliesWhileParked: beforeStatus.replies,
+    SYS_read,
   };
 }
 
@@ -220,7 +260,49 @@ function readStatus(env, pid) {
   const text = n > 0 ? DEC.decode(buf.subarray(0, n)) : "";
   const state = /state:\t(\w+)/.exec(text);
   const calls = /calls:\t(\d+)/.exec(text);
-  return { state: state ? state[1] : null, calls: calls ? Number(calls[1]) : null, text };
+  const replies = /replies:\t(\d+)/.exec(text);
+  const sc = /syscall:\t(-?\d+)/.exec(text);
+  return {
+    state: state ? state[1] : null,
+    calls: calls ? Number(calls[1]) : null,
+    replies: replies ? Number(replies[1]) : null,
+    // -1 means "in no call". `null` means the field was absent, which is a different fact and
+    // must not read as "not parked".
+    syscall: sc ? Number(sc[1]) : null,
+    text,
+  };
+}
+
+/**
+ * Poll `/proc/<pid>/status` until the process is parked in syscall `nr`.
+ *
+ * WHY THIS EXISTS. `readStatus(...).state === "running"` was the whole of two "parked" assertions,
+ * and `running` is true of every process that is not a zombie — so both passed whether or not the
+ * process had ever reached the call in question. Worse, they were read IMMEDIATELY after the write
+ * that was supposed to leave the process parked, so they also raced it: a child that had not yet
+ * reached its `read` reported exactly the same `running`.
+ *
+ * PARKED IS TWO FACTS: a call outstanding (`calls` one ahead of `replies`) and WHICH call
+ * (`syscall`). Both come from /proc, so this is observed rather than inferred from timing.
+ */
+function awaitParkedIn(env, pid, nr, rounds = 300) {
+  for (let i = 0; i < rounds; i += 1) {
+    const st = readStatus(env, pid);
+    if (st.errno) return { ok: false, why: `status errno ${st.errno}`, rounds: i };
+    if (st.syscall === null) {
+      return { ok: false, why: "/proc status publishes no `syscall` field", rounds: i };
+    }
+    if (st.syscall === nr && st.calls === st.replies + 1) {
+      return { ok: true, rounds: i, syscall: st.syscall, calls: st.calls, replies: st.replies };
+    }
+    const [lo, hi] = packI64(2000000);
+    env.syscall(2, lo, hi, 0);
+  }
+  const last = readStatus(env, pid);
+  return {
+    ok: false, why: `never parked in syscall ${nr}`, rounds,
+    syscall: last.syscall, calls: last.calls, replies: last.replies,
+  };
 }
 
 /** Ctrl-C at the master must raise SIGINT on the foreground group. */
@@ -331,9 +413,71 @@ function pWinsize(env) {
     before, after,
     resized: after.rows === 40 && after.cols === 120,
     child: stat,
-    // The sleep was INTERRUPTED by SIGWINCH, which is how a non-fatal signal at a parked process
-    // is observable at all.
-    sleepInterrupted: !!(stat && stat.exited),
+    // THE STAGE'S OWN ACCOUNT. `stat.exited` alone was true of an uninterrupted 8-second sleep,
+    // so it said nothing about SIGWINCH; the stage exits 0 only when its sleep returned -EINTR.
+    sleepInterrupted: !!(stat && stat.exited && stat.code === 0),
+    stageVerdict: stat ? stat.code : null,
+    EINTR: E.EINTR,
+  };
+}
+
+/**
+ * A pty operation whose signal lands on THE PROCESS MAKING THE CALL, which must be answered once.
+ *
+ * `pty_open` sets the foreground group from the OPENER's pgid, so until a shell moves it — and a
+ * shell resizing its terminal before it spawns anything has not moved it — a resize on the master
+ * raises SIGWINCH on the caller itself. `raiseOne` then interrupts the in-flight call, and the
+ * handler's return used to be replied a SECOND time: two SEQ bumps and two G_INFLIGHT decrements
+ * for one call, which drives the kernel's depth gauge negative and breaks the issued == replied
+ * identity `check_syscall` asserts. `finish` now drops the second.
+ *
+ * WHAT THIS ASSERTS, and why it is checked from here rather than only in the kernel's counters:
+ * the process must still be able to make calls afterwards. A channel one reply ahead of itself is
+ * the user-visible wreckage, and `getpgid` returning something other than this process's own group
+ * is how a program would meet it.
+ */
+function pSelfwinch(env) {
+  const pty = env.tty.ptyOpen();
+  if (typeof pty === "number") return { ok: false, why: `pty_open ${-pty}` };
+  const { master, slave } = pty;
+  const mine = env.proc.getpgid(0);
+  // DELIBERATELY NOT MOVED. `withStage` puts the stage's own group in the foreground, which is
+  // what a shell does per pipeline and what makes every other proof here signal a CHILD.
+  const fgBefore = env.tty.getPgrp(master);
+  const before = env.tty.winsizeGet(master);
+  const set = env.tty.winsizeSet(master, 40, 120);
+  /* THE PENDING BIT IS DRAINED AT THE NEXT SYSCALL ENTRY, which answers -EINTR without making a
+   * call at all (src/libos/syscall.mjs's `interruptedAtEntry`). So the first call after a signal
+   * is EXPECTED to refuse — that is delivery, not damage — and the call after THAT is the one
+   * that says whether the channel is still in step: it must return MY group, not the resize
+   * call's answer.
+   *
+   * THE ORDER HERE IS LOAD-BEARING, and reading the terminal back first is how it was got wrong:
+   * `winsizeGet` was the call that absorbed the drain, so `after` came back as the integer -EINTR
+   * and `resized` compared an errno's `.rows` against 40. Measured: `after: -27, setResult: -27`,
+   * which is `scripts/check.py --only m4b`. Every read of the terminal's state comes after the
+   * drain. */
+  const drained = env.proc.getpgid(0);
+  const nextCall = env.proc.getpgid(0);
+  const after = env.tty.winsizeGet(master);
+  env.fs.close(slave);
+  env.fs.close(master);
+  return {
+    ok: !!(fgBefore === mine && nextCall === mine && after.rows === 40 && after.cols === 120),
+    myPgid: mine, fgBefore,
+    foregroundIsMine: fgBefore === mine,
+    before, after,
+    // THE SIDE EFFECT COMPLETED. `setWinsize` resizes and only then signals, so an interrupted
+    // caller must still find the terminal resized — anything else would mean the resize was lost
+    // to its own signal.
+    resized: after.rows === 40 && after.cols === 120,
+    // The caller observes its own interruption. -EINTR, not 0: the call was answered by the
+    // signal rather than by the handler.
+    setResult: set,
+    sawEintr: set === -E.EINTR,
+    // The channel is not one reply ahead: the NEXT call returns its own answer.
+    drained, drainedAtEntry: drained === -E.EINTR,
+    nextCall, channelIntact: nextCall === mine,
     EINTR: E.EINTR,
   };
 }
@@ -411,8 +555,11 @@ function pPollWait(env) {
   env.fs.close(pipe.rfd);
   env.fs.close(pty.slave);
 
-  // WAIT UNTIL IT IS ACTUALLY PARKED IN THE POLL, observed rather than slept for.
+  // WAIT UNTIL IT IS ACTUALLY PARKED IN THE POLL, observed rather than slept for — which is what
+  // the comment claimed while `awaitStarted` waited only for the stage's FIRST syscall, several
+  // calls before the `poll`.
   const started = awaitStarted(env, pid);
+  const parkedInPollObserved = awaitParkedIn(env, pid, SYS_poll);
   const statusWhileParked = readStatus(env, pid);
 
   // Make exactly ONE of the two ready.
@@ -435,8 +582,15 @@ function pPollWait(env) {
     ttyRevents: fields ? Number(fields[3]) : null,
     wokeOnPipeOnly: !!(fields && Number(fields[1]) === 1 && Number(fields[2]) !== 0
       && Number(fields[3]) === 0),
-    // The stage was parked in `poll` — the syscall name comes from /proc, so this is observed.
-    parkedInPoll: statusWhileParked.state === "running",
+    // THE STAGE WAS PARKED IN `poll`. The comment here claimed the syscall name came from
+    // /proc while the code read `state`, which is `running` for every process that has not
+    // exited. The syscall number now does come from /proc, and `calls` one ahead of `replies` is
+    // what makes it a PARK rather than a call in progress.
+    parkedInPoll: parkedInPollObserved.ok,
+    parkedIn: parkedInPollObserved.syscall,
+    parkedRounds: parkedInPollObserved.rounds,
+    parkedWhy: parkedInPollObserved.why,
+    SYS_poll,
     callsWhileParked: statusWhileParked.calls,
   };
 }
@@ -490,6 +644,7 @@ export function run(env, go) {
     case "p_poll": out = pPoll(env); break;
     case "p_pollwait": out = pPollWait(env); break;
     case "p_pgrp": out = pPgrp(env); break;
+    case "p_selfwinch": out = pSelfwinch(env); break;
     default: out = { ok: false, why: `unknown mode ${mode}` };
   }
   return { mode, ms: performance.now() - t0, ...out };

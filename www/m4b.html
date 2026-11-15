@@ -31,6 +31,8 @@ pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
  * CONTROLS
  *   ?no_isig=1       every pty comes up with ISIG cleared; both Ctrl-C proofs must fail
  *   ?no_poll_wake=1  parked polls are never re-evaluated; the blocking poll must only time out
+ *   ?no_finish_guard=1  a call its handler's side effect already answered is answered twice
+ *   ?no_winch=1      a resize still resizes but raises no SIGWINCH
  */
 import { SIGINT, POLLIN, POLLNVAL, E } from '/src/abi.mjs'
 
@@ -40,6 +42,8 @@ const params = new URLSearchParams(location.search)
 const CFG = {
   noIsig: params.get('no_isig') === '1',
   noPollWake: params.get('no_poll_wake') === '1',
+  noFinishGuard: params.get('no_finish_guard') === '1',
+  noWinch: params.get('no_winch') === '1',
 }
 
 Object.assign(globalThis.M4B, { isolated: self.crossOriginIsolated === true })
@@ -142,7 +146,10 @@ async function runProof (mode, boot, timeoutMs = 60000) {
     }
     const row = results.results.find((r) => r.pid === pid)
     if (!row) throw new Error(mode + ': no row for pid ' + pid)
-    return row
+    // THE KERNEL'S OWN COUNTERS travel with the results message already; returning them means a
+    // proof can assert on the kernel's accounting and not only on what the program could see.
+    // `kernel` is not a key any stage returns, so this cannot shadow a stage's own field.
+    return { ...row, kernel: results.kernel }
   } finally {
     k.worker.terminate()
   }
@@ -152,10 +159,14 @@ async function main () {
   const t0 = performance.now()
   say('M4b: the pty, the line discipline, poll' +
     (CFG.noIsig ? '  [CONTROL: no_isig]' : '') +
-    (CFG.noPollWake ? '  [CONTROL: no_poll_wake]' : ''))
+    (CFG.noPollWake ? '  [CONTROL: no_poll_wake]' : '') +
+    (CFG.noFinishGuard ? '  [CONTROL: no_finish_guard]' : '') +
+    (CFG.noWinch ? '  [CONTROL: no_winch]' : ''))
   const boot = { bench: 1 }
   if (CFG.noIsig) boot.noIsig = true
   if (CFG.noPollWake) boot.noPollWake = true
+  if (CFG.noFinishGuard) boot.noFinishGuard = true
+  if (CFG.noWinch) boot.noWinch = true
   const P = globalThis.M4B.proofs
 
   /* ---- ECHO, and the program reading the line ------------------------------------------- */
@@ -233,8 +244,30 @@ async function main () {
     ok: !!(ws.ok && ws.resized && ws.sleepInterrupted),
     evidence: {
       before: ws.before, after: ws.after, resized: ws.resized,
-      // A non-fatal signal at a parked process is observable as the park ending.
-      sleepInterrupted: ws.sleepInterrupted, child: ws.child,
+      // A non-fatal signal at a parked process is observable ONLY as the park ending EARLY, with
+      // -EINTR. `sleepInterrupted` was `stat.exited`, which an uninterrupted 8-second sleep also
+      // satisfies — so this clause could not fail. The stage now exits 0 only when its own sleep
+      // returned -EINTR, and its verdict is what is asserted.
+      sleepInterrupted: ws.sleepInterrupted, stageVerdict: ws.stageVerdict, child: ws.child,
+    },
+  }
+
+  /* ---- a pty op that signals THE CALLER is answered exactly once ------------------------- */
+  const sw = await runProof('p_selfwinch', boot)
+  say('selfwinch: set ' + sw.setResult + ', next call ' + sw.nextCall + ' of ' + sw.myPgid)
+  P.self_signal = {
+    ok: !!(sw.ok && sw.foregroundIsMine && sw.resized && sw.sawEintr && sw.channelIntact),
+    evidence: {
+      // A fresh pty's foreground group is the opener's, so this resize signals the caller. Every
+      // other proof here moves the group to a child first, which is why none of them reached it.
+      foregroundIsMine: sw.foregroundIsMine, myPgid: sw.myPgid, fgBefore: sw.fgBefore,
+      // The resize completed and the caller saw its own interruption, in that order.
+      resized: sw.resized, after: sw.after, setResult: sw.setResult, sawEintr: sw.sawEintr,
+      // AND THE CHANNEL IS NOT ONE REPLY AHEAD. A second reply for one call bumps SEQ twice; the
+      // next call then reads an answer it never asked for. This is that, from the program's side.
+      channelIntact: sw.channelIntact, nextCall: sw.nextCall,
+      answeredDuringCall: sw.kernel && sw.kernel.answeredDuringCall,
+      EINTR: sw.EINTR,
     },
   }
 
@@ -281,7 +314,10 @@ async function main () {
     },
   }
 
-  globalThis.M4B.config = { noIsig: CFG.noIsig, noPollWake: CFG.noPollWake }
+  globalThis.M4B.config = {
+    noIsig: CFG.noIsig, noPollWake: CFG.noPollWake,
+    noFinishGuard: CFG.noFinishGuard, noWinch: CFG.noWinch,
+  }
   const sections = Object.entries(globalThis.M4B.proofs)
   const ran = sections.filter(([, v]) => v !== null)
   globalThis.M4B.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)

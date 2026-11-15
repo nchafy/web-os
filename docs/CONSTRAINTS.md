@@ -857,3 +857,55 @@ cancellation design.
     three more queues, and four hand-written rings is four places for the wrap to be wrong — a push
     that straddles the end of the buffer is two copies, and the second is the one a hand-written
     ring forgets. Pure, so `fsfuzz.py` lints it.
+113. **A resource and its accounting are acquired in the order that cannot leak.** `dup` raised the
+    description's refcount and THEN asked for an fd, so a table at `OPEN_MAX` answered -EMFILE with
+    the count permanently one high — and a kind's `close` op fires only when the last reference
+    goes, so it never fired. A pipe whose writer count never drops leaves its reader parked on an
+    EOF that cannot arrive, which is constraint 92's deadlock reached by a different route. The
+    same shape in `open`'s async arm leaked an OPFS **sync access handle**, which is an exclusive
+    lock per file: a retryable errno made one file unopenable by any process for the lifetime of
+    the page. Take the slot first, then the reference; release the host resource on every arm that
+    can still fail.
+114. **A handler's own side effect may answer its call, and the second reply must be dropped at the
+    funnel.** A pty operation signals the foreground group, and a fresh pty's foreground group is
+    its OPENER's — so a resize issued before a shell has moved it raises SIGWINCH on the process
+    making the call. `raiseOne` interrupts the in-flight call, and `finish` then replied to the
+    handler's return as well: two SEQ bumps and two `G_INFLIGHT` decrements for one call, which
+    drives the depth gauge negative and breaks the issued == replied identity `check_syscall`
+    asserts. The guard is in `finish`, which all three dispatchers and `later` return through, so
+    a handler added later cannot forget it. The drop is COUNTED (`answeredDuringCall`) rather than
+    silent, because a guard that hides the class it prevents is the next defect.
+115. **Readiness that changes without a `reply` must wake parked polls explicitly.** Constraint 109
+    hooks the wake on `reply` so no pollable kind can forget it, and teardown is the one path that
+    moves readiness and does not reply — its only `reply` runs BEFORE the fd sweep that drops a
+    pipe's `writers` or a pty's `slaves` to 0. A peer parked in `poll` over a dying process's pipe
+    waited out its own timeout, or waited forever where it had asked to block, for an event that
+    had already happened. The sweep now wakes polls after `pollForget`.
+116. **A negative `poll` timeout is INFINITE.** `poll(NULL, 0, -1)` was answered 0 immediately,
+    which is a busy-wait where the caller asked to block — the one shape where a program spins the
+    kernel by doing exactly what POSIX says. It parks with an empty set instead, which no fd can
+    make ready, so only a signal or teardown ends it.
+117. **"Parked" is not a state name.** `/proc/<pid>/status`'s `state` is `running` for every process
+    that is not a zombie, so two checks asserting a process was blocked in `read` and in `poll`
+    were asserting only that it had not exited — and sampled it immediately after the write that
+    was meant to park it, so they raced it too. Parked is TWO facts: a call outstanding (`calls`
+    one ahead of `replies`) and WHICH call. The syscall number is published in `status` for that
+    reason, and the checks wait for it rather than sampling once.
+118. **An iteration cap is not a wait.** The stage behind the milestone's headline behaviour —
+    Ctrl-C reaching a process spinning in a compute loop — spun for 200,000 iterations and then
+    exited normally, which on this machine beat the orchestrator's keystroke about 1 run in 4. The
+    proof then failed with `killed: false, code: 0`. A process that must be alive when an event
+    arrives is bounded by WALL CLOCK, and the ceiling is the error path: returning at all is the
+    failure, so it names itself in the exit code.
+119. **A fix in a module is unverified until the path a user reaches calls it.** `Pty.writable`
+    answered POLLOUT correctly from the day it was written and `pollOne` still carried an
+    unconditional `revents |= POLLOUT`, so the kernel's `poll` kept telling a slave with a full
+    16 KiB output ring that it could write. A unit probe calling the new method directly passed,
+    and the one caller that mattered had not been changed. This is constraint 100's rule — a
+    mechanism with no live caller is unverified — in the harder form: a mechanism with a TEST
+    caller and no production caller looks verified.
+120. **`d.get(a) == d.get(b)` passes when both are absent**, because `None == None`. Two clauses in
+    `check_m4b` compared a measured errno to the constant it should equal, with both travelling in
+    the same evidence object — so one typo in the page would have removed both halves together and
+    left the clause green. A comparison between two fields read out of a reported object asserts
+    presence first.

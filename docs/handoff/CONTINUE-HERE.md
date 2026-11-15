@@ -19,7 +19,7 @@ tell you. Everything the repo settles, the repo settles.
 ## Read these first, in this order
 
 `CLAUDE.md` has an onboarding table — follow it. Short version: `CONTEXT.md`, then
-`docs/CONSTRAINTS.md` (71 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
+`docs/CONSTRAINTS.md` (120 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
 `MILESTONES.md`. Then `docs/DECISIONS.md` before arguing with any decision.
 
 Do not re-derive anything those files settle. They are the product of adversarial review, and
@@ -32,10 +32,11 @@ what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 7 checks, 278 expectations |
-| `scripts/check.py --prove-failure` | inverts every expectation; must report failures |
-| `scripts/check.py --negative <control>` | 14 controls; `--controls` lists what each proves. **Kill stray Chrome between runs** or a sweep reports a false BROKEN |
-| `scripts/fsfuzz.py` | host-side fs gate, no browser: 91 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
+| `scripts/check.py` | the suite — 7 checks, 284 expectations |
+| `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
+| `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
+| `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
+| `scripts/fsfuzz.py` | host-side fs gate, no browser: 129 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
 **Run all of them before and after anything you change.** `scripts/check.py --controls` lists what
