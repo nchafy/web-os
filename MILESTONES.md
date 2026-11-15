@@ -24,8 +24,8 @@ checks is a wish.
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
 | M1 | Process lifecycle, signals, hard cap | 4 | 1 | ✅ done — a spinner dies on End Process |
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
-| **M2** | **VFS core on OPFS** | 8 | | ⬜ **next** |
-| M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | | ⬜ |
+| M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
+| **M3** | **`/proc`, `/dev`, mounts, provider iface, /dev/trace** | 4 | | ⬜ **next** |
 | M4 | Pipes, pty, line discipline | 5 | | ⬜ |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
@@ -539,7 +539,83 @@ record.
 
 ---
 
-## M2 — VFS core on OPFS · 8 days · ~1400 LoC
+## M2 — VFS core on OPFS · ✅ done · est 8 d, actual 3
+
+**All four proofs pass.** 10,000 files survive a reload with every byte and every mode bit intact
+(`bytesOk 10000/10000`, `modesOk 10000/10000`); a journal torn three different ways reports the
+discarded tail and never reseeds; two concurrent opens of one file both succeed, and across a
+copy-on-write swing the holders keep reading the superseded generation while a later opener gets the
+new one; and two writers on one inode both keep their committed bytes.
+
+Suite: **4 checks, 167 expectations** (boot 30, syscall 31, m1 14, m2 92). `--prove-failure` 51–52 s,
+stable. `scripts/fsfuzz.py`: 91/91 host tests, 10,000 torn journals accepting nothing, **42/42
+failure-path assertions with a control that reinstates all 8 fixes and produces 23 failures**. Seven
+of seven mutations caught. Six negative controls behave.
+
+### The verification took eight rounds, and that is the record worth keeping
+
+Rounds 1–5 each fixed a real defect correctly and none of them finished, because they were all
+instances of one property:
+
+| round | fix | why it was not enough |
+|---|---|---|
+| 1 | `writeFd` reads the inode's size, not the description's | `truncateFd` and `commit` read a stale one |
+| 2 | gate on "has staged" rather than "is clean" | `copyUp`, `readFd`, `closeFd`, `O_TRUNC` still stale |
+| 3 | descriptions cache **no** durable state | the staged generation's *base* was still a cached read |
+| 4 | the commit validates its base `(gen, end)` | blind to an in-place write inside the slack |
+| 5 | the stamp becomes a monotonic mutation counter | **the bump is not atomic with the mutation it stamps** |
+
+**Round 6 found the actual cause: this kernel yields at every `await`, and nothing serialized
+operations on one inode.** Every durable read-then-mutate spanning an await was a race, so each
+correct fix exposed the next site. The signal was that the attacker's *complete* enumeration of
+mutation sites still found the hazard — when an exhaustive search of the obvious shape keeps
+finding new instances, the shape is wrong.
+
+The fix is one async mutex per inode, held across the whole read-modify-write. It is verified
+mechanically rather than argued: **all 81 awaits in `src/kernel/store.mjs` enumerated — 59 inside a
+lock, 20 outside, none carrying a durable read-then-mutate across an await unlocked.** Deadlock
+attempts failed. CAS exhaustion went from 13 of 200 to 0, because a re-stage now runs under the same
+lock as the refusal. proof (a) got marginally *faster*, and the volume lock priced out as noise
+(4129 ms locked against 4552 unlocked).
+
+The deadlock rule is **enforced, not documented**: `scripts/fsfuzz.py` lints the ten declared lock
+takers and refuses a `withInode` call outside them or a taker called from inside the module, with
+its own control, shown catching a taker that stops taking.
+
+**Rounds 7–8 were a different class entirely** — POSIX semantics and swallowed errors, neither
+needing concurrency:
+
+- **`O_APPEND` was a seek at open, not an append per write.** Two appenders, four calls, every call
+  returning success, four acknowledged bytes gone, fsck clean. A shell's `>>` would have hit it at M5.
+- **An errno collapsed into a benign value, twice.** `IO_LIST` failing became `[]`, which `fsck`
+  read as "listed, and empty". Then the same bug for `IO_READ_ALL`: an unreadable superblock slot
+  read as *absent*, so a populated volume mounted as a first boot and **reseeded** — constraint 28's
+  named defect, reached through an error path. Measured before the fix: a 1-inode tree published
+  over a 28-inode volume with 10 blobs still on disk.
+- **`later()` discarded its rejection reason**, so any kernel-side exception in any async syscall
+  body became an anonymous `-EIO`. It is counted and named now, and the suite asserts the count is
+  zero — with an anti-vacuity partner asserting the counters were actually read, because a
+  page-wide zero that nobody summed is a number no clause can defend.
+
+### The two decisions the spec required here
+
+**Copy-on-write, not metadata-only durability** (constraint 60, `DECISIONS.md` D17). The rejected
+answer is ext4's `data=writeback`, which is not ext4's default precisely because it leaves intact
+metadata pointing at torn data. COW is nearly free here because a blob is named `ino.gen`, so the
+swing is a reference change. The append exception — a write at or beyond the committed size goes in
+place, because the committed size does not name those bytes — is what keeps a sequential appender
+from copying its whole file per `fsync`; 10,000 files cost **0 copy-ups**.
+
+**The superblock format** was settled by M2a and used unchanged: generation, major/minor, three
+slots, newest-valid-wins. Three because against two alternating slots a bad write to the *older*
+one during a commit can leave zero valid copies.
+
+### What is on the record rather than fixed
+
+Eleven numbered limitations, constraints 61–71, each with an address and a reproduction, sorted into
+defect / permitted-by-decision / structural. The spec warns that discovering a data-consistency
+property after a user has files is the bad outcome; a recorded limitation with an address is not
+that, and an unrecorded one is.
 
 **Build.** Days 1–4: port `../webxp/shared/fs/vfs.mjs` (1,301 lines) — `#lookup` with
 `MAX_LINKS=40`, the permission checks, the error codes, `serialize`/`parse` as snapshot writer and

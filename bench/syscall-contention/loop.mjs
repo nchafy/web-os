@@ -11,6 +11,7 @@
 // the second hand-synced copy CLAUDE.md names as the defect this rule exists for.
 import {
   SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
+  O_WRONLY, O_CREAT, O_TRUNC,
   MAX_INLINE, packI64, fnv1a, FNV1A_BASIS,
 } from "/src/abi.mjs";
 
@@ -91,8 +92,12 @@ function runIoWindow(env, { until, buf, ioRole }) {
   if (ioRole) {
     // One open per process, not one per write: constraint 22 says open is rare and fd I/O common,
     // and this is the shape M2 will have.
-    const name = new TextEncoder().encode(`m0a-${env.pid}.bin`);
-    fd = env.syscall(SYS_open, 0, 0, 0, 0, 0, 0, 0, 0, name, 0, name.length);
+    // A real path through the real VFS. M0a measured this call with the VFS missing underneath
+    // it; the flags are open(2)'s and the mix is the same one — an open per process, then fd I/O
+    // (constraint 22: open is rare, fd I/O common).
+    const name = new TextEncoder().encode(`/m0a-${env.pid}.bin`);
+    fd = env.syscall(SYS_open, O_WRONLY | O_CREAT | O_TRUNC, 0o644,
+      0, 0, 0, 0, 0, 0, name, 0, name.length);
     if (fd < 0) return { calls: 0, wrong: 1, openErrno: fd, firstMs: t0, lastMs: now(), spanMs: 0 };
     opened = 1;
     while (now() < until) {

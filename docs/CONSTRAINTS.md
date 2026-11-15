@@ -164,6 +164,10 @@ says so.
     worker, persisted as an OPFS superblock snapshot plus an append-only OPFS journal, with file
     data in a flat OPFS directory named by inode number. `stat` 27 ns, path walk 370 ns, boot
     7.2 ms at 10k inodes. `research/gap-06.md`.
+    **Corrected at M2: a blob is named `<ino>.<gen>`, not `<ino>`.** The directory is still flat and
+    still keyed by inode — the suffix says which *generation* of that inode's bytes it holds, which
+    is what copy-on-write needs (constraint 60). Exactly one generation at a time is the one the
+    metadata points at.
 26. The blob directory MUST stay flat. Chrome 157 has no `FileSystemDirectoryHandle.move()`, and
     the one-argument rename does not exist in Safari 27.2; the only portable primitive is
     `fileHandle.move(dirHandle, name)`. `research/gap-06.md`.
@@ -441,6 +445,54 @@ a different measurement and not a continuation of the old one.
     The negative control is `--io-inline`, which routes storage back onto the dispatch thread and
     reproduces the inline column above. A fix that cannot be switched off has not been shown to be
     the thing that worked.
+60. **File data MUST be copy-on-write. Durability is NOT metadata-only.** An overwrite stages a new
+    blob generation, writes it, flushes it, and only then swings the inode's reference in the
+    journal; the superseded generation is freed after the commit. Write ordering is
+    blob → flush → **validate** → apply in memory → journal → flush.
+
+    **Corrected during M2.** The ordering above originally ended "journal → flush → apply in
+    memory", and that order is what made an unprivileged write sequence able to brick a volume:
+    `applyOp` can refuse a commit, and a refusal arriving *after* the record is durable means replay
+    must refuse it too — measured as a mount coming up read-only having applied 51 of 54 records and
+    discarded the rest, including a `mkdir` that had already returned success. Every metadata op
+    already decided before journalling; the data path now agrees with them.
+
+    What constraint 60 buys is unchanged and is the thing to preserve: **no record may point at
+    data that is not durable.** The blob is still written and flushed before anything references it.
+    What moved is the *validation*, from after durability to before it, which is strictly safer. The
+    residue is named where it is taken: an apply whose journal append then fails is undone in memory
+    (`vfs.revertCommit`), because a published size that no record accounts for is worse than a lost
+    swing.
+
+    M2's spec offered two answers and required one to be chosen there rather than discovered later.
+    The rejected one — declaring the guarantee metadata-only — is exactly ext4's `data=writeback`,
+    which is **not ext4's default precisely because it leaves intact metadata pointing at torn
+    data**. Copy-on-write is nearly free here because a blob name is an integer plus a generation,
+    so "write a new one and swing the reference" costs a rename of a reference rather than a copy
+    of a file. `research/09-hobbyist-os-actions.md` §5, `designs/` and `DECISIONS.md` D17.
+
+    **The append exception, and the reason it is not a loophole.** A write landing entirely at or
+    beyond the committed size appends into the current generation. The committed `size` does not
+    name those bytes, so a torn append can only damage bytes nobody had committed, and a crash
+    leaves the metadata pointing at the intact prefix it already pointed at. Without this split a
+    sequential appender copies its whole file on every `fsync` and the cost is quadratic — measured
+    at 10,000 files: 0 copy-ups, 10,000 swings.
+
+    **The test for the exception MUST read the inode's CURRENT committed size, never a
+    per-description snapshot.** This was wrong first and it is the sharpest trap in the design:
+    with two file descriptions open on one inode, fd1 appending past the committed size and
+    fsyncing publishes a larger size, after which fd2 — still holding the size it saw at open —
+    computes that *its* write is an append when it is now 32 bytes below the committed size, and
+    overwrites committed data in place. A per-description cache of a value another description can
+    change is a stale read by construction. Found by attacking the built code with two real fds,
+    not by a mutation.
+
+    **Constraint 47 arbitrates the swing, not the directory.** Two generations exist briefly for
+    one logical file, so a reader holding the old one must keep reading it while a new opener gets
+    the new one. The per-inode refcount under the fd table defers the directory removal until the
+    last reference closes. Measured: blobs `[19.1, 20.1, 21.1, 22.1]` → `[19.1, 20.1, 20.2, 21.1,
+    22.1]`, one deferred free, zero immediate frees — the superseded blob outlived its reader
+    because the refcount said so.
 55. A terminated kernel's nested process workers keep running for about **2.0 s**, which reproduces
     constraint 14 one level down the worker tree: `terminate()` on the kernel does not reap what the
     kernel spawned. Measured twice by renderer CPU time, 3.27 → 5.30 s over the 2.3 s after
@@ -457,3 +509,67 @@ a different measurement and not a continuation of the old one.
     `flush()` is 260 µs and its snapshot is not yet measured. Constraint 46 leaves no way around
     this, because no fixed timeout can separate a dead kernel from `sleep 100`.
     `bench/syscall-contention/results-sweep.json`, heartbeat-gap rows.
+
+## What M2 left open, on the record
+
+M2 was verified in eight rounds. Each round's attacks found defects the previous round's fix had not
+covered, and the record of *how* that converged is in `MILESTONES.md` §M2 because it is the useful
+part. These are what remain. Every one has an address and a reproduction, because the alternative —
+a limitation nobody wrote down — is the outcome M2's own spec names as the bad one: *discovering a
+data-consistency property after a user has files*.
+
+Three kinds, filed differently. A **defect** is wrong and unfixed. A **permitted** behaviour is a
+recorded decision with a cost. A **structural** item needs a mechanism M2 does not own.
+
+61. **STRUCTURAL — the in-memory apply is not under the volume lock.** A metadata op applied inside
+    a snapshot's window lands in both the image and the journal, and the next mount refuses the
+    duplicate. `src/kernel/calls.mjs:171-190` applies synchronously in `decide()` and journals
+    after; the volume lock covers the record and not the apply. Closing it means `metaOp` taking the
+    volume lock, which crosses the `calls`/`store` boundary. Reachable without a crash only while a
+    snapshot is in flight. **Surfaced:** the next mount reports it.
+62. **PERMITTED — the boot mount cannot report a blob the metadata names and the directory lacks.**
+    `BOOT_CFG` does not set `sweepBlobs`, so `store.mjs` passes `blobs: null` to fsck at boot. The
+    reason is constraint 33: Safari enumerates OPFS directory names at 0.60 ms each, so 10k names
+    is ~6 s, and constraint 33 already requires orphan collection to live on an idle task or an
+    explicit fsck rather than at boot. **Surfaced:** an explicit fsck reports it; the mount does not.
+63. **PERMITTED — slack is reported and never reclaimed.** A blob longer than its published size is
+    listed in `fsck`'s `long` arm with its reclaimable bytes, and the mount is not refused: the
+    bytes above the published size are not data, and a mount must not write. **Surfaced:** yes, by
+    `fsck`; it persists until that generation is superseded.
+64. **STRUCTURAL — the lock lint proves taker membership, not coverage.** `scripts/fsfuzz.py`'s
+    rules catch a `withInode` call outside the declared takers and a taker called from inside the
+    module, which is what makes the deadlock rule enforceable. They cannot see a durable
+    read-then-mutate that simply never calls `withInode` at all. The defence against that is the
+    mechanical await enumeration recorded in `MILESTONES.md` §M2, which is a measurement rather than
+    a gate.
+65. **STRUCTURAL — the harness cannot force an interleave inside one syscall's own `await`, and no
+    in-session check can produce a true mid-operation crash.** Every crash-shaped state in the
+    proofs is injected page-side, because a kernel's own fd teardown commits a dirty description and
+    so cannot leave one. The per-inode lock removes the hazard *within* a mount; the CAS is what
+    defends a replayed record after one.
+66. **PERMITTED — a burned journal sequence stops replay at the hole until the next snapshot.** A
+    failed append burns its number rather than rolling back, because a later caller may already hold
+    `seq + 1`. The trade is deliberate: without the burn, the first failed append refuses every
+    record for the life of the mount. A snapshot clears it. **Surfaced:** the mount reports the
+    discarded tail.
+67. **PERMITTED — a write whose syscall teardown refused can still become durable.**
+    `src/kernel/kernel.mjs` answers the in-flight call with the teardown errno and then closes the
+    fds *without* awaiting, because constraint 14 forbids awaiting there — `terminate()` offers no
+    chance to finish. The ~2 s quarantine is what makes it survivable. This is the tension between
+    constraints 14 and 23, not a defect with a local fix.
+68. **STRUCTURAL — `restage` re-copies the whole base per attempt**, so a commit that loses its base
+    *n* times costs *n+1* full-file copies for one `fsync`. Unpriced above small files; the
+    per-inode lock makes a loss happen at most once within a mount, which is why it has not been
+    measured. `readRebases` and `restages` are counted in the storage stats.
+69. **STRUCTURAL — the staged generation's modification log grows with the number of disjoint dirty
+    ranges** a description writes between its copy-up and its commit. Contiguous and overlapping
+    writes coalesce, so a sequential writer is one entry however many calls it makes; a scattered
+    writer is not bounded and nothing checks it.
+70. **STRUCTURAL — no registered check exercises `O_APPEND` from two processes**, and `pwrite` under
+    `O_APPEND` is unchecked. The registered check is one process with two descriptions, serial.
+    POSIX and Linux disagree about whether `pwrite` appends under `O_APPEND`; this implementation
+    honours the explicit offset, which is POSIX, and says so where it is decided.
+71. **STRUCTURAL — the explicit `fsck` takes no volume lock**, so it can read the journal while an
+    append is in flight and report a torn record on a healthy volume. Low: the figure it produces is
+    conservative in the safe direction — it reports a problem that is not there, rather than missing
+    one that is.

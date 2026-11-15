@@ -1,0 +1,2400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m2 — the VFS core on OPFS</title>
+<style>
+  :root { color-scheme: dark; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { margin: 0; padding: 2rem; background: #0b1016; color: #c7d3e0; }
+  h1 { font-size: .95rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
+       color: #74b8fc; margin: 0 0 1rem; }
+  pre { white-space: pre-wrap; color: #7d8da0; margin: 0; }
+  .bad { color: #ff7b72; }
+  .ok { color: #7ee787; }
+</style>
+</head>
+<body>
+<h1>m2 &mdash; the VFS core on OPFS</h1>
+<pre id="log"></pre>
+
+<script>
+/* The module-graph preflight, classic script by design: a preflight written inside the module it
+ * is meant to protect cannot run when that module 404s. Same shape as www/m0.html and www/m1.html. */
+(() => {
+  const GRAPH = [
+    '/src/abi.mjs',
+    '/src/kernel/kernel.mjs',
+    '/src/kernel/table.mjs',
+    '/src/kernel/files.mjs',
+    '/src/kernel/calls.mjs',
+    '/src/kernel/store.mjs',
+    '/src/kernel/io-worker.mjs',
+    '/src/kernel/io-inline.mjs',
+    '/src/kernel/iocore.mjs',
+    '/src/fs/crc32.mjs',
+    '/src/fs/journal.mjs',
+    '/src/fs/superblock.mjs',
+    '/src/fs/image.mjs',
+    '/src/fs/vfs.mjs',
+    '/src/fs/fsck.mjs',
+    '/src/libos/process.mjs',
+    '/src/libos/syscall.mjs',
+    '/bench/fs-core/program.mjs',
+  ]
+  globalThis.M2 = {
+    state: 'starting',
+    isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [],
+    /* `later()`'s rejection count, SUMMED over every kernel this page boots, and the number of
+     * kernels that answered the read. The sum is the assertion and the count is its anti-vacuity:
+     * a zero nobody could read is not a zero. */
+    asyncFail: 0, statsReads: 0,
+  }
+  const say = (s) => {
+    const out = document.getElementById('log')
+    if (out) out.textContent += s + '\n'
+  }
+  addEventListener('error', (ev) => {
+    const src = ev.target && (ev.target.src || ev.target.href)
+    if (!src) return
+    globalThis.M2.errors.push('failed to load ' + src)
+    if (globalThis.M2.state === 'starting') {
+      globalThis.M2.state = 'error'
+      globalThis.M2.why = 'failed to load ' + src + ' — the module graph is not reachable from ' +
+        'this server root. The bench serves the REPOSITORY ROOT; see bench/fs-core.'
+    }
+  }, true)
+  globalThis.__m2Preflight = (async () => {
+    const missing = []
+    await Promise.all(GRAPH.map(async (url) => {
+      try {
+        const r = await fetch(url, { cache: 'no-store' })
+        if (!r.ok) missing.push(url + ' -> HTTP ' + r.status)
+      } catch (e) { missing.push(url + ' -> ' + (e && e.message)) }
+    }))
+    const result = { ok: missing.length === 0, missing, graph: GRAPH }
+    globalThis.M2.preflight = result
+    if (!result.ok) {
+      globalThis.M2.state = 'error'
+      globalThis.M2.why = 'module-graph preflight failed, ' + missing.length + ' of ' +
+        GRAPH.length + ' unreachable: ' + missing.join('; ') +
+        '. The bench serves the REPOSITORY ROOT, not ./www.'
+      say(globalThis.M2.why)
+    }
+    return result
+  })()
+})()
+</script>
+
+<script type="module">
+/* M2's three proofs, each written so a control can be scored on WHICH clause moves.
+ *
+ *   (a) 10,000 files survive a reload byte- and mode-intact.
+ *   (b) a journal truncated mid-record makes fsck report the discarded tail rather than reseeding.
+ *   (c) two concurrent opens of one file both succeed (constraint 47).
+ *
+ * "A reload" means A SECOND KERNEL over the same OPFS, not a page reload: the page holds the
+ * harness, and reloading it would also reload the harness. The second kernel takes the boot lock,
+ * reads the three superblock slots, replays the journal and mounts — which is every step a real
+ * reload takes, and it is the step that matters. The page reload itself is what constraint 48 is
+ * about, and the boot lock's retry is reported separately because a kernel that came up read-only
+ * on a race is the defect that constraint names.
+ */
+
+import {
+  ABI_FINGERPRINT, BOOT_LOCK_BUDGET_MS, JOURNAL_IDLE_MS, SUPER_SLOTS, BLOB_DIR,
+  O_RDONLY, O_WRONLY, O_CREAT, O_TRUNC, S_IFREG, E,
+} from '/src/abi.mjs'
+import { encodeRecord, decodeRecord, HEADER_BYTES } from '/src/fs/journal.mjs'
+import {
+  bytesFor, modeFor, pathFor, TWO_WRITERS, PENDING_APPEND, ORPHANED, DROP_APPEND, DROP_GROW,
+  CAS, CAS_SLACK, CAS_ROUNDS, KILLED,
+} from '/bench/fs-core/program.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const num = (k, d) => (params.has(k) ? Number(params.get(k)) : d)
+
+Object.assign(globalThis.M2, { isolated: self.crossOriginIsolated === true })
+
+/* Refuse when there is no SharedArrayBuffer. --no-isolation prove-failure declares this
+ * UNMEASURABLE: the kernel's SAB is not constructible outside a cross-origin isolated context, so
+ * there is no filesystem to mount and no proof to take. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M2.state = 'aborted'
+  globalThis.M2.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No figures. Run scripts/serve.py WITHOUT --no-isolation.'
+  out.className = 'bad'
+  say(globalThis.M2.why)
+} else {
+  main().catch((e) => {
+    globalThis.M2.state = 'error'
+    globalThis.M2.why = String(e && e.stack || e)
+    say(globalThis.M2.why)
+  })
+}
+
+class KernelFail extends Error {}
+
+function kernelBoot(cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map()
+  const pending = []
+  const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M2.kernelIsolated = m.isolated === true
+      globalThis.M2.kernelFingerprint = m.abiFingerprint
+      globalThis.M2.lastMount = m.fs
+    }
+    if (m.t === 'fault') {
+      globalThis.M2.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M2.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M2.errors.push('io: ' + m.why)
+    const w = waiters.get(m.t)
+    if (w) { waiters.delete(m.t); w(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M2.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, timeoutMs = 10000) => new Promise((resolve, reject) => {
+    if (abort) return reject(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return resolve(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); reject(new Error('timed out waiting for ' + t)) }, timeoutMs)
+    waiters.set(t, (m) => {
+      clearTimeout(timer)
+      if (m instanceof Error) reject(m); else resolve(m)
+    })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  // `pids` is what shut() reaps. Recorded here rather than by each caller, so a step that
+  // forgets cannot leave a process behind.
+  return { worker, expect, post: (m) => worker.postMessage(m), events, pids: [] }
+}
+
+globalThis.M2.proofs = {
+  proof_a: null, proof_b: null, proof_c: null, proof_d: null, pending: null, drop: null,
+  cas: null, orphan: null, refuse: null, unreadable: null, append: null, order: null, api: null,
+}
+
+const PROGRAM = '/bench/fs-core/program.mjs'
+
+/* The file proof (b) reads back. `modebits` creates it 0o600 and chmods it to 0o660 in the LAST
+ * journal record, which is the record each tear damages. Three outcomes, and they are three
+ * different facts: 0o600 means the tail was discarded, which is correct; 0o660 means the record
+ * survived the tear; ANYTHING ELSE means a permission nobody wrote reached the user's file. */
+const VICTIM = '/d/0/modes/m9'
+const VICTIM_CREATE = 0o600
+const VICTIM_CHMOD = 0o660
+const BOOT_CFG = {
+  bench: 1,
+  noCowOrder: params.get('no_cow_order') === '1',
+  noCrc: params.get('no_crc') === '1',
+}
+
+/* THE OPFS IS ONE PER ORIGIN, so every proof here starts from a WIPED one. Without that, a
+ * previous run's 10,000 files are still on disk and proof (a) could pass by reading them — which
+ * is the vacuity this whole page exists to avoid. Done from the page, because a kernel that could
+ * wipe the volume would be a kernel with a reseed path in it (constraint 28). */
+async function wipe() {
+  const root = await navigator.storage.getDirectory()
+  const names = []
+  for await (const name of root.keys()) names.push(name)
+  for (const name of names) {
+    try { await root.removeEntry(name, { recursive: true }) } catch (e) { /* gone is fine */ }
+  }
+  return names.length
+}
+
+/* The journal and the blob directory, read from the PAGE rather than through the kernel. The page
+ * is the only agent that can look at the volume while no kernel holds the boot lock, which is what
+ * lets proof (b) tear a journal the way a half-finished write would. */
+async function readRaw(name) {
+  const root = await navigator.storage.getDirectory()
+  const fh = await root.getFileHandle(name, { create: false })
+  return new Uint8Array(await (await fh.getFile()).arrayBuffer())
+}
+
+async function writeRaw(name, bytes) {
+  const root = await navigator.storage.getDirectory()
+  const fh = await root.getFileHandle(name, { create: true })
+  const w = await fh.createWritable()
+  await w.truncate(0)
+  await w.write(bytes)
+  await w.close()
+}
+
+/* One blob file, written from the PAGE. Same argument as the torn journal proof (b) writes: a
+ * crash between a copy-up and its commit leaves a staged generation on disk that no kernel would
+ * ever create on purpose, and no kernel can be asked to leave one behind — its fd teardown
+ * COMMITS a dirty description, so the staged generation becomes the committed one. The page is
+ * the only agent that can put the volume in that state. */
+async function writeBlobRaw(name, bytes) {
+  const root = await navigator.storage.getDirectory()
+  const dir = await root.getDirectoryHandle(BLOB_DIR, { create: true })
+  const fh = await dir.getFileHandle(name, { create: true })
+  const w = await fh.createWritable()
+  await w.truncate(0)
+  await w.write(bytes)
+  await w.close()
+}
+
+/** One blob file's bytes, read from the PAGE. The slack scenario grows a committed blob, and
+ *  growing it means keeping what is there: a planted blob of the wrong CONTENT would be a
+ *  different scenario, with nothing above the published size to resurrect. */
+async function readBlobRaw(name) {
+  const root = await navigator.storage.getDirectory()
+  const dir = await root.getDirectoryHandle(BLOB_DIR, { create: true })
+  const fh = await dir.getFileHandle(name, { create: false })
+  return new Uint8Array(await (await fh.getFile()).arrayBuffer())
+}
+
+async function listBlobs() {
+  const root = await navigator.storage.getDirectory()
+  const dir = await root.getDirectoryHandle(BLOB_DIR, { create: true })
+  const out = []
+  for await (const [name, handle] of dir.entries()) {
+    if (handle.kind !== 'file') continue
+    out.push({ name, size: (await handle.getFile()).size })
+  }
+  return out
+}
+
+/**
+ * Spawn ONE process with its own argv. argv rides on the SPAWN, not on the `go` broadcast, because
+ * a process's arguments belong to the process: proof (c) runs three different programs against one
+ * kernel, and a broadcast argv would give all three the last one's.
+ *
+ * uid 1000, deliberately. A process running as root would pass every permission check by
+ * bypassing it, and then constraint 29's credential is an argument nothing consults.
+ */
+async function spawnProcess(k, argv, cfg = {}) {
+  k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+    cfg: { argv, uid: 1000, gid: 1000, ...cfg }, readyTimeoutMs: 20000 })
+  const spawned = await k.expect('spawned', 20000)
+  if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+  const ready = await k.expect('ready', 20000)
+  if (ready.starved) throw new Error('ready starved: ' + ready.why)
+  k.pids.push(spawned.pids[0])
+  return spawned.pids[0]
+}
+
+/**
+ * Run ONE process to completion and return its result row.
+ *
+ * `go.pid` addresses it alone, so a process that already ran does not run again — which matters
+ * for proof (c), where the holder must keep its fd and not re-open. `mode: 'park'` so the kernel
+ * arms no barrier: the barrier is loop.mjs's dance and this program does not do it.
+ */
+async function runPid(k, pid, timeoutMs = 300000, what = '', argv = null) {
+  /* `argv` is how one process runs SEVERAL steps. Proof (d) needs a writer that opens a file in
+   * one step and writes through the SAME description in the next — two processes, each keeping
+   * its fd across its own two runs, which is the only way to have two live write descriptions on
+   * one inode at once. The kernel spreads `go` onto the process's port, so the per-run argv wins
+   * over the one the spawn carried (src/libos/process.mjs). */
+  k.post({ t: 'go', go: argv ? { mode: 'park', pid, argv } : { mode: 'park', pid } })
+  let results
+  try {
+    results = await k.expect('results', timeoutMs)
+  } catch (e) {
+    /* NAMED. A bare "timed out waiting for results" says nothing about which of six program runs
+     * stopped, and that is the one thing a reader needs: the 10,000-file write is 50 s of real
+     * work and the two 30 s steps are not, so a timeout from each means something different. */
+    throw new Error('pid ' + pid + ' (' + (what || 'program') + ') produced no results in ' +
+      timeoutMs + ' ms: ' + (e && e.message))
+  }
+  const row = results.results.find((r) => r.pid === pid)
+  if (!row) throw new Error('pid ' + pid + ' (' + (what || 'program') + ') produced no result row')
+  return row
+}
+
+/** Spawn and run, for the common case of one program per kernel. */
+async function once(k, argv, timeoutMs, cfg) {
+  return runPid(k, await spawnProcess(k, argv, cfg), timeoutMs, argv.join(' '))
+}
+
+/**
+ * One process's result row, found in the EVENT LOG rather than taken off the waiter queue.
+ *
+ * `runPid` above awaits the next `results` message, which is right for one process at a time and
+ * wrong for two running at once: the two messages arrive in either order, so the first `expect`
+ * resolves with whichever landed first and the row the caller wanted is in the other one. Every
+ * step AFTER a concurrent pair has the same problem in reverse — the pair's messages are still
+ * queued, so the next `expect('results')` hands back one of theirs and the new process's row looks
+ * missing. Measured as `pid 5 (cascheck) produced no result row` with the process having run
+ * perfectly. This reads the log by pid and ignores the queue, so it is correct in both cases.
+ */
+async function rowFor(k, pid, timeoutMs = 60000, what = '') {
+  const until = performance.now() + timeoutMs
+  for (;;) {
+    for (const m of k.events) {
+      if (m.t !== 'results' || !m.results) continue
+      const row = m.results.find((r) => r.pid === pid)
+      if (row) return row
+    }
+    if (performance.now() >= until) {
+      throw new Error('pid ' + pid + ' (' + (what || 'program') + ') produced no result row in '
+        + timeoutMs + ' ms')
+    }
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+/** Spawn, run and collect by pid. `once` for a step that follows a concurrent pair. */
+async function onceByPid(k, argv, timeoutMs = 60000) {
+  const pid = await spawnProcess(k, argv)
+  k.post({ t: 'go', go: { mode: 'park', pid, argv } })
+  return rowFor(k, pid, timeoutMs, argv.join(' '))
+}
+
+/**
+ * The install step, AS ROOT, and it is here because the first run of this bench measured why it
+ * has to be: a uid-1000 process cannot mkdir in a 0755 root owned by uid 0, so every one of the
+ * seventeen mkdirs came back -EACCES. That is constraint 29's mode bits working. Root creates the
+ * tree and chowns it to 1000; everything after this runs as 1000 and is subject to the bits.
+ */
+const ROOT = { uid: 0, gid: 0 }
+const USER = 1000
+
+async function install(k) {
+  const row = await once(k, ['setup', String(USER)], 60000, ROOT)
+  if (!row.ok) throw new Error('setup failed: ' + JSON.stringify(row.errors))
+  return row
+}
+
+/**
+ * EVERY PROCESS THIS KERNEL SPAWNED, TERMINATED BEFORE THE KERNEL IS.
+ *
+ * `terminate()` on the kernel worker does NOT reap its nested process workers — constraint 14
+ * measured one running on for 2004-2051 ms, and the kernel is the only thing that can terminate
+ * them. This page boots nine kernels across its four steps, so a `shut` that only terminated the
+ * kernel would leave every process of every step alive in one renderer.
+ *
+ * MEASURED, which is why it is here rather than tidy: with ~150 orphans from the check that runs
+ * before this one still holding worker slots, the 10,000-file write went from 40-50 s to past
+ * 300 s in the same browser. A page that does not clean up after itself makes its neighbour
+ * measure a different system.
+ */
+async function shut(k) {
+  const pids = (k.pids || []).filter((pid) => pid >= 1)
+  if (pids.length) {
+    for (const pid of pids) k.post({ t: 'end-process', pid })
+    // Bounded: a kernel that will not answer must not hold the page. The reaps are the kernel's
+    // own `reaped` events, which is the only record that terminate() was actually called.
+    const until = performance.now() + 5000
+    const seen = new Set()
+    while (seen.size < pids.length && performance.now() < until) {
+      for (const m of k.events) if (m.t === 'reaped' && pids.includes(m.pid)) seen.add(m.pid)
+      if (seen.size >= pids.length) break
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    if (seen.size < pids.length) {
+      globalThis.M2.errors.push('shut: ' + (pids.length - seen.size) + ' of ' + pids.length +
+        ' processes were not reaped before the kernel was terminated')
+    }
+  }
+  /* THE ASYNC-COMPLETION FAILURE COUNT, read before this kernel is terminated. `later()` is the
+   * completion path for open, write, fsync, truncate and close, so a rejection there is any
+   * kernel-side exception in any async syscall body — answered to the caller as a bare -EIO, which
+   * is indistinguishable from a real storage error. It is summed here rather than per section
+   * because a per-kernel number nothing added up is a number no clause can assert, and every
+   * section's kernel passes through this function. A kernel that will not answer says so instead
+   * of contributing a silent zero. */
+  try {
+    k.post({ t: 'stats' })
+    const st = await k.expect('stats', 5000)
+    const n = (st.kernel && st.kernel.asyncFail) || 0
+    globalThis.M2.statsReads += 1
+    globalThis.M2.asyncFail += n
+    if (n) {
+      globalThis.M2.errors.push('asyncFail: ' + n +
+        ' async syscall completion(s) rejected in this kernel')
+    }
+  } catch (e) {
+    globalThis.M2.errors.push('shut: the kernel would not report its counters, so its asyncFail ' +
+      'was not read: ' + String((e && e.message) || e))
+  }
+  try { k.worker.terminate() } catch (e) { /* already gone is fine */ }
+}
+
+/**
+ * Proof (a): 10,000 files, a second kernel over the same OPFS, every byte and every mode bit
+ * intact — plus the fsck that must come back CLEAN, which is the clause the dropped-ordering
+ * control is named for.
+ */
+async function proof_a() {
+  const n = num('a_n', 10000)
+  say('--- proof (a): ' + n + ' files, reload, every byte and every mode bit intact')
+  const wiped = await wipe()
+  const first = kernelBoot(BOOT_CFG)
+  let made = null
+  let installed = null
+  let mount1 = null
+  let snapshot = null
+  try {
+    const up = await first.expect('up', 20000)
+    mount1 = up.fs
+    if (!mount1 || mount1.mode !== 'rw') {
+      return { ok: false, evidence: { at: 'mount', mount: mount1, wiped } }
+    }
+    installed = await install(first)
+    made = await once(first, ['mkfiles', String(n)])
+    first.post({ t: 'snapshot' })
+    snapshot = await first.expect('snapshot', 60000)
+  } finally {
+    await shut(first)
+  }
+  // The second kernel. It takes the boot lock, reads the slots, replays and mounts — every step a
+  // reload takes. The previous kernel's handle is still being released, which is exactly the race
+  // constraint 48 is about, so the lock's wait and attempt count are reported.
+  const second = kernelBoot(BOOT_CFG)
+  let verified = null
+  let mount2 = null
+  let fsckReport = null
+  try {
+    const up = await second.expect('up', 20000)
+    mount2 = up.fs
+    if (!mount2 || mount2.mode !== 'rw') {
+      return { ok: false, evidence: { at: 'remount', mount: mount2, lock: mount2 && mount2.lock } }
+    }
+    verified = await once(second, ['verify', String(n)])
+    second.post({ t: 'fsck' })
+    fsckReport = await second.expect('fsck', 120000)
+  } finally {
+    await shut(second)
+  }
+  const clean = !!(fsckReport && fsckReport.report
+    && fsckReport.report.mountable === 'rw' && fsckReport.report.problems.length === 0)
+  return {
+    ok: !!(made && made.ok && verified && verified.ok && clean),
+    evidence: {
+      n, wiped,
+      wroteMs: made ? Math.round(made.ms) : -1,
+      verifyMs: verified ? Math.round(verified.ms) : -1,
+      written: made ? made.written : -1,
+      bytes: made ? made.bytes : -1,
+      checked: verified ? verified.checked : -1,
+      bytesOk: verified ? verified.bytesOk : -1,
+      modesOk: verified ? verified.modesOk : -1,
+      installErrors: installed ? installed.errors : null,
+      writeErrors: made ? made.errors : null,
+      verifyErrors: verified ? verified.errors : null,
+      snapshot: snapshot ? { ok: snapshot.ok, generation: snapshot.generation,
+        slot: snapshot.slot, stats: snapshot.stats } : null,
+      // Constraint 48, measured rather than asserted: the second kernel raced the first's handle.
+      bootLock: mount2 ? mount2.lock : null,
+      bootLockBudgetMs: BOOT_LOCK_BUDGET_MS,
+      mode1: mount1 ? mount1.mode : '', mode2: mount2 ? mount2.mode : '',
+      fsckClean: clean,
+      fsckProblems: fsckReport && fsckReport.report ? fsckReport.report.problems : null,
+      fsckBlobs: fsckReport && fsckReport.report ? fsckReport.report.blobs : null,
+      // fsck NEVER writes (constraint 28). The superblock generation and slot before and after an
+      // explicit fsck over a volume it had something to say about.
+      fsckWrote: fsckReport ? fsckReport.report.wrote : null,
+      fsckBefore: fsckReport ? fsckReport.before : null,
+      fsckAfter: fsckReport ? fsckReport.after : null,
+    },
+  }
+}
+
+/**
+ * Proof (b): a journal truncated mid-record. fsck reports the discarded tail rather than reseeding.
+ *
+ * THREE TEARS, because they are caught by THREE DIFFERENT GUARDS, and the negative control that
+ * removes the CRC must move two of them and leave the third standing:
+ *
+ *   b1  a plain truncation            — the LENGTH check catches it; the CRC never runs
+ *   b2  truncated and zero-padded     — the block was allocated and not written, which is what a
+ *                                       torn append actually leaves. Only the CRC catches it.
+ *   b3  one flipped byte in a payload — every length is right and the record APPLIES. The CRC is
+ *                                       the only thing between this and a tree that comes back
+ *                                       with a mode nobody wrote.
+ *
+ * A control that moved all three would not say which guard it removed, and b1 holding is the
+ * evidence that the length check is a different guard from the checksum.
+ */
+async function proof_b() {
+  say('--- proof (b): a journal truncated mid-record — fsck reports the tail, never reseeds')
+  const results = {}
+  for (const shape of ['b1', 'b2', 'b3']) {
+    results[shape] = await tornJournal(shape)
+    say('    ' + shape + ': ' + JSON.stringify(results[shape]))
+  }
+  const shapes = ['b1', 'b2', 'b3']
+  const ok = shapes.every((s) => results[s].reported && !results[s].reseeded
+    // AND the user's file carries a mode somebody wrote. The tail was discarded, so the chmod in
+    // it was never applied and the file keeps its create mode — which is the correct outcome and
+    // the one a reader can check.
+    && !results[s].victimMadeUp && results[s].victimKeptCreateMode)
+  return {
+    ok,
+    evidence: {
+      ...results,
+      note: 'b1 is caught by the length check, b2 and b3 by the CRC. The no-crc control must '
+        + 'move b2 and b3 and leave b1 standing. victimKeptCreateMode is the claim about the '
+        + "user's FILE rather than about the parser: the chmod in the discarded tail was never "
+        + 'applied, so m9 keeps 0600.',
+    },
+  }
+}
+
+/** Build a volume with a known-good snapshot plus three journalled metadata ops, then tear it. */
+async function tornJournal(shape) {
+  await wipe()
+  // A kernel, a few files, a snapshot (which resets the journal), then more ops so the journal
+  // holds records the snapshot does not.
+  const k = kernelBoot(BOOT_CFG)
+  let before = null
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '8'])
+    if (!made.ok) return { at: 'mkfiles', errors: made.errors }
+    k.post({ t: 'snapshot' })
+    const snap = await k.expect('snapshot', 30000)
+    if (!snap.ok) return { at: 'snapshot', r: snap.r }
+    // Ops AFTER the snapshot, so they live only in the journal. `modebits` writes ten files and
+    // chmods each, which is twenty metadata records plus ten commits.
+    const modes = await once(k, ['modebits'])
+    if (!modes.ok) return { at: 'modebits', bad: modes.bad }
+    // The idle flush point (constraint 23). Waited for rather than forced, because the point is
+    // that it happens on its own.
+    await new Promise((r) => setTimeout(r, JOURNAL_IDLE_MS * 3))
+    k.post({ t: 'fs-state' })
+    before = (await k.expect('fs-state', 10000)).fs
+  } finally {
+    await shut(k)
+  }
+  // The kernel is gone, so its journal handle is released and the page can tear the file. Waited
+  // out: constraint 55 measured a terminated worker running on for about 2.0 s.
+  const bytes = await waitForJournal()
+  if (!bytes || bytes.length <= HEADER_BYTES) return { at: 'journal', bytes: bytes ? bytes.length : -1 }
+  const torn = bytes.slice()
+  let note = ''
+  if (shape === 'b1') {
+    // A plain truncation: the file is five bytes shorter than its last record needs.
+    await writeRaw('journal', torn.subarray(0, torn.length - 5))
+    note = 'truncated 5 bytes'
+  } else if (shape === 'b2') {
+    // Truncated and zero-padded back to the record's own length.
+    torn.fill(0, torn.length - 5)
+    await writeRaw('journal', torn)
+    note = 'last 5 bytes zeroed, length intact'
+  } else {
+    /* ONE DIGIT INSIDE A MODE FIELD, in the last record so the earlier ones still replay.
+     *
+     * Not an arbitrary byte: the claim is that the CRC is the only thing between a flipped bit and
+     * a tree whose permissions nobody wrote, and a flip that landed on a timestamp would not have
+     * shown that. `modebits` chmods its last file to 0o660 = 432, so "mode":432 becomes 430.
+     *
+     * Searched in the BYTES. A record's header holds bytes above 0x7F, which TextDecoder turns
+     * into replacement characters — a character index into the decoded form is not a byte index. */
+    const at = lastIndexOfBytes(torn, '"mode":432')
+    if (at < 0) return { at: 'flip', why: 'no "mode":432 record to flip, so b3 would prove nothing' }
+    torn[at + 9] = 0x30                            // 432 (0o660) -> 430 (0o656)
+    await writeRaw('journal', torn)
+    note = 'one digit flipped inside the last record’s mode field'
+  }
+  // A third kernel over the torn volume. It must mount READ-ONLY and REPORT, never reseed.
+  const k2 = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k2.expect('up', 20000)
+    const fs = up.fs
+    /* THE USER'S FILE, read back through stat from inside a process.
+     *
+     * This is what makes b3 a claim about the filesystem rather than about the parser: with the
+     * CRC removed the flipped record is accepted AND APPLIED, and the file comes back carrying a
+     * permission nobody ever wrote. "The record was accepted" could not have said that. */
+    let seen = null
+    try {
+      seen = await once(k2, ['statmode', VICTIM], 30000)
+    } catch (e) {
+      seen = { ok: false, why: String(e && e.message) }
+    }
+    const journal = fs.report && fs.report.journal
+    const reported = !!(journal && journal.stopped !== null && journal.discardedBytes > 0)
+    // THE RESEED TEST, and it is a measurement rather than an assertion: a reseeded volume has a
+    // smaller inode count than the one it replaced and a bumped superblock generation. Both are
+    // read back off the mount.
+    const inodesNow = fs.inodes ? fs.inodes.inodes : -1
+    const inodesBefore = before && before.inodes ? before.inodes.inodes : -1
+    const reseeded = inodesNow >= 0 && inodesBefore > 0 && inodesNow < inodesBefore / 2
+    return {
+      shape, note,
+      journalBytes: bytes.length,
+      stopped: journal ? journal.stopped : null,
+      discardedBytes: journal ? journal.discardedBytes : -1,
+      records: journal ? journal.records : -1,
+      applied: journal ? journal.applied : -1,
+      mode: fs.mode,
+      reported,
+      // The acceptance the CRC control flips. `accepted` true means replay took the torn tail.
+      accepted: !!(journal && journal.stopped === null),
+      inodesBefore, inodesNow, reseeded,
+      victim: VICTIM,
+      victimMode: seen && seen.ok ? seen.mode : -1,
+      // The three facts the mode word can state, named so a control is scored on WHICH one moved.
+      victimKeptCreateMode: !!(seen && seen.ok && seen.mode === VICTIM_CREATE),
+      victimKeptChmod: !!(seen && seen.ok && seen.mode === VICTIM_CHMOD),
+      victimMadeUp: !!(seen && seen.ok && seen.mode !== VICTIM_CREATE
+        && seen.mode !== VICTIM_CHMOD),
+      generationBefore: before ? before.generation : '', generationNow: fs.generation,
+      problems: (fs.report && fs.report.problems ? fs.report.problems : []).map((p) => p.what),
+    }
+  } finally {
+    await shut(k2)
+  }
+}
+
+/** The last byte offset at which `text`'s ASCII bytes appear in `hay`. A byte search, because a
+ *  journal is not text and a character index into its decoded form is not a byte index. */
+function lastIndexOfBytes(hay, text) {
+  const needle = new TextEncoder().encode(text)
+  outer: for (let at = hay.length - needle.length; at >= 0; at -= 1) {
+    for (let i = 0; i < needle.length; i += 1) if (hay[at + i] !== needle[i]) continue outer
+    return at
+  }
+  return -1
+}
+
+/** The journal file, once the previous kernel has let go of it. A read against a held handle is
+ *  not an error worth reporting — it is the 2.0 s grace constraint 55 measured. */
+async function waitForJournal() {
+  const until = performance.now() + BOOT_LOCK_BUDGET_MS + 1000
+  for (;;) {
+    try {
+      return await readRaw('journal')
+    } catch (e) {
+      if (performance.now() > until) return null
+      await new Promise((r) => setTimeout(r, 50))
+    }
+  }
+}
+
+/**
+ * THE JOURNAL'S OWN SEQUENCE NUMBERS, read straight off the disk once the kernel has let go.
+ *
+ * `src/fs/journal.mjs`'s replay stops at the first record whose sequence is not its predecessor's
+ * plus one and DISCARDS everything after it, which is correct — the later records' predecessor is
+ * gone — so a journal whose sequences are not strictly consecutive has already lost its tail. The
+ * sequences are therefore read rather than inferred from the mount's verdict: a duplicate and a
+ * skip both stop replay at the same place and they are different defects. A duplicate means two
+ * ops took one number, which is a writer allocating across an `await`.
+ *
+ * `decodeRecord` does the parsing, so there is no second reader of the record layout here.
+ */
+async function journalSeqs() {
+  const bytes = await waitForJournal()
+  if (!bytes) return { at: 'journal' }
+  const seqs = []
+  let off = 0
+  for (;;) {
+    const r = decodeRecord(bytes, off)
+    if (!r.ok) break
+    seqs.push(Number(r.seq))
+    off += r.size
+  }
+  let brk = -1
+  for (let i = 1; i < seqs.length; i += 1) {
+    if (seqs[i] !== seqs[i - 1] + 1) { brk = i; break }
+  }
+  return {
+    bytes: bytes.length, records: seqs.length, parsedTo: off, firstBreakAt: brk,
+    around: brk < 0 ? [] : seqs.slice(Math.max(0, brk - 3), brk + 3),
+    isDuplicate: brk > 0 && seqs[brk] === seqs[brk - 1],
+    isSkip: brk > 0 && seqs[brk] > seqs[brk - 1] + 1,
+    duplicates: seqs.length - new Set(seqs).size,
+    consecutive: brk === -1 && seqs.length > 0,
+  }
+}
+
+/**
+ * Proof (c): two concurrent opens of one file both succeed — constraint 47's case.
+ *
+ * A sync access handle is an EXCLUSIVE lock per file, so without a per-inode refcount beneath the
+ * fd table the second open throws NoModificationAllowedError and `cat notes.txt | wc -l` fails
+ * while an editor holds the file.
+ *
+ * Two PROCESSES, not two fds in one process: a refcount that only worked within one process would
+ * pass a single-process test and fail the case the constraint is written about. The holder keeps
+ * its fd open across the second open, which the kernel's own refcount report confirms.
+ *
+ * It then drives the COW swing WHILE BOTH ARE OPEN, which is the interaction the milestone calls
+ * the hard part: a third process overwrites the file, so two blobs briefly exist for one logical
+ * file. The next opener must get the new generation — and so must the HELD fd, which is the clause
+ * that changed.
+ *
+ * WHY "THE SUPERSEDED BLOB OUTLIVES ITS READER" IS NO LONGER THE CLAIM HERE. It used to be, and
+ * it was the stale read in assertion form: the holder stayed pinned to the generation it opened,
+ * so the free deferred to its close — and that is exactly how one fd came to report `fstat` 40
+ * while `pread` on the same fd returned 8. POSIX has two fds on one file sharing the FILE, not a
+ * snapshot each, so the holder must follow the swing. `hreread` reads through the kept
+ * description and is the clause a cached generation fails. The superseded generation then has no
+ * reader left, so its removal is IMMEDIATE and that is the right outcome — the refcount table
+ * still took the decision, which is what constraint 47 is about. The DEFERRED arm is reachable
+ * where a reference genuinely outlives the free: an unlink under an open description, which the
+ * `drop` section below measures.
+ */
+async function proof_c() {
+  say('--- proof (c): two concurrent opens of one file both succeed (constraint 47)')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    const path = pathFor(1)
+    const want = bytesFor(1)
+    const wantSum = [...want].reduce((a, b) => (a + b) & 0xffff, 0)
+
+    // The holder. It opens, reads, and keeps the fd. Its process stays alive, so the kernel's fd
+    // table still holds a reference on the blob when the second open arrives — and it is spawned
+    // separately from its run so it can be addressed AGAIN after the swing.
+    const holder = await spawnProcess(k, ['hold', path])
+    const held = await runPid(k, holder, 30000, 'hold')
+    if (!held.ok) return { ok: false, evidence: { at: 'hold', held } }
+
+    // The second opener, in a DIFFERENT process, while the first still holds the file. Two
+    // processes and not two fds in one: a refcount that only worked within one process would pass
+    // a single-process test and fail the case constraint 47 is written about.
+    const opener = await spawnProcess(k, ['reader', path])
+    const second = await runPid(k, opener, 30000, 'reader')
+    if (!second.ok) return { ok: false, evidence: { at: 'reader', second } }
+
+    const beforeBlobs = await listBlobs()
+    // The swing, with both readers still holding the old generation.
+    const over = await once(k, ['overwrite', path], 30000)
+    k.post({ t: 'fs-state' })
+    const state = (await k.expect('fs-state', 10000)).fs
+    const afterBlobs = await listBlobs()
+
+    // A third opener AFTER the swing must see the NEW generation's bytes.
+    const third = await once(k, ['reader', path], 30000)
+    // THE HELD DESCRIPTION, re-read. Same fd, same description, after another process swung the
+    // inode under it. A description that cached its generation at open answers here with the
+    // superseded blob's bytes while its own fstat reports the new size.
+    const again = await runPid(k, holder, 30000, 'hreread', ['hreread'])
+
+    // THE SECOND DESCRIPTION LETS GO while the holder keeps reading. The inode's handle is shared
+    // by every description on it — a sync access handle is an exclusive lock per file, so it has
+    // to be — and the count that decides when it is released is a count of DESCRIPTIONS, which
+    // only the kernel's fd table can know. Released on the FIRST of two closes instead, the
+    // holder's next read has no handle to read through.
+    const letGo = await runPid(k, opener, 30000, 'wclose second', ['wclose'])
+    const outlived = await runPid(k, holder, 30000, 'hreread after the close', ['hreread'])
+
+    const bothOpened = !!(held.ok && second.ok);
+    const sameBytes = held.sum === wantSum && second.sum === wantSum
+    const newBytes = !!(over && over.ok && third && third.ok && third.sum === over.sum)
+    const heldFollowed = !!(again && again.ok && over && over.ok
+      && again.size === over.afterSize && again.read === over.afterSize
+      && again.sum === over.sum)
+    // The superseded generation's NAME. Its removal was taken by the refcount table — nothing was
+    // reading it once the held description followed the swing — and the directory records the
+    // outcome rather than deciding it.
+    const beforeNames = beforeBlobs.map((b) => b.name).sort()
+    const afterNames = afterBlobs.map((b) => b.name).sort()
+    const gone = beforeNames.filter((n) => !afterNames.includes(n))
+    const fresh = afterNames.filter((n) => !beforeNames.includes(n))
+    const supersededLeft = gone.length === 1 && fresh.length === 1
+      && state.stats.immediateFrees > 0 && afterNames.length === beforeNames.length
+    // The fd is still USABLE: the read answered, at the size the file now publishes. The bytes
+    // are not asserted here — the dropped-ordering control empties the blob and would make this
+    // clause fail for the control's reason rather than this one's.
+    const outlivedTheClose = !!(letGo && letGo.close === 0 && outlived && outlived.ok === true
+      && over && outlived.size === over.afterSize)
+    return {
+      ok: bothOpened && sameBytes && newBytes && heldFollowed && supersededLeft
+        && outlivedTheClose,
+      evidence: {
+        path, wantSum,
+        holder: { ok: held.ok, fd: held.fd, size: held.size, sum: held.sum },
+        second: { ok: second.ok, fd: second.fd, size: second.size, sum: second.sum },
+        bothOpened, sameBytes,
+        overwrite: over ? { ok: over.ok, size: over.size, afterSize: over.afterSize,
+          sum: over.sum } : null,
+        thirdOpener: third ? { ok: third.ok, sum: third.sum } : null,
+        heldAgain: again ? { ok: again.ok, size: again.size, read: again.read, sum: again.sum,
+          openSize: again.openSize } : null,
+        letGo: letGo ? { close: letGo.close } : null,
+        outlived: outlived ? { ok: outlived.ok, at: outlived.at, errno: outlived.errno,
+          size: outlived.size, read: outlived.read, sum: outlived.sum } : null,
+        newBytes, heldFollowed, supersededLeft, outlivedTheClose, gone, newBlobs: fresh,
+        blobsBefore: beforeNames,
+        blobsAfter: afterNames,
+        copyUps: state.stats.copyUps,
+        swings: state.stats.swings,
+        deferredFrees: state.stats.deferredFrees,
+        immediateFrees: state.stats.immediateFrees,
+      },
+    }
+  } finally {
+    await shut(k)
+  }
+}
+
+/**
+ * Proof (d): TWO CONCURRENT WRITERS on one inode, and both keep their committed bytes.
+ *
+ * Proof (c) has two readers and a third-process writer, and nothing anywhere exercised two live
+ * WRITE descriptions on one inode — which is where copy-on-write was not atomic. Both writers
+ * write at the size the file published when THEY opened it, which is the configuration constraint
+ * 47 creates: A's range is an append past the committed size and lands in place, and B's range
+ * then starts `aLen` bytes BELOW the size A published, so it must stage a new generation.
+ *
+ * Against a per-description snapshot of the committed size, B's write read as an append, went
+ * into A's committed generation IN PLACE, and B's commit published a size computed from the same
+ * stale base — losing A's committed bytes with no crash involved. Both clauses are scored
+ * separately below: `stagedNewGeneration` is the copy-up that must happen, and `bothKept` is the
+ * bytes a user would actually read back.
+ */
+async function proof_d() {
+  say('--- proof (d): two concurrent WRITERS on one inode, both keep their committed bytes')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    const path = pathFor(TWO_WRITERS.index)
+    const size0 = bytesFor(TWO_WRITERS.index).length
+
+    // Two processes, two descriptions, both open before either writes.
+    const a = await spawnProcess(k, ['wopen', path])
+    const b = await spawnProcess(k, ['wopen', path])
+    const openA = await runPid(k, a, 30000, 'wopen A')
+    const openB = await runPid(k, b, 30000, 'wopen B')
+    if (!openA.ok || !openB.ok) return { ok: false, evidence: { at: 'wopen', openA, openB } }
+
+    // Writer A: an append past the committed size, then fsync. Its bytes are now COMMITTED and
+    // the metadata publishes size0 + aLen.
+    const wroteA = await runPid(k, a, 30000, 'wwrite a', ['wwrite', 'a'])
+    k.post({ t: 'fs-state' })
+    const mid = (await k.expect('fs-state', 10000)).fs
+    const blobsMid = (await listBlobs()).map((x) => x.name).sort()
+
+    // Writer B: the same offset, which is now below the committed size. This must copy up.
+    const wroteB = await runPid(k, b, 30000, 'wwrite b', ['wwrite', 'b'])
+    k.post({ t: 'fs-state' })
+    const after = (await k.expect('fs-state', 10000)).fs
+    const blobsAfter = (await listBlobs()).map((x) => x.name).sort()
+
+    // A third process with a FRESH description reads the file back. It recomputes every
+    // expectation from TWO_WRITERS and bytesFor rather than being handed them by either writer.
+    const seen = await once(k, ['wcheck', path], 30000)
+
+    const bothOpened = openA.ok === true && openB.ok === true
+      && openA.size === size0 && openB.size === size0
+    const copyUps = (after.stats.copyUps || 0) - (mid.stats.copyUps || 0)
+    const fresh = blobsAfter.filter((n) => !blobsMid.includes(n))
+    const stagedNewGeneration = copyUps === 1 && fresh.length === 1
+    const bothKept = !!(seen && seen.ok)
+    return {
+      ok: bothOpened && stagedNewGeneration && bothKept,
+      evidence: {
+        path, size0, plan: { ...TWO_WRITERS },
+        openA: { ok: openA.ok, fd: openA.fd, size: openA.size },
+        openB: { ok: openB.ok, fd: openB.fd, size: openB.size },
+        bothOpened,
+        wroteA: { ok: wroteA.ok, at: wroteA.at, length: wroteA.length,
+          publishedSize: wroteA.publishedSize },
+        wroteB: { ok: wroteB.ok, at: wroteB.at, length: wroteB.length,
+          publishedSize: wroteB.publishedSize },
+        copyUpsBefore: mid.stats.copyUps, copyUpsAfter: after.stats.copyUps,
+        copyUps, stagedNewGeneration,
+        blobsMid, blobsAfter, newBlobs: fresh,
+        check: seen, bothKept,
+        wantSize: size0 + TWO_WRITERS.aLen,
+      },
+    }
+  } finally {
+    await shut(k)
+  }
+}
+
+/**
+ * AN OUTSTANDING APPEND UNDER ANOTHER DESCRIPTION'S COMMIT.
+ *
+ * THE STATE PROOF (d) CANNOT REACH, and the one that produced three separate failures. Proof (d)'s
+ * two writers are both CLEAN when they write, so every decision either makes happens to be made
+ * from a current base. Here the second writer is made dirty FIRST by an append that stages no
+ * generation — one pwrite far past the committed size, no fsync — and only then does the first
+ * writer commit underneath it.
+ *
+ * Against the wrong predicate ("is this description clean?" rather than "has it staged a
+ * generation?") that one state gave three outcomes, all measured with two fds and no privilege:
+ * the second writer's next write landed IN the committed generation in place over the first
+ * writer's fsynced bytes; an ftruncate on the same description copied up `min(size, STALE size)`
+ * and returned 32 committed bytes as zeroes under a blob length fsck reported as clean; and the
+ * commit that followed named a superseded generation, which the VFS refused AFTER the record was
+ * already durable — leaving the next mount read-only and discarding a mkdir that had returned
+ * success.
+ *
+ * So the clauses are the three failures, each read where a user would hit it: the committed bytes
+ * mid-flight, both writers' bytes at the end, and the mount that follows.
+ */
+/* Phase two's own file and its own directory name. A SECOND file, because phase one's has already
+ * been through a copy-up and the refusal must be reached from a generation nobody else moved. */
+const PHASE_TWO_INDEX = 2
+const AFTER_DIR = '/d/2/after-the-refusal'
+
+async function pendingAppend() {
+  say('--- pending: an outstanding append under another description\'s commit')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  const path = pathFor(TWO_WRITERS.index)
+  const size0 = bytesFor(TWO_WRITERS.index).length
+  const path2 = pathFor(PHASE_TWO_INDEX)
+  let evidence = {}
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+
+    // Two processes, two descriptions, both opened at the same committed size.
+    const a = await spawnProcess(k, ['wopen', path])
+    const b = await spawnProcess(k, ['wopen', path])
+    const openA = await runPid(k, a, 30000, 'wopen A')
+    const openB = await runPid(k, b, 30000, 'wopen B')
+    if (!openA.ok || !openB.ok) return { ok: false, evidence: { at: 'wopen', openA, openB } }
+
+    // B goes DIRTY WITH NO STAGED GENERATION. The append exception has two halves and both are
+    // read here, and the first one is NOT "a fresh description still sees the old size" — that
+    // was the stale read in assertion form. POSIX has two fds on one file sharing the file, so
+    // B's four bytes are in the file the moment `pwrite` returns a count for them and EVERY
+    // description must see them.
+    //
+    // What the COW rule actually buys for an uncommitted append is DURABILITY, not invisibility:
+    // the METADATA does not name those bytes until a commit, so a crash leaves the intact prefix
+    // the metadata already pointed at. That is measured as the metadata NOT MOVING — no swing, no
+    // journal record — rather than as a reader being lied to.
+    k.post({ t: 'fs-state' })
+    const beforePend = (await k.expect('fs-state', 10000)).fs
+    const pend = await runPid(k, b, 30000, 'wpend B', ['wpend'])
+    k.post({ t: 'fs-state' })
+    const afterPend = (await k.expect('fs-state', 10000)).fs
+    const peekPend = await once(k, ['wpeek', path], 30000)
+
+    // A appends at the size it saw and fsyncs. Those bytes are now COMMITTED.
+    const wroteA = await runPid(k, a, 30000, 'wwrite a', ['wwrite', 'a'])
+    k.post({ t: 'fs-state' })
+    const mid = (await k.expect('fs-state', 10000)).fs
+
+    // B writes at the size IT saw, which is now aLen bytes below the committed size. It must copy
+    // up — and it must carry its own uncommitted append across with everything else.
+    const putB = await runPid(k, b, 30000, 'wput b', ['wput', 'b'])
+
+    // THE OBSERVATION, taken through a FRESH description BEFORE B commits. The generation the
+    // metadata names must still hold A's bytes.
+    const peek = await once(k, ['wpeek', path], 30000)
+    const syncB = await runPid(k, b, 30000, 'wsync B', ['wsync'])
+    k.post({ t: 'fs-state' })
+    const after = (await k.expect('fs-state', 10000)).fs
+
+    // A third process with a fresh description recomputes the whole layout and reads it back.
+    const seen = await once(k, ['pcheck', path], 30000)
+    const blobsAfter = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+
+    // PHASE TWO, on a second file: the same outstanding-append state, but the other description's
+    // write goes BELOW the committed size, so it SWINGS the inode onto a new generation. The
+    // appending description's commit then names a generation that no longer exists, which the VFS
+    // must refuse — and the refusal must arrive before the record is durable, or replay refuses it
+    // too and the volume comes up read-only with every later record discarded.
+    const c = await spawnProcess(k, ['wopen', path2])
+    const e2 = await spawnProcess(k, ['wopen', path2])
+    const openC = await runPid(k, c, 30000, 'wopen C')
+    const openE = await runPid(k, e2, 30000, 'wopen E')
+    const pendE = await runPid(k, e2, 30000, 'wpend E', ['wpend'])
+    const belowC = await runPid(k, c, 30000, 'wbelow C', ['wbelow'])
+    // The commit that names the superseded generation. A refusal here is legal; a refusal that
+    // left a record behind is not, and only the next mount can say which happened.
+    const syncE = await runPid(k, e2, 30000, 'wsync E', ['wsync'])
+    // A metadata op AFTER it. Its record sits past the refused commit's position in the journal.
+    const madeDir = await once(k, ['wmkdir', AFTER_DIR], 30000)
+
+    evidence = {
+      path, size0, plan: { ...TWO_WRITERS, pending: { ...PENDING_APPEND } },
+      openA: { ok: openA.ok, size: openA.size }, openB: { ok: openB.ok, size: openB.size },
+      bothOpened: openA.size === size0 && openB.size === size0,
+      pend: { ok: pend.ok, at: pend.at, length: pend.length, openSize: pend.openSize,
+        fdSize: pend.fdSize, wantFdSize: pend.wantFdSize, freshSize: peekPend.size,
+        swings: [beforePend.stats.swings, afterPend.stats.swings],
+        journalAppends: [beforePend.stats.journalAppends, afterPend.stats.journalAppends] },
+      wroteA: { ok: wroteA.ok, at: wroteA.at, publishedSize: wroteA.publishedSize },
+      putB: { ok: putB.ok, at: putB.at, publishedSize: putB.publishedSize },
+      syncB: { ok: syncB.ok, publishedSize: syncB.publishedSize },
+      peek: { ok: peek.ok, size: peek.size, atS: peek.atS, wantAtS: peek.wantAtS,
+        committedBytesIntact: peek.committedBytesIntact },
+      copyUps: (after.stats.copyUps || 0) - (mid.stats.copyUps || 0),
+      copyUpsBefore: mid.stats.copyUps, copyUpsAfter: after.stats.copyUps,
+      check: seen, blobsAfter,
+      wantSize: Math.max(size0 + TWO_WRITERS.aLen, PENDING_APPEND.off + PENDING_APPEND.len),
+      phase2: {
+        path: path2,
+        openC: { ok: openC.ok, size: openC.size }, openE: { ok: openE.ok, size: openE.size },
+        pendE: { ok: pendE.ok, fdSize: pendE.fdSize },
+        belowC: { ok: belowC.ok, publishedSize: belowC.publishedSize },
+        // The refusal itself. Its errno is RECORDED and not asserted: refusing is legal, and
+        // what this proof is about is whether the refused record reached the disk.
+        syncE: { ok: syncE.ok, at: syncE.at, errno: syncE.errno },
+        madeDir: { ok: madeDir.ok, errno: madeDir.errno, path: AFTER_DIR },
+      },
+    }
+    // Held back from the METADATA: this description sees its own bytes, and nothing was published
+    // — no swing, no journal record.
+    evidence.pendingHeldBack = pend.ok === true && pend.fdSize === pend.wantFdSize
+      && afterPend.stats.swings === beforePend.stats.swings
+      && afterPend.stats.journalAppends === beforePend.stats.journalAppends
+    // And the other half: those bytes ARE in the file, for every description. One file, one size.
+    evidence.pendingVisible = peekPend.ok === true && peekPend.size === pend.wantFdSize
+    evidence.stagedNewGeneration = evidence.copyUps === 1
+    evidence.committedBytesIntact = peek.committedBytesIntact === true
+    evidence.bothKept = seen.ok === true
+  } finally {
+    await shut(k)
+  }
+
+  // THE MOUNT THAT FOLLOWS, on the same volume with no wipe. A commit record the writer's own VFS
+  // refused is durable, and replay must then refuse it too: the volume comes up read-only and
+  // every record after it is discarded. So "the syscalls returned 0" is not the whole claim —
+  // the next boot is.
+  await waitForJournal()
+  const k2 = kernelBoot(BOOT_CFG)
+  try {
+    const up2 = await k2.expect('up', 20000)
+    const j = up2.fs.report && up2.fs.report.journal
+    evidence.remount = {
+      mode: up2.fs.mode,
+      problems: (up2.fs.report && up2.fs.report.problems ? up2.fs.report.problems : [])
+        .map((p) => p.what + ': ' + String(p.why).slice(0, 180)),
+      journal: j ? { records: j.records, applied: j.applied, rejected: j.rejected } : null,
+    }
+    const reread = await once(k2, ['pcheck', path], 30000)
+    evidence.rereadAfterRemount = reread
+    // The directory created AFTER the refused commit. "The journal is clean" is a claim about a
+    // user's data, so it is read as one: the name either resolves on the next mount or it does
+    // not, and it had already returned success.
+    const dirAfter = await once(k2, ['wstat', AFTER_DIR], 30000)
+    evidence.dirAfterRemount = { ok: dirAfter.ok, errno: dirAfter.errno, path: AFTER_DIR }
+    evidence.mountsReadWrite = up2.fs.mode === 'rw'
+    evidence.survivedRemount = reread.ok === true
+    evidence.replayRejectedNothing = (evidence.remount.journal
+      ? (evidence.remount.journal.rejected || []).length === 0 : false)
+      && dirAfter.ok === true
+  } catch (e) {
+    evidence.remount = { threw: String((e && e.message) || e) }
+    evidence.mountsReadWrite = false
+    evidence.survivedRemount = false
+    evidence.replayRejectedNothing = false
+  } finally {
+    await shut(k2)
+  }
+
+  return {
+    ok: evidence.bothOpened === true && evidence.pendingHeldBack === true
+      && evidence.pendingVisible === true
+      && evidence.stagedNewGeneration === true && evidence.committedBytesIntact === true
+      && evidence.bothKept === true && evidence.replayRejectedNothing === true
+      && evidence.mountsReadWrite === true && evidence.survivedRemount === true,
+    evidence,
+  }
+}
+
+/**
+ * A STAGED GENERATION LEFT BEHIND BY A CRASH IS NEVER HANDED OUT AGAIN.
+ *
+ * The staging floor is what stops a generation number being reused, and it was seeded from the
+ * generations the METADATA names. Those are the committed ones. A crash between a copy-up and its
+ * commit leaves a staged blob on disk that no inode points at, so the floor could not see it —
+ * and the next write handed that number out again, opened the orphan, and published its bytes as
+ * the file's own.
+ *
+ * Measured against the old floor with a leftover 1000-byte `blobs/22.2`: an ftruncate growing an
+ * 8-byte file to 40 returned ZERO zeroed bytes and 32 bytes of the orphan's filler where POSIX
+ * requires zeroes. The explicit fsck afterwards reported `rw` and no problems, because the blob
+ * length matched the published size — so validation could not see it either.
+ *
+ * THE ORPHAN IS INJECTED FROM THE PAGE for the reason writeBlobRaw records: a kernel's own fd
+ * teardown commits a dirty description, so no kernel can be asked to leave a staged generation
+ * behind. This is the same method proof (b) uses for its torn journal.
+ */
+async function orphanedGeneration() {
+  say('--- orphan: a staged generation a crash left behind is never handed out again')
+  await wipe()
+  const path = pathFor(TWO_WRITERS.index)
+  const evidence = { path, plan: { ...ORPHANED } }
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    evidence.blobsBefore = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+  } finally {
+    await shut(k)
+  }
+
+  // One orphaned generation per committed blob, which is what makes this a property of the FLOOR
+  // rather than of one file: whichever inode the grow lands on, its next generation is spoken for.
+  const injected = []
+  for (const b of await listBlobs()) {
+    const m = /^(\d+)\.1$/.exec(b.name)
+    if (!m) continue
+    const name = m[1] + '.' + ORPHANED.gen
+    await writeBlobRaw(name, new Uint8Array(ORPHANED.bytes).fill(ORPHANED.byte))
+    injected.push(name)
+  }
+  evidence.injected = injected
+  const afterInject = await listBlobs()
+  // ANTI-VACUITY: the orphans have to be ON DISK, at their full length, before the second boot.
+  evidence.orphansOnDisk = injected.length > 0 && injected.every((name) =>
+    afterInject.some((b) => b.name === name && b.size === ORPHANED.bytes))
+
+  await waitForJournal()
+  const k2 = kernelBoot(BOOT_CFG)
+  try {
+    const up2 = await k2.expect('up', 20000)
+    evidence.remountMode = up2.fs.mode
+    if (up2.fs.mode !== 'rw') return { ok: false, evidence }
+    evidence.grown = await once(k2, ['wgrow', path], 60000)
+    evidence.blobsAfter = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+    // The explicit fsck, which is the sweep. Recorded rather than asserted clean: the orphans are
+    // genuinely stale blobs and reporting them is correct.
+    k2.post({ t: 'fsck' })
+    const ck = await k2.expect('fsck', 30000).catch(() => null)
+    evidence.fsck = ck && ck.report
+      ? { mountable: ck.report.mountable,
+          problems: (ck.report.problems || []).map((p) => p.what),
+          blobs: ck.report.blobs }
+      : { raw: ck ? Object.keys(ck) : null }
+  } finally {
+    await shut(k2)
+  }
+
+  const g = evidence.grown || {}
+  evidence.grownRangeZeroed = g.zeroed === g.wantZero && g.foreignBytes === 0
+  // The orphan must still be sitting there at its own length: a floor that reused the name would
+  // have truncated it DOWN to the file's new size, which is the shape of the defect.
+  evidence.orphanUntouched = injected.every((name) =>
+    (evidence.blobsAfter || []).includes(name + ':' + ORPHANED.bytes))
+  return {
+    ok: evidence.orphansOnDisk === true && evidence.remountMode === 'rw'
+      && evidence.grownRangeZeroed === true && evidence.orphanUntouched === true,
+    evidence,
+  }
+}
+
+/**
+ * THE COMMIT IS A COMPARE-AND-SWAP, AND THE PUBLISHED SIZE IS THE ONLY AUTHORITY.
+ *
+ * Five scenarios, each on its own wiped volume, and each one was a SILENT loss: every call returned
+ * success and the explicit fsck afterwards reported `rw` with no problems, because the surviving
+ * blob's length matched the size the metadata published.
+ *
+ * (1) `base` — fd1 writes BELOW the committed size, which stages a copy-up from the blob as it is
+ *     now. fd2 then appends AT the committed size and FSYNCS, so its bytes are durable and
+ *     published before fd1 commits anything. fd1's commit then publishes a generation copied from
+ *     a base that no longer exists. Measured against the old code: fd2's four fsynced bytes gone,
+ *     `fsync` 0 for both, `close` 0 for both, fsck `rw` with `short: []`.
+ *
+ * (2) `twostage` — two descriptions each stage their own generation over DISJOINT ranges inside the
+ *     committed size and each fsyncs. Two staged generations are two whole-file snapshots, so the
+ *     second swing reverted the first; POSIX has both ranges in the file.
+ *
+ * (3) `m4` — the same race, read through `fstat` and `SEEK_END` instead of through the bytes. A
+ *     dirty description answered from its own staged generation alone, so after fd2 published a
+ *     longer file fd1 under-reported it and `SEEK_END` landed BELOW the real end — which turns the
+ *     next append into an overwrite of committed bytes. Reachable without any commit race, which
+ *     is why it is its own scenario.
+ *
+ * (4) `slack` — bytes above the published size, planted page-side, which is the state a crash
+ *     between a commit's flush and its journal record leaves. Nothing may see them: the extent
+ *     came from `max(published size, blob length)`, so `stat` reported 40 over a published 8, a
+ *     read returned 32 bytes nobody wrote, and the next `close()` published them. fsck must still
+ *     REPORT them, which is the arm it did not have — it tested only `onDisk < entry.size`, and
+ *     every silent case across four rounds of attacks ended with a blob at least as long as its
+ *     published size.
+ *
+ * (5) `opens` — two processes opening ONE path with no await between their `go` messages, so the
+ *     two opens overlap inside the kernel. The per-name refcount table could not arbitrate that:
+ *     an open is not in the table until its handle exists, so the second `createSyncAccessHandle`
+ *     threw and `open` returned -EBUSY — which the storage edge itself calls a kernel defect.
+ *     Constraint 47's headline case, and the sequential version of it is what used to be tested.
+ *
+ * THE COUNTERS ARE THE ANTI-VACUITY CLAUSE. `casRefusals` and `restages` must be non-zero in the
+ * racing scenarios: a volume that happens to come out right because the race did not happen would
+ * otherwise pass every byte clause.
+ */
+async function casCommit() {
+  say('--- cas: the commit validates its base, and a lost race keeps both writers’ bytes')
+  const path = pathFor(TWO_WRITERS.index)
+  const S = bytesFor(TWO_WRITERS.index).length
+  const evidence = { path, S, plan: { ...CAS, slack: CAS_SLACK } }
+  for (const which of CAS_RACES) {
+    evidence[which] = await casRace(which, path, S)
+  }
+  evidence.slack = await casSlack(path, S)
+  evidence.opens = await casOpens(path)
+  evidence.contend = await casContend(path)
+  evidence.retry = await casRetry(path)
+  const ok = CAS_RACES.every((w) => evidence[w].ok === true)
+    && evidence.slack.ok === true && evidence.opens.ok === true
+    && evidence.contend.ok === true && evidence.retry.ok === true
+  return { ok, evidence }
+}
+
+/**
+ * THE RACING SCENARIOS, and WHAT THE FILE MUST BE AT THE END OF EACH, recomputed here rather than
+ * taken from the program's own verdict: the program reports offsets and this decides what belongs
+ * at them. Adding a scenario is adding a row.
+ *
+ * `slackin` and `slackwide` are a pair on purpose. The first writes INSIDE the slack, where the old
+ * `(gen, end)` stamp could not see it; the second crosses the end by one byte, where it could. Both
+ * must keep every acknowledged byte, and only the pair can tell "the counter is bumped by an
+ * in-place write" from "the extent happened to move".
+ */
+const CAS_WANT = {
+  base: (S) => ({ size: S + CAS.len, at0: CAS.belowByte, atS: CAS.tailByte }),
+  twostage: (S) => ({ size: S, at0: CAS.belowByte, atLen: CAS.tailByte }),
+  m4: (S) => ({ size: S + 2 * CAS.len, at0: CAS.belowByte, atS: CAS.tailByte,
+    atS2: CAS.thirdByte }),
+  slackin: (S) => ({ size: S + CAS.len, at0: CAS.belowByte, atS: CAS.thirdByte }),
+  slackwide: (S) => ({ size: S + CAS.len + 1, at0: CAS.belowByte, atS: CAS.thirdByte }),
+  // The file fd2 truncated it to, holding the bytes fd1 wrote below it. `atS` is past the end here
+  // and is deliberately not named: a want nobody can read is not a clause.
+  dirtytrunc: () => ({ size: CAS.len, at0: CAS.belowByte }),
+}
+
+const CAS_RACES = Object.keys(CAS_WANT)
+
+/**
+ * TWO WRITERS CONTENDING, EACH FOR CAS_ROUNDS ROUNDS, so commits really do lose their base.
+ *
+ * THE CLAUSE IS THE ERRNO. A bounded retry has one refusal to offer and if it ever arrives it must
+ * arrive under its own name: every failing call here must be -EBUSY and nothing else. An empty
+ * list is the expected outcome now that a commit holds the inode across its re-stage — the base
+ * cannot move twice under one commit, so nothing reaches the exhaustion arm — and the clause is
+ * still the one that catches an unnamed failure. Measured value of that —
+ * `commit`'s exhaustion arm returned an errno the module never imported, so it threw a
+ * ReferenceError, the kernel's catch-all answered -EIO, and a caller was told "I/O error" about a
+ * file that was entirely healthy. The volume must also still mount read-write with a clean fsck,
+ * and no byte below the published size may come from anywhere but the two writers and the seed.
+ */
+async function casContend(path) {
+  const out = {}
+  await wipe()
+  let k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { at: 'mkfiles', errors: made.errors }
+    const p1 = await spawnProcess(k, ['casloop', path + '|a'])
+    const p2 = await spawnProcess(k, ['casloop', path + '|b'])
+    k.post({ t: 'go', go: { mode: 'park', pid: p1, argv: ['casloop', path + '|a'] } })
+    k.post({ t: 'go', go: { mode: 'park', pid: p2, argv: ['casloop', path + '|b'] } })
+    const a = await rowFor(k, p1, 120000, 'casloop a')
+    const b = await rowFor(k, p2, 120000, 'casloop b')
+    out.a = { ok: a.ok, at: a.at, which: a.which, S: a.S, close: a.close, wroteAll: a.wroteAll,
+      errnos: a.errnos, acknowledgedEnd: a.acknowledgedEnd }
+    out.b = { ok: b.ok, at: b.at, which: b.which, S: b.S, close: b.close, wroteAll: b.wroteAll,
+      errnos: b.errnos, acknowledgedEnd: b.acknowledgedEnd }
+    out.check = await onceByPid(k, ['cascheck', path], 30000)
+    k.post({ t: 'fs-state' })
+    out.stats = (await k.expect('fs-state', 10000)).fs.stats
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    out.fsck = ck && ck.report
+      ? { mountable: ck.report.mountable, problems: (ck.report.problems || []).map((p) => p.what),
+          blobs: ck.report.blobs }
+      : null
+    out.notes = (k.events || []).flatMap((m) => (m.t === 'io-note' && m.why ? [m.why] : []))
+  } catch (e) {
+    out.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+  await waitForJournal()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    out.remount = { mode: up.fs.mode,
+      problems: (up.fs.report && up.fs.report.problems ? up.fs.report.problems : [])
+        .map((p) => p.what),
+      check: await once(k, ['cascheck', path], 30000) }
+  } catch (e) {
+    out.remount = { threw: String((e && e.message) || e) }
+  } finally {
+    await shut(k)
+  }
+  const errnos = [...((out.a && out.a.errnos) || []), ...((out.b && out.b.errnos) || [])]
+  out.errnos = errnos
+  // EBUSY AND NOTHING ELSE. An empty list is allowed: the race is nondeterministic, and a run in
+  // which no commit exhausted its attempts has nothing to refuse. What may never appear is another
+  // errno, which is how an unnamed failure shows up.
+  out.onlyEbusyRefusals = errnos.every((e) => e === E.EBUSY)
+  out.bothWrote = !!(out.a && out.a.wroteAll === true && out.b && out.b.wroteAll === true)
+  const after = (out.remount && out.remount.check) || {}
+  out.noForeignBytes = (out.check || {}).ok === true && after.ok === true
+    && after.size >= after.base && after.size <= after.maxEnd
+  out.volumeClean = !!(out.fsck && out.fsck.mountable === 'rw' && out.fsck.problems.length === 0)
+    && out.remount && out.remount.mode === 'rw'
+  out.ok = out.onlyEbusyRefusals === true && out.bothWrote === true
+    && out.noForeignBytes === true && out.volumeClean === true
+  return out
+}
+
+/**
+ * THE SAME CONTENTION, WITH THE CALLER DOING THE RIGHT THING ABOUT -EBUSY, and the journal read off
+ * the disk afterwards. Two defects live in this one workload and neither is visible from the final
+ * bytes alone.
+ *
+ * WHAT A RETRY IS TOLD. A bounded compare-and-swap's only refusal is -EBUSY and the caller's only
+ * correct response is to ask again. The exhaustion arm freed the staged generation first, so the
+ * retry found nothing to publish and answered 0 — the caller was told its discarded write was
+ * durable. Measured at 13 of 200 fsyncs. The clause is per round and it is a READ-BACK through a
+ * fresh description: every round writes a distinct value, so a 0 from `fsync` is a claim that can
+ * be checked against the byte in the file rather than counted.
+ *
+ * THE REFUSAL NO LONGER REACHES THE CALLER AT ALL, and that is this scenario's second reading.
+ * A commit holds the inode across its whole retry, so the base cannot move between a refusal and
+ * the re-stage that answers it: one re-stage is always enough and four-in-a-row is unreachable.
+ * The race is still here — 83 of 400 commits lost their base at 200 rounds per writer — so what
+ * the scenario asserts is that every one of them was absorbed, with the per-round read-back
+ * unchanged underneath it.
+ *
+ * WHAT THE JOURNAL LOOKS LIKE. Three callers reach the journal append concurrently, and the
+ * sequence number was allocated AFTER the append's await, so two records took the same number.
+ * Replay stops at a non-consecutive sequence and discards the tail: measured off this workload's
+ * own disk as 443 records with a duplicated 59 at record 60, a remount that came up READ-ONLY, and
+ * 37,409 bytes of tail thrown away — including ops that had returned success. The sequences are
+ * read straight off the file, because the mount's verdict cannot tell a duplicate from a skip.
+ */
+async function casRetry(path) {
+  const out = {}
+  await wipe()
+  let k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { at: 'mkfiles', errors: made.errors }
+    const p1 = await spawnProcess(k, ['casretry', path + '|a'])
+    const p2 = await spawnProcess(k, ['casretry', path + '|b'])
+    k.post({ t: 'go', go: { mode: 'park', pid: p1, argv: ['casretry', path + '|a'] } })
+    k.post({ t: 'go', go: { mode: 'park', pid: p2, argv: ['casretry', path + '|b'] } })
+    out.a = await rowFor(k, p1, 300000, 'casretry a')
+    out.b = await rowFor(k, p2, 300000, 'casretry b')
+    k.post({ t: 'fs-state' })
+    out.stats = (await k.expect('fs-state', 10000)).fs.stats
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    out.fsck = ck && ck.report
+      ? { mountable: ck.report.mountable, journal: ck.report.journal,
+          problems: (ck.report.problems || []).map((p) => p.what) }
+      : null
+    out.notes = (k.events || []).flatMap((m) => (m.t === 'io-note' && m.why ? [m.why] : []))
+  } catch (e) {
+    out.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+  out.journalSeqs = await journalSeqs()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    out.remount = { mode: up.fs.mode,
+      problems: (up.fs.report && up.fs.report.problems ? up.fs.report.problems : [])
+        .map((p) => p.what),
+      journal: up.fs.report && up.fs.report.journal,
+      read: await once(k, ['cas', path + '|read'], 30000) }
+  } catch (e) {
+    out.remount = { threw: String((e && e.message) || e) }
+  } finally {
+    await shut(k)
+  }
+  const a = out.a || {}
+  const b = out.b || {}
+  const after = (out.remount && out.remount.read) || {}
+  // EVERY 0 FROM fsync WAS TRUE. The program checked each one against the file at the time; this is
+  // its count, and a single lie fails the scenario.
+  out.everyAcknowledgementWasDurable = a.liedTimes === 0 && a.acked > 0
+  /* ANTI-VACUITY, READ OFF THE KERNEL'S COUNTERS RATHER THAN OFF THE CALLER'S REFUSALS.
+   *
+   * It was `(a.refusals || 0) > 0` — the caller saw at least one -EBUSY — and that is no longer
+   * reachable, which is the point rather than an excuse. A commit now runs under the inode's lock,
+   * so its re-stage runs there too: the base cannot move again between the refusal and the retry,
+   * one re-stage is always enough, and a commit can lose its base at most ONCE. `casExhausted`
+   * needs four in a row. So the race must still be shown to have happened, and the stronger fact
+   * is now assertable beside it: no caller was refused at all. Measured at 200 rounds per writer:
+   * casRefusals 83, restages 83, casExhausted 0, refusals to the caller 0. */
+  out.theRaceHappened = ((out.stats || {}).casRefusals || 0) > 0
+    && ((out.stats || {}).restages || 0) > 0
+  out.noCallerWasRefused = (a.refusals || 0) === 0 && (b.refusals || 0) === 0
+    && ((out.stats || {}).casExhausted || 0) === 0
+  out.onlyEbusyRefusals = [...(a.refused || []).map((r) => r.errno),
+    ...(a.errnos || []), ...(b.errnos || [])].every((e) => e === E.EBUSY)
+  // THE LAST ACKNOWLEDGED WRITE SURVIVES THE REMOUNT, which is a different fact from "no lie
+  // mid-flight": a stage kept and then dropped at close would pass the per-round clause.
+  out.lastDurableValueSurvived = after.ok === true && a.lastDurable > 0
+    && after.at0 === a.lastDurable && after.size === b.acknowledgedEnd
+  out.seqsAreStrictlyConsecutive = (out.journalSeqs || {}).consecutive === true
+    && (out.journalSeqs || {}).duplicates === 0
+  // AND THE WORKLOAD REALLY WROTE A JOURNAL. Consecutive sequences over three records would be
+  // satisfied by a kernel that barely ran.
+  out.enoughRecordsToMatter = (out.journalSeqs || {}).records > CAS_ROUNDS
+  // WHAT THE NEXT MOUNT DID WITH THEM, which is the consequence the sequences have and the reason
+  // to read them: a duplicate stops replay and discards every record after it. Deliberately NOT
+  // the explicit fsck's verdict - the dropped-ordering control leaves the journal perfectly
+  // sequenced and the BLOBS short, and this clause is about the journal.
+  const rj = (out.remount || {}).journal || {}
+  out.replayAcceptedEveryRecord = (out.remount || {}).mode === 'rw'
+    && rj.stopped === null && rj.discardedBytes === 0
+  out.volumeClean = !!(out.fsck && out.fsck.mountable === 'rw' && out.fsck.problems.length === 0)
+    && out.remount && out.remount.mode === 'rw' && out.remount.problems.length === 0
+  out.ok = out.everyAcknowledgementWasDurable === true && out.theRaceHappened === true
+    && out.noCallerWasRefused === true
+    && out.onlyEbusyRefusals === true && out.lastDurableValueSurvived === true
+    && out.seqsAreStrictlyConsecutive === true && out.enoughRecordsToMatter === true
+    && out.replayAcceptedEveryRecord === true && out.volumeClean === true
+  return out
+}
+
+/** One racing scenario, with the remount that stops it passing by never being asked again. */
+async function casRace(which, path, S) {
+  const out = { which }
+  await wipe()
+  let k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ...out, at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ...out, at: 'mkfiles', errors: made.errors }
+    out.row = await once(k, ['cas', path + '|' + which], 60000)
+    k.post({ t: 'fs-state' })
+    out.stats = (await k.expect('fs-state', 10000)).fs.stats
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    out.fsck = ck && ck.report
+      ? { mountable: ck.report.mountable, problems: (ck.report.problems || []).map((p) => p.what),
+          blobs: ck.report.blobs }
+      : null
+  } catch (e) {
+    out.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+  await waitForJournal()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    out.remount = { mode: up.fs.mode, read: await once(k, ['cas', path + '|read'], 30000) }
+  } catch (e) {
+    out.remount = { threw: String((e && e.message) || e) }
+  } finally {
+    await shut(k)
+  }
+  const row = out.row || {}
+  const after = (out.remount && out.remount.read) || {}
+  const want = CAS_WANT[which](S)
+  out.want = want
+  out.survivedTheRemount = out.remount && out.remount.mode === 'rw'
+    && after.size === want.size && after.readStopsAtTheEnd === true
+    && Object.keys(want).every((f) => f === 'size' || after[f] === want[f])
+  /* THE RACE HAPPENED AND THE MOVED BASE WAS CAUGHT. Without this a run in which nothing ever saw
+   * a moved base would pass every byte clause above and prove nothing.
+   *
+   * TWO ROUTES CATCH IT AND THE CLAUSE ACCEPTS EITHER, with both counters in the evidence so a
+   * reader can see which fired. The commit's compare-and-swap is one (`casRefusals`). The other is
+   * a READER: `extentFd` re-bases a stale stage before it answers, because the extent it reports
+   * and the blob behind it would otherwise come from two different states — so in a scenario whose
+   * dirty description reads or fstats before it commits, the base is already current by commit
+   * time and the CAS has nothing left to refuse. `m4` and `dirtytrunc` are those scenarios, and
+   * requiring the CAS specifically would be asserting WHICH mechanism caught it rather than that
+   * the stale base never reached the disk. `restages > 0` is the half that is common to both: a
+   * moved base that was detected and not re-based is a byte somebody loses. */
+  const st = out.stats || {}
+  out.movedBaseWasCaught = ((st.casRefusals || 0) > 0 || (st.readRebases || 0) > 0)
+    && (st.restages || 0) > 0
+  out.volumeClean = !!(out.fsck && out.fsck.mountable === 'rw' && out.fsck.problems.length === 0)
+  out.ok = row.ok === true && row.everyCallSucceeded === true && row.bothKept === true
+    && row.readStopsAtTheEnd !== false && out.movedBaseWasCaught === true
+    && out.survivedTheRemount === true && out.volumeClean === true
+  return out
+}
+
+/** Uncommitted bytes above the published size, planted page-side and then remounted. */
+async function casSlack(path, S) {
+  const out = {}
+  await wipe()
+  let k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { at: 'mkfiles', errors: made.errors }
+    // A snapshot first, so the published size is in the superblock and not only in the journal.
+    k.post({ t: 'snapshot' })
+    await k.expect('snapshot', 20000).catch(() => null)
+  } finally {
+    await shut(k)
+  }
+  // THE BLOB THIS FILE'S BYTES ARE IN, identified the only way the page can and asserted by
+  // finding exactly one: the committed generation whose length is the seeded length.
+  const hits = (await listBlobs()).filter((b) => b.size === S && /\.1$/.test(b.name))
+  if (hits.length !== 1) return { at: 'identify', hits: hits.map((b) => b.name) }
+  const name = hits[0].name
+  const was = await readBlobRaw(name)
+  const grown = new Uint8Array(was.length + CAS_SLACK)
+  grown.set(was, 0)
+  grown.fill(ORPHANED.byte, was.length)
+  await writeBlobRaw(name, grown)
+  out.planted = { name, was: was.length, now: grown.length, byte: ORPHANED.byte }
+  const onDisk = (await listBlobs()).find((b) => b.name === name)
+  // ANTI-VACUITY: the slack has to be on disk before the remount, or there is nothing to resist.
+  out.slackOnDisk = !!(onDisk && onDisk.size === S + CAS_SLACK)
+
+  await waitForJournal()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    out.remount = { mode: up.fs.mode,
+      problems: (up.fs.report && up.fs.report.problems ? up.fs.report.problems : [])
+        .map((p) => p.what) }
+    out.row = await once(k, ['cas', path + '|slack'], 30000)
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    out.fsck = ck && ck.report
+      ? { mountable: ck.report.mountable, problems: (ck.report.problems || []).map((p) => p.what),
+          blobs: ck.report.blobs }
+      : null
+  } catch (e) {
+    out.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+  await waitForJournal()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    out.second = { mode: up.fs.mode, read: await once(k, ['cas', path + '|read'], 30000) }
+  } catch (e) {
+    out.second = { threw: String((e && e.message) || e) }
+  } finally {
+    await shut(k)
+  }
+  const row = out.row || {}
+  const after = (out.second && out.second.read) || {}
+  out.publishedSizeHeld = row.ok === true && row.nothingResurrected === true
+    && row.fdSize === S && after.size === S && after.read === S
+  // fsck SEES IT. The bytes are still on disk — a mount must not write — so the clause is that the
+  // sweep names them as slack and counts them reclaimable, which is the arm it did not have.
+  const b = (out.fsck && out.fsck.blobs) || {}
+  out.fsckReportedTheSlack = Array.isArray(b.long) && b.long.length === 1
+    && b.long[0].name === out.planted.name && b.long[0].want === S
+    && b.long[0].have === S + CAS_SLACK && b.reclaimableBytes >= CAS_SLACK
+  out.ok = out.slackOnDisk === true && out.publishedSizeHeld === true
+    && out.fsckReportedTheSlack === true
+  return out
+}
+
+/** Two processes, one path, two opens with no await between them. */
+async function casOpens(path) {
+  const out = {}
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { at: 'mount', mode: up.fs.mode }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { at: 'mkfiles', errors: made.errors }
+    const p1 = await spawnProcess(k, ['casopen', path])
+    const p2 = await spawnProcess(k, ['casopen', path])
+    // BOTH AT ONCE, which is the whole scenario: `runPid` awaits one `results` event and would
+    // serialise them, so the two gos go out together and the rows are collected by pid.
+    k.post({ t: 'go', go: { mode: 'park', pid: p1, argv: ['casopen', path] } })
+    k.post({ t: 'go', go: { mode: 'park', pid: p2, argv: ['casopen', path] } })
+    const a = await rowFor(k, p1, 60000, 'casopen 1')
+    const b = await rowFor(k, p2, 60000, 'casopen 2')
+    out.a = { ok: a.ok, at: a.at, errno: a.errno, size: a.size, close: a.close }
+    out.b = { ok: b.ok, at: b.at, errno: b.errno, size: b.size, close: b.close }
+    out.errors = (k.events || []).flatMap((m) => (m.t === 'io-note' && m.why ? [m.why] : []))
+    out.ok = a.ok === true && b.ok === true && a.size === b.size
+  } catch (e) {
+    out.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+  return out
+}
+
+/**
+ * ALL THREE SUPERBLOCK SLOTS CORRUPTED ON A NON-EMPTY VOLUME: refuse, and write nothing.
+ *
+ * `src/fs/fsck.mjs` returning 'refuse' is checked under Node, but the RESEED lives in the caller
+ * — and the caller's refuse arm was exercised by nothing. Replacing it with the fresh-volume body
+ * (seed an empty VFS, write a snapshot, mount read-write) is constraint 28's named defect and
+ * webxp's exact behaviour, and it passed all three proofs and every host test.
+ *
+ * Three snapshots first, so all three slots hold live copies of a real volume: one or two corrupt
+ * slots is the case fsck is built to SURVIVE (it falls back and says so), and corrupting all three
+ * is the case constraint 28 is about. The bytes are then read back after the refused mount, because
+ * "it wrote nothing" is a claim about the volume rather than about the report.
+ */
+async function refusedMount() {
+  say('--- all three superblock slots corrupt: the mount must REFUSE and write nothing')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  let before = null
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '8'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    for (let i = 0; i < SUPER_SLOTS.length; i += 1) {
+      k.post({ t: 'snapshot' })
+      const snap = await k.expect('snapshot', 60000)
+      if (!snap.ok) return { ok: false, evidence: { at: 'snapshot', i, r: snap.r } }
+    }
+    // Ops AFTER the last snapshot, flushed by the idle timer, so the journal is NOT empty when
+    // the volume is wrecked. A reseed truncates the journal, and against an empty one that clause
+    // could not tell a refusal from a reseed.
+    const extra = await once(k, ['modebits'])
+    if (!extra.ok) return { ok: false, evidence: { at: 'modebits', bad: extra.bad } }
+    await new Promise((r) => setTimeout(r, JOURNAL_IDLE_MS * 3))
+    k.post({ t: 'fs-state' })
+    before = (await k.expect('fs-state', 10000)).fs
+  } finally {
+    await shut(k)
+  }
+
+  // Corrupt every slot IN PLACE, keeping each file's length: a short slot would be refused by the
+  // length check instead of by the magic, and this proof is about the volume's verdict rather than
+  // about which guard produced it.
+  const wrecked = []
+  for (const name of SUPER_SLOTS) {
+    let bytes = null
+    try { bytes = await readRaw(name) } catch (e) { bytes = null }
+    if (!bytes || bytes.length === 0) {
+      wrecked.push({ name, present: false })
+      continue
+    }
+    const junk = new Uint8Array(bytes.length).fill(0x5a)
+    await writeRaw(name, junk)
+    wrecked.push({ name, present: true, length: junk.length, sum: sum16(junk) })
+  }
+  const journalBefore = await waitForJournal()
+  const blobsBefore = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+
+  // The second kernel, over a volume whose every superblock slot is garbage.
+  const k2 = kernelBoot(BOOT_CFG)
+  let fs2 = null
+  try {
+    fs2 = (await k2.expect('up', 20000)).fs
+  } finally {
+    await shut(k2)
+  }
+
+  // Read the volume back. A reseed writes a slot and truncates the journal, so both are measured.
+  const slotsAfter = []
+  for (const name of SUPER_SLOTS) {
+    let bytes = null
+    try { bytes = await readRaw(name) } catch (e) { bytes = null }
+    slotsAfter.push(bytes
+      ? { name, present: true, length: bytes.length, sum: sum16(bytes) }
+      : { name, present: false })
+  }
+  const journalAfter = await waitForJournal()
+  const blobsAfter = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+
+  const allThreeCorrupted = wrecked.filter((s) => s.present).length === SUPER_SLOTS.length
+  const refused = !!(fs2 && fs2.mode === 'refuse')
+  const slotsUnchanged = JSON.stringify(wrecked) === JSON.stringify(slotsAfter)
+  const journalUnchanged = (journalBefore ? journalBefore.length : -1)
+    === (journalAfter ? journalAfter.length : -2)
+  const blobsUnchanged = JSON.stringify(blobsBefore) === JSON.stringify(blobsAfter)
+  const wroteFalse = !!(fs2 && fs2.report && fs2.report.wrote === false)
+  // A reseeded volume is a volume with one inode in it. The refusing kernel has NO tree at all,
+  // which is the honest state: there is no image to read without a valid slot.
+  const noInventedTree = !!(fs2 && (fs2.inodes === null || fs2.inodes === undefined))
+  return {
+    ok: allThreeCorrupted && refused && slotsUnchanged && journalUnchanged && blobsUnchanged
+      && wroteFalse && noInventedTree,
+    evidence: {
+      slots: SUPER_SLOTS.length,
+      inodesBefore: before && before.inodes ? before.inodes.inodes : -1,
+      generationBefore: before ? before.generation : '',
+      generationAfter: fs2 ? fs2.generation : '',
+      slotBefore: wrecked, slotAfter: slotsAfter,
+      journalBytesBefore: journalBefore ? journalBefore.length : -1,
+      journalBytesAfter: journalAfter ? journalAfter.length : -1,
+      blobsBefore: blobsBefore.length, blobsAfter: blobsAfter.length,
+      mode: fs2 ? fs2.mode : '',
+      wrote: fs2 && fs2.report ? fs2.report.wrote : null,
+      problems: (fs2 && fs2.report && fs2.report.problems ? fs2.report.problems : [])
+        .map((p) => p.what),
+      why: (fs2 && fs2.report && fs2.report.problems ? fs2.report.problems : [])
+        .map((p) => String(p.why).slice(0, 160)),
+      inodesAfter: fs2 ? fs2.inodes : null,
+      allThreeCorrupted, refused, slotsUnchanged, journalUnchanged, blobsUnchanged,
+      wroteFalse, noInventedTree,
+    },
+  }
+}
+
+/**
+ * A SLOT NAME TURNED INTO A DIRECTORY, which is how this page makes a slot read REFUSE against a
+ * real OPFS. The kernel reads a slot with `getFileHandle(name, {create: false})`, and the File
+ * System spec has that refuse a directory entry with `TypeMismatchError` — not `NotFoundError`,
+ * which is the whole distinction src/kernel/iocore.mjs `readAll` keeps. No hook inside the kernel,
+ * no bench flag: the volume is genuinely in a state where a slot exists and cannot be read.
+ */
+async function slotToDirectory(name) {
+  const root = await navigator.storage.getDirectory()
+  try { await root.removeEntry(name, { recursive: true }) } catch (e) { /* gone is fine */ }
+  await root.getDirectoryHandle(name, { create: true })
+  /* What the read actually does, read back from the page: the clause below must not pass because
+   * the name was merely missing. */
+  try {
+    await readRaw(name)
+    return 'the read SUCCEEDED'
+  } catch (e) {
+    return String((e && e.name) || e)
+  }
+}
+
+/**
+ * A SUPERBLOCK SLOT THAT CANNOT BE READ. Read-only or refuse — never a first boot.
+ *
+ * WHY THIS IS THE DANGEROUS ONE. A healthy volume's journal is EMPTY: the last snapshot truncates
+ * it. So on a volume that has just taken a snapshot, the superblock slots are the only evidence
+ * left that the volume exists at all — and an errno read as "this slot is absent" makes all of that
+ * evidence vanish at once. fsck then sees no bytes anywhere, answers FRESH, and FRESH is the one
+ * verdict whose caller is allowed to write: a new superblock over live blobs, mounted read-write,
+ * `problems` empty. Constraint 28's named defect and webxp's exact behaviour, reached through an
+ * error path instead of a bad image.
+ *
+ * TWO ARMS, because the honest verdict is not the same one twice:
+ *
+ *   ONE SLOT REFUSED   the other two still carry the volume, so it mounts READ-ONLY at the
+ *                      generation they name, says which slot and why, and keeps its tree.
+ *   ALL THREE REFUSED  there is no image, so REFUSE and keep every byte.
+ *
+ * MEASURED AGAINST THE PRE-FIX READER on this same page, which is what the clauses are sized
+ * against rather than reasoning: one slot refused mounted READ-WRITE with `problems` EMPTY, and
+ * all three produced a tree of ONE inode — the bare root — over a volume holding 28 inodes and 10
+ * blobs, with those 10 blobs still on disk and nothing left naming them. The reseed got as far as
+ * publishing that invented tree; only its superblock write was refused, because the slot name this
+ * page turned into a directory is also where the new superblock was going.
+ */
+async function unreadableSlot() {
+  say('--- a superblock slot that cannot be READ: read-only or refuse, never a first boot')
+  await wipe()
+  let before = null
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '8'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    // One snapshot per slot, so all three hold a live copy and the arm below can refuse the OLDEST
+    // and still be read: a clause on the generation cannot then pass by falling back.
+    for (let i = 0; i < SUPER_SLOTS.length; i += 1) {
+      k.post({ t: 'snapshot' })
+      const snap = await k.expect('snapshot', 60000)
+      if (!snap.ok) return { ok: false, evidence: { at: 'snapshot', i, r: snap.r } }
+    }
+    k.post({ t: 'fs-state' })
+    before = (await k.expect('fs-state', 10000)).fs
+  } finally {
+    await shut(k)
+  }
+
+  const journalBefore = await waitForJournal()
+  const blobsBefore = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+  const oldest = SUPER_SLOTS[(before.slot + 1) % SUPER_SLOTS.length]
+  const refusedWith = await slotToDirectory(oldest)
+
+  const k2 = kernelBoot(BOOT_CFG)
+  let one = null
+  try {
+    one = (await k2.expect('up', 20000)).fs
+  } finally {
+    await shut(k2)
+  }
+  const journalAfterOne = await waitForJournal()
+  const blobsAfterOne = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+
+  // Now every slot. The journal is still empty, so this is the shape that used to read as a volume
+  // nobody had ever written.
+  for (const name of SUPER_SLOTS) await slotToDirectory(name)
+  const k3 = kernelBoot(BOOT_CFG)
+  let all = null
+  try {
+    all = (await k3.expect('up', 20000)).fs
+  } finally {
+    await shut(k3)
+  }
+  const journalAfterAll = await waitForJournal()
+  const blobsAfterAll = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+
+  const named = (fs) => (fs && fs.report && fs.report.problems ? fs.report.problems : []).some(
+    (p) => p.what === 'superblock' && /could not be READ/.test(String(p.why)))
+  // THE ANTI-VACUITY CLAUSE, and it carries the whole scenario: an absent slot is a different
+  // volume, and a read that came back NotFoundError would be testing that other volume.
+  const readRefusedNotAbsent = refusedWith !== 'the read SUCCEEDED'
+    && refusedWith !== 'NotFoundError'
+  const journalWasEmpty = !!journalBefore && journalBefore.length === 0
+  const oneReadOnly = !!(one && one.mode === 'ro' && one.readOnly === true)
+  const oneSameGeneration = !!(one && before && one.generation === before.generation)
+  const oneKeptItsTree = !!(one && one.inodes && before && before.inodes
+    && one.inodes.inodes === before.inodes.inodes)
+  const allRefused = !!(all && all.mode === 'refuse')
+  const allInventedNothing = !!(all && (all.inodes === null || all.inodes === undefined))
+  const wroteNothing = !!(one && one.report && one.report.wrote === false)
+    && !!(all && all.report && all.report.wrote === false)
+  const blobsUntouched = JSON.stringify(blobsBefore) === JSON.stringify(blobsAfterOne)
+    && JSON.stringify(blobsBefore) === JSON.stringify(blobsAfterAll)
+  const journalUntouched = (journalAfterOne ? journalAfterOne.length : -1) === 0
+    && (journalAfterAll ? journalAfterAll.length : -1) === 0
+
+  return {
+    ok: readRefusedNotAbsent && journalWasEmpty && oneReadOnly && oneSameGeneration
+      && oneKeptItsTree && named(one) && allRefused && allInventedNothing && named(all)
+      && wroteNothing && blobsUntouched && journalUntouched,
+    evidence: {
+      refusedWith,
+      oldest,
+      generationBefore: before ? before.generation : '',
+      generationOne: one ? one.generation : '',
+      modeBefore: before ? before.mode : '',
+      modeOne: one ? one.mode : '',
+      modeAll: all ? all.mode : '',
+      inodesBefore: before && before.inodes ? before.inodes.inodes : -1,
+      inodesOne: one && one.inodes ? one.inodes.inodes : -1,
+      inodesAll: all ? all.inodes : null,
+      journalBytesBefore: journalBefore ? journalBefore.length : -1,
+      journalBytesOne: journalAfterOne ? journalAfterOne.length : -1,
+      journalBytesAll: journalAfterAll ? journalAfterAll.length : -1,
+      blobsBefore: blobsBefore.length,
+      blobsAfterOne: blobsAfterOne.length,
+      blobsAfterAll: blobsAfterAll.length,
+      problemsOne: (one && one.report && one.report.problems ? one.report.problems : [])
+        .map((p) => p.what),
+      problemsAll: (all && all.report && all.report.problems ? all.report.problems : [])
+        .map((p) => p.what),
+      whyOne: (one && one.report && one.report.problems ? one.report.problems : [])
+        .map((p) => String(p.why).slice(0, 200)),
+      whyAll: (all && all.report && all.report.problems ? all.report.problems : [])
+        .map((p) => String(p.why).slice(0, 200)),
+      unreadableSlotsOne: one && one.report && one.report.superblock
+        ? one.report.superblock.unreadableSlots : -1,
+      readRefusedNotAbsent, journalWasEmpty, oneReadOnly, oneSameGeneration, oneKeptItsTree,
+      allRefused, allInventedNothing, wroteNothing, blobsUntouched, journalUntouched,
+    },
+  }
+}
+
+/**
+ * THE WRITE ORDERING, MEASURED, and the directory-handle budget with it.
+ *
+ * Constraint 23's ordering is blob -> flush -> journal -> flush -> apply, and it was asserted by
+ * nothing: swapping the commit to journal-then-blob-flush passed every proof. The honest reason
+ * is recorded in the no-cow-order control — an in-session read cannot see an unflushed write,
+ * because `flush()` buys durability past a process death and not visibility — but the conclusion
+ * drawn from it was too weak. THE ORDER IS OBSERVABLE WITHOUT A CRASH: the storage edge records
+ * the sequence of operations it performed, and for a commit the blob's flush must carry a lower
+ * sequence number than the journal append that points at it.
+ *
+ * Constraint 24 rides along on the same read. `getDirectoryHandle` is 85 us per component, and
+ * this kernel's claim is stronger than "few": ONE for the life of the module, because path
+ * resolution runs over the in-memory inode tree and a blob is one flat name. Structurally sound
+ * is not the same as checked.
+ */
+/* O_APPEND's file. One directory level under the tree `setup` hands to the user. */
+const APPENDED = '/d/0/appended'
+
+/**
+ * O_APPEND, WHICH IS AN OFFSET PER WRITE AND NOT A SEEK AT OPEN.
+ *
+ * One process, four calls, nothing concurrent: an 8-byte file, two descriptions opened for append,
+ * one 4-byte write and one fsync through each. POSIX puts both ranges in the file. Read once at
+ * open — which is what `calls.mjs` used to do — both descriptions get the same end, the second
+ * writes over the first, and every call returns success: 12 bytes where 16 were acknowledged, with
+ * an explicit fsck reporting the volume clean. That last part is why this is a section and not a
+ * row in `apicheck`: the failure is silent, so the clause has to read the BYTES back.
+ */
+async function appendPerWrite() {
+  say('--- O_APPEND: two appending descriptions, and the bytes of both')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const row = await once(k, ['append', APPENDED], 60000)
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    const report = ck && ck.report ? ck.report : null
+    const clean = !!(report && report.mountable === 'rw'
+      && (report.problems || []).length === 0)
+    return {
+      ok: !!(row && row.ok && clean),
+      evidence: {
+        acknowledged: row && row.acknowledged === true,
+        bothRangesSurvived: row && row.whole === true,
+        size: row && row.size, wantSize: row && row.wantSize,
+        wrote: row && row.wrote, synced: row && row.synced,
+        got: row && row.got, want: row && row.want,
+        at: row && row.at, errno: row && row.errno,
+        clean,
+        fsck: report
+          ? { mountable: report.mountable, problems: (report.problems || []).map((p) => p.what),
+              blobs: report.blobs }
+          : null,
+      },
+    }
+  } finally {
+    await shut(k)
+  }
+}
+
+async function ordering() {
+  say('--- the write ordering, measured: the blob flush precedes the journal append')
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    // Four files, each opened, written once, fsynced and closed. The clause below reads the LAST
+    // commit's entries, so what matters is that nothing else is running: the trace is this
+    // kernel's whole storage history.
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+    k.post({ t: 'io-stats' })
+    const got = await k.expect('io-stats', 10000)
+    const io = (got && got.io) || {}
+    const trace = io.trace || []
+    const counts = io.counts || {}
+
+    const lastWrite = lastEntry(trace, (e) => e.op === 'write')
+    const flush = lastWrite ? firstAfter(trace, lastWrite.n, (e) => e.op === 'flush') : null
+    const append = lastWrite
+      ? firstAfter(trace, lastWrite.n, (e) => e.op === 'journal-append') : null
+    const jflush = append ? firstAfter(trace, append.n, (e) => e.op === 'journal-flush') : null
+    const ordered = !!(lastWrite && flush && append && jflush
+      && flush.n > lastWrite.n && append.n > flush.n && jflush.n > append.n)
+    // The thing flushed must be the BLOB, not the journal: a trace that proved an ordering
+    // between two journal operations would prove nothing about the data.
+    const flushedBlob = !!(flush && /^\d+\.\d+$/.test(flush.name))
+    const oneDirectoryHandle = counts.getDirectoryHandle === 1 && (counts.opens || 0) >= 4
+    return {
+      ok: ordered && flushedBlob && oneDirectoryHandle,
+      evidence: {
+        ordered, flushedBlob, oneDirectoryHandle,
+        commit: {
+          write: lastWrite, blobFlush: flush, journalAppend: append, journalFlush: jflush,
+        },
+        counts, traced: io.traced, dropped: io.dropped,
+        handles: io.handles, names: io.names, pendingFree: io.pendingFree,
+        // The tail itself, so a failure says what the edge actually did.
+        tail: trace.slice(-10).map((e) => e.n + ':' + e.op + (e.name ? ' ' + e.name : '')),
+      },
+    }
+  } finally {
+    await shut(k)
+  }
+}
+
+/** The last trace entry matching a predicate, and the first one after a sequence number. The
+ *  trace is a ring, so `n` is the ordering and an index into the array is not. */
+function lastEntry(trace, pick) {
+  for (let i = trace.length - 1; i >= 0; i -= 1) if (pick(trace[i])) return trace[i]
+  return null
+}
+
+function firstAfter(trace, n, pick) {
+  for (const e of trace) if (e.n > n && pick(e)) return e
+  return null
+}
+
+/** A cheap byte sum, for "these bytes are the bytes I left there". Not a checksum with a claim —
+ *  the length is compared beside it, and the volume is a few kilobytes. */
+function sum16(bytes) {
+  let s = 0
+  for (let i = 0; i < bytes.length; i += 1) s = (s + bytes[i] * (1 + (i & 7))) & 0xffff
+  return s
+}
+
+/**
+ * The rest of the ABI, exercised once each.
+ *
+ * NOT a fourth proof — the milestone owes three — but a call the suite never issues is a call
+ * nobody has shown works. The three proofs reach twelve of the thirty-nine syscalls; this reaches
+ * the others: pread not moving the cursor, dup sharing a description, readdir's cookie,
+ * ftruncate's copy-up, rename's bookkeeping, statfs, and nine refusals including the two that make
+ * constraint 29's credential mean something (mkdir in a root this uid does not own, and a chown
+ * away from one's own uid).
+ */
+async function apiSurface() {
+  say('--- the rest of the ABI: one call each, as uid ' + USER)
+  await wipe()
+  const k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const row = await once(k, ['apicheck'], 60000)
+    return { ok: row.ok === true, evidence: { calls: row.calls, bad: row.bad, rows: row.rows } }
+  } finally {
+    await shut(k)
+  }
+}
+
+/**
+ * THE DROP SECTION: what `close()` reports, and what it leaves behind.
+ *
+ * Four routes through one question — does a description's last act tell the truth about the bytes
+ * it was holding — and each one was a separate silent loss.
+ *
+ * (1) THE ACKNOWLEDGED APPEND. B appends four bytes AT the committed size: `pwrite` returns 4 and
+ *     B's own `fstat` reports the longer file, so the caller has been told twice. A then writes
+ *     BELOW the committed size and fsyncs, which stages a generation and swings. B closes.
+ *     Measured against the old code: `close()` returned 0, a fresh open reported the ORIGINAL
+ *     size, the four bytes were gone, and the explicit fsck afterwards came back `rw` with no
+ *     problems — because the blob's length matched the size the metadata published. The cause was
+ *     in the copy: it asked for the COPYING description's view of the length while the shared blob
+ *     was physically longer, so the swing published a generation B's bytes were not in.
+ *
+ * (2) THE REFUSED COMMIT. The same shape reached through `ftruncate` instead: fd1 grows the file
+ *     and stages a generation, fd2 writes below and swings PAST it, and fd1's commit then names a
+ *     generation the VFS has superseded. Refusing is correct. Reporting 0 from `close()` for it is
+ *     not, and neither is leaving the staged blob on disk for the life of the volume.
+ *
+ * (3) UNLINK UNDER AN OPEN DESCRIPTION. M2 does not implement POSIX's "the file lives until the
+ *     last descriptor closes" — that needs an orphan table in the VFS and a journal that can
+ *     replay one — so it REFUSES, and the clause is that it refuses CONSISTENTLY. The old mix of
+ *     working reads and -EIO writes was the worst of both. The blob's directory entry still
+ *     survives until the last close, which is where the DEFERRED free is now reachable.
+ *
+ * (4) THE CALLER THAT CANNOT READ A RETURN VALUE. A writer is KILLED holding a staged generation
+ *     while a second writer contends on the same inode, twelve times, each with its own byte.
+ *     Teardown closes the fd and `closeFd` commits, and teardown cannot await — so the errno has
+ *     nowhere to go and the NOTE is the only report. Measured unserialized: 3 of 12 acknowledged
+ *     writes destroyed, the volume clean afterwards, every one of them named in a note that
+ *     nothing asserted on. This route asserts the kernel's note COUNT, which is what makes the
+ *     channel a report rather than a log line.
+ */
+async function dropAndClose() {
+  say('--- drop: what close() reports, and what it leaves behind')
+  const path = pathFor(TWO_WRITERS.index)
+  const size0 = bytesFor(TWO_WRITERS.index).length
+  const evidence = { path, size0, plan: { ...DROP_APPEND, grow: DROP_GROW,
+    below: TWO_WRITERS.bLen, belowByte: TWO_WRITERS.bByte } }
+
+  /* ---- route 1: the acknowledged append, on its own volume ---- */
+  await wipe()
+  let k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') return { ok: false, evidence: { at: 'mount', mode: up.fs.mode } }
+    await install(k)
+    const made = await once(k, ['mkfiles', '4'])
+    if (!made.ok) return { ok: false, evidence: { at: 'mkfiles', errors: made.errors } }
+
+    const a = await spawnProcess(k, ['wopen', path])
+    const b = await spawnProcess(k, ['wopen', path])
+    const openA = await runPid(k, a, 30000, 'wopen A')
+    const openB = await runPid(k, b, 30000, 'wopen B')
+    // B's append. Acknowledged twice: the count, and B's own fstat.
+    const tail = await runPid(k, b, 30000, 'wtail B', ['wtail'])
+    // A writes below the committed size and fsyncs: a copy-up and a SWING.
+    const below = await runPid(k, a, 30000, 'wbelow A', ['wbelow'])
+    // THE CLOSE. Its return value is the clause.
+    const closeB = await runPid(k, b, 30000, 'wclose B', ['wclose'])
+    const closeA = await runPid(k, a, 30000, 'wclose A', ['wclose'])
+    const seen = await once(k, ['dcheck', path], 30000)
+    k.post({ t: 'fsck' })
+    const ck = await k.expect('fsck', 30000).catch(() => null)
+    evidence.append = {
+      openA: { ok: openA.ok, size: openA.size }, openB: { ok: openB.ok, size: openB.size },
+      tail: { ok: tail.ok, at: tail.at, wrote: tail.wrote, want: tail.want,
+        fdSize: tail.fdSize, wantFdSize: tail.wantFdSize },
+      below: { ok: below.ok, publishedSize: below.publishedSize },
+      closeB: closeB.close, closeA: closeA.close,
+      check: { ok: seen.ok, size: seen.size, wantSize: seen.wantSize, belowOk: seen.belowOk,
+        tailOk: seen.tailOk, atS: seen.atS, wantAtS: seen.wantAtS },
+      fsck: ck && ck.report
+        ? { mountable: ck.report.mountable, problems: (ck.report.problems || []).map((x) => x.what) }
+        : null,
+      blobs: (await listBlobs()).map((x) => x.name + ':' + x.size).sort(),
+    }
+    evidence.acknowledged = tail.ok === true && tail.wrote === DROP_APPEND.len
+      && tail.fdSize === tail.wantFdSize
+    evidence.closeReportedSuccess = closeB.close === 0 && closeA.close === 0
+    evidence.acknowledgedBytesKept = seen.ok === true
+      && seen.size === size0 + DROP_APPEND.len && seen.atS === DROP_APPEND.byte
+    evidence.volumeStillClean = !!(ck && ck.report && ck.report.mountable === 'rw'
+      && (ck.report.problems || []).length === 0)
+  } catch (e) {
+    evidence.threw = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+
+  /* ---- route 2: a staged grow another description's swing superseded ---- */
+  await wipe()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') { evidence.refused = { at: 'mount', mode: up.fs.mode } } else {
+      await install(k)
+      const made = await once(k, ['mkfiles', '4'])
+      if (!made.ok) { evidence.refused = { at: 'mkfiles', errors: made.errors } } else {
+        const c = await spawnProcess(k, ['wopen', path])
+        const e2 = await spawnProcess(k, ['wopen', path])
+        await runPid(k, c, 30000, 'wopen C')
+        await runPid(k, e2, 30000, 'wopen E')
+        const blobsBefore = (await listBlobs()).map((x) => x.name).sort()
+        const grown = await runPid(k, c, 30000, 'wstage C', ['wstage'])
+        const swung = await runPid(k, e2, 30000, 'wbelow E', ['wbelow'])
+        // C's staged generation was copied from a base E has since superseded. The commit's
+        // compare-and-swap must notice, re-stage onto E's generation and replay C's own
+        // modification — so BOTH acknowledged changes survive and neither close reports a loss.
+        const closeC = await runPid(k, c, 30000, 'wclose C', ['wclose'])
+        const closeE = await runPid(k, e2, 30000, 'wclose E', ['wclose'])
+        k.post({ t: 'fs-state' })
+        const st = (await k.expect('fs-state', 10000)).fs
+        const blobs = (await listBlobs()).map((x) => x.name + ':' + x.size).sort()
+        const merged = await once(k, ['gcheck', path], 30000)
+        evidence.refused = {
+          grown: { ok: grown.ok, ftruncate: grown.ftruncate, want: grown.want,
+            fdSize: grown.fdSize },
+          swung: { ok: swung.ok, publishedSize: swung.publishedSize },
+          closeC: closeC.close, closeE: closeE.close, merged,
+          casRefusals: st.stats.casRefusals, restages: st.stats.restages,
+          casExhausted: st.stats.casExhausted, refusedCommits: st.stats.refusedCommits,
+          blobsBefore, blobs,
+        }
+        // THE GROW AND THE WRITE BOTH SURVIVED. `ftruncate` returned 0 and E's `fsync` returned
+        // 0, so POSIX has a 72-byte file with E's bytes at the head and zeroes above the original
+        // length. Against the old code the grow was discarded entirely and `close` reported the
+        // loss — correct for a commit that could not be published, and the loss itself was the
+        // defect: the base had moved and nothing re-derived the staged generation from it.
+        evidence.bothChangesSurvived = merged.ok === true
+          && st.stats.casRefusals > 0 && st.stats.restages > 0 && st.stats.casExhausted === 0
+          && closeC.close === 0 && closeE.close === 0
+        // STILL ONE GENERATION PER FILE. The count comes from the directory BEFORE the attack
+        // rather than from a literal, so a change to how many files `setup` and `mkfiles` leave
+        // cannot make this pass by arithmetic. A re-stage opens a second staged blob and must free
+        // the one it replaced; leaking it would show up here.
+        evidence.noStagedBlobLeft = blobs.length === blobsBefore.length
+      }
+    }
+  } catch (e) {
+    evidence.refusedThrew = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+
+  /* ---- route 3: unlink under an open description ---- */
+  await wipe()
+  k = kernelBoot(BOOT_CFG)
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') { evidence.unlinked = { at: 'mount', mode: up.fs.mode } } else {
+      await install(k)
+      const made = await once(k, ['mkfiles', '4'])
+      if (!made.ok) { evidence.unlinked = { at: 'mkfiles', errors: made.errors } } else {
+        const u = await spawnProcess(k, ['wopen', path])
+        const openU = await runPid(k, u, 30000, 'wopen U')
+        const before = (await listBlobs()).map((x) => x.name).sort()
+        const row = await runPid(k, u, 30000, 'wunlink U', ['wunlink', path])
+        // STILL ON DISK, because the description still holds a reference: this is the deferred
+        // free, and it is reachable here and nowhere else now that a reader follows a swing.
+        const during = (await listBlobs()).map((x) => x.name).sort()
+        k.post({ t: 'fs-state' })
+        const st = (await k.expect('fs-state', 10000)).fs
+        const closeU = await runPid(k, u, 30000, 'wclose U', ['wclose'])
+        const after = (await listBlobs()).map((x) => x.name).sort()
+        const gone = before.filter((n) => !during.includes(n))
+        evidence.unlinked = {
+          openSize: openU.size, row, closeU: closeU.close,
+          deferredFrees: st.stats.deferredFrees,
+          blobsBefore: before, blobsDuring: during, blobsAfter: after,
+        }
+        // CONSISTENTLY REFUSED: every operation on the fd failed, and all under one errno.
+        const codes = row.errnos || []
+        evidence.refusedConsistently = row.ok === true && codes.length === 5
+          && new Set(codes).size === 1
+        // The blob outlived the unlink and went with the last close.
+        evidence.blobOutlivedTheUnlink = gone.length === 0 && st.stats.deferredFrees > 0
+          && during.length === before.length && after.length === before.length - 1
+        evidence.closeAfterUnlinkSucceeded = closeU.close === 0
+      }
+    }
+  } catch (e) {
+    evidence.unlinkedThrew = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+
+  /* ---- route 4: a writer KILLED holding a staged generation, against a contender ----
+   *
+   * THE ONE CALLER THAT CANNOT READ A RETURN VALUE. A process's teardown closes its fds
+   * synchronously — it cannot await, because the pid's ~2 s quarantine is what gives the commit
+   * time to land (constraint 14) — so `closeFd`'s errno has nowhere to go and the note channel is
+   * the only report. Measured against the unserialized kernel: 3 of 12 rounds destroyed a 4-byte
+   * write that `pwrite` had acknowledged, the volume came back clean, and the only trace was
+   * `close of inode 22 could not publish its write: errno 8` in a log nothing asserted on.
+   *
+   * SO THIS ROUTE ASSERTS THE NOTE COUNT, which is why the kernel counts notes at all. Nothing
+   * here may be refused: the victim's range is disjoint from the contender's, the contender is a
+   * live process whose every call must succeed, and a note would mean one of them was turned away.
+   */
+  await wipe()
+  k = kernelBoot(BOOT_CFG)
+  const kills = []
+  try {
+    const up = await k.expect('up', 20000)
+    if (up.fs.mode !== 'rw') { evidence.killed = { at: 'mount', mode: up.fs.mode } } else {
+      await install(k)
+      const made = await once(k, ['mkfiles', '4'])
+      if (!made.ok) { evidence.killed = { at: 'mkfiles', errors: made.errors } } else {
+        const spec = path + '|' + KILLED.hamRounds
+        for (let r = 0; r < KILLED.rounds; r += 1) {
+          const value = KILLED.values[r]
+          const victim = await spawnProcess(k, ['kstage', path + '|' + value])
+          const ham = await spawnProcess(k, ['kham', spec])
+          // The contender is released FIRST and is not awaited, so the victim's stage and its kill
+          // land inside the contender's loop. Rows are collected by pid because both are running.
+          k.post({ t: 'go', go: { mode: 'park', pid: ham, argv: ['kham', spec] } })
+          k.post({ t: 'go', go: { mode: 'park', pid: victim, argv: ['kstage', path + '|' + value] } })
+          const stage = await rowFor(k, victim, 60000, 'kstage')
+          // KILLED, holding the staged generation.
+          k.post({ t: 'end-process', pid: victim })
+          const hamRow = await rowFor(k, ham, 300000, 'kham')
+          const after = await onceByPid(k, ['kread', path], 60000)
+          kills.push({ r, value, wrote: stage.wrote,
+            at0: after.at0, atVictim: after.atVictim, size: after.size,
+            survived: after.atVictim === value,
+            hamWrote: hamRow.wrote, hamSynced: hamRow.synced,
+            hamWriteErrs: hamRow.writeErrs, hamSyncErrs: hamRow.syncErrs })
+        }
+        k.post({ t: 'fs-state' })
+        const st = (await k.expect('fs-state', 10000)).fs
+        k.post({ t: 'fsck' })
+        const ck = await k.expect('fsck', 30000).catch(() => null)
+        const acknowledged = kills.filter((x) => x.wrote === KILLED.len).length
+        const vanished = kills.filter((x) => x.wrote === KILLED.len && x.survived !== true)
+        evidence.killed = {
+          rounds: KILLED.rounds, acknowledged, vanished: vanished.length, vanishedRounds: vanished,
+          liveFdErrs: kills.flatMap((x) => [...(x.hamWriteErrs || []), ...(x.hamSyncErrs || [])]),
+          // THE KERNEL'S OWN COUNT, not the page's collection of strings: one number, counted at
+          // the single exit every note leaves through.
+          notes: st.notes, noteTexts: st.noteTexts,
+          stats: st.stats,
+          fsck: ck && ck.report
+            ? { mountable: ck.report.mountable,
+                problems: (ck.report.problems || []).map((x) => x.what) }
+            : null,
+        }
+        // EVERY ACKNOWLEDGED WRITE IS STILL THERE, and all twelve were acknowledged. Both halves:
+        // a round whose `pwrite` failed would otherwise make this pass by writing nothing.
+        evidence.killedWriterKeptEveryByte = acknowledged === KILLED.rounds
+          && vanished.length === 0
+        // AND NOTHING WAS REFUSED. The note count is zero and no call on the contender's live fd
+        // returned an errno.
+        evidence.killedWriterLeftNothingUnpublished = st.notes === 0
+          && evidence.killed.liveFdErrs.length === 0
+        evidence.killedVolumeClean = !!(ck && ck.report && ck.report.mountable === 'rw'
+          && (ck.report.problems || []).length === 0)
+      }
+    }
+  } catch (e) {
+    evidence.killedThrew = String((e && e.message) || e)
+  } finally {
+    await shut(k)
+  }
+
+  return {
+    ok: evidence.acknowledged === true && evidence.closeReportedSuccess === true
+      && evidence.acknowledgedBytesKept === true && evidence.volumeStillClean === true
+      && evidence.bothChangesSurvived === true && evidence.noStagedBlobLeft === true
+      && evidence.refusedConsistently === true && evidence.blobOutlivedTheUnlink === true
+      && evidence.closeAfterUnlinkSucceeded === true
+      && evidence.killedWriterKeptEveryByte === true
+      && evidence.killedWriterLeftNothingUnpublished === true
+      && evidence.killedVolumeClean === true,
+    evidence,
+  }
+}
+
+async function main() {
+  const pre = await globalThis.__m2Preflight
+  if (!pre.ok) throw new Error(globalThis.M2.why)
+  globalThis.M2.pageFingerprint = ABI_FINGERPRINT
+  globalThis.M2.config = {
+    bootLockBudgetMs: BOOT_LOCK_BUDGET_MS,
+    journalIdleMs: JOURNAL_IDLE_MS,
+    superSlots: SUPER_SLOTS.length,
+    noCowOrder: BOOT_CFG.noCowOrder,
+    noCrc: BOOT_CFG.noCrc,
+    files: num('a_n', 10000),
+  }
+
+  /* Each proof boots its own kernels so one cannot carry state into another, and each wipes the
+   * OPFS first so a previous run's files cannot make a proof pass by accident. */
+  for (const [name, fn] of [['proof_a', proof_a], ['proof_b', proof_b], ['proof_c', proof_c],
+    ['proof_d', proof_d], ['pending', pendingAppend], ['drop', dropAndClose],
+    ['cas', casCommit], ['orphan', orphanedGeneration],
+    ['refuse', refusedMount], ['unreadable', unreadableSlot], ['append', appendPerWrite],
+    ['order', ordering], ['api', apiSurface]]) {
+    globalThis.M2.proofs[name] = await fn()
+    const p = globalThis.M2.proofs[name]
+    say(name.replace('_', ' (') + ') ' + (p.ok ? 'ok' : 'FAIL') + ': ' +
+      JSON.stringify(p.evidence))
+  }
+
+  const allOk = Object.values(globalThis.M2.proofs).every((p) => p && p.ok)
+  globalThis.M2.verdict = allOk ? 'ok' : 'FAIL'
+  globalThis.M2.state = 'done'
+  if (allOk) out.className = 'ok'
+  say('verdict: ' + globalThis.M2.verdict)
+}
+</script>
+</body>
+</html>

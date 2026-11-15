@@ -11,7 +11,24 @@ import {
   initSyscall, syscall, write, r1of, rawWriteLength, probeNotEqual, samples, resetSamples,
   publishProgress,
   observeHeartbeat, barrierArrive, barrierDepart, barrierCounters,
+  open, close, read, pread, pwrite, readAll, fsync, ftruncate, truncate, seek,
+  fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, linkAt, rename,
+  readlink, readdir, statfs, dup, dup2,
 } from "./syscall.mjs";
+
+/**
+ * M2's file API, as ONE object on `env.fs`.
+ *
+ * Grouped rather than spread across nineteen more keys because constraint 15's seam is asserted by
+ * enumerating what a program was handed: every value here is a function, so the enumeration still
+ * shows nothing with a byteLength or a postMessage, and a reader checking that claim has one
+ * object to look at rather than nineteen rows.
+ */
+const FS = Object.freeze({
+  open, close, read, pread, pwrite, readAll, write, fsync, ftruncate, truncate, seek,
+  fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, link: linkAt,
+  rename, readlink, readdir, statfs, dup, dup2,
+});
 
 const now = () => performance.now();
 
@@ -23,6 +40,15 @@ let pid = 0;
 let myIndex = 0;
 let program = null;
 let clock = null;
+/**
+ * THE PROCESS'S OWN argv, from its spawn. A process's arguments belong to the process, not to a
+ * broadcast: a page driving several DIFFERENT programs against one kernel would otherwise have to
+ * send one `go` per program and every process would read the last one's arguments.
+ *
+ * `go.argv` still wins where it is given, because M0's and M1's benches pass argv that way and a
+ * change that broke them would be a change to a milestone that is already proved.
+ */
+let myArgv = [];
 
 /**
  * The clock's quantum, measured in THIS process in THIS run: the smallest non-zero delta over n
@@ -85,6 +111,7 @@ self.onmessage = async (ev) => {
       port = m.port;
       pid = m.pid;
       myIndex = (m.cfg && m.cfg.index) | 0;
+      myArgv = (m.cfg && m.cfg.argv) || [];
       clock = measureClock((m.cfg && m.cfg.clockReads) || 200000);
       initSyscall({ ctl, u8, g, port, pid, quantumMs: clock.quantumMs, onsignal,
         noSigpend: !!(m.cfg && m.cfg.noSigpend) });
@@ -126,7 +153,8 @@ function onCommand(m) {
     const env = {
       syscall, write, r1of, rawWriteLength, probeNotEqual, samples, resetSamples,
       observeHeartbeat, barrierArrive, barrierDepart, barrierCounters, publishProgress,
-      pid, index: myIndex, argv: m.argv || [], envp: m.envp || {},
+      fs: FS,
+      pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
     };
     const data = program.run(env, m);
     port.postMessage({

@@ -288,6 +288,41 @@ has to be said in the code or it becomes the architecture by accident.
 
 ---
 
+## D17 · File data is copy-on-write, not metadata-only durability
+
+**Rejected: declaring the durability guarantee metadata-only.** That is the cheaper answer and it
+is what the journal plus alternating superblocks already give for free. It is also exactly ext4's
+`data=writeback`, which is not ext4's default precisely because it leaves **intact metadata
+pointing at torn data** — a file whose mode, size and name are all correct and whose contents are
+half of two different writes.
+
+**Chosen: copy-on-write the blob.** An overwrite stages a new generation, writes it, flushes it,
+and only then swings the inode's reference in the journal. This is cheap here in a way it is not in
+a real filesystem: a blob is named `<ino>.<gen>`, so the swing is a reference change rather than a
+copy, and freeing the old generation is removing one directory entry.
+
+**Why the choice had to be made at M2 and not later.** The spec's own framing is the argument:
+discovering this after a user has files is the bad outcome. Metadata-only durability is not a
+guarantee users read — it is one they violate by accident, once, with a file they wanted.
+
+**One exception, and it is load-bearing rather than a loophole.** A write entirely at or beyond the
+committed size appends in place, because the committed size does not name those bytes and a torn
+append can therefore only damage bytes nobody committed. Without it a sequential appender copies
+its whole file on every `fsync`, which is quadratic; with it, 10,000 files cost 0 copy-ups.
+
+**The exception's test is the trap.** It must read the inode's *current* committed size. Written
+first against a per-description snapshot, it let a second fd overwrite committed data in place:
+fd1 appends past the size and fsyncs, publishing a larger one, and fd2 still believes the size it
+saw at open, so its write below the new size looks like an append. A per-description cache of a
+value another description can change is a stale read by construction. This was found by attacking
+the built code with two real file descriptions — not by review, and not by a mutation.
+
+*Evidence: measurement and precedent. `docs/CONSTRAINTS.md` 60, `research/09-hobbyist-os-actions.md`
+§5 (Phantom's three blocks per page, ext4's defaults), and the two-fd attack recorded in
+`MILESTONES.md` §M2.*
+
+---
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

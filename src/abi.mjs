@@ -108,7 +108,34 @@ const INTS = {
   SYS_getpgid: 13,
   SYS_setsid: 14,
   SYS_perform: 15,
-  NSYS: 16,
+  // M2. Append-only, never renumbered. 16..21 are the fd group docs/ABI.md lists; 22..36 are the
+  // path group. SYS_open keeps number 3 and gains its real signature (a0 = flags, a1 = mode, byte
+  // region = path): M0a's flat-name open was the same call with the VFS missing underneath it, and
+  // a second "open" would be two renderers of one fact.
+  SYS_close: 16,
+  SYS_read: 17,
+  SYS_pread: 18,
+  SYS_pwrite: 19,
+  SYS_seek: 20,
+  SYS_fstat: 21,
+  SYS_ftruncate: 22,
+  SYS_mkdir: 23,
+  SYS_rmdir: 24,
+  SYS_unlink: 25,
+  SYS_rename: 26,
+  SYS_symlink: 27,
+  SYS_readlink: 28,
+  SYS_link: 29,
+  SYS_stat: 30,
+  SYS_lstat: 31,
+  SYS_chmod: 32,
+  SYS_chown: 33,
+  SYS_readdir: 34,
+  SYS_truncate: 35,
+  SYS_statfs: 36,
+  SYS_dup: 37,
+  SYS_dup2: 38,
+  NSYS: 39,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -207,6 +234,51 @@ const INTS = {
   // asserts only MONOTONICITY, so a widening after an initial narrowing must fail.
   CAP_ALL: -1,  // every bit set, as a 32-bit signed value — i.e. 0xffffffff as an i32
 
+  // ---- M2 ----------------------------------------------------------------------------------
+
+  // open(2) flags, LINUX's numeric values rather than WASI's oflags. The errno space is WASI's
+  // (docs/ABI.md) because a wasi-libc binary needs no translation on the error path; the flag
+  // space is Linux's because WASI splits "how to open" across oflags + fdflags + rights, and a
+  // three-word open is the shape docs/ABI.md's `open(flags, mode)` already rejected.
+  O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_ACCMODE: 3,
+  O_CREAT: 0x40, O_EXCL: 0x80, O_TRUNC: 0x200, O_APPEND: 0x400,
+  O_DIRECTORY: 0x10000, O_NOFOLLOW: 0x20000,
+
+  SEEK_SET: 0, SEEK_CUR: 1, SEEK_END: 2,
+
+  // POSIX's own NAME_MAX. Here rather than in src/fs/vfs.mjs because it CROSSES the boundary: the
+  // kernel refuses a longer component with -ENAMETOOLONG and a program has to know what length it
+  // is being refused for, so there is one declaration and vfs.mjs imports it.
+  NAME_MAX: 255,
+
+  // The POSIX file-type bits inside a mode word. The VFS stores the permission bits alone and
+  // carries the type as a string; these are what fstat/stat publish, so a program can do
+  // `(mode & S_IFMT) === S_IFDIR` the way it would anywhere else.
+  S_IFMT: 0o170000, S_IFREG: 0o100000, S_IFDIR: 0o040000, S_IFLNK: 0o120000,
+
+  // The Filestat record, 64 bytes as docs/ABI.md publishes. The FIELDS are not WASI's: WASI's
+  // filestat has no mode, no uid and no gid, and constraint 29 turns on exactly those — a
+  // credential per call is decoration if stat cannot report the bits it was checked against. The
+  // size is kept at WASI's 64 so the published figure stands.
+  FST_DEV: 0, FST_INO: 8, FST_MODE: 16, FST_NLINK: 20, FST_UID: 24, FST_GID: 28,
+  FST_SIZE: 32, FST_ATIM: 40, FST_MTIM: 48, FST_CTIM: 56,
+  FILESTAT_BYTES: 64,
+
+  // A readdir record: [u64 ino][u8 type][u8 nlen][u16 pad][char[] name], padded to 4 bytes.
+  // docs/ABI.md's shape with the pad made explicit, because an unaligned u64 read is the kind of
+  // defect that only shows up on a name of the wrong length.
+  DT_UNKNOWN: 0, DT_DIR: 4, DT_REG: 8, DT_LNK: 10,
+  DIRENT_HEADER: 12,
+
+  // Constraint 48: the boot lock must retry for LONGER than the terminate abort grace before
+  // declaring another tab. Constraint 55 measured that grace at ~2.0 s, so a 3 s budget is the
+  // measured figure plus a margin — not a round number. Backoff doubles from BOOT_LOCK_FIRST_MS.
+  BOOT_LOCK_BUDGET_MS: 3000,
+  BOOT_LOCK_FIRST_MS: 25,
+
+  // Constraint 23: the journal is flushed on fsync, on snapshot, and on idle. This is "idle".
+  JOURNAL_IDLE_MS: 250,
+
   // Per-fd in-flight budget (item (e)). Charged per fd — not per process, not per event source —
   // because the fd is already the unit `poll()` waits on (constraint 42) and the unit `close()`
   // releases. The errno is ENOBUFS: the published WASI number for "no buffer space", which is
@@ -224,7 +296,18 @@ export const {
   SAB_BYTES, BYTE_OFF, DATA_OFF, LEN_I32, MAX_INLINE,
   SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
   SYS_spawn, SYS_exit, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid,
-  SYS_sched_yield, SYS_getppid, SYS_getpgid, SYS_setsid, SYS_perform, NSYS,
+  SYS_sched_yield, SYS_getppid, SYS_getpgid, SYS_setsid, SYS_perform,
+  SYS_close, SYS_read, SYS_pread, SYS_pwrite, SYS_seek, SYS_fstat, SYS_ftruncate,
+  SYS_mkdir, SYS_rmdir, SYS_unlink, SYS_rename, SYS_symlink, SYS_readlink, SYS_link,
+  SYS_stat, SYS_lstat, SYS_chmod, SYS_chown, SYS_readdir, SYS_truncate, SYS_statfs,
+  SYS_dup, SYS_dup2, NSYS,
+  O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
+  O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
+  S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
+  FST_DEV, FST_INO, FST_MODE, FST_NLINK, FST_UID, FST_GID, FST_SIZE,
+  FST_ATIM, FST_MTIM, FST_CTIM, FILESTAT_BYTES,
+  DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DIRENT_HEADER,
+  BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
   F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN,
   PROC_CAP, A_SHM, CALLID_WRAP,
@@ -251,6 +334,50 @@ export const IO_OPEN = "io-open";
 export const IO_WRITE = "io-write";
 export const IO_FSYNC = "io-fsync";
 export const IO_CLOSE = "io-close";
+export const IO_READ = "io-read";
+export const IO_BLOB_OPEN = "io-blob-open";
+export const IO_TRUNCATE = "io-truncate";
+export const IO_FREE = "io-free";
+export const IO_LIST = "io-list";
+export const IO_READ_ALL = "io-read-all";
+export const IO_WRITE_ALL = "io-write-all";
+export const IO_LOCK = "io-lock";
+export const IO_JOURNAL = "io-journal";
+export const IO_COPY = "io-copy";
+/**
+ * One blob's PHYSICAL length, from the handle that holds it.
+ *
+ * Not a measurement request: it is on the headline path. A file description holds no cached size,
+ * so "how far do this generation's bytes reach" is asked of the blob at the point of use — and an
+ * uncommitted append lives exactly there, in the committed generation above the size the metadata
+ * publishes, where no number in the metadata names it.
+ */
+export const IO_SIZE = "io-size";
+/** The storage edge's own counters and operation trace. A MEASUREMENT request: it performs no I/O,
+ *  and it is what makes constraint 23's write ordering and constraint 24's one-directory-handle
+ *  budget observable from a check rather than only readable in the code. */
+export const IO_STATS = "io-stats";
+
+/** How many trace entries the storage edge keeps. A ring: the sequence number survives it, so
+ *  "this flush preceded that journal append" is a comparison of integers rather than of positions
+ *  in an array a 10,000-file run would have overrun. */
+export const IO_TRACE_KEEP = 512;
+
+/**
+ * The flat blob directory (constraint 26). One subdirectory of the OPFS root, names `<ino>.<gen>`.
+ * Declared beside the I/O message kinds for the same reason they are: the dispatch kernel and the
+ * I/O worker must not disagree about a string.
+ */
+export const BLOB_DIR = "blobs";
+
+/** The journal file's name in the OPFS root. Its sync access handle IS the boot lock
+ *  (constraint 48), so the name is agreed here rather than in the worker that holds it — a module
+ *  that assigns `self.onmessage` is an entry point and must not be imported for a constant. */
+export const JOURNAL_NAME = "journal";
+
+/** The three superblock slots. THREE, not two, on Phantom's argument: against two alternating
+ *  slots a bad write to the older one DURING a commit can leave zero valid copies. */
+export const SUPER_SLOTS = Object.freeze(["sb.0", "sb.1", "sb.2"]);
 
 /** Indexed by syscall number, so a number and its printed name cannot drift. The kernel reads
  *  this array at boot to derive its dispatch table and assert every declared call has a handler
@@ -259,6 +386,10 @@ export const SYS_NAME = Object.freeze([
   "getpid", "write", "clock_nanosleep", "open", "fsync",
   "spawn", "exit", "waitpid", "kill", "sigaction", "setpgid",
   "sched_yield", "getppid", "getpgid", "setsid", "perform",
+  "close", "read", "pread", "pwrite", "seek", "fstat", "ftruncate",
+  "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink", "link",
+  "stat", "lstat", "chmod", "chown", "readdir", "truncate", "statfs",
+  "dup", "dup2",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
@@ -304,6 +435,30 @@ export const EPERM = E.EPERM;
 export const ESRCH = E.ESRCH;
 export const ECHILD = E.ECHILD;
 export const ECONNABORTED = E.ECONNABORTED;
+// M2's path and fd group, by name. Every one is read off the table above rather than written as a
+// number, so the single-copy rule holds for the errnos too.
+export const ENOENT = E.ENOENT;
+export const ENOTDIR = E.ENOTDIR;
+export const EISDIR = E.EISDIR;
+export const EEXIST = E.EEXIST;
+export const ENOTEMPTY = E.ENOTEMPTY;
+export const EACCES = E.EACCES;
+export const ELOOP = E.ELOOP;
+export const ENAMETOOLONG = E.ENAMETOOLONG;
+export const ENOSPC = E.ENOSPC;
+export const EROFS = E.EROFS;
+export const EMFILE = E.EMFILE;
+export const EMLINK = E.EMLINK;
+export const EFBIG = E.EFBIG;
+export const EBUSY = E.EBUSY;
+export const EXDEV = E.EXDEV;
+export const ESPIPE = E.ESPIPE;
+export const EOVERFLOW = E.EOVERFLOW;
+/** Every operation on a file description whose inode is gone. POSIX has no errno for it because
+ *  POSIX never reaches the state: it keeps an unlinked file alive until the last descriptor
+ *  closes. M2 does not, so it refuses CONSISTENTLY under one name instead of answering some calls
+ *  and failing others — see src/kernel/store.mjs `resolve`. */
+export const ESTALE = E.ESTALE;
 
 /**
  * The two errnos M1 gives a name to, DERIVED from the table rather than written as an index.
@@ -345,6 +500,43 @@ export function packI64(value) {
 
 export function unpackI64(lo, hi) {
   return (BigInt(hi) << 32n) | (BigInt(lo >>> 0));
+}
+
+/**
+ * The Filestat codec, in ONE place because the kernel writes the record and the process reads it.
+ * Pure over a DataView; it performs no I/O and names no capability, so a process may call it.
+ *
+ * `mode` carries the S_IF* type bits ORed with the permission bits, which is POSIX's own packing.
+ * Times are nanoseconds since the epoch as BigInt: a millisecond Date.now() times 1e6 exceeds
+ * 2^53 in 2255, but a u64 nanosecond field read as a double loses precision today, which is why
+ * the pair is BigInt and not Number.
+ */
+export function encodeFilestat(dv, off, st) {
+  dv.setBigUint64(off + FST_DEV, BigInt(st.dev || 0), true);
+  dv.setBigUint64(off + FST_INO, BigInt(st.ino), true);
+  dv.setUint32(off + FST_MODE, st.mode >>> 0, true);
+  dv.setUint32(off + FST_NLINK, st.nlink >>> 0, true);
+  dv.setUint32(off + FST_UID, st.uid >>> 0, true);
+  dv.setUint32(off + FST_GID, st.gid >>> 0, true);
+  dv.setBigUint64(off + FST_SIZE, BigInt(st.size), true);
+  dv.setBigUint64(off + FST_ATIM, BigInt(st.atimeNs), true);
+  dv.setBigUint64(off + FST_MTIM, BigInt(st.mtimeNs), true);
+  dv.setBigUint64(off + FST_CTIM, BigInt(st.ctimeNs), true);
+}
+
+export function decodeFilestat(dv, off) {
+  return {
+    dev: dv.getBigUint64(off + FST_DEV, true),
+    ino: dv.getBigUint64(off + FST_INO, true),
+    mode: dv.getUint32(off + FST_MODE, true),
+    nlink: dv.getUint32(off + FST_NLINK, true),
+    uid: dv.getUint32(off + FST_UID, true),
+    gid: dv.getUint32(off + FST_GID, true),
+    size: dv.getBigUint64(off + FST_SIZE, true),
+    atimeNs: dv.getBigUint64(off + FST_ATIM, true),
+    mtimeNs: dv.getBigUint64(off + FST_MTIM, true),
+    ctimeNs: dv.getBigUint64(off + FST_CTIM, true),
+  };
 }
 
 /** The next per-call-unique CALLID. Monotonic per process, wrapping at 2^31, never negative. */
@@ -472,6 +664,53 @@ export function selfTest() {
   const bytes = new Uint8Array([0x66, 0x6f, 0x6f, 0x62, 0x61, 0x72]);
   if (fnv1a(bytes, 0, 6) !== 0xbf9cf968) fail("fnv1a over bytes disagrees with fnv1aString");
   if (fnv1a(bytes, 3, 3, fnv1a(bytes, 0, 3)) !== 0xbf9cf968) fail("fnv1a does not chain by seed");
+
+  // M2. The Filestat record must fit its published size with no field overlapping another, and
+  // it must round-trip: a mode bit lost in the codec is a mode bit the 10k-file proof cannot
+  // observe, and the proof would pass by comparing two copies of the same mistake.
+  const fields = [
+    [FST_DEV, 8], [FST_INO, 8], [FST_MODE, 4], [FST_NLINK, 4], [FST_UID, 4], [FST_GID, 4],
+    [FST_SIZE, 8], [FST_ATIM, 8], [FST_MTIM, 8], [FST_CTIM, 8],
+  ];
+  let covered = 0;
+  for (const [at, width] of fields) {
+    if (at % width !== 0) fail(`Filestat field at ${at} is not ${width}-byte aligned`);
+    if (at + width > FILESTAT_BYTES) fail(`Filestat field at ${at} runs past the record`);
+    covered += width;
+  }
+  if (covered !== FILESTAT_BYTES) fail(`Filestat fields cover ${covered} of ${FILESTAT_BYTES} B`);
+  const probe = new DataView(new ArrayBuffer(FILESTAT_BYTES));
+  const want = {
+    dev: 0n, ino: 0x1_0000_0003n, mode: S_IFREG | 0o754, nlink: 2, uid: 1000, gid: 1001,
+    size: 0x1_0000_0007n, atimeNs: 1n, mtimeNs: 0x7fff_ffff_ffffn, ctimeNs: 3n,
+  };
+  encodeFilestat(probe, 0, want);
+  const round = decodeFilestat(probe, 0);
+  for (const key of Object.keys(want)) {
+    if (round[key] !== want[key]) fail(`Filestat ${key} round-trips as ${round[key]}`);
+  }
+  if ((round.mode & S_IFMT) !== S_IFREG) fail("Filestat loses the S_IFMT type bits");
+  if ((round.mode & 0o7777) !== 0o754) fail("Filestat loses the permission bits");
+  if (new Set([S_IFREG, S_IFDIR, S_IFLNK]).size !== 3) fail("the S_IF* type bits are not distinct");
+  for (const bit of [S_IFREG, S_IFDIR, S_IFLNK]) {
+    if ((bit & S_IFMT) !== bit) fail("an S_IF* bit is outside S_IFMT");
+  }
+  if ((O_RDONLY & O_ACCMODE) !== 0 || (O_WRONLY & O_ACCMODE) !== O_WRONLY
+      || (O_RDWR & O_ACCMODE) !== O_RDWR) {
+    fail("O_ACCMODE does not mask the three access modes");
+  }
+  if (new Set([SEEK_SET, SEEK_CUR, SEEK_END]).size !== 3) fail("the seek whences are not distinct");
+  // Constraint 48 is a comparison, not a number: the budget must exceed constraint 55's measured
+  // ~2.0 s terminate abort grace, or a normal reload comes up read-only at random.
+  if (BOOT_LOCK_BUDGET_MS <= 2051) {
+    fail(`the boot-lock budget ${BOOT_LOCK_BUDGET_MS} ms does not exceed the 2,051 ms worst `
+      + "terminate abort grace measured in constraint 55");
+  }
+  if (BOOT_LOCK_FIRST_MS <= 0 || BOOT_LOCK_FIRST_MS >= BOOT_LOCK_BUDGET_MS) {
+    fail("the boot-lock backoff must start inside its budget");
+  }
+  if (DIRENT_HEADER % 4 !== 0) fail("a dirent header that is not 4-byte aligned unaligns its u64");
+
   if (!ABI_FINGERPRINT) fail("fingerprint is zero");
   return ABI_FINGERPRINT;
 }
