@@ -1063,12 +1063,13 @@ fail. A page whose check cannot fail is not a page.
 
 ## Open experiments
 
-Three cheap measurements that should happen before the milestone that depends on them. `PLAN.md`
-§10 has the full list of unresolved items.
+Cheap measurements that should happen before the milestone that depends on them. `PLAN.md` §10 has
+the full list of unresolved items. **The first row is retired** — struck through, with its result,
+because an experiments table that drops its answers teaches the reader to re-run them.
 
 | Experiment | Before | Cost | Why |
 |---|---|---|---|
-| Can `Atomics.notify` interrupt a worker inside a synchronous OPFS read? | M4 | 0.5 d | If not, `read()` is not interruptible and the ABI is lying about Ctrl-C. Weakest point in the cancellation design. |
+| ~~Can `Atomics.notify` interrupt a worker inside a synchronous OPFS read?~~ | ~~M4~~ | 0.25 d actual | **DONE — no, it cannot, and the ABI is honest anyway.** A thread in a synchronous call is not in `Atomics.wait`, so the notify woke 0. But the handles are in the I/O worker since M0b, so the CALLING process parks and is interruptible; a signal waits one chunk, **10 µs p99**. `bench/m4-intr/probe.py`, constraints 86–89. |
 | Why is spawn 1.3–1.6× constraint 19's figure on this build? | M1 | 0.25 d | M0 excluded `Blob`/`createObjectURL` and classic-vs-module; what is left is the patch build, script size, and sample count. Re-run gap-04's own spawn harness here. M1 spawns constantly, so an unexplained 1.5× is worth a quarter day. |
 | Does the worker ceiling knee between 256 and 3,200? | M1 | 0.5 d | M0 stopped at 256 with zero failures but per-worker cost was still rising. Constraint 17 sets the design limit at 1,000, which sits inside the unmeasured gap. |
 | Is a journal append plus `flush()` durable across a kill? | before storing anything real | 1 d | The spec says "attempt to transfer" and allows a no-op. Build the zip-export affordance regardless. |

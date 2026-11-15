@@ -686,3 +686,35 @@ a recorded decision with a cost, a **structural** item needs a mechanism M3 does
     the volume at boot — which a read-only mount cannot do — or having `readdir` splice in the
     mountpoints rooted one level below the directory being read. The second is right and is not
     done.
+
+## What M4's prerequisite experiment measured
+
+Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro. `bench/m4-intr/probe.py`. This is the
+measurement `MILESTONES.md` §"Open experiments" owed before M4 and called the weakest point in the
+cancellation design.
+
+86. **`Atomics.notify` CANNOT interrupt a thread inside a synchronous OPFS read.** Measured: the
+    notify woke **0 workers** while the target was inside a chunked `read()` loop, against a
+    baseline where the same notify woke 1 worker parked in `Atomics.wait` with a 0.15 ms wake
+    latency. The mechanism is not a limitation to work around — a thread inside a synchronous call
+    is not in `Atomics.wait`, so there is nothing to wake. The flag is latched and observed only at
+    the next point the thread chooses to look, which in the chunked loop was the next chunk
+    boundary.
+87. **`read()` is nevertheless INTR-capable as `docs/ABI.md` documents, because of where the
+    handles live.** Since M0b the sync access handles are in the kernel's I/O worker (constraints
+    58–59), so the CALLING PROCESS parks in `Atomics.wait` and is fully interruptible: the kernel
+    replies `ST_INTR` and drops the late answer by CALLID. The I/O worker's read runs to completion
+    and its result is discarded. **The delay a signal waits for is the chunk in flight, measured at
+    10 µs p99** for the ABI's 64 KiB `MAX_INLINE` cap (0.005 ms median). So the ABI is honest and
+    the cost of Ctrl-C during a file read is bounded by one chunk.
+    **This is the constraint that retires the experiment, and it is a stronger result than the
+    question expected:** the design was already right, for a reason the question did not consider.
+88. **A blocking call MUST park in `Atomics.wait`, never inside a synchronous call.** The direct
+    consequence of 86 for M4: a pipe read with no data cannot be served by anything that blocks the
+    thread, because such a call cannot be interrupted at all and Ctrl-C on `sleep 100 | cat` is one
+    of M4's own proofs. It must park on the process's SEQ word like every other blocking call and be
+    woken by the kernel.
+89. **The I/O worker MUST keep its reads chunked at `MAX_INLINE`.** One unchunked 16 MiB read blocks
+    it for **2.67 ms p99** (1.7 ms median), and every other process's signal waits for it — the same
+    head-of-line argument as constraint 58's `fsync`, at a different scale. Measured per size:
+    64 KiB 0.005 ms median / 0.010 p99; 1 MiB 0.040 / 0.140; 16 MiB 1.725 / 2.910.
