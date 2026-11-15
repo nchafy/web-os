@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M4 — pipes, process groups</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
+</head>
+<body>
+<pre id="log">M4 starting…</pre>
+<script>
+  globalThis.M4 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M4's page harness: pipes, process groups, and the dead-peer asymmetry.
+ *
+ * The milestone's proofs are written in shell syntax and there is no shell until M5, so each is
+ * built from the mechanism the shell will use — `pipe2` + `spawn` with file actions + `setpgid`,
+ * which is what replaces `fork`. One orchestrator process per proof, spawning its own stages:
+ * every byte and every signal below crosses a real syscall from inside a real process worker.
+ *
+ *   PROOF 1  `yes | head -1` terminates — the writer dies of SIGPIPE
+ *   PROOF 2  Ctrl-C on a pipeline kills both stages
+ *   PROOF 3  a writer killed -9 makes its blocked reader return 0 (EOF), not an errno
+ *   PROOF 4  a blocked writer whose reader died gets SIGPIPE
+ *
+ * CONTROL ?no_sigpipe=1 — stop delivering a fatal SIGPIPE; proof 1 must HANG, which the program
+ * reports as `hitCap` rather than as a timeout, because a timeout carries no information.
+ */
+import { SIGPIPE, SIGINT, E } from '/src/abi.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = { noSigpipe: params.get('no_sigpipe') === '1' }
+
+Object.assign(globalThis.M4, { isolated: self.crossOriginIsolated === true })
+
+globalThis.M4.proofs = {
+  pipe_basic: null, yes_head: null, group_signal: null,
+  killed_writer_eof: null, killed_reader_epipe: null,
+}
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M4.state = 'aborted'
+  globalThis.M4.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures.'
+  out.className = 'bad'
+  say(globalThis.M4.why)
+} else {
+  main().catch((e) => {
+    globalThis.M4.state = 'error'
+    globalThis.M4.why = String((e && e.stack) || e)
+    say(globalThis.M4.why)
+  })
+}
+
+const PROGRAM = '/bench/m4-fs/program.mjs'
+class KernelFail extends Error {}
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M4.kernelIsolated = m.isolated === true
+      globalThis.M4.kernelFingerprint = m.abiFingerprint
+    }
+    if (m.t === 'fault') {
+      globalThis.M4.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M4.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M4.notes.push(m.why)
+    if (m.t === 'teardown-leak') globalThis.M4.errors.push('teardown-leak pid ' + m.pid)
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M4.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); rej(new Error('timed out waiting for ' + t)) }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m), events, pids: [] }
+}
+
+/**
+ * Run ONE orchestrator to completion and return its row.
+ *
+ * A fresh kernel per proof. Each proof spawns and kills several processes and leaves zombies in a
+ * ~2.2 s terminate quarantine, so sharing one kernel would make each proof's process table depend
+ * on how fast the previous one finished — and `yes | head -1` under the control deliberately does
+ * not finish at all.
+ */
+async function runProof (mode, boot, timeoutMs = 90000) {
+  const k = kernelBoot(boot)
+  globalThis.M4.events = k.events
+  try {
+    await k.expect('up', 30000)
+    k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+      cfg: { argv: [mode], uid: 0, gid: 0 }, readyTimeoutMs: 20000 })
+    const spawned = await k.expect('spawned', 20000)
+    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+    await k.expect('ready', 20000)
+    const pid = spawned.pids[0]
+    k.post({ t: 'go', go: { mode: 'park', pid } })
+    let results
+    try {
+      results = await k.expect('results', timeoutMs)
+    } catch (e) {
+      /* A TIMEOUT MUST CARRY THE STATE, not just the word "timeout". A stopped pipeline raises no
+       * error anywhere — a parked reader and a parked writer are both legitimate — so the only way
+       * to tell a working pipe from a deadlocked one is to read the counts. */
+      k.post({ t: 'm4-state' })
+      let state = null
+      try { state = await k.expect('m4-state', 5000) } catch (e2) { state = { why: String(e2) } }
+      globalThis.M4.stuck = { mode, state }
+      throw new Error(mode + ': ' + (e && e.message) + ' — kernel state: ' +
+        JSON.stringify(state && { procs: state.procs, pipes: state.pipes }))
+    }
+    const row = results.results.find((r) => r.pid === pid)
+    if (!row) {
+      throw new Error(mode + ': no row for pid ' + pid + '; got ' +
+        JSON.stringify(results.results.map((r) => r.pid)))
+    }
+    return row
+  } finally {
+    k.worker.terminate()
+  }
+}
+
+async function main () {
+  const t0 = performance.now()
+  say('M4: pipes and process groups' + (CFG.noSigpipe ? '  [CONTROL: no_sigpipe]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.noSigpipe) boot.noSigpipe = true
+  const P = globalThis.M4.proofs
+
+  /* ---- a pipe carries bytes between two processes at all -------------------------------- */
+  const basic = await runProof('p_basic', boot)
+  say('p_basic: writer ' + JSON.stringify(basic.writer) + ' reader ' + JSON.stringify(basic.reader))
+  P.pipe_basic = {
+    ok: !!(basic.ok && basic.reader && basic.reader.exited && basic.writer
+      && basic.writer.exited && basic.pipe && basic.pipe.rfd >= 0 && basic.pipe.wfd >= 0
+      && basic.pipe.rfd !== basic.pipe.wfd),
+    evidence: {
+      pipe: basic.pipe, writerPid: basic.writerPid, readerPid: basic.readerPid,
+      writer: basic.writer, reader: basic.reader,
+      // Two DIFFERENT fds from one call, the read end in r0 and the write end in r1.
+      twoDistinctFds: !!(basic.pipe && basic.pipe.rfd !== basic.pipe.wfd),
+      bothReaped: !!(basic.writer && basic.writer.exited && basic.reader && basic.reader.exited),
+    },
+  }
+
+  /* ---- PROOF 1: `yes | head -1` terminates ---------------------------------------------- */
+  const yh = await runProof('p_yeshead', boot)
+  say('p_yeshead: head ' + JSON.stringify(yh.head) + ' yes ' + JSON.stringify(yh.yes))
+  P.yes_head = {
+    ok: !!(yh.ok && yh.yesKilledBySigpipe && yh.head && yh.head.exited),
+    evidence: {
+      yesPid: yh.yesPid, headPid: yh.headPid,
+      head: yh.head, yes: yh.yes,
+      // THE PROOF: the writer was killed, by SIGPIPE, rather than exiting or running on.
+      yesKilledBySigpipe: yh.yesKilledBySigpipe,
+      SIGPIPE: yh.SIGPIPE,
+    },
+  }
+
+  /* ---- PROOF 2: one signal kills every stage of the pipeline ---------------------------- */
+  const grp = await runProof('p_group', boot)
+  say('p_group: sleeper ' + JSON.stringify(grp.sleeper) + ' catter ' + JSON.stringify(grp.catter))
+  P.group_signal = {
+    ok: !!(grp.ok && grp.bothKilledByInt),
+    evidence: {
+      myPgid: grp.myPgid, sleeperPid: grp.sleeperPid, catterPid: grp.catterPid,
+      killResults: grp.killResults,
+      sleeper: grp.sleeper, catter: grp.catter,
+      bothKilledByInt: grp.bothKilledByInt, SIGINT: grp.SIGINT,
+    },
+  }
+
+  /* ---- PROOF 3: a killed writer gives its blocked reader EOF, not an errno -------------- */
+  const kw = await runProof('p_killwriter', boot)
+  say('p_killwriter: reader ' + JSON.stringify(kw.reader))
+  P.killed_writer_eof = {
+    ok: !!(kw.ok && kw.writer && kw.writer.killed && kw.reader && kw.reader.exited),
+    evidence: {
+      writerPid: kw.writerPid, readerPid: kw.readerPid, killResult: kw.killResult,
+      writer: kw.writer, reader: kw.reader,
+      writerWasKilled: !!(kw.writer && kw.writer.killed),
+      readerExitedCleanly: !!(kw.reader && kw.reader.exited),
+    },
+  }
+
+  /* ---- PROOF 4: a blocked writer whose reader died gets SIGPIPE ------------------------- */
+  const kr = await runProof('p_killreader', boot)
+  say('p_killreader: writer ' + JSON.stringify(kr.writer))
+  P.killed_reader_epipe = {
+    ok: !!(kr.ok && kr.writerKilledBySigpipe),
+    evidence: {
+      writerPid: kr.writerPid, readerPid: kr.readerPid, killResult: kr.killResult,
+      writer: kr.writer, reader: kr.reader,
+      writerKilledBySigpipe: kr.writerKilledBySigpipe, SIGPIPE: kr.SIGPIPE,
+    },
+  }
+
+  globalThis.M4.config = { noSigpipe: CFG.noSigpipe }
+  const sections = Object.entries(globalThis.M4.proofs)
+  const ran = sections.filter(([, v]) => v !== null)
+  globalThis.M4.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
+    ? 'ok' : 'FAIL'
+  globalThis.M4.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  say('verdict ' + globalThis.M4.verdict + ' in ' + Math.round(globalThis.M4.ms) + ' ms')
+  out.className = globalThis.M4.verdict === 'ok' ? 'ok' : 'bad'
+  globalThis.M4.state = 'done'
+}
+</script>
+</body>
+</html>

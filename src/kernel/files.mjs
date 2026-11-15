@@ -245,7 +245,12 @@ registerKind(F_PIPE_R, {
     // is what POSIX says and `calls.mjs` already refuses pread on a kind without a position; this
     // is the second line of that defence, for a caller that reached the op directly.
     if (at !== undefined) return -ESPIPE;
-    return d.pipe.read(d.slot, d.slot.seq, p.bytes, dstOff, length);
+    // `p`, THE CALLING PROCESS — never a slot recorded on the description. A description is
+    // SHARED: `dup` aliases it and a spawned child inherits it, so the process that created the
+    // pipe is usually not the one reading it. Recording the creator's slot here parked the record
+    // against the parent and replied to the parent, so the child's read never returned and the
+    // whole pipeline deadlocked with no error anywhere.
+    return d.pipe.read(p, p.seq, p.bytes, dstOff, length);
   },
   close(d) {
     return d.pipe.close(true);
@@ -255,7 +260,8 @@ registerKind(F_PIPE_R, {
 registerKind(F_PIPE_W, {
   write(d, u8, offset, length, p, at) {
     if (at !== undefined) return -ESPIPE;
-    return d.pipe.write(d.slot, d.slot.seq, u8.subarray(offset, offset + length));
+    // `p`, the calling process. See the read op for why a description cannot carry a slot.
+    return d.pipe.write(p, p.seq, u8.subarray(offset, offset + length));
   },
   fsync() {
     // A pipe has nothing to force. 0 rather than -ENOSYS, for the reason the tmpfs gives: `fsync`

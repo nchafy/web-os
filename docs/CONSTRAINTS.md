@@ -718,3 +718,49 @@ cancellation design.
     it for **2.67 ms p99** (1.7 ms median), and every other process's signal waits for it — the same
     head-of-line argument as constraint 58's `fsync`, at a different scale. Measured per size:
     64 KiB 0.005 ms median / 0.010 p99; 1 MiB 0.040 / 0.140; 16 MiB 1.725 / 2.910.
+
+## What M4 found in the code it built on
+
+90. **DEFECT (fixed) — `spawn` assigned `ppid` nowhere, so three mechanisms were unreachable.**
+    `src/kernel/table.mjs` initialised it to 0 and nothing ever wrote it, so `waitpid` could only
+    ever return `-ECHILD`, `parkParent` and teardown's parent-wake had no live caller, and
+    `setpgid`'s "or your child" clause could never be true. Nothing inherited `pgid` or `sid`
+    either, so every process was its own group and `kill(-pgid)` could not reach a pipeline — which
+    M4's own Ctrl-C proof requires. A child now inherits ppid, pgid, sid, cwd and credentials from
+    its parent; a page-spawned process still has none, which is right for a process the supervisor
+    started.
+91. **DEFECT (fixed) — teardown's parent-wake replied without removing the child from the live
+    set.** The `reapForParent` path removed it; teardown's did not. So a parent waiting on two
+    children was answered with the FIRST child's pid twice and never saw the second. Both paths now
+    go through one `detachChild`. The defect was unreachable until constraint 90 was fixed, which
+    is why it was wrong: newly-live code is where the bugs are.
+92. **DEFECT (fixed) — a pipe's open-end counts were raised per HOLDER and dropped per
+    DESCRIPTION.** `KIND_OPS.close` fires once, when the last reference to a description goes, but
+    the counts were incremented once per process that inherited it. A pipeline therefore left
+    `writers` at 1 after its only writer had exited, and the reader parked on an EOF that could
+    never arrive — with no error anywhere, because a parked reader is a legitimate state. POSIX's
+    rule is about file DESCRIPTIONS: a pipe has exactly one read description and one write
+    description, and `dup`, `dup2` and spawn-inheritance only add references, so each end is 0 or 1.
+93. **DEFECT (fixed) — a file description must not carry the slot of the process that created
+    it.** The pipe descriptions recorded their creator so the pipe could reply to a parked call.
+    But a description is SHARED — `dup` aliases it and a spawned child inherits it — so the child's
+    read parked a record against its parent and replied to the parent. The ops rows are handed the
+    calling process on every call, which is the only correct answer.
+94. **A process starts with fd 0 free, so `pipe2` can return fd 0 as the read end.** `spawn`
+    installs the sink on 1 and 2 and deliberately leaves 0 unopened so a `read(0)` is EBADF rather
+    than a silent zero, and `fds.add` hands out the lowest free fd. A caller that then treats 0 as
+    stdin wires its pipeline backwards: measured, a stage dup'd fd 0 onto fd 0 and then closed it
+    as "the pipe fd". **A process building a pipeline MUST open its own stdin first.** M5's shell
+    has to do this or inherit the bug.
+95. **The per-fd in-flight budget is RELEASED when a call parks, not held for its duration.** The
+    budget bounds outstanding kernel I/O per description, and `chargeFd`'s own comment names "a
+    kernel that never settles would hold a slot forever" as its hazard — a parked pipe read is
+    exactly that, by design and indefinitely. What bounds parked records instead is the process
+    table: a process has one futex word and one outstanding call, so a pipe holds at most one
+    record per process and processes are capped by constraint 17. Holding the charge would instead
+    make the 65th blocking reader on a shared pipe get ENOBUFS, which is a different and
+    undocumented contract.
+96. **A parked call is signalled by returning `null` from an ops row, and `null` MUST be tested
+    before any numeric use.** `null >= 0` is true and `null | 0` is 0, so a parked read left to
+    fall through answered the caller 0 — which on a pipe means EOF. A reader that was supposed to
+    wait would have seen end-of-file.

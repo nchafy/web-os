@@ -15,7 +15,7 @@ import {
   K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
   EINTR, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO,
   SIGKILL, SIGTERM, SIGINT, SIGHUP, SIGPIPE, SIG_DFL, SIG_IGN, SIG_HANDLE,
-  F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2, ENOEXEC, decodeSpawnRequest,
+  F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2, ENOEXEC, SYS_NAME, decodeSpawnRequest,
   STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
@@ -1067,8 +1067,12 @@ function teardown(slot) {
       const waited = parent.inflight.waitingFor;
       if (waited === -1 || waited === slot.pid) {
         const status = packStatus(slot.exitKind, slot.exitValue);
+        // DETACH BEFORE REPLYING, as `reapForParent` does. Without it the child stayed in `live`
+        // as a ZOMBIE after its parent had been answered, so the parent's next `waitpid` found
+        // the same child and was answered with its pid a second time — and never saw the sibling
+        // it was actually waiting for.
+        detachChild(slot);
         reply(parent, slot.pid, status, ST_RETURN);
-        parent.inflight = null;
       }
     }
   }
@@ -1111,6 +1115,25 @@ function reap(slot, kind, value) {
   post({ t: "reaped", pid: slot.pid, kind, value });
 }
 
+/**
+ * Take a reaped child out of the live set, so a second `waitpid` cannot find it again.
+ *
+ * ONE DEFINITION, because there are two paths that answer a parent and they disagreed. The
+ * `reapForParent` path removed the child; teardown's parent-wake replied and left it in `live` as
+ * a ZOMBIE — so a parent waiting for two children was answered with the FIRST child's pid twice
+ * and never saw the second. That path was unreachable until `ppid` started being assigned, which
+ * is exactly why it was wrong.
+ *
+ * The physical slot stays until `scheduleFree`'s quarantine expires; this removes only the
+ * handles a `waitpid` sweep looks at.
+ */
+function detachChild(child) {
+  if (table.byPid.get(child.pid) === child) {
+    table.byPid.delete(child.pid);
+    table.live.delete(child);
+  }
+}
+
 /** Reply directly with (pid, status): the only call that uses r1 as a value rather than as the
  *  error sentinel. Reply via reply() and return PENDING so the dispatcher does not overwrite r1
  *  with the zero finish() would publish. */
@@ -1118,10 +1141,7 @@ function reapForParent(parent, child) {
   const status = packStatus(child.exitKind, child.exitValue);
   // Remove from live so a follow-up waitpid returns -ECHILD. The physical slot sticks around
   // until scheduleFree's quarantine times out.
-  if (table.byPid.get(child.pid) === child) {
-    table.byPid.delete(child.pid);
-    table.live.delete(child);
-  }
+  detachChild(child);
   reply(parent, child.pid, status, ST_RETURN);
   return PENDING;
 }
@@ -1295,7 +1315,6 @@ function spawnChild(caller) {
     // A pipe description now held by the child must count the child's end. Done after the actions
     // so a CLOSEd end is not counted, and before the worker runs so the child cannot read from a
     // pipe whose writer count has not yet been raised.
-    countPipeEnds(child);
     // ARM THE RUN ON THE CHILD'S OWN `ready`, rather than polling for it. The worker is already
     // constructed and loading its image; `onProcessMessage`'s ready arm posts this `go` the moment
     // the child says it is initialised, so there is no sleep and no window in which the child
@@ -1306,23 +1325,6 @@ function spawnChild(caller) {
   return PENDING;
 }
 
-/**
- * Raise the pipe refcounts for every pipe description a slot ended up holding.
- *
- * A pipe's `readers`/`writers` are counts of OPEN DESCRIPTIONS, and the fd table's own refcount
- * cannot serve: two fds on one description are one open end, and `close` on the last fd is what
- * the pipe must see. So the pipe is counted per DISTINCT description, which is what the `seen`
- * set is for — the same deduplication teardown's fd sweep does, for the same reason.
- */
-function countPipeEnds(slot) {
-  const seen = new Set();
-  for (const d of slot.fds.fds) {
-    if (!d || seen.has(d)) continue;
-    seen.add(d);
-    if (d.kind === F_PIPE_R) d.pipe.readers += 1;
-    else if (d.kind === F_PIPE_W) d.pipe.writers += 1;
-  }
-}
 
 // ---------------------------------------------------------------------------- boot
 
@@ -1634,6 +1636,34 @@ async function handle(m) {
       // privileged crosses — a SAB is the channel, and the page already holds the globals one.
       post({ t: "exposed", procs: [...table.live].map((p) => ({ pid: p.pid, sab: p.sab })) });
       return;
+    case "m4-state": {
+      // M4's own account of itself: who is parked, on what, and what every pipe holds.
+      //
+      // A pipeline that stops makes no error anywhere — a parked reader and a parked writer are
+      // both legitimate states — so the only way to tell a working pipe from a deadlocked one is
+      // to look at the counts. Pipes are reached by walking the fd tables because nothing holds a
+      // registry of them: a pipe is alive exactly as long as a description points at it.
+      const pipes = new Map();
+      const procs = [...table.live].map((s) => {
+        const fds = [];
+        s.fds.fds.forEach((d, fd) => {
+          if (!d) return;
+          fds.push({ fd, kind: d.kind, refs: d.refs });
+          if (d.pipe && !pipes.has(d.pipe)) pipes.set(d.pipe, d.pipe.report());
+        });
+        return {
+          pid: s.pid, ppid: s.ppid, pgid: s.pgid, sid: s.sid, state: s.state,
+          calls: s.calls, replies: s.replies, errors: s.errors,
+          // What this process is parked on, if anything. The syscall NAME, because a number
+          // sends the reader to the table.
+          inflight: s.inflight ? (SYS_NAME[s.inflight.nr] || s.inflight.nr) : null,
+          waitingFor: s.inflight ? (s.inflight.waitingFor ?? null) : null,
+          fds,
+        };
+      });
+      post({ t: "m4-state", procs, pipes: [...pipes.values()] });
+      return;
+    }
     case "m3-state":
       post({ t: "m3-state", m3: m3State() });
       return;

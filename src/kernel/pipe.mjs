@@ -41,7 +41,20 @@ export class Pipe {
     // are distinguishable without sacrificing a byte, and a wrapped read is two subarray copies.
     this.head = 0;
     this.length = 0;
-    /** Open descriptions, by direction. A pipe is alive while either side has one. */
+    /**
+     * Whether each END is still open: 0 or 1, never more.
+     *
+     * A pipe has exactly ONE read description and ONE write description — `pipe2` creates them and
+     * `dup`, `dup2` and spawn-inheritance only add REFERENCES to those two. The fd table already
+     * refcounts references and calls the kind's `close` op once, when the last one goes, so these
+     * are set to 1 at creation and to 0 by that op.
+     *
+     * COUNTING PER HOLDER WAS WRONG and deadlocked a pipeline: raising these once per process that
+     * inherited a description, while `close` fires once per DESCRIPTION, left `writers` at 1 after
+     * the only writer had exited — so the reader parked on an EOF that could never arrive. The
+     * state dump read `readers: 2, writers: 1` for one reader and a dead writer. POSIX's rule is
+     * about file DESCRIPTIONS, which is what this now counts.
+     */
     this.readers = 0;
     this.writers = 0;
     /** Parked calls. {slot, seq, dstOff, want} for readers; {slot, seq, bytes, done} for writers. */
@@ -212,7 +225,9 @@ export class Pipe {
    */
   close(isReader) {
     if (isReader) {
-      this.readers = Math.max(0, this.readers - 1);
+      // 0, not a decrement: this op fires once, when the last reference to the read description
+      // goes. See the field's note.
+      this.readers = 0;
       if (this.readers === 0) {
         // Every parked writer gets -EPIPE and SIGPIPE. Drained into a local first: `#epipe`
         // raises a signal that can reap the slot, which mutates nothing here but makes iterating
@@ -230,8 +245,8 @@ export class Pipe {
       }
       return 0;
     }
-    this.writers = Math.max(0, this.writers - 1);
-    if (this.writers === 0) {
+    this.writers = 0;
+    {
       // Every parked reader gets 0 — EOF, not an errno. Any bytes still in the ring are delivered
       // first: a writer that wrote and then closed must not lose the write.
       this.#wakeReaders();

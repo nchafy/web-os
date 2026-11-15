@@ -1001,8 +1001,11 @@ HANDLERS.pipe2 = (p, k) => {
   // caller from assuming non-blocking semantics it will not get.
   if (flags !== 0) return -EINVAL;
   const pipe = new Pipe();
-  const rd = { kind: F_PIPE_R, refs: 1, flags: O_RDONLY, pipe, slot: p, inflight: 0 };
-  const wr = { kind: F_PIPE_W, refs: 1, flags: O_WRONLY, pipe, slot: p, inflight: 0 };
+  // NO SLOT ON THE DESCRIPTION. A description is shared — `dup` aliases it and a spawned child
+  // inherits it — so there is no one process it belongs to. The ops rows are handed the CALLING
+  // process on every call, which is the only correct answer.
+  const rd = { kind: F_PIPE_R, refs: 1, flags: O_RDONLY, pipe, inflight: 0 };
+  const wr = { kind: F_PIPE_W, refs: 1, flags: O_WRONLY, pipe, inflight: 0 };
   const rfd = p.fds.add(rd);
   if (rfd < 0) return rfd;
   const wfd = p.fds.add(wr);

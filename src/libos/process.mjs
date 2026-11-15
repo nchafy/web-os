@@ -14,6 +14,7 @@ import {
   open, close, read, pread, pwrite, readAll, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, linkAt, rename,
   readlink, readdir, statfs, dup, dup2,
+  pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
 } from "./syscall.mjs";
 
 /**
@@ -28,6 +29,18 @@ const FS = Object.freeze({
   open, close, read, pread, pwrite, readAll, write, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, link: linkAt,
   rename, readlink, readdir, statfs, dup, dup2,
+});
+
+/**
+ * M4's process and IPC calls, as ONE object on `env.proc`.
+ *
+ * Grouped for the reason `FS` is: constraint 15's seam is asserted by enumerating what a program
+ * was handed, and every value here is a function — so the enumeration still shows nothing with a
+ * byteLength or a postMessage. `spawn` + `pipe2` + `setpgid` is the whole of process creation
+ * here; there is no `fork` (constraint 20).
+ */
+const PROC = Object.freeze({
+  pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
 });
 
 const now = () => performance.now();
@@ -154,6 +167,7 @@ function onCommand(m) {
       syscall, write, r1of, rawWriteLength, probeNotEqual, samples, resetSamples,
       observeHeartbeat, barrierArrive, barrierDepart, barrierCounters, publishProgress,
       fs: FS,
+      proc: PROC,
       pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
     };
     const data = program.run(env, m);
