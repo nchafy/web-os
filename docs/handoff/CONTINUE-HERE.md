@@ -32,7 +32,7 @@ what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 7 checks, 284 expectations |
+| `scripts/check.py` | the suite — 7 checks, 298 expectations |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
@@ -41,6 +41,27 @@ what it changed in the plan. Current gates, all green:
 
 **Run all of them before and after anything you change.** `scripts/check.py --controls` lists what
 each control proves.
+
+## One open flake, measured and not root-caused
+
+`scripts/check.py --only m4b` reports **BROKEN** about **1 run in 12**, with
+`www/m4b.html reported state 'error': Error: timed out waiting for spawned`. The page boots a
+fresh kernel per proof and one of them does not answer `spawned` inside its 20 s deadline.
+
+What has been ruled out, each measured in a loop of 12 with Chrome killed and 1 s to exit between
+runs:
+
+| hypothesis | measurement |
+|---|---|
+| the thirteen proofs added in this round | 11/12 on the committed tree at **eleven** proofs too |
+| orphaned process workers from `worker.terminate()` | 11/12 with the new `shutdown` sweep, 11/12 without |
+| the `ttyspin` wall-clock ceiling burning CPU | 4/5 at 1500 ms, same rate as at 10000 ms |
+| a single-threaded test server | `scripts/check.py` already uses `ThreadingHTTPServer` |
+
+**It fails closed.** The harness reports a run it could not measure, never a pass — so a single
+BROKEN here is not evidence of a defect in the code under test. Re-run it alone. If you pick this
+up, the next thing to look at is `www/m4b.html`'s `kernelBoot`: the page never observes the
+kernel's `up` for the stuck proof, so the question is whether `new Worker` is the thing stalling.
 
 ## Next: M4a — the terminal gets a real window
 

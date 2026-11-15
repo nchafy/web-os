@@ -17,6 +17,10 @@
 //   p_poll        one process waits on TWO fds and is woken by either
 //   p_pgrp        tcgetpgrp/tcsetpgrp move the foreground group
 //   p_selfwinch   a pty op whose signal lands on the CALLER is answered exactly once
+//   p_emptypoll   poll(NULL, 0, -1) BLOCKS until a signal rather than answering 0
+//   p_fdlimit     a refused dup leaks no reference, so the reader still reaches EOF
+//   p_teardownwake a dying writer's fd sweep wakes a peer parked in poll
+//   p_openleak    an open refused with -EMFILE keeps no sync access handle
 //
 // Stage modes:
 //   ttyline       read one line from fd 0 and report it
@@ -25,8 +29,9 @@
 //   ttypoll       PARK in poll over two fds and report which one woke it
 
 import {
-  E, O_RDONLY, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGWINCH, ISIG, ICANON, ECHO,
-  VINTR, MAX_INLINE, POLLIN, packI64, SYS_read, SYS_poll,
+  E, O_RDONLY, O_RDWR, O_CREAT, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGKILL, SIGWINCH,
+  ISIG, ICANON, ECHO,
+  VINTR, MAX_INLINE, POLLIN, packI64, SYS_read, SYS_poll, OPEN_MAX,
 } from "../../src/abi.mjs";
 
 const ENC = new TextEncoder();
@@ -595,6 +600,221 @@ function pPollWait(env) {
   };
 }
 
+/**
+ * A STAGE THAT PARKS IN `poll` OVER NOTHING, which is POSIX's `poll(NULL, 0, -1)`.
+ *
+ * It must block until a signal arrives. The kernel answered 0 IMMEDIATELY — a busy-wait where the
+ * caller asked to block, which is the one shape where a program spins the kernel by doing exactly
+ * what POSIX says. Returning at all means it did not block, so the verdict is in the exit code.
+ */
+function ttyemptypollStage(env) {
+  const r = env.tty.poll([], -1);
+  // Reached only if the kernel refused to block. A signal does not come back here: SIGINT at
+  // SIG_DFL is fatal and the kernel reaps this process inside the call.
+  return { ok: false, returned: r, neverBlocked: true, exit: 1 };
+}
+
+/**
+ * `poll(NULL, 0, -1)` blocks until a signal, and the signal ends it.
+ *
+ * The proof is the stage still being parked in SYS_poll when the orchestrator looks, and dying of
+ * the signal rather than exiting. A kernel that answers immediately gives a stage that exits 1
+ * before the first look.
+ */
+function pEmptyPoll(env) {
+  const pid = stage(env, "ttyemptypoll", {});
+  if (pid < 0) return { ok: false, why: `spawn ${-pid}` };
+  const started = awaitStarted(env, pid);
+  const parked = awaitParkedIn(env, pid, SYS_poll);
+  env.proc.kill(pid, SIGINT);
+  const stat = env.proc.waitpid(pid);
+  return {
+    ok: !!(started.ok && parked.ok && stat && stat.killed && stat.code === SIGINT),
+    pid, started,
+    // PARKED, not merely alive: a call outstanding, and that call being `poll`.
+    parkedInEmptyPoll: parked.ok, parkedIn: parked.syscall, parkedWhy: parked.why,
+    child: stat,
+    // Killed BY THE SIGNAL. A stage that returned from the poll would have exited 1 instead.
+    endedBySignal: !!(stat && stat.killed && stat.code === SIGINT),
+    SIGINT, SYS_poll,
+  };
+}
+
+/**
+ * AN FD TABLE DRIVEN TO `OPEN_MAX`, and then the pipe closed.
+ *
+ * `dup` raised the description's refcount BEFORE asking for an fd, so every refused `dup` left the
+ * count one high — and a kind's `close` op fires only when the LAST reference goes. A pipe whose
+ * writer count never drops leaves its reader on an EOF that cannot arrive, which is constraint
+ * 92's deadlock reached through -EMFILE. The observable is the read: EOF, or a hang with no error
+ * anywhere.
+ */
+function pFdLimit(env) {
+  ensureStdin(env);
+  const pipe = env.proc.pipe2();
+  if (typeof pipe === "number") return { ok: false, why: `pipe2 ${-pipe}` };
+  // Fill the table with copies of the WRITE end, so every refused dup is a chance to leak a
+  // reference to the description whose closure the reader's EOF depends on.
+  const copies = [];
+  let refused = 0;
+  for (let i = 0; i < OPEN_MAX + 8; i += 1) {
+    const fd = env.fs.dup(pipe.wfd);
+    if (fd < 0) { refused = -fd; break; }
+    copies.push(fd);
+  }
+  for (const fd of copies) env.fs.close(fd);
+  env.fs.close(pipe.wfd);
+  /* ASKED THROUGH `poll`, NOT `read`, and that is deliberate. Every reference to the write end is
+   * gone, so the reader must see EOF — but with a leaked reference it sees NOTHING, and a `read`
+   * would park forever. A proof whose failure mode is a hang ends as a BROKEN check carrying no
+   * expectations, which cannot be told apart from a harness fault; `poll` with a deadline turns
+   * the same defect into a reported `nready: 0`. A check has to be able to FAIL, not wedge. */
+  const ready = env.tty.poll([{ fd: pipe.rfd, events: POLLIN }], 500);
+  const sawEof = typeof ready !== "number" && ready.nready === 1
+    && (ready.fds[0].revents & POLLIN) !== 0;
+  // Only then the read, which is now known to be answerable.
+  const buf = new Uint8Array(16);
+  const n = sawEof ? env.fs.read(pipe.rfd, buf) : null;
+  env.fs.close(pipe.rfd);
+  return {
+    ok: !!(refused > 0 && sawEof && n === 0),
+    duped: copies.length, refusedErrno: refused,
+    // The table really did fill: otherwise the refused dups never happened and nothing was tested.
+    tableFilled: refused > 0,
+    // A pipe with no writer left is READABLE — the read returns 0, and EOF is a readable event
+    // rather than a condition a poller should sleep through.
+    eofAfterRefusedDups: sawEof,
+    pollResult: typeof ready === "number" ? ready : ready.nready,
+    revents: typeof ready === "number" ? null : ready.fds[0].revents,
+    readResult: n,
+    POLLIN, EMFILE: E.EMFILE,
+  };
+}
+
+/**
+ * A stage that parks in `poll` over a pipe FOREVER, so only a wake can end it.
+ *
+ * An infinite timeout is the only way to assert the wake itself: a finite one is answered
+ * correctly by the timeout's own rescan (`docs/DECISIONS.md` D20), so it cannot tell a working
+ * wake from a late one.
+ */
+function ttyhuppollStage(env) {
+  const r = env.tty.poll([{ fd: 0, events: POLLIN }], -1);
+  if (typeof r === "number") return { ok: false, errno: -r, exit: 2 };
+  // POLLIN because a pipe with no writer is READABLE: the read returns 0, and EOF is a readable
+  // event rather than a condition a poller should sleep through.
+  const hup = (r.fds[0].revents & POLLIN) !== 0;
+  return { ok: hup, nready: r.nready, revents: r.fds[0].revents, exit: hup ? 0 : 1 };
+}
+
+/** Wait, bounded, for a process to stop being runnable. Returns what it last saw. */
+function awaitExit(env, pid, rounds = 400) {
+  for (let i = 0; i < rounds; i += 1) {
+    const st = readStatus(env, pid);
+    if (st.errno || st.state === "zombie" || st.state === "dead") {
+      return { ok: true, rounds: i, state: st.state ?? null, errno: st.errno ?? null };
+    }
+    const [lo, hi] = packI64(2000000);
+    env.syscall(2, lo, hi, 0);
+  }
+  return { ok: false, rounds, state: readStatus(env, pid).state };
+}
+
+/**
+ * TEARDOWN'S fd SWEEP MUST WAKE A PEER'S PARKED `poll`.
+ *
+ * The wake is hooked on `reply`, which is the single funnel every state change passes through —
+ * so no pollable kind can forget it (constraint 109). Teardown is the one path that moves
+ * readiness and does NOT reply: its only `reply` runs BEFORE the sweep that drops the dying
+ * process's pipe `writers` to 0. A peer parked over that pipe waited forever.
+ *
+ * THE ORCHESTRATOR OWNS THE DEADLINE, not the kernel. The stage polls with an infinite timeout,
+ * because a finite one would be answered by its own rescan and prove nothing — so a missing wake
+ * is a process that never returns. Rather than let that become a harness timeout and a BROKEN
+ * check carrying no expectations, this waits a bounded number of rounds and then SIGKILLs, so the
+ * failure is reported as `wokenByTeardown: false` with the stage still parked.
+ */
+function pTeardownWake(env) {
+  ensureStdin(env);
+  const pipe = env.proc.pipe2();
+  if (typeof pipe === "number") return { ok: false, why: `pipe2 ${-pipe}` };
+  // The POLLER gets the read end on fd 0. The WRITER is a second stage holding the write end, and
+  // killing it is what makes the pipe readable through teardown rather than through a close.
+  const poller = stage(env, "ttyhuppoll", { stdin: pipe.rfd, close: [pipe.rfd, pipe.wfd] });
+  if (poller < 0) return { ok: false, why: `spawn poller ${-poller}` };
+  const writer = stage(env, "ttyspin", { stdout: pipe.wfd, close: [pipe.rfd, pipe.wfd] });
+  if (writer < 0) return { ok: false, why: `spawn writer ${-writer}` };
+  // THE ORCHESTRATOR LETS GO OF BOTH ENDS, or the poller's EOF depends on this process too.
+  env.fs.close(pipe.rfd);
+  env.fs.close(pipe.wfd);
+  const pollerStarted = awaitStarted(env, poller);
+  const writerStarted = awaitStarted(env, writer);
+  const parked = awaitParkedIn(env, poller, SYS_poll);
+  // KILL THE WRITER. Its teardown closes the write end, which is the state change that must wake
+  // the poller — and it goes through no `reply` at all.
+  const killed = env.proc.kill(writer, SIGKILL);
+  const woke = awaitExit(env, poller, 400);
+  if (!woke.ok) env.proc.kill(poller, SIGKILL);
+  const pollerStat = env.proc.waitpid(poller);
+  const writerStat = env.proc.waitpid(writer);
+  return {
+    ok: !!(pollerStarted.ok && writerStarted.ok && parked.ok && killed === 0 && woke.ok
+      && pollerStat && pollerStat.exited && pollerStat.code === 0),
+    pollerPid: poller, writerPid: writer,
+    parkedInPoll: parked.ok, parkedIn: parked.syscall, parkedWhy: parked.why,
+    killResult: killed,
+    // THE SUBJECT. False means the poller was still parked after its only writer was torn down.
+    wokenByTeardown: woke.ok, wokeRounds: woke.rounds, stateAfter: woke.state,
+    // And it woke with the RIGHT answer: its exit code is 0 only if revents carried POLLIN.
+    pollerVerdict: pollerStat ? pollerStat.code : null,
+    poller: pollerStat, writer: writerStat,
+    SYS_poll,
+  };
+}
+
+/**
+ * An `open` refused with -EMFILE must not keep the file's sync access handle.
+ *
+ * `createSyncAccessHandle` is AN EXCLUSIVE LOCK PER FILE, so a handle leaked by a refused open
+ * made that one file unopenable by any process for the lifetime of the page — a retryable errno
+ * turned into permanent loss of one file. The observable is the SECOND open, after room is made.
+ */
+function pOpenLeak(env) {
+  ensureStdin(env);
+  const path = "/tmp/openleak";
+  const seed = env.fs.open(path, O_RDWR | O_CREAT, 0o600);
+  if (seed < 0) return { ok: false, why: `seed open ${-seed}` };
+  env.fs.write(seed, ENC.encode("hello"));
+  env.fs.close(seed);
+  // Fill the table with copies of something cheap, so the open below is refused for want of an fd
+  // rather than for any reason of its own.
+  const copies = [];
+  let refused = 0;
+  for (let i = 0; i < OPEN_MAX + 8; i += 1) {
+    const fd = env.fs.dup(0);
+    if (fd < 0) { refused = -fd; break; }
+    copies.push(fd);
+  }
+  const refusedOpen = env.fs.open(path, O_RDONLY);
+  // Room again.
+  for (const fd of copies) env.fs.close(fd);
+  // THE SUBJECT: the file must still be openable. A leaked handle makes this fail forever.
+  const second = env.fs.open(path, O_RDONLY);
+  const buf = new Uint8Array(16);
+  const n = second >= 0 ? env.fs.read(second, buf) : -1;
+  if (second >= 0) env.fs.close(second);
+  return {
+    ok: !!(refused > 0 && refusedOpen < 0 && second >= 0 && n === 5),
+    tableFilled: refused > 0, duped: copies.length, refusedErrno: refused,
+    refusedOpenErrno: refusedOpen < 0 ? -refusedOpen : 0,
+    openRefused: refusedOpen < 0,
+    // The file is still there and still readable.
+    reopened: second >= 0, reopenErrno: second < 0 ? -second : 0,
+    bytes: n, text: n > 0 ? DEC.decode(buf.subarray(0, n)) : "",
+    EMFILE: E.EMFILE,
+  };
+}
+
 function pPgrp(env) {
   const s = withStage(env, "ttysleep");
   if (s.err) return { ok: false, why: s.err };
@@ -634,6 +854,8 @@ export function run(env, go) {
     case "ttyspin": out = ttyspinStage(env); break;
     case "ttysleep": out = ttysleepStage(env); break;
     case "ttypoll": out = ttypollStage(env); break;
+    case "ttyemptypoll": out = ttyemptypollStage(env); break;
+    case "ttyhuppoll": out = ttyhuppollStage(env); break;
     case "p_echo": out = pEcho(env); break;
     case "p_canon": out = pCanon(env); break;
     case "p_intr": out = pIntr(env); break;
@@ -645,6 +867,10 @@ export function run(env, go) {
     case "p_pollwait": out = pPollWait(env); break;
     case "p_pgrp": out = pPgrp(env); break;
     case "p_selfwinch": out = pSelfwinch(env); break;
+    case "p_emptypoll": out = pEmptyPoll(env); break;
+    case "p_fdlimit": out = pFdLimit(env); break;
+    case "p_teardownwake": out = pTeardownWake(env); break;
+    case "p_openleak": out = pOpenLeak(env); break;
     default: out = { ok: false, why: `unknown mode ${mode}` };
   }
   return { mode, ms: performance.now() - t0, ...out };

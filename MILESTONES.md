@@ -27,7 +27,7 @@ checks is a wish.
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
-| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 39 expectations, 4 controls |
+| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 53 expectations, 4 controls |
 | **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
@@ -914,23 +914,29 @@ page's timeout carry the kernel's park and refcount dump: one run then read
 ## M4b — the pty, the line discipline, `poll` · ✅ done · est 2 d, actual 1 · **ACCEPT**
 
 ```
-scripts/check.py                     7 checks, 284 expectations (m4b: 39)
-scripts/check.py --prove-failure both  exit 0 — all 284 invert and fire
-scripts/check.py --negative no-isig           m4b fail: 8 red, 31 intact
-scripts/check.py --negative no-poll-wake      m4b fail: 3 red, 36 intact
-scripts/check.py --negative no-finish-guard   m4b fail: 4 red, 35 intact
-scripts/check.py --negative no-winch          m4b fail: 6 red, 33 intact
+scripts/check.py                     7 checks, 298 expectations (m4b: 53)
+scripts/check.py --prove-failure both  exit 0 — every expectation inverts and fires
+scripts/check.py --negative no-isig           m4b fail: 8 red, 45 intact
+scripts/check.py --negative no-poll-wake      m4b fail: 3 red, 50 intact
+scripts/check.py --negative no-finish-guard   m4b fail: 4 red, 49 intact
+scripts/check.py --negative no-winch          m4b fail: 6 red, 47 intact
 bench/m4b-pty/probe.mjs              124 host assertions (the discipline, no browser)
 bench/m4b-pty/controls.py            5 controls, each scored on which labels move
 scripts/fsfuzz.py                    129 host tests, 10k torn journals, no browser
 ```
 
-Eleven sections over eleven fresh kernels, **3.9 s**. Every byte and every signal crosses a real
+**One open flake, measured and not root-caused:** this check reports BROKEN about 1 run in 12 on a
+page-level `timed out waiting for spawned`. Four hypotheses are ruled out by measurement in
+`docs/handoff/CONTINUE-HERE.md`, including the proof count and worker orphaning. It fails closed —
+a run it could not measure, never a pass.
+
+Thirteen sections over thirteen fresh kernels, **3.5–6.0 s** across the runs that measured it. Every byte and every signal crosses a real
 syscall from inside a real process worker.
 
-The expectation count went 33 → 39 and the host assertions 94 → 124 **after** the milestone was
+The expectation count went 33 → 53 and the host assertions 94 → 124 **after** the milestone was
 first called done, which is the adversarial review below. Four of the original clauses were
-passing without asserting their subject.
+passing without asserting their subject, and four of the review's own fixes had no check until
+they were given one — a fixed bug becomes a check, including when the bug was found by reading.
 
 ### What the documents specify, and what they do not
 
@@ -986,6 +992,15 @@ The rest were a leaked reference and a leaked OPFS sync handle on `-EMFILE` (con
 teardown sweep that changed readiness without waking parked polls (115), a `poll` timeout that
 republished a stale scan, `poll(NULL, 0, -1)` answering immediately instead of blocking (116), a
 dead `peekLast` and a docstring describing the wrong method.
+
+Four of those had no check, because they were found by reading rather than by failing. They have
+one now — `fd_limit`, `open_leak`, `teardown_wake` and `empty_poll`, each demonstrated by putting
+its own defect back. Two needed care about HOW they fail: a leaked description reference leaves a
+reader with no EOF, so the fd proof asks through `poll` with a deadline rather than through `read`,
+which would park forever and end the check as BROKEN with no expectations. Where an infinite park
+is the only way to assert the subject at all — teardown's wake, which a finite timeout's own
+rescan would answer — the orchestrator owns the deadline and reports `wokenByTeardown: false`
+(constraint 122).
 
 ### Four checks that were passing without asserting their subject
 

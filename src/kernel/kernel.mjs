@@ -1801,6 +1801,35 @@ async function handle(m) {
       reap(p, STAT_KILLED, SIGKILL);
       return;
     }
+    case "shutdown": {
+      /* EVERY LIVE PROCESS, REAPED, BEFORE THE PAGE TERMINATES THIS KERNEL.
+       *
+       * The page terminated the kernel worker and nothing else, which ORPHANS every process worker
+       * the kernel had created: a terminated worker's nested workers are collected eventually and
+       * not promptly. A bench page that boots one kernel per proof — www/m4b.html boots thirteen —
+       * then accumulates every stage it ever spawned, which is worth not doing.
+       *
+       * IT WAS REACHED FOR TO FIX A FLAKE AND DID NOT FIX IT, said here so nobody reads it as the
+       * remedy: `www/m4b.html` reports BROKEN with `timed out waiting for spawned` about 1 run in
+       * 12, and that rate was 11 of 12 with this sweep, 11 of 12 without it, and 11 of 12 at
+       * eleven proofs instead of thirteen (constraint 121). The cause is unidentified.
+       *
+       * Reaped rather than signalled: `reap` is the path `end-process` already uses, so this adds
+       * a sweep and no new teardown. The list is copied first because `reap` mutates `table.live`.
+       */
+      const live = [...table.live];
+      for (const slot of live) {
+        try {
+          reap(slot, STAT_KILLED, SIGKILL);
+        } catch (e) {
+          // One slot that will not die must not strand the rest, and the page is waiting on the
+          // acknowledgement below.
+          noteOut(`pid ${slot.pid} did not reap at shutdown: ${e && e.message}`);
+        }
+      }
+      post({ t: "shutdown", reaped: live.length, kernel: kstats() });
+      return;
+    }
     case "expose":
       // The SABs, shared (not transferred) to the page, for the one observation that has to
       // outlive this worker: whether each parked process concluded the kernel was gone. Nothing

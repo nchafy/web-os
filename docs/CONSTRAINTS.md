@@ -909,3 +909,24 @@ cancellation design.
     the same evidence object — so one typo in the page would have removed both halves together and
     left the clause green. A comparison between two fields read out of a reported object asserts
     presence first.
+121. **A bench page that boots a kernel per proof should SHUT EACH ONE DOWN, not just terminate
+    it** — and doing so did NOT fix the flake it was reached for, which is the more useful half of
+    this entry. `worker.terminate()` on the kernel orphans every process worker the kernel
+    created: a terminated worker's nested workers are collected eventually, not promptly, and
+    `www/m4b.html` boots thirteen kernels. So the kernel answers a `shutdown` message by reaping
+    every live slot through the path `end-process` already uses, and the page waits for the
+    acknowledgement before it terminates. That is right on its own terms.
+    **It is not the cause of the flake.** `www/m4b.html` reports BROKEN with a page-level
+    `timed out waiting for spawned` about 1 run in 12, and the rate was unchanged by the sweep:
+    11 of 12 with it, 11 of 12 without it, and **11 of 12 on the committed tree at 11 proofs
+    rather than 13** — so it is not the proof count either. Measured with
+    `scripts/check.py --only m4b` in loops of 12, Chrome killed and 1 s given to exit between
+    runs. THE CAUSE IS NOT IDENTIFIED. It fails closed: the harness reports a run it could not
+    measure, never a pass.
+122. **A proof whose failure mode is a HANG reports nothing.** The fd-table proof asks through
+    `poll` with a deadline and not through `read`, because a leaked description reference leaves
+    the reader with no EOF to see — a `read` would park forever, ending the check as BROKEN with
+    no expectations, indistinguishable from a harness fault. Where an infinite park is the only
+    way to assert the thing (teardown's wake, which a finite timeout's own rescan would answer),
+    the ORCHESTRATOR owns the deadline: it waits a bounded number of rounds, kills the stage, and
+    reports `wokenByTeardown: false`. A check has to be able to fail, not wedge.

@@ -2390,6 +2390,22 @@ M4B_LABELS = (
     "and the caller observes its own interruption",
     "the channel is not left one reply ahead",
     "exactly one call was answered by its own side effect",
+    # A negative timeout is infinite, and a refused `dup` leaks no reference.
+    "empty_poll ok",
+    "poll over an empty set with no timeout blocks",
+    "and only a signal ends it",
+    "fd_limit ok",
+    "the fd table really reached its ceiling",
+    "a refused dup leaks no reference, so the reader sees EOF",
+    "and the read that follows returns 0",
+    # Teardown's fd sweep moves readiness without replying; a refused open keeps no handle.
+    "teardown_wake ok",
+    "a process parked in poll with no timeout stays parked",
+    "a dying writer's fd sweep wakes a peer parked in poll",
+    "and the woken poll reported the pipe readable",
+    "open_leak ok",
+    "an open with no fd left is refused with EMFILE",
+    "and keeps no sync access handle, so the file reopens",
     # poll, which constraint 42 requires and M4's build list omits.
     "poll_ready ok",
     "poll reports an idle set as nothing ready",
@@ -2432,6 +2448,10 @@ READ_M4B = """(() => {
     termios: one(P.termios),
     winsize: one(P.winsize),
     self_signal: one(P.self_signal),
+    empty_poll: one(P.empty_poll),
+    fd_limit: one(P.fd_limit),
+    teardown_wake: one(P.teardown_wake),
+    open_leak: one(P.open_leak),
     poll_ready: one(P.poll_ready),
     poll_wait: one(P.poll_wait),
     fg_pgrp: one(P.fg_pgrp),
@@ -2450,6 +2470,10 @@ M4B_SHAPE = {
     "termios": (dict, type(None)),
     "winsize": (dict, type(None)),
     "self_signal": (dict, type(None)),
+    "empty_poll": (dict, type(None)),
+    "fd_limit": (dict, type(None)),
+    "teardown_wake": (dict, type(None)),
+    "open_leak": (dict, type(None)),
     "poll_ready": (dict, type(None)),
     "poll_wait": (dict, type(None)),
     "fg_pgrp": (dict, type(None)),
@@ -5864,7 +5888,8 @@ def check_m4b(env: Env) -> None:
         env.unmeasurable("www/m4b.html never reached a terminal state (state=%r)" % got["state"])
 
     sections = ("echo", "canonical", "intr", "wedged_intr", "raw_isig_off", "termios",
-                "winsize", "self_signal", "poll_ready", "poll_wait", "fg_pgrp")
+                "winsize", "self_signal", "empty_poll", "fd_limit",
+                "teardown_wake", "open_leak", "poll_ready", "poll_wait", "fg_pgrp")
     env.expect_that(
         "cell reported",
         all(got[name] is not None for name in sections),
@@ -5990,6 +6015,69 @@ def check_m4b(env: Env) -> None:
     # count rather than a bound, so the counter cannot absorb a genuine double reply elsewhere.
     env.expect("exactly one call was answered by its own side effect",
                ss.get("answeredDuringCall"), 1)
+
+    # ---- a negative timeout is INFINITE, and a refused `dup` leaks nothing ---------------
+    ep = ev("empty_poll")
+    env.expect_that("empty_poll ok", section_ok("empty_poll"), ep)
+    # `poll(NULL, 0, -1)` is POSIX's "block until a signal". It answered 0 immediately, which is a
+    # busy-wait where the caller asked to park. Asserted as the stage still being parked IN `poll`
+    # when the orchestrator looks — not merely alive, which is true of every non-zombie.
+    env.expect_that("poll over an empty set with no timeout blocks",
+                    ep.get("parkedInEmptyPoll") is True and same(ep, "parkedIn", "SYS_poll"),
+                    {"parkedIn": ep.get("parkedIn"), "why": ep.get("parkedWhy")})
+    env.expect_that("and only a signal ends it",
+                    ep.get("endedBySignal") is True,
+                    {"child": ep.get("child"), "SIGINT": ep.get("SIGINT")})
+
+    fl = ev("fd_limit")
+    env.expect_that("fd_limit ok", section_ok("fd_limit"), fl)
+    # Without this the refused dups never happened, so the clause below would assert nothing.
+    env.expect_that("the fd table really reached its ceiling",
+                    fl.get("tableFilled") is True and same(fl, "refusedErrno", "EMFILE"),
+                    {"duped": fl.get("duped"), "refusedErrno": fl.get("refusedErrno"),
+                     "EMFILE": fl.get("EMFILE")})
+    # `dup` raised the description's refcount BEFORE asking for an fd, so every refusal left it
+    # one high and the kind's `close` op — which fires only when the last reference goes — never
+    # fired. A pipe whose writer count never drops leaves its reader on an EOF that cannot
+    # arrive: constraint 92's deadlock reached through -EMFILE, with no error anywhere.
+    # ASKED THROUGH `poll` so the failure REPORTS: with a leaked reference the reader sees
+    # nothing, and a `read` would park forever — ending as a BROKEN check with no expectations,
+    # indistinguishable from a harness fault. A check has to be able to fail, not wedge.
+    env.expect_that("a refused dup leaks no reference, so the reader sees EOF",
+                    fl.get("eofAfterRefusedDups") is True and fl.get("pollResult") == 1
+                    and fl.get("revents") is not None
+                    and (fl["revents"] & fl.get("POLLIN", 0)) != 0,
+                    {"pollResult": fl.get("pollResult"), "revents": fl.get("revents"),
+                     "POLLIN": fl.get("POLLIN")})
+    env.expect("and the read that follows returns 0", fl.get("readResult"), 0)
+
+    tw = ev("teardown_wake")
+    env.expect_that("teardown_wake ok", section_ok("teardown_wake"), tw)
+    env.expect_that("a process parked in poll with no timeout stays parked",
+                    tw.get("parkedInPoll") is True and same(tw, "parkedIn", "SYS_poll"),
+                    {"parkedIn": tw.get("parkedIn"), "why": tw.get("parkedWhy")})
+    # The wake is hooked on `reply` so no pollable kind can forget it, and teardown is the one
+    # path that moves readiness without replying: its only `reply` runs BEFORE the fd sweep that
+    # drops the dying process's pipe `writers` to 0. The poller waited forever.
+    env.expect_that("a dying writer's fd sweep wakes a peer parked in poll",
+                    tw.get("wokenByTeardown") is True,
+                    {"wokeRounds": tw.get("wokeRounds"), "stateAfter": tw.get("stateAfter")})
+    # Woke with the RIGHT answer, not merely woke: the stage exits 0 only if revents carried
+    # POLLIN, which is what a pipe with no writer left must report.
+    env.expect("and the woken poll reported the pipe readable", tw.get("pollerVerdict"), 0)
+
+    ol = ev("open_leak")
+    env.expect_that("open_leak ok", section_ok("open_leak"), ol)
+    env.expect_that("an open with no fd left is refused with EMFILE",
+                    ol.get("openRefused") is True and same(ol, "refusedOpenErrno", "EMFILE"),
+                    {"refusedOpenErrno": ol.get("refusedOpenErrno"), "EMFILE": ol.get("EMFILE")})
+    # `createSyncAccessHandle` is an exclusive lock per file, so a handle the refused open kept
+    # made this one file unopenable by any process for the lifetime of the page — a retryable
+    # errno turned into permanent loss of one file.
+    env.expect_that("and keeps no sync access handle, so the file reopens",
+                    ol.get("reopened") is True and ol.get("text") == "hello",
+                    {"reopenErrno": ol.get("reopenErrno"), "bytes": ol.get("bytes"),
+                     "text": ol.get("text")})
 
     # ---- poll, both halves ---------------------------------------------------------------
     pr = ev("poll_ready")

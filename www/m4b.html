@@ -151,6 +151,19 @@ async function runProof (mode, boot, timeoutMs = 60000) {
     // `kernel` is not a key any stage returns, so this cannot shadow a stage's own field.
     return { ...row, kernel: results.kernel }
   } finally {
+    /* ASK THE KERNEL TO END ITS PROCESSES BEFORE TERMINATING IT. `terminate()` on the kernel
+     * orphans every process worker it created — nested workers of a terminated worker are
+     * collected eventually, not promptly — and this page boots one kernel per proof, so every
+     * stage ever spawned accumulated. Worth not doing, and NOT the fix for this page's flake:
+     * the `timed out waiting for spawned` BROKEN happens about 1 run in 12 with or without this
+     * (constraint 121). Bounded and swallowed: a kernel that cannot answer must not stop the
+     * page from terminating it. */
+    try {
+      k.post({ t: 'shutdown' })
+      await k.expect('shutdown', 5000)
+    } catch (e) {
+      globalThis.M4B.notes.push(mode + ': shutdown did not acknowledge: ' + (e && e.message))
+    }
     k.worker.terminate()
   }
 }
@@ -268,6 +281,69 @@ async function main () {
       channelIntact: sw.channelIntact, nextCall: sw.nextCall,
       answeredDuringCall: sw.kernel && sw.kernel.answeredDuringCall,
       EINTR: sw.EINTR,
+    },
+  }
+
+  /* ---- poll(NULL, 0, -1) BLOCKS, and the two leak paths leak nothing -------------------- */
+  const ep = await runProof('p_emptypoll', boot)
+  say('emptypoll: parked ' + ep.parkedInEmptyPoll + ', ended by signal ' + ep.endedBySignal)
+  P.empty_poll = {
+    ok: !!(ep.ok && ep.parkedInEmptyPoll && ep.endedBySignal),
+    evidence: {
+      // A negative timeout is INFINITE. This answered 0 immediately, so a program polling an
+      // empty set to wait for a signal span the kernel instead of parking.
+      parkedInEmptyPoll: ep.parkedInEmptyPoll, parkedIn: ep.parkedIn, parkedWhy: ep.parkedWhy,
+      endedBySignal: ep.endedBySignal, child: ep.child, SIGINT: ep.SIGINT, SYS_poll: ep.SYS_poll,
+    },
+  }
+
+  const fl = await runProof('p_fdlimit', boot)
+  say('fdlimit: duped ' + fl.duped + ', refused ' + fl.refusedErrno + ', read ' + fl.readResult)
+  P.fd_limit = {
+    ok: !!(fl.ok && fl.tableFilled && fl.eofAfterRefusedDups),
+    evidence: {
+      // The table really filled, or the refused dups never happened and nothing was tested.
+      tableFilled: fl.tableFilled, duped: fl.duped, refusedErrno: fl.refusedErrno,
+      EMFILE: fl.EMFILE,
+      // THE OBSERVABLE. `dup` raised the refcount before asking for an fd, so every refusal left
+      // it one high and the write end never closed — the reader's EOF could not arrive and the
+      // read parked with no error anywhere.
+      // ASKED THROUGH `poll`: with a leaked reference the reader sees nothing, and a `read`
+      // would park forever — a proof that wedges reports no expectations at all.
+      eofAfterRefusedDups: fl.eofAfterRefusedDups,
+      pollResult: fl.pollResult, revents: fl.revents, POLLIN: fl.POLLIN,
+      readResult: fl.readResult,
+    },
+  }
+
+  const tw = await runProof('p_teardownwake', boot)
+  say('teardownwake: parked ' + tw.parkedInPoll + ', woke ' + tw.wokenByTeardown +
+    ' in ' + tw.wokeRounds + ' rounds, verdict ' + tw.pollerVerdict)
+  P.teardown_wake = {
+    ok: !!(tw.ok && tw.parkedInPoll && tw.wokenByTeardown && tw.pollerVerdict === 0),
+    evidence: {
+      // An INFINITE timeout, because a finite one is answered correctly by its own rescan
+      // (docs/DECISIONS.md D20) and so cannot tell a working wake from a late one.
+      parkedInPoll: tw.parkedInPoll, parkedIn: tw.parkedIn, parkedWhy: tw.parkedWhy,
+      SYS_poll: tw.SYS_poll, killResult: tw.killResult,
+      // THE SUBJECT: teardown's fd sweep moves readiness and passes through no `reply`.
+      wokenByTeardown: tw.wokenByTeardown, wokeRounds: tw.wokeRounds,
+      stateAfter: tw.stateAfter,
+      // And it woke with the right answer, not merely woke.
+      pollerVerdict: tw.pollerVerdict, poller: tw.poller,
+    },
+  }
+
+  const ol = await runProof('p_openleak', boot)
+  say('openleak: refused ' + ol.refusedOpenErrno + ', reopened ' + ol.reopened)
+  P.open_leak = {
+    ok: !!(ol.ok && ol.tableFilled && ol.openRefused && ol.reopened),
+    evidence: {
+      tableFilled: ol.tableFilled, duped: ol.duped,
+      openRefused: ol.openRefused, refusedOpenErrno: ol.refusedOpenErrno, EMFILE: ol.EMFILE,
+      // A sync access handle is an EXCLUSIVE LOCK PER FILE, so one leaked by a refused open made
+      // this file unopenable by anything for the lifetime of the page.
+      reopened: ol.reopened, reopenErrno: ol.reopenErrno, bytes: ol.bytes, text: ol.text,
     },
   }
 
