@@ -31,6 +31,8 @@ mode is impossible.
 | console errors nobody looked at                     | per-check drain of all three CDP error events      | 1   |
 | a check written and never registered                | registry.audit rules 1, 2 and 7                    | 3   |
 | a check nothing can invert                          | INVERT is mandatory; the opt-out needs a reason    | 3   |
+| invert_query used to point the inversion phase at   | audit rule 15: every key must already be in the    | 3   |
+|   a different page, flag or mode                    |   check's own document                             |     |
 | a control declared and never expected to fire       | audit ties Check.controls to CONTROLS[..].expects  | 3   |
 | a page that did not refuse once isolation was gone  | gate N3, per document, off the registry's own      | 1   |
 |                                                     |   refusal_expr - audit rule 12 requires one        |     |
@@ -441,6 +443,19 @@ class Control:
     #: Installed at boot through the cfg.noSigpend hook, which refuses unless the page asked for
     #: a bench boot (src/kernel/kernel.mjs, same discipline as installStall).
     NO_SIGPEND = "no-sigpend"
+    #: M2, stage 1. The commit's data-before-metadata ordering is dropped: the journal record and
+    #: its flush land and the staged bytes are discarded, which is the state a crash between the
+    #: two steps leaves. fsck must then report corruption. Installed through the cfg.noCowOrder
+    #: hook, which refuses unless the page asked for a bench boot (src/kernel/kernel.mjs).
+    #:
+    #: It DISCARDS the bytes rather than only skipping flush() because skipping the flush alone
+    #: changed nothing observable: an unflushed FileSystemSyncAccessHandle write is still visible
+    #: to a later read in the same agent, and with blobFlushes at 0 fsck still came back clean.
+    NO_COW_ORDER = "no-cow-order"
+    #: M2, stage 2, and the one that makes stage 1 worth reading. The journal's and the snapshot
+    #: image's CRC checks are removed, so a torn tail is ACCEPTED. The torn-journal proof must
+    #: start passing a bad image; if it passed either way it was testing nothing.
+    NO_CRC = "no-crc"
     ONCE = "once"
 
 
@@ -456,6 +471,8 @@ CONTROL_RUNS = {
     Control.PATCHED: ("patched-required", "patched-optional"),
     Control.KERNEL_STALL: ("kernel-stall",),
     Control.NO_SIGPEND: ("no-sigpend",),
+    Control.NO_COW_ORDER: ("no-cow-order",),
+    Control.NO_CRC: ("no-crc",),
 }
 
 
@@ -492,6 +509,19 @@ class Check:
     #: The request path Env.reload navigates to, query included. Asserted on the wire by serve()
     #: before Chrome starts, and the key env.request() reads the document's own response back by.
     document: str
+    #: Query parameters that override `document`'s for the --prove-failure INVERT phase only.
+    #:
+    #: WHAT IT IS FOR, because it could be a way to disarm the mode and must not be: the invert
+    #: phase asks one question — does every expectation this check records invert and fire — and
+    #: the answer does not depend on the size of the page's workload. m2's 10,000-file proof paid
+    #: 73 s of a 300 s page-level budget to answer it in the run that passed and TIMED OUT in the
+    #: run that did not, so the suite's own self-proof reported itself broken one run in two. A
+    #: gate that flakes is a gate that gets ignored.
+    #:
+    #: Audit rule 15 holds the line: every key here must already appear in `document`, so this can
+    #: only re-point a parameter the page already reads and can never introduce a mode, a flag or
+    #: a different page for the phase that is supposed to be checking the normal one.
+    invert_query: Tuple[Tuple[str, str], ...]
     #: The readiness predicate, polled instead of slept on, and what to say when it never holds.
     #: Declared per check because "the page finished" is a different fact for every page.
     ready_expr: str
@@ -514,7 +544,8 @@ _REGISTRY: List[Check] = []
 def check(*, name: str, milestone: str, controls: Tuple[str, ...], labels: Tuple[str, ...],
           root: str, document: str, ready_expr: str, ready_what: str, ready_timeout: float,
           requires_isolation: bool = True, no_invert_reason: str = "", note: str = "",
-          control_address: str = "", refusal_expr: str = "", refusal_want: str = ""):
+          control_address: str = "", refusal_expr: str = "", refusal_want: str = "",
+          invert_query: Tuple[Tuple[str, str], ...] = ()):
     def decorate(func: Callable[["Env"], None]) -> Callable[["Env"], None]:
         _REGISTRY.append(Check(
             name=name,
@@ -533,6 +564,7 @@ def check(*, name: str, milestone: str, controls: Tuple[str, ...], labels: Tuple
             control_address=control_address,
             root=root,
             document=document,
+            invert_query=tuple(invert_query),
             ready_expr=ready_expr,
             ready_what=ready_what,
             ready_timeout=ready_timeout,
@@ -729,6 +761,19 @@ def audit() -> None:
                 "%s does not carry the %s control and gives no no_invert_reason, so "
                 "--prove-failure would skip it and still report that every inversion fired"
                 % (candidate.name, Control.INVERT))
+        # 15. invert_query may only RE-POINT a parameter the document already carries. Without
+        #     this it would be a way to hand the inversion phase a different page, a different
+        #     control flag or a mode the normal run never loads - and the phase that exists to
+        #     show every check capable of failing would be checking something else.
+        document_keys = set(dict(urllib.parse.parse_qsl(
+            urllib.parse.urlsplit(candidate.document).query)))
+        for key, value in candidate.invert_query:
+            if key not in document_keys:
+                problems.append(
+                    "%s's invert_query sets %r=%r, which its document (%s) does not carry. "
+                    "invert_query may only re-point a parameter the page already reads, never "
+                    "introduce one for the inversion phase alone"
+                    % (candidate.name, key, value, candidate.document))
         # 9. A declared negative control must have an expectation naming this check, or the
         #    control is decoration: --controls advertises it and no gate ever scores it.
         for tag, runs in sorted(CONTROL_RUNS.items()):
@@ -1624,6 +1669,348 @@ M1_LABELS = (
     "served m1.html",
 )
 
+#: What the phases that are NOT about scale use instead: both negative controls, and the
+#: inversion phase. ONE number, because it is one fact — the file count at which proof (a) still
+#: exercises every clause and the run is seconds rather than a minute. Measured: the inversion
+#: phase went from 73 s (and a 300 s page-level timeout one run in two) to under 10 s.
+M2_CONTROL_FILES = 400
+
+#: Every label check_m2 records, in body order. The registry's inventory: the count is its length,
+#: each negative control's `held` is derived from it, and run_one refuses a run whose body records
+#: anything else.
+M2_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "abi fingerprint published",
+    # THE NOTE CHANNEL AS A CLAUSE, page-wide. Zero is the measured normal (38 before one inode's
+    # operations were serialized, none after at 60, 200 and 10,000 files), so a note that only
+    # reaches a log is a failure nobody reads.
+    "the storage edge raised no note in any section",
+    # (a) 10,000 files survive a reload byte- and mode-intact. Split into clauses because the
+    #     ordering control leaves the METADATA whole and destroys only the DATA, and a single
+    #     "proof_a ok" could not have said that.
+    "proof_a ok",
+    "proof_a wrote every file",
+    "proof_a every byte survived the reload",
+    "proof_a every mode bit survived the reload",
+    "proof_a mounted read-write both times",
+    "proof_a boot lock taken inside its budget",
+    "proof_a fsck clean after the reload",
+    "proof_a fsck wrote nothing",
+    "proof_a blob sweep accounts for every file",
+    # (b) a journal truncated mid-record. Three tears, three guards.
+    "proof_b ok",
+    "proof_b1 truncated tail reported",
+    "proof_b2 zero-padded tail reported",
+    "proof_b3 flipped mode field reported",
+    "proof_b nothing was reseeded",
+    "proof_b a torn journal mounts read-only",
+    "proof_b the user's file kept a mode somebody wrote",
+    # (c) two concurrent opens of one file both succeed, and the swing under them.
+    "proof_c ok",
+    "proof_c two concurrent opens both succeeded",
+    "proof_c both readers saw the committed bytes",
+    "proof_c a later opener saw the new generation",
+    # The HELD description, re-read after the swing. This replaced "the superseded blob outlived
+    # its reader", which was the stale read in assertion form: the holder stayed pinned to the
+    # generation it opened, which is how one fd came to report fstat 40 while pread on the same fd
+    # returned 8. POSIX has two fds on one file sharing the FILE, so the holder must follow — and
+    # with no reader left on the superseded generation its removal is immediate, which the clause
+    # below reads off the directory. The DEFERRED arm moved to the `drop` section, where a
+    # reference genuinely outlives the free.
+    "proof_c the held fd followed the swing",
+    "proof_c the holder outlived the other description's close",
+    "proof_c the superseded generation left the directory",
+    # (d) two concurrent WRITERS on one inode. Proof (c) has two readers and a third-process
+    #     writer, and two live WRITE descriptions on one inode was the configuration in which
+    #     copy-on-write was not atomic: the append-vs-copy-up test read a per-description
+    #     snapshot of the committed size, so a write below a size the OTHER description had
+    #     published took the append branch and overwrote committed bytes in place.
+    "proof_d ok",
+    "proof_d two write descriptions on one inode",
+    "proof_d the second writer staged a new generation",
+    "proof_d both writers' committed bytes survived",
+    # An OUTSTANDING APPEND under another description's commit — the state proof (d) cannot
+    #     reach, because both of its writers are clean when they write. One state, three
+    #     separate failures: a write below another description's published size landing in the
+    #     committed generation in place, a commit publishing a size BACKWARDS over fsynced
+    #     bytes, and a commit record the writer's own VFS refused reaching the disk and bricking
+    #     the next mount read-only. Split into clauses for the same reason proof (a) is: the
+    #     final bytes alone came out RIGHT against the broken code, and the clause that moved
+    #     was the mid-flight read.
+    "pending ok",
+    # "Held back" is a claim about the METADATA and is now measured as the metadata not moving —
+    # no swing, no journal record. It used to be measured as a FRESH description still seeing the
+    # old size, which asserted that the appended bytes were invisible to another description, and
+    # that is the stale read rather than the guarantee: POSIX has two fds on one file sharing the
+    # file, and `pwrite` had already returned a count for those bytes. The visibility half is now
+    # its own clause and asserts the opposite of what the old one did.
+    "pending the append was held back from the metadata",
+    "pending the append is visible to every description",
+    "pending the appending writer staged a new generation",
+    "pending the committed generation was never written in place",
+    "pending both writers' bytes survived",
+    "pending the replay rejected nothing",
+    "pending the volume still mounts read-write",
+    "pending the bytes survived the remount",
+    # WHAT `close()` REPORTS, AND WHAT IT LEAVES BEHIND. Three routes through one question, and
+    # each was a separate silent loss that the round of attacks after the one which patched the
+    # previous site found. Route 1 is the headline: an acknowledged append under another
+    # description's swing, lost with `close()` returning 0 and an explicit fsck reporting the
+    # volume clean, because the blob's length matched the size the metadata published.
+    "drop ok",
+    "drop the append was acknowledged twice",
+    "drop close reported success",
+    "drop the acknowledged bytes are in the file",
+    "drop the volume is clean afterwards",
+    "drop a superseded stage is re-based, not discarded",
+    "drop a re-staged commit left no staged blob behind",
+    "drop every call on an unlinked description refuses alike",
+    "drop an unlinked file's blob outlived its last descriptor",
+    # ROUTE 4, AND THE ONE CALLER THAT CANNOT READ A RETURN VALUE. A writer killed holding a staged
+    # generation under contention: teardown commits and cannot await, so the note channel is the
+    # only report there is. 3 of 12 acknowledged writes were destroyed before one inode's
+    # operations were serialized, every one of them named in a note nothing asserted on — which is
+    # why the second label here reads the kernel's note COUNT.
+    "drop a killed writer's acknowledged bytes survive",
+    "drop the note channel stayed silent under a killed writer",
+    # THE COMMIT IS A COMPARE-AND-SWAP, and the five scenarios are five losses that reported
+    # success. The copy a copy-up takes is speculative, and a speculative copy is only valid if
+    # nothing moved underneath it — which the commit never checked. The slack pair is the other
+    # half of the same sentence: the published size is the only authority on what a file contains,
+    # so bytes above it are reclaimable slack, reportable by fsck and invisible to every reader.
+    "cas ok",
+    "cas base keeps every acknowledged byte",
+    "cas twostage keeps every acknowledged byte",
+    "cas m4 keeps every acknowledged byte",
+    # THE SLACK PAIR AS A RACE, which is different from the slack pair as a plant below: a write
+    # INSIDE the region an uncommitted append opened moves neither the generation nor the extent, so
+    # a stamp made of those two numbers could not see it and the next staged commit reverted it.
+    # `slackwide` is the same ordering one byte wider, where the extent does move — the boundary,
+    # kept beside it so "the counter is bumped by an in-place write" is distinguishable from "the
+    # extent happened to move".
+    "cas slackin keeps every acknowledged byte",
+    "cas slackwide keeps every acknowledged byte",
+    # ONE DESCRIPTION'S read, fstat AND SEEK_END, after another description published a SHORTER
+    # file. `read` clamped to the base its copy came from while the other two read the extent now.
+    "cas dirtytrunc keeps every acknowledged byte",
+    "cas uncommitted slack does not resurrect",
+    "cas fsck reports a blob longer than its published size",
+    "cas two overlapping opens of one name both succeed",
+    "cas contention refuses only under EBUSY",
+    # WHAT A CALLER WHO RETRIES -EBUSY IS TOLD, and what the journal looks like underneath the same
+    # workload. Two different defects, one two-writer run: a retry was answered 0 over a stage the
+    # refusal had discarded, and two concurrent appends took one sequence number, which makes replay
+    # discard every record after it.
+    "cas a retried fsync is never told a discarded write is durable",
+    "cas the journal's sequences are strictly consecutive",
+    # A STAGED GENERATION A CRASH LEFT BEHIND. The staging floor was seeded from the generations
+    #     the METADATA names, which are the committed ones — so an orphan from a crash between a
+    #     copy-up and its commit was invisible to it, the next write reused that generation
+    #     number, and the orphan's bytes became the file's. fsck reported the volume clean,
+    #     because the blob's length matched the size the metadata published.
+    "orphan ok",
+    "orphan the orphaned generation was on disk",
+    "orphan a grown range reads as zeroes",
+    "orphan the orphaned generation was not reused",
+    # A refused mount, in the KERNEL rather than in fsck. src/fs/fsck.mjs returning 'refuse' is
+    # checked under Node; the reseed lives in the caller, and the caller's refuse arm was
+    # exercised by nothing — so webxp's defect could be reinstated there with every proof and
+    # every host test still passing.
+    "refuse all three slots were corrupted",
+    "refuse the mount refused",
+    "refuse the volume was not touched",
+    "refuse no tree was invented",
+    # A SLOT THAT CANNOT BE READ, which is the refused mount's error-path twin. A healthy volume's
+    # journal is EMPTY because the last snapshot truncated it, so the slots are the only evidence
+    # the volume exists — and an errno read as "absent" made all of it vanish at once and reached
+    # the FRESH arm, the one arm allowed to write. Measured against the pre-fix reader: one
+    # unreadable slot mounted READ-WRITE with `problems` empty, and three produced a tree of one
+    # inode over a volume of 28 with its 10 blobs orphaned on disk.
+    "unreadable the slot read refused with something other than absence",
+    "unreadable the journal was empty, so only the slots said the volume existed",
+    "unreadable one unreadable slot mounts read-only at the same generation",
+    "unreadable one unreadable slot keeps its tree",
+    "unreadable every unreadable slot refuses",
+    "unreadable both verdicts name the slot that could not be read",
+    "unreadable neither verdict wrote anything",
+    # O_APPEND, WHICH WAS A SEEK AT OPEN. One process, four calls, no race: two appending
+    # descriptions both get the end read once, and the second writes over the first with `write`
+    # returning 4 and `fsync` returning 0 to each. M5's `>>` is the caller that will hit it.
+    "append both O_APPEND writes were acknowledged",
+    "append two O_APPEND writers both keep their bytes",
+    "append the volume is clean afterwards",
+    # EVERY ASYNC SYSCALL COMPLETION, ACROSS EVERY SECTION. `later()` is the completion path for
+    # open, write, fsync, truncate and close, and its rejection arm used to answer a bare -EIO that
+    # named nothing: a kernel-side exception was indistinguishable from a real storage error. The
+    # count is summed over every kernel this page boots, and the second clause is its anti-vacuity
+    # — a zero nobody could read is not a zero.
+    "no async syscall completion was rejected in any section",
+    "every kernel's counters were read before it was terminated",
+    # Constraints 23 and 24, as traces off the storage edge rather than as readings of the code.
+    "order the blob flush precedes the journal append",
+    "order one directory handle for the module's life",
+    # The rest of the ABI. Not a fourth proof — the milestone owes three — but a call the suite
+    # never issues is a call nobody has shown works, and the three proofs reach twelve of the
+    # thirty-nine.
+    "every other syscall answers correctly",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m2.html",
+)
+
+#: What dropping the data-before-metadata ordering turns red, MEASURED under the control at
+#: a_n=8 on Chrome 157.0.8103.52 (`bench/fs-core/probe.py --files 8 --no-cow-order`):
+#: bytesOk 0 of 8, modesOk 8 of 8, fsck "8 blob(s) are SHORTER than the size the metadata
+#: publishes", proof_c's three readers all summing 0.
+#:
+#: THE SHAPE OF THIS LIST IS THE FINDING. Every metadata clause HOLDS — the files are there, the
+#: modes are right, the mount is read-write, the boot lock was taken, fsck still wrote nothing —
+#: and only the data clauses move. That is exactly "intact metadata pointing at torn data", which
+#: is the outcome copy-on-write was chosen to prevent, and it is why `held` being derived matters:
+#: a hand-written list would have been a guess about which half survives.
+_NO_COW_ORDER_FAILS = (
+    "proof_a ok",
+    "proof_a every byte survived the reload",
+    "proof_a fsck clean after the reload",
+    "proof_a blob sweep accounts for every file",
+    "proof_c ok",
+    "proof_c both readers saw the committed bytes",
+    "proof_c a later opener saw the new generation",
+    # The held fd still FOLLOWS the swing under the control — it resolves the new generation and
+    # reports its size — and reads 0 bytes out of it, because the control emptied the blob. So the
+    # byte clause moves and the directory clause beside it does not, which is the same split as
+    # everywhere else in this list. Measured at a_n=400: re-read size 8, read 0, checksum 0
+    # against the overwrite's 1308.
+    "proof_c the held fd followed the swing",
+    # Proof (d) splits the same way: both writers still OPEN the inode and the second still STAGES
+    # a new generation — the copy-up decision is metadata and the control does not touch it — and
+    # the bytes are what goes. The copy-up copies out of a blob the control emptied, so the
+    # surviving-bytes clause is the one that moves.
+    "proof_d ok",
+    "proof_d both writers' committed bytes survived",
+    # The pending proof splits the same way again, and the split is sharper because it has more
+    # metadata clauses: the append is still held back from the metadata, the copy-up still
+    # happens, the refused commit still leaves no record, and the volume still mounts
+    # READ-WRITE — only the three byte clauses move. Measured at a_n=400 under the control: the
+    # mid-flight read saw 0 rather than the first writer's 0xa1, pcheck read 0 of 104 bytes, and
+    # the remount came up rw with problems: [].
+    "pending ok",
+    "pending the committed generation was never written in place",
+    "pending both writers' bytes survived",
+    "pending the bytes survived the remount",
+    # The drop section splits the same way, and the split is worth reading because this section is
+    # ABOUT a silent loss: the append is still acknowledged, both closes still return 0, the
+    # refusal is still reported, the staged blob is still freed and the unlinked blob still
+    # outlives its descriptor — every one of those is metadata. What moves is the bytes, and with
+    # them the fsck clause, which under the control reports `ro` with 402 blobs SHORTER than the
+    # size the metadata publishes. Measured at a_n=400: check size 12 of a wanted 12 with
+    # belowOk=false and tailOk=false, over blobs that are all 0 bytes long.
+    "drop ok",
+    "drop the acknowledged bytes are in the file",
+    "drop the volume is clean afterwards",
+    # THE RE-BASE CLAUSE MOVES WITH THE BYTES, and its three ranges say why: under the control the
+    # merge's head, middle and grown ranges all read as zeroes, because the blob every one of them
+    # was copied from was emptied after its commit.
+    "drop a superseded stage is re-based, not discarded",
+    # THE KILLED-WRITER ROUTE MOVES AS A PAIR, and the pair is the control's whole point here.
+    # Measured at a_n=400 under the control: all twelve writes still ACKNOWLEDGED (the control
+    # touches no decision, only the bytes) and all twelve vanished, with the explicit fsck
+    # reporting `ro` and `blobs`. The note channel then carries 2,400 of them — "staged generation
+    # 22.2 is 4 byte(s) on disk and its commit would publish 8", which is the commit refusing to
+    # name bytes that are not there — so the silence clause moves too. A control under which the
+    # note count stayed at zero would mean the count was not reading the channel.
+    "drop a killed writer's acknowledged bytes survive",
+    "drop the note channel stayed silent under a killed writer",
+    # AND THE PAGE-WIDE NOTE CLAUSE WITH IT: 2,587 notes across the run under the control against
+    # none on a clean one, so the count is reading the channel rather than a constant.
+    "the storage edge raised no note in any section",
+    # TWO CLAUSES HERE ARE THE CONTROL'S OWN SUBJECT REACHING FURTHER THAN IT USED TO, and they are
+    # the only entries in this list that are not byte clauses. The commit now compares the size it
+    # is about to publish against the staged blob's OWN LENGTH, and the control's state — metadata
+    # that names bytes which are not there — is exactly what that comparison refuses: the copy-up
+    # copies 0 of 40 bytes out of an emptied blob, so the commit will not publish 40 over a 16-byte
+    # generation and `fsync` answers -EIO. Measured at a_n=400: proof (d)'s second writer still
+    # takes the copy-up branch (copyUps 0 -> 1) and its staged generation is then DISCARDED, so the
+    # "new blob on disk" half of that clause is what moves. Refusing to publish a size the blob
+    # does not have is the invariant; a control that left it unexercised would be the weaker report.
+    "proof_d the second writer staged a new generation",
+    # THE CAS SECTION, and its split is the sharpest in this list: six of its seven clauses are
+    # about bytes or about the counters that prove a race happened, and all six move. The seventh —
+    # two overlapping opens of one name — is pure metadata and HOLDS, which is what keeps the
+    # section from reading as "everything fails under the control".
+    "cas ok",
+    "cas base keeps every acknowledged byte",
+    "cas twostage keeps every acknowledged byte",
+    "cas m4 keeps every acknowledged byte",
+    # THE SLACK PAIR AND THE TWO-BASE READ SPLIT THE SAME WAY, and the halves that HOLD say which
+    # clause is which. Measured at a_n=400 under the control: `slackin` and `slackwide` still make
+    # the compare-and-swap fire (casFired true) and lose their bytes, because the generation every
+    # commit published was emptied afterwards - final.read 0 of a published 12. `dirtytrunc`'s
+    # THREE ANSWERS STILL AGREE (fdSize 4, readLen 4, seekEnd 4, threeAgree true): the renderer is
+    # metadata and the control does not touch it, so what moves is the byte at offset 0.
+    "cas slackin keeps every acknowledged byte",
+    "cas slackwide keeps every acknowledged byte",
+    "cas dirtytrunc keeps every acknowledged byte",
+    # THE RETRY CLAUSE MOVES BECAUSE ITS SUBJECT IS A BYTE: it reads back what a 0 from `fsync`
+    # claimed. Under the control every commit's generation is emptied, so the read-back finds
+    # nothing — measured 192 of 200 rounds claiming durability over a file that reads 0 bytes, and
+    # the refusals arrive as EIO from the staged-length assertion rather than as EBUSY. The journal
+    # clause beside it is NOT in this list and must hold: the control leaves the sequences
+    # perfectly consecutive and the blobs short.
+    "cas a retried fsync is never told a discarded write is durable",
+    "cas uncommitted slack does not resurrect",
+    "cas fsck reports a blob longer than its published size",
+    # THE CONTENTION CLAUSE IS "ONE KIND OF REFUSAL", and that is a property of a HEALTHY volume.
+    # Under the control every staged generation is emptied after its commit, so the staged-length
+    # assertion refuses each of the next commits and says why. Measured at a_n=400: errnos
+    # [10, 29 x 15] - one EBUSY from the bounded retry running out, then fifteen EIO, each with its
+    # own note naming the generation, its length and the size the commit would have published
+    # ("staged generation 22.7 is 4 byte(s) on disk and its commit would publish 72"). Every one of
+    # those is the control's corruption being refused rather than an unnamed failure, which is what
+    # the clause is for on the headline path.
+    "cas contention refuses only under EBUSY",
+    # The orphan proof splits the same way a third time: the orphan is still on disk, the floor
+    # still refuses to reuse its generation — both read off the DIRECTORY — and only the bytes in
+    # the grown range go, because the control empties the blob the truncate staged.
+    "orphan ok",
+    "orphan a grown range reads as zeroes",
+    # The O_APPEND section splits the way every data section does: both writes are still
+    # ACKNOWLEDGED — the control touches no decision, only the bytes — and what moves is what a
+    # fresh reader finds, with the fsck clause beside it, because the control empties each blob
+    # after its commit and fsck then reports it SHORTER than the size the metadata publishes.
+    "append two O_APPEND writers both keep their bytes",
+    "append the volume is clean afterwards",
+    # The ordering clause is this control's own subject, read off the trace rather than inferred:
+    # with the data-before-metadata ordering dropped there is NO blob flush to precede the journal
+    # append. The directory-handle clause beside it is untouched, which is what keeps the two
+    # separate.
+    "order the blob flush precedes the journal append",
+    # Two of its fifty-four rows, and both are data rows: `pread reads from the offset` saw zeros,
+    # and `ftruncate kept the bytes below it` saw zeros. Every one of its refusals and all its
+    # metadata rows held, which is the same split as the rest of this list.
+    "every other syscall answers correctly",
+    "verdict is ok",
+)
+
+#: What removing the CRC turns red, measured the same way (`--files 8 --no-crc`): b2 and b3 come
+#: back `stopped: null, accepted: true`, b3 APPLIES its corrupt record, the volume mounts
+#: read-write with no problems at all, and `/d/0/modes/m9` reads 0o656 — a permission nobody wrote.
+#:
+#: b1 HOLDS, and that is the point. A plain truncation is caught by the record's LENGTH check, not
+#: by its checksum, so a control that moved all three tears would not have said which guard it
+#: removed. The holding clause is the evidence that the two guards are different guards.
+_NO_CRC_FAILS = (
+    "proof_b ok",
+    "proof_b2 zero-padded tail reported",
+    "proof_b3 flipped mode field reported",
+    "proof_b a torn journal mounts read-only",
+    "proof_b the user's file kept a mode somebody wrote",
+    "verdict is ok",
+)
+
 #: The two labels the no-sigpend control turns red. `verdict is ok` goes with proof_e because the
 #: aggregate verdict reads the all-ok of every proof; naming only proof_e would let a verdict
 #: regression (e.g. a page that forgets to AND the five proofs) pass under this control.
@@ -1663,6 +2050,12 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="same mechanism as syscall: the kernel's SAB is not constructible without "
                 "COOP/COEP, so www/m1.html aborts before any proof runs. UNMEASURABLE rather "
                 "than FAIL for the same reason - a FAIL would claim four verdicts were taken.",
+        ), "m2": Expect(
+            UNMEASURABLE,
+            why="same mechanism as syscall and m1: the kernel's SAB is not constructible without "
+                "COOP/COEP, so no filesystem is mounted and www/m2.html aborts before any proof "
+                "runs. Measured: state 'aborted' in 0.0 s. UNMEASURABLE rather than FAIL, because "
+                "a FAIL would claim three proofs were taken and found wanting.",
         ), "boot": Expect(
             Outcome.FAIL,
             failed=_NO_ISOLATION_FAILS,
@@ -1744,6 +2137,61 @@ CONTROLS: Dict[str, NegativeControl] = {
             # Everything else, derived from the inventory. An added expectation enters `held` on
             # the first run rather than being silently unscored.
             held=held_rest(M1_LABELS, _NO_SIGPEND_FAILS),
+        )},
+    ),
+    "no-cow-order": NegativeControl(
+        name="no-cow-order",
+        why="no_cow_order=1: the commit's data-before-metadata ordering is dropped. The journal "
+            "record and its flush land and the staged bytes are discarded, which is the state a "
+            "crash between those two steps leaves — intact metadata pointing at data that was "
+            "never written. src/kernel/kernel.mjs refuses the hook without a bench boot.\n"
+            "It discards the bytes rather than only skipping flush() BECAUSE SKIPPING THE FLUSH "
+            "ALONE CHANGED NOTHING OBSERVABLE: an unflushed FileSystemSyncAccessHandle write is "
+            "still visible to a later read in the same agent (flush() buys durability past a "
+            "process death, not visibility), and with blobFlushes at 0 fsck still came back "
+            "clean. The only way to observe the ordering BY ITS EFFECTS from inside one session "
+            "is to reproduce the post-crash state.\n"
+            "THE ORDER ITSELF IS OBSERVED SEPARATELY, and that conclusion used to be drawn too "
+            "wide: the storage edge records the sequence of operations it performed, so the "
+            "`order` clause reads the blob flush's sequence number against the journal append's "
+            "for one commit. Under this control there is no blob flush at all, which is why that "
+            "clause is in the red list beside the data clauses.\n"
+            "a_n is dropped to 400 for this phase: the control is about the ordering, not about "
+            "scale, and the 10,000-file figure is the headline run's job.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_cow_order", "1"), ("a_n", str(M2_CONTROL_FILES))),
+        expects={"m2": Expect(
+            Outcome.FAIL,
+            why="fsck must report the corruption, and the METADATA clauses must all hold: the "
+                "files are there, the modes are right, the mount is read-write and fsck still "
+                "wrote nothing. Only the data is gone, which is the failure copy-on-write exists "
+                "to prevent",
+            failed=_NO_COW_ORDER_FAILS,
+            held=held_rest(M2_LABELS, _NO_COW_ORDER_FAILS),
+        )},
+    ),
+    "no-crc": NegativeControl(
+        name="no-crc",
+        why="no_crc=1: the journal's and the snapshot image's CRC checks are removed, so a torn "
+            "tail is ACCEPTED. The torn-journal proof must START PASSING a bad image — if it "
+            "passed either way it was testing nothing. Measured at a_n=400: the zero-padded tail "
+            "and the flipped mode digit both come back stopped=null accepted=true, the flipped "
+            "record is APPLIED, the volume mounts read-write with no problems reported, and "
+            "/d/0/modes/m9 reads 0o656 instead of the 0o600 it was created with.\n"
+            "THE TRUNCATED TEAR HOLDS, and that is what makes this control specific: a plain "
+            "truncation is caught by the record's LENGTH check and never reaches the checksum, so "
+            "a control that moved all three tears would not say which guard it removed.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_crc", "1"), ("a_n", str(M2_CONTROL_FILES))),
+        expects={"m2": Expect(
+            Outcome.FAIL,
+            why="without the CRC, two of the three tears are accepted and one of them silently "
+                "changes a permission on a user's file. The truncated tear and everything about "
+                "proofs (a) and (c) must be untouched",
+            failed=_NO_CRC_FAILS,
+            held=held_rest(M2_LABELS, _NO_CRC_FAILS),
         )},
     ),
     "kernel-stall": NegativeControl(
@@ -2544,6 +2992,987 @@ def check_m1(env: Env) -> None:
     env.shoot("m1")
 
 
+#: Everything check_m2 reads, in one round trip. The three proofs carry an `ok` and an `evidence`
+#: object; the evidence crosses as a real object rather than a JSON string, because this check
+#: asserts on individual clauses inside it — a control is scored on WHICH clause moved, and a
+#: string would make every clause one label.
+READ_M2 = """(() => {
+  const M = globalThis.M2 || {}
+  const p = M.proofs || {}
+  const one = (x) => x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} }
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    fingerprint: String(M.pageFingerprint || ''),
+    cfg: JSON.stringify(M.config || {}),
+    faults: (M.faults || []).map((f) => String(f.pid) + ': ' + String(f.why)),
+    errors: (M.errors || []).map(String),
+    proof_a: one(p.proof_a), proof_b: one(p.proof_b), proof_c: one(p.proof_c),
+    proof_d: one(p.proof_d), pending: one(p.pending), drop: one(p.drop),
+    cas: one(p.cas), orphan: one(p.orphan),
+    refuse: one(p.refuse), unreadable: one(p.unreadable),
+    append: one(p.append), order: one(p.order), api: one(p.api),
+    // `later()`'s rejection count summed over every kernel the page booted, and how many of them
+    // answered the read. Numbers rather than a section, because this is a property of every
+    // section at once.
+    asyncFail: Number(M.asyncFail),
+    statsReads: Number(M.statsReads),
+  }
+})()"""
+
+M2_SHAPE = {
+    "state": str, "why": str, "verdict": str, "isolated": bool, "kernelIsolated": bool,
+    "fingerprint": str, "cfg": str, "faults": list, "errors": list,
+    # Every section, declared: a page that renamed one would otherwise read as a section that
+    # produced nothing, and the check would report the rename as a failed proof.
+    "proof_a": (dict, type(None)), "proof_b": (dict, type(None)), "proof_c": (dict, type(None)),
+    "proof_d": (dict, type(None)), "pending": (dict, type(None)),
+    "drop": (dict, type(None)), "cas": (dict, type(None)),
+    "orphan": (dict, type(None)),
+    "refuse": (dict, type(None)), "unreadable": (dict, type(None)),
+    "append": (dict, type(None)),
+    "order": (dict, type(None)),
+    "api": (dict, type(None)),
+    "asyncFail": int, "statsReads": int,
+}
+
+def _cas_brief(row: object) -> object:
+    """One process result row without its clock histogram and realm enumeration.
+
+    A `results` row carries 200,000 clock samples' distinct values and the process's env keys. A
+    failure message that pasted those would bury the four numbers the clause is about.
+    """
+    if not isinstance(row, dict):
+        return row
+    drop = ("clock", "envKeys", "envKinds", "abiFingerprint", "sinkSum", "sinkBytes",
+            "sinkWrites", "isolated", "exiting", "calls", "replies", "ms")
+    return {k: v for k, v in row.items() if k not in drop}
+
+
+#: 10,000 is the milestone's own figure and this is the run that takes it.
+M2_FILES = 10000
+
+#: How many sections www/m2.html runs. The floor for the `statsReads` anti-vacuity clause: every
+#: section boots AT LEAST one kernel and every kernel goes through `shut()`, which is where the
+#: counters are read — so a run that read fewer than this did not read them all. A floor rather
+#: than the exact count because several sections boot two or three.
+M2_SECTIONS = 13
+
+M2_DOCUMENT = "/www/m2.html?a_n=%d" % M2_FILES
+
+M2_READY = ("(() => { const s = globalThis.M2 && globalThis.M2.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+
+@check(
+    name="m2",
+    milestone="m2",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_COW_ORDER, Control.NO_CRC),
+    # Fixed by M2_LABELS, not by what the page produced: a page that ran no proof records
+    # twenty-nine failing expectations rather than passing on an absent object.
+    labels=M2_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M2_DOCUMENT,
+    # The inversion phase asks whether every expectation this check records inverts and fires,
+    # and that answer does not depend on proof (a)'s file count — but the 10,000-file write made
+    # the phase cost 73 s of the page's own 300 s per-run budget, and hit it one run in two. See
+    # Check.invert_query; audit rule 15 is what stops this becoming a way to disarm the mode.
+    invert_query=(("a_n", str(M2_CONTROL_FILES)),),
+    ready_expr=M2_READY,
+    ready_what="globalThis.M2.state reaching done, aborted or error (www/m2.html)",
+    # 10,000 files is 10,000 opens at 495 us plus 10,000 flushes at 260 us by construction
+    # (constraints 22 and 23), and the measured end-to-end figure for all three proofs is 78.4 s.
+    # The bound is generous against a shared browser and is still a BOUND: a wedged kernel must
+    # end as a BROKEN check with a reason rather than a suite that never returns.
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M2 && globalThis.M2.state",
+    refusal_want="aborted",
+    note="thirteen sections: the milestone's three proofs, (d) two concurrent WRITERS on one "
+         "inode, an outstanding append under another description's commit, what close() reports "
+         "and what it leaves behind, the commit's compare-and-swap under five shapes of lost race, "
+         "a staged generation a crash left behind, a mount that must REFUSE a volume whose three "
+         "superblock slots are all corrupt, a mount whose slot READ refuses because the page "
+         "turned the slot name into a directory — read-only on one slot, refuse on all three, and "
+         "never a first boot — O_APPEND per write, and the storage edge's own trace for "
+         "constraints 23 and 24. Page-wide: the note channel, and `later()`'s async-completion "
+         "rejection count summed over every kernel the page boots. "
+         "negative controls, two stages and the second is the point: --negative no-cow-order "
+         "drops the commit's data-before-metadata ordering, which must make fsck report "
+         "corruption while every metadata clause holds; --negative no-crc then removes the "
+         "journal's checksum and the torn-journal clauses must START PASSING a bad image, with "
+         "the TRUNCATED tear still held because the length check is a different guard. "
+         "--negative no-isolation must come out BROKEN: the kernel's SAB does not exist there, so "
+         "no filesystem is mounted and no proof can be taken.",
+)
+
+def check_m2(env: Env) -> None:
+    got = env.read(READ_M2, M2_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m2.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable(
+            "www/m2.html reached state %r rather than 'done' though the runner waited %.1fs, so "
+            "no proof completed." % (got["state"], env.ready_wait_s))
+
+    # Anti-vacuity first: a page that produced no verdict cannot have proved anything, and a fault
+    # means a process died while the proofs were being taken.
+    env.expect("cell reported", (got["verdict"] != "", len(got["faults"])), (True, 0))
+    if got["faults"]:
+        env.note("process faults during the proofs: %s" % "; ".join(got["faults"]))
+    if got["errors"]:
+        env.note("page errors: %s" % "; ".join(got["errors"]))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("abi fingerprint published", bool(got["fingerprint"]),
+                    "the page published no ABI fingerprint, so there is nothing to say the page "
+                    "and the kernel agree about the ABI")
+    # THE NOTE CHANNEL, ACROSS EVERY SECTION, and it is an EXPECTATION rather than the env.note()
+    # above because of what the note-only version cost. A note is a storage refusal nobody is
+    # awaiting; the case it exists for is a commit refused inside a process's teardown, where there
+    # is no caller to return an errno to. For six rounds it was printed beside the other logs and
+    # asserted nowhere, and a workload that destroyed 3 of 12 acknowledged writes said so in a note
+    # every time while the suite passed and fsck reported the volume clean.
+    #
+    # ZERO IS NOW THE MEASURED NORMAL, which is what makes the clause affordable: the page emitted
+    # 38 notes before operations on one inode were serialized - every one a commit that lost its
+    # base four times and was refused under EBUSY - and emits none now, at 60, 200 and 10,000
+    # files. The sections that deliberately provoke a refusal (the compare-and-swap under
+    # contention, the torn journal, the refused mount, the planted orphan) are all inside that
+    # figure.
+    io_notes = [e for e in got["errors"] if e.startswith("io: ")]
+    env.expect_that(
+        "the storage edge raised no note in any section", not io_notes,
+        "%d note(s) reached the page. A note is a failure with no caller to return to, so an "
+        "unasserted one is a failure only a human reading logs can find: %s"
+        % (len(io_notes), json.dumps(io_notes[:8])[:900]))
+
+    # ---- proof (a): 10,000 files survive a reload byte- and mode-intact -----------------
+    #
+    # Read clause by clause rather than as one `ok`. The ordering control leaves every metadata
+    # clause standing and destroys only the data, and a check with one label per proof could not
+    # have reported that difference — it would have said "proof (a) failed" and left the reader to
+    # guess which half.
+    a = got["proof_a"]
+    ea = (a or {}).get("evidence") or {}
+    env.expect_that("proof_a ok", bool(a and a["ok"]),
+                    "proof (a) failed; the page's own evidence: %s" % json.dumps(ea)[:1200])
+    # The count comes from the PAGE, not from M2_FILES. The two controls drop `a_n` to 400 and a
+    # check that compared against the headline figure would fail under them for the wrong reason —
+    # and a check that read its own control flag to decide what to expect could branch on it.
+    env.expect_that(
+        "proof_a wrote every file",
+        ea.get("written") == ea.get("n") and (ea.get("n") or 0) > 0,
+        "%s of %s files were created; errors: %s"
+        % (ea.get("written"), ea.get("n"), json.dumps(ea.get("writeErrors"))[:600]))
+    env.note("proof (a): %s files, %s B, %s ms to write and %s ms to verify"
+             % (ea.get("n"), ea.get("bytes"), ea.get("wroteMs"), ea.get("verifyMs")))
+    env.expect_that(
+        "proof_a every byte survived the reload",
+        ea.get("bytesOk") == ea.get("n") and ea.get("checked") == ea.get("n"),
+        "%s of %s files read back byte-identical after the remount; the verifier recomputes the "
+        "expected bytes from the index rather than being handed them. First mismatches: %s"
+        % (ea.get("bytesOk"), ea.get("n"), json.dumps(ea.get("verifyErrors"))[:600]))
+    env.expect_that(
+        "proof_a every mode bit survived the reload", ea.get("modesOk") == ea.get("n"),
+        "%s of %s files came back with the mode they were created with. POSIX metadata lives "
+        "outside OPFS (constraint 25), so a lost mode is a lost snapshot or a lost journal record"
+        % (ea.get("modesOk"), ea.get("n")))
+    env.expect("proof_a mounted read-write both times",
+               (ea.get("mode1"), ea.get("mode2")), ("rw", "rw"))
+    lock = ea.get("bootLock") or {}
+    env.expect_that(
+        "proof_a boot lock taken inside its budget",
+        bool(lock.get("ok")) and lock.get("waitedMs", 1e9) <= ea.get("bootLockBudgetMs", 0),
+        "constraint 48: the second kernel races the first's journal handle, so the lock must "
+        "RETRY rather than declare another tab. Taken=%s after %s ms and %s attempt(s) against a "
+        "%s ms budget; why=%r. A boot lock that gave up here brings a normal reboot up read-only "
+        "at random" % (lock.get("ok"), lock.get("waitedMs"), lock.get("attempts"),
+                       ea.get("bootLockBudgetMs"), lock.get("why")))
+    env.expect_that(
+        "proof_a fsck clean after the reload", ea.get("fsckClean") is True,
+        "an explicit fsck over the remounted volume, blob sweep included, must find nothing. It "
+        "reported: %s" % json.dumps(ea.get("fsckProblems"))[:900])
+    env.expect_that(
+        "proof_a fsck wrote nothing",
+        ea.get("fsckWrote") is False and ea.get("fsckBefore") == ea.get("fsckAfter"),
+        "constraint 28: fsck must never reseed. src/fs/fsck.mjs holds no handle and no root "
+        "directory, so there is no object there a write could go through — asserted anyway, "
+        "against the superblock generation and slot before and after: %s -> %s, wrote=%s"
+        % (ea.get("fsckBefore"), ea.get("fsckAfter"), ea.get("fsckWrote")))
+    blobs = ea.get("fsckBlobs") or {}
+    env.expect_that(
+        "proof_a blob sweep accounts for every file",
+        bool(blobs.get("swept")) and blobs.get("have") == blobs.get("want")
+        and not blobs.get("missing") and not blobs.get("short") and not blobs.get("long"),
+        "the flat blob directory (constraint 26) must hold exactly one blob per committed file, "
+        "each EXACTLY the size the metadata publishes. Shorter is torn data behind whole "
+        "metadata; longer is uncommitted slack, which is permitted on a volume a crash "
+        "interrupted and is not permitted here — every description on this volume closed, and a "
+        "close publishes the extent. Swept=%s, have %s of %s wanted, %s missing, %s short, %s "
+        "long: %s %s"
+        % (blobs.get("swept"), blobs.get("have"), blobs.get("want"),
+           len(blobs.get("missing") or []), len(blobs.get("short") or []),
+           len(blobs.get("long") or []),
+           json.dumps(blobs.get("short"))[:400], json.dumps(blobs.get("long"))[:400]))
+
+    # ---- proof (b): a journal truncated mid-record -------------------------------------
+    b = got["proof_b"]
+    eb = (b or {}).get("evidence") or {}
+    env.expect_that("proof_b ok", bool(b and b["ok"]),
+                    "proof (b) failed; the page's own evidence: %s" % json.dumps(eb)[:1200])
+    # One label per tear, because each is caught by a DIFFERENT guard and the CRC control must be
+    # scored on exactly the two it removes.
+    for shape, label, guard in (
+        ("b1", "proof_b1 truncated tail reported", "the record's LENGTH check"),
+        ("b2", "proof_b2 zero-padded tail reported", "the record's CRC"),
+        ("b3", "proof_b3 flipped mode field reported", "the record's CRC"),
+    ):
+        tear = eb.get(shape) or {}
+        env.expect_that(
+            label,
+            tear.get("reported") is True and tear.get("accepted") is False
+            and (tear.get("discardedBytes") or 0) > 0,
+            "%s: replay must stop and REPORT the discarded tail rather than reseeding "
+            "(constraint 28). This tear is caught by %s. Got stopped=%r, %s byte(s) discarded, "
+            "accepted=%r, %s record(s) replayed, %s applied, mount %r"
+            % (shape, guard, tear.get("stopped"), tear.get("discardedBytes"),
+               tear.get("accepted"), tear.get("records"), tear.get("applied"), tear.get("mode")))
+    env.expect_that(
+        "proof_b nothing was reseeded",
+        all(not (eb.get(s) or {}).get("reseeded", True) for s in ("b1", "b2", "b3")),
+        "webxp reset on a bad image and that is silent data loss presented as success. Measured "
+        "against the inode count and the superblock generation across the tear: %s"
+        % json.dumps({s: {k: (eb.get(s) or {}).get(k)
+                          for k in ("inodesBefore", "inodesNow", "generationBefore",
+                                    "generationNow", "reseeded")}
+                      for s in ("b1", "b2", "b3")})[:700])
+    env.expect_that(
+        "proof_b a torn journal mounts read-only",
+        all((eb.get(s) or {}).get("mode") == "ro" for s in ("b1", "b2", "b3")),
+        "constraint 28: a snapshot that fails validation mounts READ-ONLY and surfaces the "
+        "failure. Got %s"
+        % json.dumps({s: (eb.get(s) or {}).get("mode") for s in ("b1", "b2", "b3")}))
+    env.expect_that(
+        "proof_b the user's file kept a mode somebody wrote",
+        all((eb.get(s) or {}).get("victimKeptCreateMode") is True
+            and (eb.get(s) or {}).get("victimMadeUp") is False
+            for s in ("b1", "b2", "b3")),
+        "THE CLAIM ABOUT THE FILE rather than about the parser. The chmod in the discarded tail "
+        "was never applied, so %s must read back with the mode it was created with. Got %s"
+        % (((eb.get("b3") or {}).get("victim")),
+           json.dumps({s: (eb.get(s) or {}).get("victimMode") for s in ("b1", "b2", "b3")})))
+
+    # ---- proof (c): two concurrent opens of one file both succeed ----------------------
+    c = got["proof_c"]
+    ec = (c or {}).get("evidence") or {}
+    env.expect_that("proof_c ok", bool(c and c["ok"]),
+                    "proof (c) failed; the page's own evidence: %s" % json.dumps(ec)[:1200])
+    env.expect_that(
+        "proof_c two concurrent opens both succeeded", ec.get("bothOpened") is True,
+        "constraint 47: a sync access handle is an exclusive lock per file, so a second open "
+        "throws NoModificationAllowedError unless the handles are refcounted per inode BENEATH "
+        "the fd table. `cat notes.txt | wc -l` must not fail while an editor holds the file. "
+        "holder=%s second=%s" % (json.dumps(ec.get("holder")), json.dumps(ec.get("second"))))
+    env.expect_that(
+        "proof_c both readers saw the committed bytes", ec.get("sameBytes") is True,
+        "both openers must read the committed generation, not an empty or a half-written one. "
+        "Wanted checksum %s; holder saw %s and the second saw %s"
+        % (ec.get("wantSum"), (ec.get("holder") or {}).get("sum"),
+           (ec.get("second") or {}).get("sum")))
+    env.expect_that(
+        "proof_c a later opener saw the new generation", ec.get("newBytes") is True,
+        "after the copy-on-write swing a NEW opener must resolve the inode's new generation. "
+        "overwrite=%s, third opener=%s"
+        % (json.dumps(ec.get("overwrite")), json.dumps(ec.get("thirdOpener"))))
+    env.expect_that(
+        "proof_c the held fd followed the swing", ec.get("heldFollowed") is True,
+        "THE SAME fd, THE SAME DESCRIPTION, re-read after another process swung the inode under "
+        "it. POSIX has two fds on one file sharing the FILE, not a snapshot each, so this must "
+        "come back with the new generation's bytes and the new size. Against a description that "
+        "cached its generation and its size at open, the read returned the SUPERSEDED "
+        "generation's bytes while fstat on the same fd reported the new size - stat and read "
+        "disagreeing on one descriptor with no error on either. It opened at %s and re-read %s "
+        "against the overwrite's %s"
+        % ((ec.get("heldAgain") or {}).get("openSize"), json.dumps(ec.get("heldAgain")),
+           json.dumps(ec.get("overwrite"))))
+    env.expect_that(
+        "proof_c the holder outlived the other description's close",
+        ec.get("outlivedTheClose") is True,
+        "A SYNC ACCESS HANDLE IS AN EXCLUSIVE LOCK PER FILE, so every description on one inode "
+        "rests on one handle — and the count that decides when it is released is a count of "
+        "DESCRIPTIONS, which only the kernel's fd table can know. Released on the FIRST of two "
+        "closes instead, the holder's next read has no handle to read through. The bytes are not "
+        "asserted here, only that the fd still answers at the size the file publishes: the "
+        "dropped-ordering control empties the blob and would fail a byte clause for its own "
+        "reason. close of the other description %s, holder's read %s against the overwrite's %s"
+        % (json.dumps(ec.get("letGo")), json.dumps(ec.get("outlived")),
+           (ec.get("overwrite") or {}).get("afterSize")))
+    env.expect_that(
+        "proof_c the superseded generation left the directory", ec.get("supersededLeft") is True,
+        "THE CONSTRAINT-47 INTERACTION, which is the hard part of the COW decision: during the "
+        "swing two blobs exist for one logical file, so the REFCOUNT TABLE takes the decision and "
+        "the directory only records the outcome. With the held description following the swing "
+        "nothing is left reading the superseded generation, so its removal is IMMEDIATE and "
+        "exactly one name must be replaced by exactly one other. The DEFERRED arm is scored in "
+        "the drop section, on an unlink under an open description. gone %s, new %s, blobs %s -> "
+        "%s, deferred frees %s, immediate frees %s"
+        % (json.dumps(ec.get("gone")), json.dumps(ec.get("newBlobs")),
+           json.dumps(ec.get("blobsBefore")), json.dumps(ec.get("blobsAfter")),
+           ec.get("deferredFrees"), ec.get("immediateFrees")))
+
+    # ---- proof (d): two concurrent WRITERS on one inode --------------------------------
+    #
+    # THE CONFIGURATION COPY-ON-WRITE WAS NOT ATOMIC IN, and it needed no crash. Both writers
+    # write at the size the file published when THEY opened it: A's range appends past the
+    # committed size and lands in place, and B's range then starts below the size A published, so
+    # it must stage a new generation. Against a per-description snapshot of the committed size,
+    # B's write read as an append, went into A's committed generation in place, and B's commit
+    # published a size computed from the same stale base — losing A's committed bytes outright.
+    d = got["proof_d"]
+    ed = (d or {}).get("evidence") or {}
+    env.expect_that("proof_d ok", bool(d and d["ok"]),
+                    "proof (d) failed; the page's own evidence: %s" % json.dumps(ed)[:1200])
+    env.expect_that(
+        "proof_d two write descriptions on one inode", ed.get("bothOpened") is True,
+        "constraint 47 again, in the configuration proof (c) does not reach: two processes must "
+        "both hold a WRITE description on one inode, and both must see the same committed size "
+        "at open. A=%s B=%s against size %s"
+        % (json.dumps(ed.get("openA")), json.dumps(ed.get("openB")), ed.get("size0")))
+    env.expect_that(
+        "proof_d the second writer staged a new generation", ed.get("stagedNewGeneration") is True,
+        "the second writer's range starts %s byte(s) below the size the first writer published, "
+        "so the append-vs-copy-up test must copy up: exactly one copy-up and exactly one new "
+        "blob generation on disk. copyUps %s -> %s (delta %s), new blob(s) %s. A delta of 0 is "
+        "the defect: that write took the APPEND branch and overwrote committed bytes in place"
+        % ((ed.get("plan") or {}).get("aLen"), ed.get("copyUpsBefore"), ed.get("copyUpsAfter"),
+           ed.get("copyUps"), json.dumps(ed.get("newBlobs"))))
+    env.expect_that(
+        "proof_d both writers' committed bytes survived", ed.get("bothKept") is True,
+        "POSIX has two fds on one file sharing the file, so BOTH writers' committed ranges must "
+        "be readable through a third description. Wanted %s bytes; the reader recomputed every "
+        "expectation from the plan rather than being handed it: %s"
+        % (ed.get("wantSize"), json.dumps({k: (ed.get("check") or {}).get(k)
+                                           for k in ("ok", "size", "wantSize", "prefixOk",
+                                                     "bRangeOk", "aTailOk", "atS", "atBEnd")})))
+
+    # ---- an outstanding append under another description's commit ----------------------
+    #
+    # THE STATE PROOF (d) CANNOT REACH. Both of its writers are clean when they write, so every
+    # decision either of them makes happens to be made from a current base. Here the second
+    # description is made dirty FIRST by an append that stages no generation, and the question
+    # the whole milestone turns on is which base its NEXT decision reads: its own, or the
+    # inode's.
+    pend = got["pending"]
+    ep = (pend or {}).get("evidence") or {}
+    ep2 = ep.get("phase2") or {}
+    env.expect_that("pending ok", bool(pend and pend["ok"]),
+                    "the pending proof failed; the page's own evidence: %s" % json.dumps(ep)[:1400])
+    env.expect_that(
+        "pending the append was held back from the metadata", ep.get("pendingHeldBack") is True,
+        "ANTI-VACUITY, and it is constraint 60's append exception read where the exception "
+        "actually lives: the appending description must already see its own bytes, and the "
+        "METADATA must not have moved - no swing and no journal record - because a crash here has "
+        "to leave the intact prefix the metadata already pointed at. Either half failing means "
+        "this proof never reached the state it is about: it committed something. %s"
+        % json.dumps(ep.get("pend")))
+    env.expect_that(
+        "pending the append is visible to every description", ep.get("pendingVisible") is True,
+        "THE OTHER HALF, and it asserts the OPPOSITE of what this clause used to. A FRESH "
+        "description must see the appended bytes, because `pwrite` already returned a count for "
+        "them and POSIX has two fds on one file sharing the file. Reporting the old size to "
+        "another description is not durability - it is the stale read, and the same cache that "
+        "produced it had one fd reporting fstat 40 while pread on that fd returned 8. The "
+        "appending fd saw %s and a fresh description saw %s"
+        % ((ep.get("pend") or {}).get("wantFdSize"), (ep.get("pend") or {}).get("freshSize")))
+    env.expect_that(
+        "pending the appending writer staged a new generation",
+        ep.get("stagedNewGeneration") is True,
+        "the appending description's next write starts %s byte(s) below the size the OTHER "
+        "description published, so the append-vs-copy-up test must copy up. Exactly one copy-up: "
+        "%s -> %s (delta %s). A delta of 0 IS the defect - the write took the append branch "
+        "against the base this description saw at open, and landed in the committed generation "
+        "in place. blobs: %s"
+        % ((ep.get("plan") or {}).get("aLen"), ep.get("copyUpsBefore"), ep.get("copyUpsAfter"),
+           ep.get("copyUps"), json.dumps(ep.get("blobsAfter"))))
+    env.expect_that(
+        "pending the committed generation was never written in place",
+        ep.get("committedBytesIntact") is True,
+        "THE CLAUSE THAT CATCHES IT, and it is read mid-flight because the final bytes do not: "
+        "with the second writer's bytes written and NOT yet committed, a third fresh description "
+        "must still read the first writer's fsynced byte at that offset. The other value there "
+        "means intact metadata is pointing at overwritten data, which is the one outcome "
+        "copy-on-write exists to prevent. %s"
+        % json.dumps(ep.get("peek")))
+    env.expect_that(
+        "pending both writers' bytes survived", ep.get("bothKept") is True,
+        "five ranges, every expectation recomputed by the reader from the plan: the original "
+        "prefix, the second writer's range, the first writer's uncovered tail, the sparse gap "
+        "which POSIX requires to read as zeroes, and the appended bytes at their own offset. "
+        "Wanted %s bytes: %s"
+        % (ep.get("wantSize"), json.dumps({k: (ep.get("check") or {}).get(k)
+                                           for k in ("ok", "size", "wantSize", "prefixOk",
+                                                     "bRangeOk", "aTailOk", "gapZeroed",
+                                                     "pendingOk", "atS", "atGap", "atPend")})))
+    env.expect_that(
+        "pending the replay rejected nothing", ep.get("replayRejectedNothing") is True,
+        "phase two: the other description's write goes BELOW the committed size, so it swings "
+        "the inode onto a new generation and the appending description commits against a base "
+        "that has moved. NO RECORD THE VFS WOULD REFUSE MAY REACH THE DISK, because replay must "
+        "then refuse it too and every later record is discarded - the measured version of that "
+        "was a mount at 'record 51 (commit) could not be applied' which threw away a mkdir that "
+        "had already returned success. The commit reads its base now and validates it before "
+        "publishing, so there is no refusal here to recover from; the clause is what a refusal "
+        "would have cost. The mkdir issued after that commit must still resolve on the next "
+        "mount, and the journal must report nothing rejected. phase two: %s. remount: %s. the "
+        "directory afterwards: %s"
+        % (json.dumps(ep2), json.dumps(ep.get("remount"))[:400],
+           json.dumps(ep.get("dirAfterRemount"))))
+    env.expect_that(
+        "pending the volume still mounts read-write", ep.get("mountsReadWrite") is True,
+        "the whole sequence is unprivileged userland: two opens of a file the caller owns, one "
+        "write each. It must not be able to brick the volume. remount: %s"
+        % json.dumps({"mode": (ep.get("remount") or {}).get("mode"),
+                      "problems": (ep.get("remount") or {}).get("problems")}))
+    env.expect_that(
+        "pending the bytes survived the remount", ep.get("survivedRemount") is True,
+        "and the bytes have to be there on the next boot, which is a different fact from the "
+        "mode: the dropped-ordering control leaves this volume mounting read-write with the data "
+        "gone. The same five ranges, recomputed by a process on the SECOND kernel: %s"
+        % json.dumps({k: (ep.get("rereadAfterRemount") or {}).get(k)
+                      for k in ("ok", "size", "wantSize", "prefixOk", "bRangeOk", "aTailOk",
+                                "gapZeroed", "pendingOk")}))
+
+    # ---- what close() reports, and what it leaves behind -------------------------------
+    #
+    # THE ORDINARY PATH: write, then exit without fsync. Two fds, no crash, no privilege. The
+    # commit inside close() was refused and its errno discarded, so close() answered 0 after
+    # losing bytes pwrite had already acknowledged — and an explicit fsck afterwards reported the
+    # volume clean, because the blob's length matched the size the metadata published. Nothing in
+    # the system could surface it.
+    dr = got["drop"]
+    edr = (dr or {}).get("evidence") or {}
+    eap = edr.get("append") or {}
+    eref = edr.get("refused") or {}
+    eun = edr.get("unlinked") or {}
+    env.expect_that("drop ok", bool(dr and dr["ok"]),
+                    "the drop section failed; the page's own evidence: %s" % json.dumps(edr)[:1400])
+    env.expect_that(
+        "drop the append was acknowledged twice", edr.get("acknowledged") is True,
+        "ANTI-VACUITY, and it is what makes the loss below a LOSS rather than a write that never "
+        "happened: pwrite must return the full count at the committed size, and the appending "
+        "description's own fstat must then report the longer file. A caller told four bytes were "
+        "written and then told the file is the old length has been lied to once already, before "
+        "any close. %s" % json.dumps(eap.get("tail")))
+    env.expect_that(
+        "drop close reported success", edr.get("closeReportedSuccess") is True,
+        "both descriptions must close cleanly on this route: there is nothing wrong with the "
+        "volume, so a non-zero close here would mean the fix had turned a silent loss into a "
+        "spurious error. close(B)=%s close(A)=%s"
+        % (eap.get("closeB"), eap.get("closeA")))
+    env.expect_that(
+        "drop the acknowledged bytes are in the file",
+        edr.get("acknowledgedBytesKept") is True,
+        "THE CLAUSE THE LOSS MOVED. The other description's write went BELOW the committed size, "
+        "so it staged a generation and swung onto it — and the copy that filled that generation "
+        "must take its length from the SOURCE BLOB, which is physically longer than the copying "
+        "description had ever been told about. Asked for the copying description's own view "
+        "instead, the swing published a generation the appended bytes were not in: the file came "
+        "back at the original length with close() returning 0. A fresh description recomputes "
+        "both ranges from the plan: %s. blobs: %s"
+        % (json.dumps(eap.get("check")), json.dumps(eap.get("blobs"))))
+    env.expect_that(
+        "drop the volume is clean afterwards", edr.get("volumeStillClean") is True,
+        "AND NOTHING COULD SURFACE THE LOSS, which is why this clause is here beside the bytes: "
+        "the explicit fsck came back `rw` with no problems against the broken code too, because "
+        "the blob's length matched the size the metadata published exactly. It must still come "
+        "back clean now that the bytes are there — a volume that reported corruption here would "
+        "mean the fix published a size over a blob that does not have it. %s"
+        % json.dumps(eap.get("fsck")))
+    env.expect_that(
+        "drop a superseded stage is re-based, not discarded",
+        edr.get("bothChangesSurvived") is True,
+        "THE SECOND ROUTE: a grow staged with ftruncate, then another description writes below "
+        "the committed size and swings PAST it, so the grow was copied from a base that no longer "
+        "exists. BOTH changes were acknowledged — ftruncate returned 0 and the other "
+        "description's fsync returned 0 — so the commit's compare-and-swap must re-copy from the "
+        "new base and replay the grow onto it. The old behaviour was to refuse, report the errno "
+        "from close() and discard the grow, which is honest about a loss that did not have to "
+        "happen. The three ranges are checked by name, and the CAS counters are the anti-vacuity "
+        "clause: a run where the base never moved would pass the bytes and prove nothing. "
+        "grown=%s, swung=%s, close(C)=%s close(E)=%s, merged=%s, casRefusals=%s restages=%s "
+        "exhausted=%s"
+        % (json.dumps(eref.get("grown")), json.dumps(eref.get("swung")),
+           eref.get("closeC"), eref.get("closeE"),
+           json.dumps({k: v for k, v in (eref.get("merged") or {}).items()
+                       if k in ("ok", "size", "wantSize", "read", "headOk", "middleOk",
+                                "grownOk")}),
+           eref.get("casRefusals"), eref.get("restages"), eref.get("casExhausted")))
+    env.expect_that(
+        "drop a re-staged commit left no staged blob behind",
+        edr.get("noStagedBlobLeft") is True,
+        "and the superseded staged generation must be FREED, because nothing will ever publish it "
+        "now. Against the broken code a %s-byte blob stayed in the flat directory for the life of "
+        "the volume with no inode naming it, which is a leak fsck can only report and never "
+        "explain; a re-stage opens a replacement and must free what it replaced, so a leak here "
+        "is now reachable from two directions. blobs %s -> %s"
+        % ((edr.get("plan") or {}).get("grow"),
+           json.dumps(eref.get("blobsBefore")), json.dumps(eref.get("blobs"))))
+    env.expect_that(
+        "drop every call on an unlinked description refuses alike",
+        edr.get("refusedConsistently") is True and edr.get("closeAfterUnlinkSucceeded") is True,
+        "THE THIRD ROUTE, and the decision is stated rather than implied: M2 does NOT keep an "
+        "unlinked file alive until its last descriptor closes — that needs an orphan table in the "
+        "VFS and a journal that can replay one — so every operation on a description whose inode "
+        "is gone refuses under ONE errno, and `close` releases and succeeds. The old mix of "
+        "working reads and -EIO writes was the worst of both. errnos %s, close %s"
+        % (json.dumps((eun.get("row") or {}).get("errnos")), eun.get("closeU")))
+    env.expect_that(
+        "drop an unlinked file's blob outlived its last descriptor",
+        edr.get("blobOutlivedTheUnlink") is True,
+        "THE DEFERRED FREE, scored where a reference genuinely outlives the free. The unlink frees "
+        "every generation, but the description still holds a handle on the committed one, so the "
+        "refcount table defers the directory removal to its close — and the entry must then "
+        "actually go. This is the arm proof (c) used to score before a held fd started following "
+        "a swing. deferred frees %s; blobs before %s, while open %s, after the close %s"
+        % (eun.get("deferredFrees"), json.dumps(eun.get("blobsBefore")),
+           json.dumps(eun.get("blobsDuring")), json.dumps(eun.get("blobsAfter"))))
+    ekl = edr.get("killed") or {}
+    env.expect_that(
+        "drop a killed writer's acknowledged bytes survive",
+        edr.get("killedWriterKeptEveryByte") is True
+        and edr.get("killedVolumeClean") is True,
+        "THE FOURTH ROUTE: a writer KILLED holding a staged generation while a second writer "
+        "contends on the same inode, twelve rounds, each with its own byte so a round whose write "
+        "vanished cannot read back as a survivor on the previous round's byte. The victim's range "
+        "is DISJOINT from the contender's, so nothing may legitimately overwrite it. Measured "
+        "before operations on one inode were serialized: 3 of 12 acknowledged 4-byte writes "
+        "destroyed, with the volume `rw` and fsck reporting no problems afterwards. All twelve "
+        "must be acknowledged - a round whose pwrite failed would pass by writing nothing - and "
+        "all twelve must be in the file. acknowledged=%s of %s, vanished=%s %s, clean=%s %s, "
+        "stats=%s"
+        % (ekl.get("acknowledged"), ekl.get("rounds"), ekl.get("vanished"),
+           json.dumps(ekl.get("vanishedRounds"))[:400], edr.get("killedVolumeClean"),
+           json.dumps(ekl.get("fsck")), json.dumps(ekl.get("stats"))))
+    env.expect_that(
+        "drop the note channel stayed silent under a killed writer",
+        edr.get("killedWriterLeftNothingUnpublished") is True,
+        "AND THE ONLY REPORT THAT EXISTS FOR IT MUST BE EMPTY. A process's teardown closes its "
+        "fds synchronously and cannot await the answer (constraint 14's quarantine is what gives "
+        "the commit time to land), so `closeFd`'s errno has no caller to return to and the note "
+        "channel is the whole of the report. It carried `close of inode 22 could not publish its "
+        "write: errno 8` on every lost round and nothing asserted on it: a failure only a human "
+        "reading logs can find is not reported. So the kernel COUNTS notes at one exit and this "
+        "reads the count - zero on a workload where nothing may be refused - together with the "
+        "contender's live fd, whose every pwrite and fsync must succeed (the -EBADF came from one "
+        "operation closing a superseded handle while another held its id across an await). "
+        "notes=%s %s liveFdErrs=%s"
+        % (ekl.get("notes"), json.dumps(ekl.get("noteTexts"))[:600],
+           json.dumps(ekl.get("liveFdErrs"))[:400]))
+
+    # ---- the commit is a compare-and-swap ---------------------------------------------
+    #
+    # FIVE SCENARIOS, and every one of them was a loss that reported success. The clauses are the
+    # page's own, recomputed there from CAS and TWO_WRITERS rather than from the program's verdict,
+    # and each scenario carries an anti-vacuity clause of its own: the CAS counters for the three
+    # races, "the slack was on disk" for the slack, and two live pids for the opens.
+    cs = got["cas"]
+    ecs = (cs or {}).get("evidence") or {}
+    env.expect_that("cas ok", bool(cs and cs["ok"]),
+                    "the cas section failed; the page's own evidence: %s"
+                    % json.dumps({k: _cas_brief(v) for k, v in ecs.items()})[:1600])
+    for scenario, what in (
+        ("base", "AN APPEND PUBLISHED UNDER A STAGED COPY-UP. fd1 writes below the committed "
+                 "size, which stages a whole-file copy from the blob as it is now; fd2 then "
+                 "appends AT the committed size and FSYNCS. fd1's commit then publishes a "
+                 "generation copied from a base that has moved. Measured against the old code: "
+                 "fd2's four fsynced bytes gone, fsync 0 for both, close 0 for both, and the "
+                 "explicit fsck `rw` with `short: []` — because the surviving blob's length "
+                 "matched the size the metadata published"),
+        ("twostage", "TWO STAGED GENERATIONS OVER DISJOINT RANGES, each fsynced. Two staged "
+                     "generations are two whole-file snapshots, so the second swing reverted the "
+                     "first. POSIX has both ranges in the file: pwrite returned a count and fsync "
+                     "returned 0 to both descriptions"),
+        ("m4", "THE SAME RACE, READ THROUGH fstat AND SEEK_END. A dirty description answered from "
+               "its own staged generation alone, so once another description published a longer "
+               "file it under-reported the file and SEEK_END landed BELOW the real end — which "
+               "turns the next append into an overwrite of committed bytes. Reachable without any "
+               "commit race, which is why it is scored separately"),
+        ("slackin", "A WRITE INSIDE THE SLACK, which is the region an uncommitted append opens: "
+                    "above the published size, below how far the file's bytes now reach. It "
+                    "changes bytes in the generation the inode already points at and moves "
+                    "NEITHER the generation NOR the extent, so a compare-and-swap stamped "
+                    "(gen, end) passed and the next staged commit reverted it. Measured: four "
+                    "bytes that pwrite AND fsync both acknowledged, gone, with every call "
+                    "returning 0 and fsck reporting the volume clean because the blob's length "
+                    "still matched the published size. The stamp is now a per-inode MUTATION "
+                    "COUNTER bumped by any change to the current generation's bytes or length, so "
+                    "the CAS fires here - which is what casFired asserts"),
+        ("slackwide", "THE BOUNDARY, and it is here because it is the case the OLD stamp could "
+                      "see: the same three calls with the patch one byte longer, so the extent "
+                      "moves and (gen, end) changed. It kept its bytes against the broken code "
+                      "too. Both must pass now - if only this one does, the counter is not being "
+                      "bumped by an in-place write and `slackin` is the only clause that says so"),
+        ("dirtytrunc", "ONE DESCRIPTION'S read, fstat AND SEEK_END, WHICH USED TWO DIFFERENT "
+                       "BASES. fd1 holds a staged generation copied from the 8-byte base; fd2 then "
+                       "publishes a SHORTER file. `read` clamped to the base the copy came FROM "
+                       "while `fstat` and `SEEK_END` read the extent NOW, so the same fd reported "
+                       "a 4-byte file and then handed out 8 bytes with no error on either call - "
+                       "the same defect the storage edge lists as fixed at seven addresses, at an "
+                       "eighth. The three now come through one renderer, read at one time, and "
+                       "`threeAgree` is the clause"),
+    ):
+        row = ecs.get(scenario) or {}
+        env.expect_that(
+            "cas %s keeps every acknowledged byte" % scenario, row.get("ok") is True,
+            "%s. Every call must succeed, every range must be at its own offset after the commit "
+            "AND after a remount, a read past the end must stop at the end, the volume must stay "
+            "clean, and the moved base must actually have been CAUGHT - by the commit's "
+            "compare-and-swap (casRefusals), or by a reader re-basing a stale stage before it "
+            "answers (readRebases), either of which ends in a re-stage. row=%s want=%s "
+            "survived=%s movedBaseWasCaught=%s clean=%s stats=%s"
+            % (what, json.dumps(_cas_brief(row.get("row"))), json.dumps(row.get("want")),
+               row.get("survivedTheRemount"), row.get("movedBaseWasCaught"),
+               row.get("volumeClean"), json.dumps(row.get("stats"))))
+    sl = ecs.get("slack") or {}
+    env.expect_that(
+        "cas uncommitted slack does not resurrect", sl.get("publishedSizeHeld") is True,
+        "BYTES ABOVE THE PUBLISHED SIZE, planted page-side, which is the state a crash between a "
+        "commit's flush and its journal record leaves. The extent was max(published size, blob "
+        "length), so after the remount `stat` reported 40 over a published 8, a read returned 32 "
+        "bytes nobody wrote, and the next close() published them — uncommitted bytes made durable "
+        "by a reader. The published size is the only authority on what a file contains, so stat, "
+        "fstat, SEEK_END, a read that ASKS for the slack, the close and the next mount must all "
+        "say %s. planted=%s onDisk=%s row=%s second=%s"
+        % (ecs.get("S"), json.dumps(sl.get("planted")), sl.get("slackOnDisk"),
+           json.dumps(_cas_brief(sl.get("row"))), json.dumps(_cas_brief(
+               (sl.get("second") or {}).get("read")))))
+    env.expect_that(
+        "cas fsck reports a blob longer than its published size",
+        sl.get("fsckReportedTheSlack") is True,
+        "AND THE SWEEP MUST SEE IT. fsck tested `onDisk < entry.size` and nothing else, so every "
+        "silent failure across four rounds of attacks passed it: each one ended with a blob at "
+        "least as long as its published size. The bytes stay on disk — a mount must not write — "
+        "so the clause is that the sweep NAMES them and counts them reclaimable, beside the stale "
+        "generations and not as a refusal to mount. blobs=%s"
+        % json.dumps((sl.get("fsck") or {}).get("blobs")))
+    cd = ecs.get("contend") or {}
+    env.expect_that(
+        "cas contention refuses only under EBUSY", cd.get("ok") is True,
+        "TWO WRITERS, SIXTEEN ROUNDS EACH, posted together so their syscalls interleave at the "
+        "kernel's own await points and a commit really does run out of its four attempts. A "
+        "bounded retry has exactly one refusal to offer and it must arrive under its own name: "
+        "every failing call here must be -EBUSY and nothing else, the volume must still mount "
+        "read-write with a clean fsck, and no byte below the published size may come from anywhere "
+        "but the two writers and the seed. Measured value of the errno clause: the exhaustion arm "
+        "returned an errno this module never imported, so it threw a ReferenceError and the "
+        "kernel's catch-all answered -EIO - a refusal under a name that says nothing about what "
+        "happened, on a file that was entirely healthy. errnos=%s a=%s b=%s check=%s remount=%s "
+        "stats=%s notes=%s"
+        % (json.dumps(cd.get("errnos")), json.dumps(cd.get("a")), json.dumps(cd.get("b")),
+           json.dumps(_cas_brief(cd.get("check"))),
+           json.dumps({k: v for k, v in (cd.get("remount") or {}).items() if k != "check"}),
+           json.dumps(cd.get("stats")), json.dumps(cd.get("notes"))[:400]))
+
+    rt = ecs.get("retry") or {}
+    ra = rt.get("a") or {}
+    env.expect_that(
+        "cas a retried fsync is never told a discarded write is durable",
+        rt.get("everyAcknowledgementWasDurable") is True
+        and rt.get("theRaceHappened") is True
+        and rt.get("noCallerWasRefused") is True
+        and rt.get("onlyEbusyRefusals") is True
+        and rt.get("lastDurableValueSurvived") is True,
+        "THE SAME TWO WRITERS, WITH THE CALLER DOING THE RIGHT THING ABOUT -EBUSY. A bounded "
+        "compare-and-swap has one refusal to offer and the only correct response is to ask again. "
+        "The exhaustion arm FREED the staged generation first, so the retry found nothing staged, "
+        "took the 'nothing to publish' arm and answered 0 - a caller was told the data it had just "
+        "been refused was durable, and it was not there. Measured at 13 of 200 fsyncs (6.5%%) with "
+        "every retry answering 0. Every round writes a DISTINCT value, so each 0 from `fsync` is "
+        "checked against the byte a fresh description reads back rather than counted, and the last "
+        "acknowledged value must still be at offset 0 after the remount. THE ANTI-VACUITY CLAUSE "
+        "MOVED TO THE KERNEL'S COUNTERS and the caller-side one got stronger: a commit now holds "
+        "the inode across its re-stage, so the base cannot move twice under one commit, one "
+        "re-stage is always enough and -EBUSY never reaches a caller. So the race must still be "
+        "SHOWN (casRefusals and restages above zero - 83 of 400 commits at 200 rounds per writer) "
+        "and no caller may be refused at all (casExhausted 0, refusals 0), where the same workload "
+        "exhausted 13 of 200 before. a=%s refused=%s lastDurableSurvived=%s read=%s stats=%s "
+        "notes=%s"
+        % (json.dumps({k: ra.get(k) for k in ("ok", "rounds", "acked", "refusals",
+                                              "retriesThatSaidZero", "liedTimes", "lies",
+                                              "lastDurable", "close")}),
+           json.dumps(ra.get("refused")),
+           rt.get("lastDurableValueSurvived"),
+           json.dumps(_cas_brief((rt.get("remount") or {}).get("read"))),
+           json.dumps(rt.get("stats")), json.dumps(rt.get("notes"))[:300]))
+    env.expect_that(
+        "cas the journal's sequences are strictly consecutive",
+        rt.get("seqsAreStrictlyConsecutive") is True
+        and rt.get("enoughRecordsToMatter") is True
+        and rt.get("replayAcceptedEveryRecord") is True,
+        "AND THE JOURNAL UNDERNEATH THAT WORKLOAD, READ STRAIGHT OFF THE DISK. Three callers reach "
+        "the journal append concurrently and the sequence number was allocated AFTER the append's "
+        "await, so two records took the same number. Replay stops at a sequence that is not its "
+        "predecessor's plus one and DISCARDS the tail - which is correct, the later records' "
+        "predecessor is gone - so the duplicate threw away everything after it: measured off this "
+        "workload's own disk as 443 records with a duplicated 59 at record 60, a remount that came "
+        "up READ-ONLY, and 37,409 bytes of tail discarded including ops that had returned success "
+        "to userland. The sequences are READ rather than inferred from the mount's verdict, "
+        "because a duplicate and a skip stop replay at the same place and are different defects. "
+        "The record count is the anti-vacuity clause. seqs=%s fsck=%s remount=%s"
+        % (json.dumps(rt.get("journalSeqs")), json.dumps(rt.get("fsck"))[:400],
+           json.dumps({k: v for k, v in (rt.get("remount") or {}).items() if k != "read"})[:400]))
+
+    op = ecs.get("opens") or {}
+    env.expect_that(
+        "cas two overlapping opens of one name both succeed", op.get("ok") is True,
+        "CONSTRAINT 47'S HEADLINE CASE, with the two opens OVERLAPPING. A sync access handle is an "
+        "exclusive lock per file and the per-name refcount table makes a second open a reference "
+        "on the first handle — but an open is not in that table until its handle exists, so two "
+        "opens issued in one dispatch turn both missed it and the second "
+        "createSyncAccessHandle threw. Measured: `open` returned -EBUSY, which the storage edge "
+        "itself calls a kernel defect, and the process died. Both must now open the same file and "
+        "agree about its size. a=%s b=%s io notes=%s"
+        % (json.dumps(op.get("a")), json.dumps(op.get("b")),
+           json.dumps(op.get("errors"))[:300]))
+
+    # ---- a staged generation a crash left behind --------------------------------------
+    orph = got["orphan"]
+    eo2 = (orph or {}).get("evidence") or {}
+    eg = eo2.get("grown") or {}
+    env.expect_that("orphan ok", bool(orph and orph["ok"]),
+                    "the orphan proof failed; the page's own evidence: %s"
+                    % json.dumps({k: v for k, v in eo2.items() if k != "grown"})[:1200])
+    env.expect_that(
+        "orphan the orphaned generation was on disk",
+        eo2.get("orphansOnDisk") is True and eo2.get("remountMode") == "rw",
+        "ANTI-VACUITY: the orphans must be present at their full %s bytes before the second "
+        "kernel boots, and that kernel must mount read-write - a volume that refused to mount "
+        "would pass the clauses below by never writing anything. injected %s into %s; the mount "
+        "came up %r"
+        % ((eo2.get("plan") or {}).get("bytes"), json.dumps(eo2.get("injected")),
+           json.dumps(eo2.get("blobsBefore")), eo2.get("remountMode")))
+    env.expect_that(
+        "orphan a grown range reads as zeroes", eo2.get("grownRangeZeroed") is True,
+        "POSIX: the range an ftruncate GROWS a file into reads as zeroes. Against a staging "
+        "floor seeded from the committed generations instead of from the blob directory, the "
+        "floor handed the orphan's generation number out a second time, the truncate opened the "
+        "orphan, and %s of its filler bytes (0x%02x) became the file's. %s"
+        % ((eo2.get("plan") or {}).get("bytes"), (eo2.get("plan") or {}).get("byte", 0),
+           json.dumps({k: eg.get(k) for k in ("ok", "S", "size", "wantSize", "wantZero",
+                                              "zeroed", "foreignBytes", "atS")})))
+    env.expect_that(
+        "orphan the orphaned generation was not reused", eo2.get("orphanUntouched") is True,
+        "and the orphan itself must be untouched at its own length: a floor that reused the name "
+        "truncates it DOWN to the file's new size, which is the shape of the defect read off the "
+        "directory rather than off the bytes. blobs afterwards: %s. The explicit fsck is "
+        "RECORDED and not asserted clean - stale blobs are real and reporting them is correct: %s"
+        % (json.dumps(eo2.get("blobsAfter")), json.dumps(eo2.get("fsck"))))
+
+    # ---- a refused mount, in the kernel -----------------------------------------------
+    r = got["refuse"]
+    er = (r or {}).get("evidence") or {}
+    env.expect_that(
+        "refuse all three slots were corrupted", er.get("allThreeCorrupted") is True,
+        "ANTI-VACUITY: all %s superblock slots must have been present and overwritten before the "
+        "second kernel booted, or the refusal below is a refusal of something else. Slots as "
+        "left: %s" % (er.get("slots"), json.dumps(er.get("slotBefore"))))
+    env.expect_that(
+        "refuse the mount refused", er.get("refused") is True,
+        "constraint 28: a volume whose bytes are present and do not decode mounts REFUSED. fsck "
+        "returning 'refuse' is checked under Node; this is the KERNEL's arm, where the reseed "
+        "would live. Got mode %r with problems %s: %s"
+        % (er.get("mode"), json.dumps(er.get("problems")), json.dumps(er.get("why"))[:400]))
+    env.expect_that(
+        "refuse the volume was not touched",
+        er.get("slotsUnchanged") is True and er.get("journalUnchanged") is True
+        and er.get("blobsUnchanged") is True and er.get("wroteFalse") is True,
+        "webxp reseeded here, and that is silent data loss presented as success. 'It wrote "
+        "nothing' is a claim about the VOLUME: the slot bytes, the journal length and the blob "
+        "listing are read back after the refused mount. slots %s -> %s, journal %s -> %s B, "
+        "blobs %s -> %s, report.wrote=%s"
+        % (json.dumps(er.get("slotBefore")), json.dumps(er.get("slotAfter")),
+           er.get("journalBytesBefore"), er.get("journalBytesAfter"),
+           er.get("blobsBefore"), er.get("blobsAfter"), er.get("wrote")))
+    env.expect_that(
+        "refuse no tree was invented", er.get("noInventedTree") is True,
+        "a reseeded volume comes up with one inode in it. A refusing kernel has NO tree, which is "
+        "the honest state: there is no image to read without a valid slot. The volume held %s "
+        "inodes at generation %s; the refusing mount reports inodes=%s at generation %s"
+        % (er.get("inodesBefore"), er.get("generationBefore"), json.dumps(er.get("inodesAfter")),
+           er.get("generationAfter")))
+
+    # ---- a superblock slot that cannot be READ ----------------------------------------
+    #
+    # The refused mount's error-path twin, and the more dangerous of the two: a healthy volume's
+    # journal is EMPTY because the last snapshot truncated it, so the slots carry the only evidence
+    # the volume exists. An errno read as "this slot is absent" made all of that evidence vanish at
+    # once, which is a FRESH verdict — the one verdict whose caller may write a superblock.
+    un = got["unreadable"]
+    eun = (un or {}).get("evidence") or {}
+    env.expect_that(
+        "unreadable the slot read refused with something other than absence",
+        eun.get("readRefusedNotAbsent") is True,
+        "ANTI-VACUITY, and it carries the whole scenario. The page turns a slot NAME into a "
+        "DIRECTORY, so the kernel's `getFileHandle(name, {create: false})` refuses it — and the "
+        "refusal must not be NotFoundError, because an absent slot is the other volume and the "
+        "distinction src/kernel/iocore.mjs keeps is exactly between those two. The page read the "
+        "slot back itself and got: %r on %s"
+        % (eun.get("refusedWith"), eun.get("oldest")))
+    env.expect_that(
+        "unreadable the journal was empty, so only the slots said the volume existed",
+        eun.get("journalWasEmpty") is True,
+        "the second half of the anti-vacuity. A non-empty journal is bytes-present on its own, so "
+        "the FRESH arm would be unreachable whatever the slots said and this section would be "
+        "measuring nothing. Three snapshots were taken, so the journal must be 0 bytes: it is %s"
+        % (eun.get("journalBytesBefore"),))
+    env.expect_that(
+        "unreadable one unreadable slot mounts read-only at the same generation",
+        eun.get("oneReadOnly") is True and eun.get("oneSameGeneration") is True,
+        "two slots still decode, so the volume is there and must come up READ-ONLY on the "
+        "generation they name — not read-write, which is what the pre-fix reader did with nothing "
+        "to report, and which lets the next snapshot round-robin into the slot it cannot read. "
+        "mode=%r (was %r), generation %s -> %s, unreadableSlots=%s, problems=%s %s"
+        % (eun.get("modeOne"), eun.get("modeBefore"), eun.get("generationBefore"),
+           eun.get("generationOne"), eun.get("unreadableSlotsOne"),
+           json.dumps(eun.get("problemsOne")), json.dumps(eun.get("whyOne"))[:500]))
+    env.expect_that(
+        "unreadable one unreadable slot keeps its tree", eun.get("oneKeptItsTree") is True,
+        "read-only means readable: the inode count must be the one the volume had, not a fresh "
+        "tree and not nothing. %s inodes before, %s after"
+        % (eun.get("inodesBefore"), eun.get("inodesOne")))
+    env.expect_that(
+        "unreadable every unreadable slot refuses",
+        eun.get("allRefused") is True and eun.get("allInventedNothing") is True,
+        "with no readable slot there is no image, so REFUSE and no tree. A FRESH verdict here is "
+        "constraint 28's defect: mode=%r, inodes=%s, problems=%s %s"
+        % (eun.get("modeAll"), json.dumps(eun.get("inodesAll")),
+           json.dumps(eun.get("problemsAll")), json.dumps(eun.get("whyAll"))[:500]))
+    env.expect_that(
+        "unreadable both verdicts name the slot that could not be read",
+        bool(eun.get("whyOne")) and bool(eun.get("whyAll"))
+        and any("could not be READ" in str(w) for w in eun.get("whyOne") or [])
+        and any("could not be READ" in str(w) for w in eun.get("whyAll") or []),
+        "an error path must name what failed, and `problems` is the only place a mount's reader "
+        "meets it. read-only said: %s; refused said: %s"
+        % (json.dumps(eun.get("whyOne"))[:500], json.dumps(eun.get("whyAll"))[:500]))
+    env.expect_that(
+        "unreadable neither verdict wrote anything",
+        eun.get("wroteNothing") is True and eun.get("blobsUntouched") is True
+        and eun.get("journalUntouched") is True,
+        "measured off the VOLUME rather than off the report: the blob directory and the journal "
+        "must both come back unchanged, because a reseed writes a slot and truncates the journal. "
+        "blobs %s -> %s -> %s, journal %s -> %s -> %s bytes, wrote=%s"
+        % (eun.get("blobsBefore"), eun.get("blobsAfterOne"), eun.get("blobsAfterAll"),
+           eun.get("journalBytesBefore"), eun.get("journalBytesOne"),
+           eun.get("journalBytesAll"), eun.get("wroteNothing")))
+
+    # ---- O_APPEND is an offset per write ----------------------------------------------
+    ap = got["append"]
+    eap = (ap or {}).get("evidence") or {}
+    env.expect_that(
+        "append both O_APPEND writes were acknowledged", eap.get("acknowledged") is True,
+        "ANTI-VACUITY: both writes must return their full count and both fsyncs must return 0, or "
+        "the clause below is asserting over a write that never happened. wrote=%s synced=%s "
+        "at=%s errno=%s"
+        % (json.dumps(eap.get("wrote")), json.dumps(eap.get("synced")), eap.get("at"),
+           eap.get("errno")))
+    env.expect_that(
+        "append two O_APPEND writers both keep their bytes",
+        eap.get("bothRangesSurvived") is True
+        and eap.get("size") == eap.get("wantSize"),
+        "POSIX sets an O_APPEND description's offset to the end of the file atomically BEFORE "
+        "EACH WRITE. Taken once at open instead, two `>>` descriptions get the same end and the "
+        "second writes over the first with every call returning success. One process, four calls, "
+        "no race: the file must be %s bytes and hold both ranges. Got %s bytes: %s (want %s)"
+        % (eap.get("wantSize"), eap.get("size"), json.dumps(eap.get("got")),
+           json.dumps(eap.get("want"))))
+    env.expect_that(
+        "append the volume is clean afterwards", eap.get("clean") is True,
+        "and the volume must be clean: the lost-append version left a blob whose length matched "
+        "its published size, so fsck reported no problem and the loss was silent. fsck: %s"
+        % json.dumps(eap.get("fsck")))
+
+    # ---- every async syscall completion, across every section --------------------------
+    #
+    # `later()` runs an async syscall body off the dispatch path and answers when it settles, and
+    # it is the completion path for open, write, fsync, truncate and close. Its rejection arm used
+    # to be a bare `fail(p, EIO)`: the rejection value was dropped, nothing was noted and no
+    # counter moved, so ANY kernel-side exception in ANY of those bodies became an anonymous -EIO
+    # that a caller cannot tell from a real storage failure. The reason now goes out on the note
+    # channel — which the page-wide note clause above also asserts on — and the count is read off
+    # each kernel before it is terminated and summed here.
+    env.expect_that(
+        "no async syscall completion was rejected in any section", got["asyncFail"] == 0,
+        "%d async syscall completion(s) rejected. Each one is a throw inside a kernel-side open, "
+        "write, fsync, truncate or close body, answered to the process as -EIO. The reason is on "
+        "the note channel; the page's own errors: %s"
+        % (got["asyncFail"],
+           json.dumps([e for e in got["errors"] if "asyncFail" in e or e.startswith("io: ")])[:900]))
+    env.expect_that(
+        "every kernel's counters were read before it was terminated",
+        got["statsReads"] >= M2_SECTIONS,
+        "ANTI-VACUITY for the clause above: the count is summed from a `stats` round trip taken in "
+        "`shut()`, so a zero that nobody could read is not a zero. %d kernel(s) answered against "
+        "at least %d sections, each of which boots one or more. A kernel that would not answer "
+        "says so in the page's errors: %s"
+        % (got["statsReads"], M2_SECTIONS,
+           json.dumps([e for e in got["errors"] if e.startswith("shut: ")])[:600]))
+
+    # ---- the write ordering and the directory-handle budget ----------------------------
+    o = got["order"]
+    eo = (o or {}).get("evidence") or {}
+    env.expect_that(
+        "order the blob flush precedes the journal append",
+        eo.get("ordered") is True and eo.get("flushedBlob") is True,
+        "constraint 23's ordering is blob -> flush -> journal -> flush, and it is MEASURED here "
+        "rather than read: an in-session read cannot see an unflushed write, so the sequence of "
+        "operations the storage edge performed is the observation. For the last commit the blob's "
+        "flush must carry a lower sequence number than the journal append that points at it, and "
+        "the thing flushed must be a BLOB rather than the journal. Commit: %s. Edge tail: %s"
+        % (json.dumps(eo.get("commit")), json.dumps(eo.get("tail"))))
+    env.expect_that(
+        "order one directory handle for the module's life", eo.get("oneDirectoryHandle") is True,
+        "constraint 24: `getDirectoryHandle` is 85 us per component, so a path that costs one per "
+        "component is 23 syscalls for a four-component walk. This kernel takes ONE for the life "
+        "of the module — path resolution runs over the in-memory inode tree and a blob is one "
+        "flat `<ino>.<gen>` name. Counted across the run: %s"
+        % json.dumps(eo.get("counts")))
+
+    # ---- the rest of the ABI -----------------------------------------------------------
+    api = got["api"]
+    eapi = (api or {}).get("evidence") or {}
+    env.expect_that(
+        "every other syscall answers correctly", bool(api and api["ok"]),
+        "%s of the calls the three proofs do not reach failed. Each row names the call and what "
+        "it saw: %s"
+        % (len(eapi.get("bad") or []), json.dumps(eapi.get("bad"))[:1400]))
+    env.note("the rest of the ABI: %s calls exercised" % eapi.get("calls"))
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+    env.note("config: %s" % got["cfg"])
+
+    document = env.request(env.document)
+    env.expect("document COOP", document.headers.get("Cross-Origin-Opener-Policy"),
+               "same-origin")
+    env.expect("document COEP", document.headers.get("Cross-Origin-Embedder-Policy"),
+               "require-corp")
+    env.expect_that(
+        "served m2.html", env.served_matches_disk(env.document),
+        "the bytes served for %s differ from the file on disk, so this run measured something "
+        "other than this tree" % env.document)
+
+    env.shoot("m2")
+
+
 # ======================================================================================
 # Phases, the loop and the gates (§5, §7, §9)
 # ======================================================================================
@@ -2582,14 +4011,20 @@ class Phase:
     cleanup: Tuple[pathlib.Path, ...] = ()
 
 
-def phase_document(candidate: Check, query: Tuple[Tuple[str, str], ...]) -> str:
-    """The request path a check's page is loaded from, with a control's parameters merged in.
+def phase_document(candidate: Check, phase: "Phase") -> str:
+    """The request path a check's page is loaded from, with this phase's parameters merged in.
 
     One definition, because serve() asserts this exact path on the wire before Chrome starts,
     Env.reload navigates it, and the check reads its own response headers back by it. Three
     copies of a query string is three chances for the assertion to be about a different URL
     than the one the browser fetched.
+
+    Two sources merge, and the phase's own win: a negative control's `query`, and a check's
+    `invert_query` in the inversion phase only.
     """
+    query = phase.query
+    if phase.mode == MODE_INVERT and candidate.invert_query:
+        query = tuple(candidate.invert_query) + tuple(query)
     if not query:
         return candidate.document
     parts = urllib.parse.urlsplit(candidate.document)
@@ -2805,7 +4240,7 @@ class PhaseRun(NamedTuple):
 
 def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> PhaseRun:
     results: List[Result] = []
-    documents = dict((c.name, phase_document(c, phase.query)) for c in phase.checks)
+    documents = dict((c.name, phase_document(c, phase)) for c in phase.checks)
     with contextlib.ExitStack() as stack:
         # One server per declared root, every one of them asserting its own isolation mode and
         # every document the checks on it will navigate to, before Chrome exists. Two servers in
@@ -2986,7 +4421,7 @@ def gate_no_isolation(run: PhaseRun, report: Report) -> int:
     # for either name on any page this phase loaded is a leak. The value is printed so the reader
     # sees which. Read off the response the BROWSER got, as the server recorded it.
     leaked = ["%s's document (%s) carried %s: %r"
-              % (r.check.name, phase_document(r.check, run.phase.query), name,
+              % (r.check.name, phase_document(r.check, run.phase), name,
                  r.document_headers[name])
               for r in results for name, _ in ISOLATION_HEADERS if name in r.document_headers]
     if leaked:
@@ -3312,6 +4747,7 @@ _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-",
                       labels=("-",), min_expectations=1,
                       requires_isolation=False, no_invert_reason="",
                       note="", control_address="", root=Root.WWW, document="/",
+                      invert_query=(),
                       ready_expr="true", ready_what="-", ready_timeout=1.0,
                       refusal_expr="", refusal_want="")
 

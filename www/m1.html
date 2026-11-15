@@ -257,16 +257,38 @@ async function proof_b() {
 async function proof_c() {
   say('--- proof (c): the 129th spawn fails cleanly')
   const k = kernelBoot(BOOT_CFG)
+  let spawned = null
   try {
     await k.expect('up', 5000)
     const want = PROC_CAP + 1
-    const spawned = await spawnProcesses(k, want, ['sleeper'])
+    spawned = await spawnProcesses(k, want, ['sleeper'])
     const ok = spawned.refused > 0 && spawned.pids.filter((p) => p >= 1).length === PROC_CAP
     return { ok, evidence: { want, refused: spawned.refused, cap: spawned.cap,
       live: spawned.live, why: spawned.why } }
   } finally {
+    await reapAll(k, spawned)
     try { k.worker.terminate() } catch (e) {}
   }
+}
+
+/* EVERY PROCESS THIS PAGE SPAWNED, TERMINATED BEFORE THE KERNEL IS.
+ *
+ * `terminate()` on the kernel worker does NOT reap its nested process workers: constraint 14
+ * measured one running on for 2004-2051 ms, and the kernel is the only thing that can call
+ * terminate() on them. So a page that terminated only the kernel left this proof's 128 sleepers
+ * alive in the renderer for whatever ran next.
+ *
+ * MEASURED, which is why this is here: with those orphans still holding worker slots, the next
+ * check's 10,000-file write went from 40-50 s to past 300 s in the same browser — a page that
+ * cleans up after itself or a neighbour that measures a different system, and there is no third
+ * option while scripts/check.py shares one browser across checks.
+ */
+async function reapAll(k, spawned) {
+  if (!spawned || !spawned.pids) return
+  const pids = spawned.pids.filter((pid) => pid >= 1)
+  if (!pids.length) return
+  for (const pid of pids) k.post({ t: 'end-process', pid })
+  await waitForReaps(k, pids, 10000)
 }
 
 /* Proof (d): kill the kernel worker. Every parked process returns EIO within 200 ms, WITHOUT
