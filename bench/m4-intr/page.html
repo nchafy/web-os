@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>M4 experiment — is a synchronous OPFS read interruptible?</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+.ok{color:#8f8}.bad{color:#f88}</style></head>
+<body>
+<pre id="log">starting…</pre>
+<script>
+  globalThis.INTR = { state: 'starting', isolated: self.crossOriginIsolated === true, results: {} }
+</script>
+<script type="module">
+/**
+ * M4's owed experiment: can `Atomics.notify` interrupt a worker inside a SYNCHRONOUS OPFS read?
+ *
+ * MILESTONES.md calls this the weakest point in the cancellation design, and the reason it is owed
+ * BEFORE M4 is that the answer changes what M4 builds: if a handler sitting inside a synchronous
+ * read cannot be interrupted, then a blocking call must park in `Atomics.wait` and never inside
+ * the read, and `docs/ABI.md`'s claim that `read()` is INTR-capable needs qualifying.
+ *
+ * Three measurements, and the first exists so the other two mean something:
+ *   1. baseline — a worker in `Atomics.wait` IS woken by a notify, and in how long
+ *   2. the subject — a notify sent while the worker is inside a chunked synchronous read; when is
+ *      the earliest the worker can observe it?
+ *   3. the floor — how long ONE synchronous read blocks the thread, at the ABI's own 64 KiB cap
+ *      and well past it
+ */
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const num = (k, d) => (params.has(k) ? Number(params.get(k)) : d)
+
+const EVT = 0, PHASE = 1
+const P_READING = 1, P_PARKED = 3
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.INTR.state = 'aborted'
+  globalThis.INTR.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures.'
+  out.className = 'bad'
+  say(globalThis.INTR.why)
+} else {
+  main().catch((e) => {
+    globalThis.INTR.state = 'error'
+    globalThis.INTR.why = String((e && e.stack) || e)
+    say(globalThis.INTR.why)
+  })
+}
+
+function spawn () {
+  const w = new Worker('/bench/m4-intr/worker.mjs', { type: 'module', name: 'intr' })
+  const waiters = new Map()
+  const pending = []
+  w.onmessage = (ev) => {
+    const m = ev.data
+    if (m.t === 'error') { globalThis.INTR.errors = (globalThis.INTR.errors || []).concat(m.why) }
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  w.onerror = (e) => { globalThis.INTR.errors = (globalThis.INTR.errors || []).concat(e.message) }
+  const expect = (t, ms = 60000) => new Promise((res, rej) => {
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); rej(new Error('timed out waiting for ' + t)) }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); res(m) })
+  })
+  return { w, expect, post: (m) => w.postMessage(m) }
+}
+
+/** Wait until the worker says it is in `phase`, by POLLING THE SAB — not by a message, which
+ *  would be queued behind the synchronous read we are trying to interrupt. That is the whole
+ *  reason the phase word exists. */
+async function awaitPhase (i32, phase, budgetMs = 10000) {
+  const until = performance.now() + budgetMs
+  while (performance.now() < until) {
+    if (Atomics.load(i32, PHASE) === phase) return true
+    await new Promise((r) => setTimeout(r, 0))
+  }
+  return false
+}
+
+async function main () {
+  const sab = new SharedArrayBuffer(64)
+  const i32 = new Int32Array(sab)
+  const BYTES = num('bytes', 64 * 1024 * 1024)
+  const CHUNK = num('chunk', 65404)          // the ABI's MAX_INLINE: one read() of a real caller
+  const ROUNDS = num('rounds', 200)
+
+  const k = spawn()
+  k.post({ t: 'init', sab })
+  await k.expect('ready')
+
+  /* ---- 1. BASELINE: a notify wakes a parked worker ------------------------------------- */
+  const parkP = (async () => {
+    k.post({ t: 'park', timeoutMs: 5000 })
+    return k.expect('park-done')
+  })()
+  await awaitPhase(i32, P_PARKED)
+  /* A DELAY, and the one place this harness uses one. "The worker is inside Atomics.wait" cannot
+   * be observed from here — the phase word is set just BEFORE the call — so there is nothing to
+   * poll and a sleep is the honest instrument. Without it the store landed first and `wait`
+   * returned `not-equal`: a correct outcome that measures nothing, which is why the probe's
+   * baseline gate exists. */
+  await new Promise((r) => setTimeout(r, num('park_delay_ms', 50)))
+  const notifyAt = performance.now()
+  Atomics.store(i32, EVT, 1)
+  const woke = Atomics.notify(i32, EVT, 1)
+  const park = await parkP
+  const wakeLatencyMs = performance.now() - notifyAt
+  globalThis.INTR.results.baseline = {
+    ok: park.result === 'ok' && woke === 1,
+    atomicsWaitResult: park.result, workersWoken: woke,
+    waitedMs: park.waitedMs, wakeLatencyMs,
+  }
+  say('1. baseline: Atomics.wait returned ' + park.result + ', woke ' + woke +
+    ' worker(s) after ' + park.waitedMs.toFixed(2) + ' ms')
+
+  /* ---- 2. THE SUBJECT: a notify during a synchronous read ------------------------------ */
+  const readStart = performance.now()
+  const readP = (async () => {
+    k.post({ t: 'read-while-notified', name: 'intr-probe.bin', bytes: BYTES, chunk: CHUNK })
+    return k.expect('read-done', 300000)
+  })()
+  const got = await awaitPhase(i32, P_READING, 60000)
+  if (!got) throw new Error('the worker never reached the reading phase')
+  /* INTO the read, not at its edge. Notifying the instant the phase flips lands before the first
+   * chunk runs, and `firstSeenMs` then reports ~0 — which looks like an interruption and is only
+   * a race. The read is tens of milliseconds, so a few milliseconds in is genuinely mid-flight. */
+  await new Promise((r) => setTimeout(r, num('read_delay_ms', 8)))
+  const notifyAt2 = performance.now()
+  Atomics.store(i32, EVT, 1)
+  const notified = Atomics.notify(i32, EVT, 1)
+  const r = await readP
+  const notifiedAtMs = notifyAt2 - readStart
+  globalThis.INTR.results.notifyDuringRead = {
+    // A worker inside a synchronous call is NOT in Atomics.wait, so there is nobody to wake.
+    // `notify` returning 0 is the mechanism, stated as a number.
+    workersWoken: notified,
+    bytes: r.bytes, reads: r.reads, readMs: r.readMs,
+    firstSeenMs: r.firstSeenMs, seenAfter: r.seenAfter,
+    perReadUs: r.perReadUs,
+    chunk: CHUNK,
+    // When the notify was sent, on the page's clock relative to the read's dispatch. The worker's
+    // `firstSeenMs` is on its own clock relative to its own read start; the two origins differ by
+    // the postMessage hop, so these are compared as DURATIONS and not as instants.
+    notifiedAtMs,
+  }
+  say('2. notify during a ' + (BYTES / 1048576) + ' MiB chunked read: woke ' + notified +
+    ' worker(s); the read took ' + r.readMs.toFixed(1) + ' ms over ' + r.reads +
+    ' reads (' + r.perReadUs.toFixed(1) + ' us each); first observable at ' +
+    (r.firstSeenMs === null ? 'never' : r.firstSeenMs.toFixed(3) + ' ms'))
+
+  /* ---- 3. THE FLOOR: one uninterrupted synchronous read -------------------------------- */
+  const floors = {}
+  for (const size of [CHUNK, 1048576, 16 * 1048576]) {
+    k.post({ t: 'one-read', name: 'intr-probe.bin', bytes: size, rounds: size > 1048576 ? 20 : ROUNDS })
+    const f = await k.expect('one-read-done', 300000)
+    floors[String(size)] = { medianMs: f.medianMs, p99Ms: f.p99Ms, maxMs: f.maxMs, rounds: f.rounds }
+    say('3. one read of ' + size + ' B: median ' + f.medianMs.toFixed(3) +
+      ' ms, p99 ' + f.p99Ms.toFixed(3) + ', max ' + f.maxMs.toFixed(3))
+  }
+  globalThis.INTR.results.readFloor = floors
+
+  k.w.terminate()
+  globalThis.INTR.state = 'done'
+  out.className = 'ok'
+  say('done')
+}
+</script>
+</body>
+</html>
