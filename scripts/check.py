@@ -485,6 +485,11 @@ class Control:
     #: and the dropped-record counter must go non-zero AND STILL BE DISPLAYED — which is why the
     #: "counter is displayed" label is in this control's HELD list and not its failed one.
     TRACE_TINY = "trace-tiny"
+    #: M4's control. SIGPIPE stops being fatal under SIG_DFL, through the cfg.noSigpipe hook which
+    #: deletes it from the kernel's fatal-default SET at boot — data, so the headline path carries
+    #: one Set lookup either way and no control branch. `yes | head -1` must then HANG: head exits,
+    #: the pipe loses its reader, and yes writes into a pipe nobody reads forever.
+    NO_SIGPIPE = "no-sigpipe-signal"
     ONCE = "once"
 
 
@@ -505,6 +510,7 @@ CONTROL_RUNS = {
     Control.PROC_CACHE: ("proc-cache",),
     Control.USR_404: ("usr-404",),
     Control.TRACE_TINY: ("trace-tiny",),
+    Control.NO_SIGPIPE: ("no-sigpipe-signal",),
 }
 
 
@@ -2240,6 +2246,93 @@ _TRACE_TINY_FAILS = (
     "verdict is ok",
 )
 
+
+# ======================================================================================
+# M4 — pipes, process groups, and the dead-peer asymmetry
+# ======================================================================================
+
+#: Clause-level, so the control can be scored on WHICH expectations move. Both SIGPIPE proofs
+#: depend on the same fatal disposition, and nothing else does — which is what makes the control
+#: specific rather than merely destructive.
+M4_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # A pipe carries bytes between two processes at all.
+    "pipe_basic ok",
+    "pipe2 returns two distinct fds",
+    "both pipeline stages were reaped",
+    # PROOF: `yes | head -1` terminates.
+    "yes_head ok",
+    "the writer was killed by SIGPIPE",
+    "and the reader exited cleanly",
+    # PROOF: one signal kills every stage.
+    "group_signal ok",
+    "both stages share one process group, and the orchestrator is outside it",
+    "one kill(-pgid) signalled the group",
+    "both stages died of SIGINT",
+    # PROOF: a killed writer gives its blocked reader EOF, not an errno.
+    "killed_writer_eof ok",
+    "the killed writer was reaped",
+    "and its blocked reader exited cleanly",
+    # PROOF: a blocked writer whose reader died gets SIGPIPE.
+    "killed_reader_epipe ok",
+    "the blocked writer was killed by SIGPIPE",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m4.html",
+)
+
+M4_DOCUMENT = "/www/m4.html"
+
+M4_READY = ("(() => { const s = globalThis.M4 && globalThis.M4.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M4 = """(() => {
+  const M = globalThis.M4 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    pipe_basic: one(P.pipe_basic),
+    yes_head: one(P.yes_head),
+    group_signal: one(P.group_signal),
+    killed_writer_eof: one(P.killed_writer_eof),
+    killed_reader_epipe: one(P.killed_reader_epipe),
+  }
+})()"""
+
+M4_SHAPE = {
+    "state": str, "why": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "pipe_basic": (dict, type(None)),
+    "yes_head": (dict, type(None)),
+    "group_signal": (dict, type(None)),
+    "killed_writer_eof": (dict, type(None)),
+    "killed_reader_epipe": (dict, type(None)),
+}
+
+#: The labels a non-fatal SIGPIPE must move, and only those. Both SIGPIPE proofs, their section
+#: flags, and the verdict.
+_NO_SIGPIPE_FAILS = (
+    "yes_head ok",
+    "the writer was killed by SIGPIPE",
+    "killed_reader_epipe ok",
+    "the blocked writer was killed by SIGPIPE",
+    "verdict is ok",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -2266,6 +2359,12 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "COOP/COEP, so no filesystem is mounted and www/m2.html aborts before any proof "
                 "runs. Measured: state 'aborted' in 0.0 s. UNMEASURABLE rather than FAIL, because "
                 "a FAIL would claim three proofs were taken and found wanting.",
+        ), "m4": Expect(
+            UNMEASURABLE,
+            why="the same mechanism again: without COOP/COEP there is no SAB, so no kernel boots, "
+                "no process exists and nothing can be piped between two of them. UNMEASURABLE "
+                "rather than FAIL, because a FAIL would claim a pipeline was built and behaved "
+                "wrongly.",
         ), "m3": Expect(
             UNMEASURABLE,
             why="the same mechanism once more: without COOP/COEP there is no SAB, so the kernel "
@@ -2486,6 +2585,34 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "read from the newest records, which a lapped ring still has",
             failed=_TRACE_TINY_FAILS,
             held=held_rest(M3_LABELS, _TRACE_TINY_FAILS),
+        )},
+    ),
+    "no-sigpipe-signal": NegativeControl(
+        name="no-sigpipe-signal",
+        why="no_sigpipe=1: SIGPIPE stops being fatal under SIG_DFL. The kernel keeps its "
+            "fatal-default dispositions in a SET built at boot (src/kernel/kernel.mjs "
+            "FATAL_DEFAULT), so the control DELETES a row rather than adding a branch — the "
+            "headline path carries one Set lookup either way.\n"
+            "WHAT MUST BREAK: `yes | head -1` must hang. head reads once and exits, the pipe "
+            "loses its reader, and the writer's next write gets -EPIPE with a signal nothing acts "
+            "on — `drainSignals` discards the bit at the next syscall entry — so it writes forever. "
+            "The program caps that loop and reports `hitCap` instead of hanging, because a real "
+            "hang gives the harness a timeout and no information about which loop stopped.\n"
+            "BOTH SIGPIPE PROOFS MOVE and nothing else does, which is what makes this control "
+            "specific: `yes | head -1` and the blocked writer whose reader died are the two "
+            "clauses that turn on the disposition, while the pipe's bytes, the SIGINT sweep over a "
+            "process group, and the reader's EOF are untouched. EOF is the OTHER half of "
+            "docs/ABI.md decision 5 and has nothing to do with SIGPIPE — a control that moved it "
+            "too would mean the two directions were sharing an implementation.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_sigpipe", "1"),),
+        expects={"m4": Expect(
+            Outcome.FAIL,
+            why="the writer must survive its own failed writes, while the reader's EOF and the "
+                "process-group signal still hold",
+            failed=_NO_SIGPIPE_FAILS,
+            held=held_rest(M4_LABELS, _NO_SIGPIPE_FAILS),
         )},
     ),
     "kernel-stall": NegativeControl(
@@ -5268,6 +5395,132 @@ def check_m3(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m3.html", env.served_matches_disk(env.document),
                     "the m3.html served does not match www/m3.html on disk")
+
+
+@check(
+    name="m4",
+    milestone="m4",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SIGPIPE),
+    labels=M4_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M4_DOCUMENT,
+    ready_expr=M4_READY,
+    ready_what="globalThis.M4.state reaching done, aborted or error (www/m4.html)",
+    # The headline run is 1.1 s measured, over five fresh kernels. The bound is generous and is
+    # still a BOUND: a deadlocked pipeline raises no error anywhere, so a pipe that stopped must
+    # end as a BROKEN check carrying the kernel's park and refcount state — which www/m4.html
+    # attaches to the timeout — rather than as a suite that never returns.
+    ready_timeout=240.0,
+    refusal_expr="globalThis.M4 && globalThis.M4.state",
+    refusal_want="aborted",
+    note="five sections, each a pipeline built from the mechanism the shell will use — `pipe2` + "
+         "`spawn` with posix_spawn file actions + `setpgid`, which is what replaces `fork`. The "
+         "milestone states its proofs in shell syntax and there is no shell until M5, so an "
+         "orchestrator process spawns its own stages and every byte and every signal crosses a "
+         "real syscall from inside a real process worker. "
+         "THE ASYMMETRY IS THE SUBJECT (docs/ABI.md decision 5): a blocked reader whose last "
+         "writer went sees 0, meaning EOF and NOT an errno, while a blocked writer whose last "
+         "reader went gets -EPIPE plus SIGPIPE. Getting it backwards makes `yes | head -1` either "
+         "hang or report a spurious error. "
+         "negative control: --negative no-sigpipe-signal stops SIGPIPE being fatal, and the two "
+         "proofs that turn on that disposition must fail while the reader's EOF and the "
+         "process-group signal hold. --negative no-isolation must come out BROKEN: no SAB, so no "
+         "kernel and no processes to pipe between.",
+)
+def check_m4(env: Env) -> None:
+    got = env.read(READ_M4, M4_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m4.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m4.html aborted: %s. The kernel's SAB is not constructible without cross-origin "
+            "isolation, so no process exists and nothing can be piped."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m4.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("pipe_basic", "yes_head", "group_signal", "killed_writer_eof",
+                "killed_reader_epipe")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        row = got[name]
+        return (row or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- a pipe carries bytes between two processes --------------------------------------
+    pb = ev("pipe_basic")
+    env.expect_that("pipe_basic ok", section_ok("pipe_basic"), pb)
+    env.expect_that("pipe2 returns two distinct fds", pb.get("twoDistinctFds") is True,
+                    pb.get("pipe"))
+    env.expect_that("both pipeline stages were reaped", pb.get("bothReaped") is True,
+                    {"writer": pb.get("writer"), "reader": pb.get("reader")})
+
+    # ---- PROOF: `yes | head -1` terminates -----------------------------------------------
+    yh = ev("yes_head")
+    env.expect_that("yes_head ok", section_ok("yes_head"), yh)
+    # THE CLAUSE THE CONTROL MOVES. Killed, and by SIGPIPE — not exited, and not still running.
+    env.expect_that("the writer was killed by SIGPIPE", yh.get("yesKilledBySigpipe") is True,
+                    {"yes": yh.get("yes"), "SIGPIPE": yh.get("SIGPIPE")})
+    env.expect_that("and the reader exited cleanly",
+                    bool(yh.get("head") and yh["head"].get("exited")), yh.get("head"))
+
+    # ---- PROOF: one signal kills every stage of the pipeline ------------------------------
+    gs = ev("group_signal")
+    env.expect_that("group_signal ok", section_ok("group_signal"), gs)
+    # THE GROUP IS THE SUBJECT. Two separate kill(pid) calls passed this section while
+    # `deliverSignal`'s target < 0 branch and the pgid inheritance M4 added went untested.
+    pgids = gs.get("stagePgids") or []
+    env.expect_that("both stages share one process group, and the orchestrator is outside it",
+                    len(pgids) == 2 and pgids[0] == gs.get("sleeperPid")
+                    and pgids[1] == gs.get("sleeperPid")
+                    and gs.get("orchestratorOutsideTheGroup") is True,
+                    {"stagePgids": pgids, "sleeperPid": gs.get("sleeperPid"),
+                     "myPgid": gs.get("myPgid"), "setpgid": gs.get("setpgidResults")})
+    env.expect_that("one kill(-pgid) signalled the group", gs.get("groupKillResult") == 0,
+                    gs.get("groupKillResult"))
+    env.expect_that("both stages died of SIGINT", gs.get("bothKilledByInt") is True,
+                    {"sleeper": gs.get("sleeper"), "catter": gs.get("catter"),
+                     "started": gs.get("started"), "SIGINT": gs.get("SIGINT")})
+
+    # ---- PROOF: a killed writer gives its blocked reader EOF, not an errno ----------------
+    kw = ev("killed_writer_eof")
+    env.expect_that("killed_writer_eof ok", section_ok("killed_writer_eof"), kw)
+    env.expect_that("the killed writer was reaped", kw.get("writerWasKilled") is True,
+                    kw.get("writer"))
+    # EOF is 0 and not an errno, so the reader must EXIT CLEANLY rather than fault or error.
+    env.expect_that("and its blocked reader exited cleanly",
+                    kw.get("readerExitedCleanly") is True, kw.get("reader"))
+
+    # ---- PROOF: a blocked writer whose reader died gets SIGPIPE ---------------------------
+    kr = ev("killed_reader_epipe")
+    env.expect_that("killed_reader_epipe ok", section_ok("killed_reader_epipe"), kr)
+    env.expect_that("the blocked writer was killed by SIGPIPE",
+                    kr.get("writerKilledBySigpipe") is True,
+                    {"writer": kr.get("writer"), "SIGPIPE": kr.get("SIGPIPE")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m4.html", env.served_matches_disk(env.document),
+                    "the m4.html served does not match www/m4.html on disk")
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
                       labels=("-",), min_expectations=1,

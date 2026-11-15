@@ -18,6 +18,9 @@ import {
   SYS_lstat, SYS_seek, SYS_mkdir, SYS_unlink, SYS_chmod, SYS_readdir, SYS_readlink,
   SYS_symlink, SYS_rename, SYS_link, SYS_statfs, SYS_ftruncate, SYS_chown,
   SYS_pread, SYS_pwrite, SYS_rmdir, SYS_truncate, SYS_dup, SYS_dup2,
+  SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_setpgid, SYS_setsid,
+  SYS_getpgid, SYS_getppid, SYS_exit, encodeSpawnRequest,
+  STAT_EXITED, STAT_KILLED, WNOHANG,
   FILESTAT_BYTES, DIRENT_HEADER, decodeFilestat,
   EINTR, EIO, EINVAL, isErr, nextCallId, unpackI64, packI64,
 } from "../abi.mjs";
@@ -521,6 +524,88 @@ export function readdir(fd, cookie = 0) {
     at += (DIRENT_HEADER + nlen + 3) & ~3;
   }
   return { entries: out, cookie: next, done: out.length === 0 };
+}
+
+/* --------------------------- M4: pipes and process control ---------------------------
+ *
+ * These are the calls `spawn` + `pipe` + `setpgid` replaces `fork` with (constraint 20). Grouped
+ * on `env.proc` in src/libos/process.mjs for the reason `FS` is grouped: constraint 15's seam is
+ * asserted by ENUMERATING what a program was handed, and one object of functions keeps that
+ * enumeration readable.
+ */
+
+/**
+ * pipe2(flags) -> {rfd, wfd}, or a negative errno.
+ *
+ * Two fds from one call, so the write end comes back in r1 — the same channel `seek` uses for the
+ * high half of an i64 and `readdir` for its cookie. Returned as an OBJECT rather than a pair,
+ * because a caller that mixed up the order of a two-element array would wire a pipeline backwards
+ * and the mistake would look like a hang.
+ */
+export function pipe2(flags = 0) {
+  const r = syscall(SYS_pipe2, flags);
+  if (r < 0) return r;
+  return { rfd: r, wfd: r1of() };
+}
+
+/**
+ * spawn a child. `actions` are posix_spawn-shaped: `{op: SPAWN_DUP2, a: from, b: to}` and
+ * `{op: SPAWN_CLOSE, a: fd}`.
+ *
+ * The child inherits this process's whole fd table and THEN the actions rearrange it, which is
+ * posix_spawn's own order and what lets a shell say "put the pipe's write end on 1, then close the
+ * pipe fd". Encoding is the shared codec in src/abi.mjs, so there is one definition of the bytes.
+ */
+export function spawn(path, argv = [], actions = []) {
+  const bytes = encodeSpawnRequest({ path, argv, actions });
+  if (bytes.length > MAX_INLINE) return -EINVAL;
+  return syscall(SYS_spawn, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+/**
+ * waitpid(pid, flags) -> {pid, exited, killed, code}, or a negative errno.
+ *
+ * The status is in r1, encoded `(kind << 8) | value` by the kernel — the only call that uses r1 as
+ * a value rather than as the error sentinel. Decoded here so a caller never open-codes the shift:
+ * `exited` with code 0 and `killed` by signal 0 are the two states that would otherwise be
+ * indistinguishable, which is why the kernel carries a kind bit at all.
+ */
+export function waitpid(pid = -1, flags = 0) {
+  const r = syscall(SYS_waitpid, pid, flags);
+  if (r < 0) return r;
+  const status = r1of();
+  const kind = (status >> 8) & 0xff;
+  return {
+    pid: r,
+    exited: kind === STAT_EXITED,
+    killed: kind === STAT_KILLED,
+    code: status & 0xff,
+  };
+}
+
+export function kill(pid, sig) {
+  return syscall(SYS_kill, pid, sig);
+}
+
+export function setpgid(pid = 0, pgid = 0) {
+  return syscall(SYS_setpgid, pid, pgid);
+}
+
+export function setsid() {
+  return syscall(SYS_setsid);
+}
+
+export function getpgid(pid = 0) {
+  return syscall(SYS_getpgid, pid);
+}
+
+export function getppid() {
+  return syscall(SYS_getppid);
+}
+
+/** Never returns. The kernel reaps the caller, so there is nothing to come back to. */
+export function exit(code = 0) {
+  return syscall(SYS_exit, code & 0xff);
 }
 
 export function statfs() {

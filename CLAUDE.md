@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 89 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 102 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 17 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  89 normative constraints  ← cite these
+  CONSTRAINTS.md  102 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -221,6 +221,19 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Assert each refusal's errno separately.** A single "it refused" passes for a filesystem that
   refused for the wrong reason. M3's `truncate` answered ENOENT where it owed EROFS, and only the
   per-call assertion caught it.
+- **A timeout MUST carry state.** A stopped pipeline raises no error anywhere — a parked reader and
+  a parked writer are both legitimate — so the only way to tell a working pipe from a deadlocked
+  one is to read the counts. `www/m4.html` attaches the kernel's park and refcount dump to its own
+  timeout, and that dump is what located constraint 92 in one run.
+- **A test double MUST NOT be gentler than the thing it stands for.** M4's pipe probe gave the
+  kernel a fake `raise` that did not reap, so an entire class of double-reply defect was invisible
+  to 68 passing assertions. A fake that cannot reach the real failure tests a world that does not
+  exist.
+- **`node -e "import('./src/kernel/kernel.mjs')"` is the fast syntax check.** A duplicate import
+  surfaced in the browser as `worker.onerror` with the message `undefined`; node named it at once.
+- **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
+  the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
+  control passed alone.
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 
