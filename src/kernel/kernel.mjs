@@ -18,8 +18,10 @@ import {
   STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
-import { makeSink, installTruncateOverflow, openFile, KIND_OPS } from "./files.mjs";
+import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./files.mjs";
 import { buildCalls, installStall, PENDING } from "./calls.mjs";
+import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mjs";
+import { makeInlineIo } from "./io-inline.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -34,6 +36,9 @@ let opfsWhy = "";
 let IO = null;
 let ioBooted = false;
 let ioWhy = "";
+let STORE = null;
+let QUOTA = null;
+let mountReport = null;
 let table = null;
 let hb = 0;
 let kServiceMs = 0;
@@ -43,6 +48,14 @@ let notify0 = 0;
 let lateReply = 0;
 let dropped = 0;
 let badCallId = 0;
+/**
+ * KERNEL-SIDE EXCEPTIONS IN AN ASYNC SYSCALL BODY, counted. `later()` is the completion path for
+ * open, write, fsync, truncate and close, so its rejection arm is where ANY throw inside ANY of
+ * those bodies lands — and it used to answer a bare `-EIO` that named nothing, noted nothing and
+ * moved no counter. A number is what makes "nothing threw" assertable: an exception reported only
+ * by the errno a caller would have got from a real I/O failure is indistinguishable from one.
+ */
+let asyncFail = 0;
 let intrCount = 0;
 let hbTick = 0;
 let lastTick = 0;
@@ -90,6 +103,28 @@ let satDepth = 0;
  *  claimed, and the number looks clean. */
 const faults = [];
 
+/**
+ * THE NOTE CHANNEL'S COUNTER, and the reason it exists rather than the texts alone.
+ *
+ * A note is a storage failure nobody is awaiting, and the case it was built for is the one that
+ * cannot be anything else: a process's own teardown closes its fds, `closeFd` commits whatever was
+ * staged, and teardown cannot await the answer — so a write the kernel could not publish has no
+ * caller to return an errno to. The channel carried that fact to the page as a STRING, and every
+ * consumer printed it next to the other logs. Measured: a workload that destroyed an acknowledged
+ * 4-byte write in 3 of 12 rounds emitted `close of inode 22 could not publish its write: errno 8`
+ * every time, the suite passed, and fsck reported the volume clean. A failure only a human reading
+ * logs can find is not reported.
+ *
+ * So the channel is a NUMBER as well as a text: counted here, carried in `fsState` and `kstats`,
+ * and asserted at zero by the suite on a workload where nothing may be refused
+ * (`scripts/check.py` "drop the note channel stayed silent under a killed writer").
+ *
+ * `NOTE_KEEP` bounds the texts. The count is unbounded and is the thing assertions read.
+ */
+const NOTE_KEEP = 32;
+const noteTexts = [];
+let noteCount = 0;
+
 // ---------------------------------------------------------------------------- reply
 
 /**
@@ -132,10 +167,19 @@ function intr(p) {
   reply(p, -EINTR, -1, ST_INTR);
 }
 
-/** A handler's numeric return, in docs/ABI.md's single-register convention. */
+/**
+ * A handler's numeric return, in docs/ABI.md's single-register convention.
+ *
+ * `p.rlen` and `p.r1` are the two scratch words a handler may set, cleared at every dispatch so a
+ * handler that sets neither cannot publish the previous call's. They exist because docs/ABI.md
+ * gives three calls a reply that is not one integer: `fstat` and `statfs` write a record into the
+ * byte region, `readdir` writes records AND returns a cookie in r1, and `seek` returns an i64 as
+ * the (r0, r1) pair. Writing those through reply()'s existing parameters keeps reply() the single
+ * writer of SEQ, STATUS and RLEN.
+ */
 function finish(p, r) {
   if (r < 0) reply(p, r, -1);
-  else reply(p, r, 0);
+  else reply(p, r, p.r1 | 0, ST_RETURN, p.rlen | 0);
 }
 
 /** An async handler's completion. A reply for a call already answered is dropped and counted —
@@ -162,9 +206,19 @@ function setTimer(p, ms) {
 function makeIo(worker) {
   const pending = new Map();
   let seq = 1;
+  let booted = null;
   worker.onmessage = (ev) => {
     const m = ev.data;
-    if (m.t === "booted") { ioBooted = m.ok; ioWhy = m.why || ""; return; }
+    if (m.t === "booted") {
+      ioBooted = m.ok;
+      ioWhy = m.why || "";
+      if (booted) booted(m.ok);
+      return;
+    }
+    // A note is a fact the worker could not return to a caller — a blob that would not delete.
+    // Surfaced under its own name rather than swallowed: it is a leak, not a corruption, and the
+    // two want different responses.
+    if (m.t === "io-note") { noteOut(m.why); return; }
     if (m.t === "io-error") {
       const w = pending.get(m.seq);
       pending.delete(m.seq);
@@ -180,12 +234,27 @@ function makeIo(worker) {
       const s = seq++;
       return new Promise((resolve, reject) => {
         pending.set(s, { resolve, reject });
-        worker.postMessage({ t, seq: s, ...body });
+        // THE ENVELOPE WINS OVER THE BODY. `t` and `seq` are the transport's own two fields, and a
+        // body that happened to carry either of them used to overwrite the correlation id: the
+        // worker echoed the body's value, `pending.get` missed, and the promise NEVER SETTLED — a
+        // syscall parked forever and a mount that timed out with no error anywhere. Measured with a
+        // journal request whose payload named its own `seq`.
+        worker.postMessage({ ...body, t, seq: s });
       });
     },
     // Notifications: no reply expected, so they cannot queue behind a request (constraint 57's
     // drain order — notifications first).
     boot() { worker.postMessage({ t: "boot" }); },
+    /** The boot handshake, awaited. A `booted` that has not landed is not an I/O worker with no
+     *  OPFS — it is an I/O worker that has not answered yet, and mounting against the difference
+     *  would read a populated volume as a fresh one. */
+    ready(timeoutMs) {
+      if (ioBooted) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => { booted = null; resolve(false); }, timeoutMs);
+        booted = (ok) => { clearTimeout(timer); booted = null; resolve(ok); };
+      });
+    },
     register(pid, sab) { worker.postMessage({ t: "register", pid, sab }); },
     unregister(pid) { worker.postMessage({ t: "unregister", pid }); },
     outstanding() { return pending.size; },
@@ -202,6 +271,9 @@ function makeIo(worker) {
  */
 function later(p, job) {
   const seqAtDispatch = p.inflight.seq;
+  // Captured here and not read in the handler: `finish` nulls `inflight`, so a rejection arriving
+  // after one would have had nothing to name the call with.
+  const nrAtDispatch = p.inflight.nr;
   Promise.resolve()
     .then(job)
     .then(
@@ -209,7 +281,19 @@ function later(p, job) {
         if (!p.ctl || p.seq !== seqAtDispatch) { lateReply += 1; return; }
         finish(p, r);
       },
-      () => {
+      (reason) => {
+        // THE REASON IS NAMED, COUNTED, AND ONLY THEN TURNED INTO AN ERRNO. The caller still gets
+        // -EIO, because there is no errno for "the kernel threw" and inventing one would put a
+        // kernel defect in the ABI — but the errno is no longer the only trace. The note carries
+        // the call number and the stack, the counter makes zero assertable, and the two together
+        // are the difference between a bug and a storage error from the reader's side.
+        //
+        // Counted BEFORE the identity check so a rejection is counted whether or not its caller is
+        // still there: a process that was reaped while its write was in flight is exactly the case
+        // where the throw is otherwise invisible.
+        asyncFail += 1;
+        noteOut(`pid ${p.pid} call ${nrAtDispatch} threw inside its async body: `
+          + `${(reason && (reason.stack || reason.message)) || String(reason)}`);
         if (!p.ctl || p.seq !== seqAtDispatch) { lateReply += 1; return; }
         fail(p, EIO);
       },
@@ -258,6 +342,9 @@ function onSyscall(p, posted) {
   if (Atomics.load(g, G_WINDOW) === W_OPEN) depthTarget[bucket] += 1;
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null };
+  // The two reply scratch words, cleared per dispatch. See finish().
+  p.rlen = 0;
+  p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
   kServiceMs += now() - tIn;
@@ -286,6 +373,9 @@ function onSyscallNoDepth(p, posted) {
   }
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null };
+  // The two reply scratch words, cleared per dispatch. See finish().
+  p.rlen = 0;
+  p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
   kServiceMs += now() - tIn;
@@ -315,6 +405,9 @@ function onSyscallNoSigpend(p, posted) {
   }
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null };
+  // The two reply scratch words, cleared per dispatch. See finish().
+  p.rlen = 0;
+  p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
   kServiceMs += now() - tIn;
@@ -386,6 +479,10 @@ async function programImage(programUrl) {
 // ---------------------------------------------------------------------------- spawn
 
 const results = [];
+/** How many processes the last `go` was addressed to. `results` is posted when that many have
+ *  answered, not when the live count has — a kernel that lost a process would otherwise wait out
+ *  its whole timeout for a result nobody is going to send. */
+let goCount = 0;
 
 /**
  * Two phase, forced by measurement. Phase 1 allocates and posts; phase 2 is the process's own
@@ -405,6 +502,11 @@ function spawn(image, programCfg, index = 0) {
   slot.sab = new SharedArrayBuffer(SAB_BYTES);
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
+  // THE PROCESS'S IDENTITY, set at spawn and read per call by every path syscall (constraint 29).
+  // A spawn that did not take one would make every process root, and then the mode bits a check
+  // asserts are bits nothing ever consults.
+  if (programCfg.uid !== undefined) slot.uid = programCfg.uid | 0;
+  if (programCfg.gid !== undefined) slot.gid = programCfg.gid | 0;
   slot.ctl[UID] = slot.uid;
   // M1 (f). The frame header magic+version, written once. The libos reads it once at init and
   // panics on mismatch — four bytes impossible to retrofit after a program is shipped.
@@ -464,6 +566,12 @@ function spawn(image, programCfg, index = 0) {
 async function spawnBatch(m) {
   const image = await programImage(m.programUrl);
   const pids = [];
+  // G_READY IS CUMULATIVE, so the target is absolute. A second batch against one kernel otherwise
+  // finds the counter already at or past its own count and reports ready before the new processes
+  // exist — measured as `TypeError: Cannot read properties of null (reading 'run')` in the child,
+  // because its `go` arrived before its program had finished importing. M1 never saw it: one batch
+  // per kernel.
+  const already = Atomics.load(g, G_READY);
   // The ordinal of the attempt the cap refused, in pids-ever-allocated terms rather than in
   // this request's terms: pids are monotonic and nothing is freed at M0, so table.spawned at
   // the moment of the refusal is the number of live processes and the attempt was the next
@@ -493,13 +601,15 @@ async function spawnBatch(m) {
     // A busy-spin, not a park, so the no-parking lint over this directory still holds — and
     // it reproduces the same mechanism, because it also never yields and the child's ready
     // message can never be processed.
+    const want = already + m.count;
     const until = now() + (m.parkMs || 10000);
-    while (now() < until && Atomics.load(g, G_READY) < m.count) { /* starve the children */ }
+    while (now() < until && Atomics.load(g, G_READY) < want) { /* starve the children */ }
     const ready = Atomics.load(g, G_READY);
-    post({ t: "ready", ready, want: m.count, starved: ready < m.count, why: starvedWhy(ready, m.count, m.parkMs || 10000) });
+    post({ t: "ready", ready, want, starved: ready < want,
+      why: starvedWhy(ready, want, m.parkMs || 10000) });
     return;
   }
-  awaitReady(m.count, m.readyTimeoutMs || 10000);
+  awaitReady(already + m.count, m.readyTimeoutMs || 10000);
 }
 
 function onProcessMessage(slot, m) {
@@ -524,7 +634,9 @@ function onProcessMessage(slot, m) {
       sinkWrites: sink ? sink.writes : 0,
       ...m.data,
     });
-    if (results.length === table.live.size) post({ t: "results", results, kernel: kstats() });
+    if (results.length >= (goCount || table.live.size)) {
+      post({ t: "results", results, kernel: kstats() });
+    }
     return;
   }
   if (m.t === "fault") {
@@ -674,6 +786,43 @@ function pairs(hist) {
   return out;
 }
 
+/**
+ * The filesystem's own account of itself: how it mounted, what fsck found at mount, and the
+ * storage counters. Reported at boot and on demand.
+ *
+ * `mode` is the load-bearing field. A kernel that mounted READ-ONLY because the image failed
+ * validation must say so where a reader meets it (constraint 28) — webxp reseeded and reported
+ * success, and the whole point of this milestone is that it does not.
+ */
+function fsState() {
+  if (!STORE) {
+    return { mounted: false, mode: MOUNT_REFUSE, report: mountReport, opfsWhy, ioWhy,
+      notes: noteCount, noteTexts: noteTexts.slice() };
+  }
+  return {
+    mounted: true,
+    mode: STORE.mode,
+    readOnly: STORE.readOnly,
+    generation: String(STORE.generation),
+    slot: STORE.slot,
+    journalFirstSeq: String(STORE.journalFirstSeq),
+    seq: String(STORE.seq),
+    dirty: STORE.dirty,
+    lock: STORE.lock,
+    report: STORE.report,
+    inodes: STORE.vfs ? STORE.vfs.stats() : null,
+    stats: { ...STORE.stats },
+    // THE NOTE CHANNEL, AS A NUMBER, beside the storage counters and for the same reason they are
+    // here: a caller can assert on it. A note is a refusal nobody was awaiting, so on a workload
+    // where nothing may be refused this must read zero — and before it was counted, the only
+    // record of an unpublished write was a line in a log.
+    notes: noteCount,
+    noteTexts: noteTexts.slice(),
+    quota: QUOTA ? { usage: QUOTA.usage, quota: QUOTA.quota } : null,
+    inline: !!(IO && IO.inline),
+  };
+}
+
 function kstats() {
   return {
     abiFingerprint: ABI_FINGERPRINT,
@@ -681,7 +830,9 @@ function kstats() {
     cfg,
     calls: kCalls,
     serviceMeanUs: kCalls ? (kServiceMs * 1000) / kCalls : 0,
-    notifyWoke, notify0, lateReply, dropped, badCallId, intr: intrCount,
+    notifyWoke, notify0, lateReply, dropped, badCallId, asyncFail, intr: intrCount,
+    // The note channel's count, so a bench that never asks for `fs-state` still reports it.
+    notes: noteCount,
     faults: faults.slice(),
     heartbeat: hb, hbTick,
     hbGap: {
@@ -711,6 +862,7 @@ function kstats() {
     perProcess: table
       ? [...table.live].map((p) => ({ pid: p.pid, calls: p.calls, replies: p.replies, state: p.state }))
       : [],
+    fs: fsState(),
   };
 }
 
@@ -760,10 +912,20 @@ function teardown(slot) {
     slot.fds.fds[fd] = null;
     if (--d.refs <= 0) {
       try {
-        KIND_OPS[d.kind]?.close?.(d);
+        // A file's close commits a staged generation and releases its handle, so it returns a
+        // PROMISE. Teardown cannot await — it runs synchronously and the pid's quarantine is what
+        // gives the commit time to land (constraint 14's ~2 s) — but a REJECTION must be reported
+        // rather than becoming an unhandled rejection that panics the whole kernel.
+        const closing = KIND_OPS[d.kind]?.close?.(d);
+        if (closing && typeof closing.then === "function") {
+          closing.catch((error) => noteOut(
+            `pid ${slot.pid} fd ${fd} did not close cleanly at teardown: ${error && error.message}`,
+          ));
+        }
       } catch (e) {
-        // A close op that throws must not stop teardown. The leak is recorded by the kernel's
-        // own panic path if it mattered; here it must not block the slot being reaped.
+        // A close op that threw synchronously must not stop teardown: the remaining fds still
+        // have to be released and the slot still has to be reaped.
+        noteOut(`pid ${slot.pid} fd ${fd} close threw: ${e && e.message}`);
       }
     }
   }
@@ -940,6 +1102,20 @@ function post(m) {
   self.postMessage(m);
 }
 
+/**
+ * EVERY NOTE LEAVES THE KERNEL HERE, which is what makes the count equal to the channel.
+ *
+ * Six call sites feed it — the I/O worker's relay, the inline I/O surface, the Store, teardown's
+ * two close arms, and `later()`'s rejection arm — and a seventh that posted `io-note` directly
+ * would be a note nothing counted. There is one function so there is one number.
+ */
+function noteOut(why) {
+  noteCount += 1;
+  const text = String(why);
+  if (noteTexts.length < NOTE_KEEP) noteTexts.push(text);
+  post({ t: "io-note", why: text });
+}
+
 self.onerror = (e) => panic(`kernel onerror: ${e.message ?? e}`);
 self.onunhandledrejection = (e) => panic(`kernel rejection: ${e.reason}`);
 
@@ -975,12 +1151,46 @@ async function handle(m) {
         OPFS_ROOT = null;
         opfsWhy = String((e && e.name) || e);
       }
+      // The storage quota, asked for ONCE. `navigator.storage.estimate()` is the only source for
+      // the figure statfs publishes, and asking per call would charge every `df` for it.
+      try {
+        QUOTA = await navigator.storage.estimate();
+      } catch (e) {
+        QUOTA = null;
+      }
       // The I/O worker, unless the control routes storage back onto this thread. Constraint 58:
       // with the handles here, one process's fsync took every other process's p99 from 275 us to
-      // 850 at N=16 and past the kill bar at N=64.
-      if (!cfg.ioInline) {
+      // 850 at N=16 and past the kill bar at N=64. The control is ONE OBJECT swapped at boot —
+      // src/kernel/io-inline.mjs implements the same request() surface synchronously — so neither
+      // store.mjs nor files.mjs carries an inline branch and the headline path cannot have been
+      // perturbed by the control's existence.
+      if (cfg.ioInline) {
+        if (cfg.bench !== 1) throw new Error("ioInline requires bench=1");
+        IO = makeInlineIo(() => OPFS_ROOT, noteOut);
+        ioBooted = await IO.start();
+        if (!ioBooted) ioWhy = opfsWhy || "no OPFS root";
+      } else {
         IO = makeIo(new Worker(new URL("./io-worker.mjs", import.meta.url), { type: "module" }));
         IO.boot();
+        // The mount below reads the superblock slots through this worker, so the boot handshake
+        // has to have landed first. Awaited rather than assumed: a mount that raced the worker's
+        // getDirectory() would read three absent slots and call a populated volume fresh, which is
+        // the one mistake constraint 28 exists to prevent.
+        await IO.ready(5000);
+      }
+      // The filesystem. Mounted BEFORE any process exists, because a process's first syscall may
+      // be an open and a half-mounted filesystem has no honest answer for it.
+      if (ioBooted) {
+        // The note channel: a storage refusal nobody is awaiting. The one that matters is a
+        // commit refused inside a process's teardown — teardown cannot await an fd's close, so a
+        // write the kernel could not publish would otherwise leave no record anywhere.
+        STORE = new Store(IO, cfg, noteOut);
+        STORE.quota = QUOTA;
+        installStore(STORE);
+        mountReport = await STORE.mount();
+      } else {
+        mountReport = { mountable: MOUNT_REFUSE, problems: [{ what: "opfs",
+          why: `the I/O worker has no OPFS root: ${ioWhy || opfsWhy || "unknown"}` }] };
       }
       // k.table is a getter in the surface below, so handlers see the live ProcTable rather
       // than a snapshot taken before anything was spawned. The alternative — passing `table`
@@ -988,9 +1198,7 @@ async function handle(m) {
       // own test rig recreated the table.
       CALLS = buildCalls({
         reply, fail, setTimer, later,
-        opfsRoot: () => OPFS_ROOT,
-        io: IO,
-        ioInline: !!cfg.ioInline,
+        get store() { return STORE; },
         get table() { return table; },
         reap,
         reapForParent,
@@ -1012,6 +1220,17 @@ async function handle(m) {
         installTruncateOverflow();
       }
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
+      // M2's negative control, both stages. Same discipline as installStall: a hook a later change
+      // could leave armed is worse than one requiring a hand edit, so bench=1 is the gate, and the
+      // echoed cfg above is how each proves it was applied.
+      //
+      // Stage 1, `noCowOrder`: the commit drops the data-before-metadata ordering, so the journal
+      // record and its flush land and the blob is never flushed. fsck must report corruption.
+      // Stage 2, `noCrc`: replay and the image decoder stop checking their CRCs, so a torn journal
+      // is ACCEPTED and the torn-journal proof starts passing — if it passed either way it was
+      // testing nothing.
+      if (cfg.noCowOrder && cfg.bench !== 1) throw new Error("noCowOrder requires bench=1");
+      if (cfg.noCrc && cfg.bench !== 1) throw new Error("noCrc requires bench=1");
       if (cfg.noSigpend) {
         // The M1 negative control. Refuses unless the page asked for a bench boot, the same
         // discipline installStall applies: a hook a later change could leave armed is worse
@@ -1022,8 +1241,14 @@ async function handle(m) {
       setInterval(tick, HB_PERIOD_MS);
       lastTick = now();
       Atomics.store(g, G_KSTATE, K_UP);
-      // The echoed cfg is not a courtesy: it is how a control proves it was applied.
-      post({ t: "up", globals, abiFingerprint: ABI_FINGERPRINT, cfg, isolated: self.crossOriginIsolated === true });
+      // The echoed cfg is not a courtesy: it is how a control proves it was applied. The mount
+      // report travels with it for the same reason: a kernel that came up READ-ONLY must say so at
+      // boot rather than answering -EROFS to the first write and leaving the caller to guess.
+      post({
+        t: "up", globals, abiFingerprint: ABI_FINGERPRINT, cfg,
+        isolated: self.crossOriginIsolated === true,
+        fs: fsState(),
+      });
       return;
     }
     case "spawn":
@@ -1047,7 +1272,15 @@ async function handle(m) {
         armBarrier(want, want - (m.go.roleOf >= 0 ? 1 : 0), m.go.windowMs | 0,
           m.go.barrierTimeoutMs || 60000);
       }
-      for (const p of table.live) p.port.postMessage({ t: "go", ...m.go });
+      // `go.pid` addresses ONE process. A page driving several different programs against one
+      // kernel — M2's proof (c) holds a file open in one process while a second opens it and a
+      // third overwrites it — cannot use a broadcast: every process would re-run on every go.
+      const targets = [...table.live].filter((p) => !m.go || !m.go.pid || p.pid === m.go.pid);
+      // What `results` waits for. The live-process count was wrong the moment a process could
+      // die: a kernel that lost one would wait for a result that is never coming and report the
+      // timeout as latency.
+      goCount = targets.length;
+      for (const p of targets) p.port.postMessage({ t: "go", ...m.go });
       return;
     }
     case "raise": {
@@ -1076,6 +1309,50 @@ async function handle(m) {
     case "stats":
       post({ t: "stats", kernel: kstats() });
       return;
+    case "snapshot": {
+      // Constraint 23's second flush point. The shell's job in a real system; the page's here,
+      // because M2 has no shell yet. It is NOT a syscall: docs/ABI.md's path group does not list
+      // one, and inventing a number the ABI does not name would be a worse departure than
+      // reaching it through the kernel's own control channel.
+      if (!STORE) {
+        post({ t: "snapshot", ok: false, why: "no filesystem is mounted" });
+        return;
+      }
+      const r = await STORE.writeSnapshot();
+      post({
+        t: "snapshot", ok: r === 0, r,
+        generation: String(STORE.generation), slot: STORE.slot,
+        journalFirstSeq: String(STORE.journalFirstSeq), stats: { ...STORE.stats },
+      });
+      return;
+    }
+    case "fsck": {
+      // An EXPLICIT fsck, blob sweep included (constraint 33 keeps the sweep off the boot path).
+      // It never writes: src/fs/fsck.mjs holds no handle and no root directory, so there is no
+      // object there through which a reseed could be expressed.
+      if (!STORE) {
+        post({ t: "fsck", ok: false, why: "no filesystem is mounted" });
+        return;
+      }
+      const before = { generation: String(STORE.generation), slot: STORE.slot };
+      const report = await STORE.check();
+      post({ t: "fsck", ok: true, report, before,
+        after: { generation: String(STORE.generation), slot: STORE.slot } });
+      return;
+    }
+    case "fs-state":
+      post({ t: "fs-state", fs: fsState() });
+      return;
+    case "io-stats": {
+      // The storage edge's counters and operation trace. A measurement channel, not a syscall:
+      // docs/ABI.md names no call for it and a process has no business reading it.
+      if (!STORE) {
+        post({ t: "io-stats", ok: false, why: "no filesystem is mounted" });
+        return;
+      }
+      post({ t: "io-stats", ok: true, io: await STORE.ioStats() });
+      return;
+    }
     case "panic":
       panic("requested by the page");
       return;

@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 51 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 71 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 16 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 17 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  50 normative constraints  ← cite these
+  CONSTRAINTS.md  71 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms

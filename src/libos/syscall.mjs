@@ -14,7 +14,12 @@ import {
   ST_RETURN, ST_INTR, ST_KDOWN,
   REARM_MS, HB_MISS_LIMIT, G_HEARTBEAT, G_INFLIGHT, G_THINK_US,
   G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
-  SYS_getpid, SYS_write, EINTR, EIO, isErr, nextCallId, unpackI64,
+  SYS_getpid, SYS_write, SYS_read, SYS_open, SYS_close, SYS_fsync, SYS_fstat, SYS_stat,
+  SYS_lstat, SYS_seek, SYS_mkdir, SYS_unlink, SYS_chmod, SYS_readdir, SYS_readlink,
+  SYS_symlink, SYS_rename, SYS_link, SYS_statfs, SYS_ftruncate, SYS_chown,
+  SYS_pread, SYS_pwrite, SYS_rmdir, SYS_truncate, SYS_dup, SYS_dup2,
+  FILESTAT_BYTES, DIRENT_HEADER, decodeFilestat,
+  EINTR, EIO, EINVAL, isErr, nextCallId, unpackI64, packI64,
 } from "../abi.mjs";
 
 const now = () => performance.now();
@@ -308,6 +313,226 @@ export function write(fd, buf) {
     off += r;
   }
   return off;
+}
+
+// ---------------------------------------------------------------------------- M2: the file API
+//
+// Layer 2 for the filesystem. A program calls these, never `syscall(SYS_open)` directly, for the
+// same reason it calls write() rather than syscall(SYS_write): the short-count loop, the path
+// encoding and the reply-record decoding each want exactly one implementation.
+//
+// EVERY ONE OF THESE RUNS INSIDE A PROCESS and acquires nothing. A path goes out as bytes in the
+// process's own SAB and an fd comes back as an integer, which is the whole of what constraint 15
+// permits a process to hold.
+
+const PATH_ENC = new TextEncoder();
+const PATH_DEC = new TextDecoder();
+
+/** A path as bytes in a PRIVATE buffer. The kernel copies it out of the SAB before decoding —
+ *  TextDecoder refuses a shared view — and this is the encoding half of that pair. */
+function pathBytes(path) {
+  return PATH_ENC.encode(path);
+}
+
+/** Two paths, NUL-joined, as docs/ABI.md's `rename` specifies. */
+function twoPaths(a, b) {
+  return PATH_ENC.encode(`${a}\0${b}`);
+}
+
+export function open(path, flags, mode = 0o644) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_open, flags, mode, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function close(fd) {
+  return syscall(SYS_close, fd);
+}
+
+/**
+ * Read up to `want` bytes into `into` at `at`. Returns the count, 0 at EOF, or -errno.
+ *
+ * The bytes land in the process's own byte region and are copied out here, because `into` is the
+ * caller's private buffer and the region is reused by the next syscall.
+ */
+export function read(fd, into, at = 0, want = into.length - at) {
+  const n = syscall(SYS_read, fd, Math.min(want, MAX_INLINE));
+  if (n <= 0) return n;
+  into.set(u8.subarray(DATA_OFF, DATA_OFF + n), at);
+  return n;
+}
+
+/**
+ * pread/pwrite: the same two calls at an explicit offset, which does NOT move the fd's cursor.
+ * That is the whole reason they exist — two readers sharing one description must be able to read
+ * different places — so the offset goes out as an (lo, hi) pair and the cursor is never touched.
+ */
+export function pread(fd, into, offset, want = into.length) {
+  const [lo, hi] = packI64(offset);
+  const n = syscall(SYS_pread, fd, Math.min(want, MAX_INLINE), lo, hi);
+  if (n <= 0) return n;
+  into.set(u8.subarray(DATA_OFF, DATA_OFF + n), 0);
+  return n;
+}
+
+export function pwrite(fd, buf, offset) {
+  const [lo, hi] = packI64(offset);
+  return syscall(SYS_pwrite, fd, buf.length, lo, hi, 0, 0, 0, 0, buf, 0, buf.length);
+}
+
+/** The whole of a file, through the short-count loop. Returns bytes or -errno. */
+export function readAll(fd, size) {
+  const out = new Uint8Array(size);
+  let off = 0;
+  while (off < size) {
+    const n = read(fd, out, off, size - off);
+    if (n < 0) return n;
+    if (n === 0) break;
+    off += n;
+  }
+  return off === size ? out : out.subarray(0, off);
+}
+
+/** fsync is its own call (constraint 23): the 260 us flush is paid when a caller asks for
+ *  durability, never per write. */
+export function fsync(fd) {
+  return syscall(SYS_fsync, fd);
+}
+
+export function ftruncate(fd, size) {
+  const [lo, hi] = packI64(size);
+  return syscall(SYS_ftruncate, fd, lo, hi);
+}
+
+export function seek(fd, offset, whence) {
+  const [lo, hi] = packI64(offset);
+  const r = syscall(SYS_seek, fd, lo, hi, whence);
+  if (isErr(r, r1of())) return r;
+  return Number(unpackI64(r, r1of()));
+}
+
+/** A 64-byte Filestat, decoded by the ONE codec in src/abi.mjs. */
+function statAt(nr, a0, bytes) {
+  const r = bytes === undefined
+    ? syscall(nr, a0)
+    : syscall(nr, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+  if (r < 0) return r;
+  if (r !== FILESTAT_BYTES) return -EIO;
+  const record = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + FILESTAT_BYTES));
+  return decodeFilestat(new DataView(record.buffer), 0);
+}
+
+export function fstat(fd) {
+  return statAt(SYS_fstat, fd);
+}
+
+export function stat(path) {
+  return statAt(SYS_stat, 0, pathBytes(path));
+}
+
+export function lstat(path) {
+  return statAt(SYS_lstat, 0, pathBytes(path));
+}
+
+export function mkdir(path, mode = 0o755) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_mkdir, mode, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+/** dup/dup2 share one file DESCRIPTION, so a seek through either moves both. That is POSIX's own
+ *  shape and it is what makes `2>&1` mean anything. */
+export function dup(fd) {
+  return syscall(SYS_dup, fd);
+}
+
+export function dup2(from, to) {
+  return syscall(SYS_dup2, from, to);
+}
+
+export function rmdir(path) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_rmdir, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function unlink(path) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_unlink, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function truncate(path, size) {
+  const bytes = pathBytes(path);
+  const [lo, hi] = packI64(size);
+  return syscall(SYS_truncate, lo, hi, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function chmod(path, mode) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_chmod, mode, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function chown(path, uid, gid) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_chown, uid, gid, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function symlink(target, path) {
+  const bytes = twoPaths(target, path);
+  return syscall(SYS_symlink, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function linkAt(existing, path) {
+  const bytes = twoPaths(existing, path);
+  return syscall(SYS_link, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function rename(from, to) {
+  const bytes = twoPaths(from, to);
+  return syscall(SYS_rename, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function readlink(path) {
+  const bytes = pathBytes(path);
+  const n = syscall(SYS_readlink, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+  if (n < 0) return n;
+  return PATH_DEC.decode(new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n)));
+}
+
+/**
+ * One batch of directory entries, and the cookie for the next. Unpacks docs/ABI.md's record:
+ * [u64 ino][u8 type][u8 nlen][u16 pad][char[] name], each padded to four bytes.
+ *
+ * `cookie === entries.length` is NOT the end condition — a directory can run out exactly at a
+ * batch boundary. An empty batch is the end, which is what `readdir(3)` means by a null return.
+ */
+export function readdir(fd, cookie = 0) {
+  const n = syscall(SYS_readdir, fd, cookie);
+  if (n < 0) return n;
+  const next = r1of();
+  const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n));
+  const dv = new DataView(bytes.buffer);
+  const out = [];
+  let at = 0;
+  while (at + DIRENT_HEADER <= bytes.length) {
+    const ino = dv.getBigUint64(at, true);
+    const type = bytes[at + 8];
+    const nlen = bytes[at + 9];
+    if (at + DIRENT_HEADER + nlen > bytes.length) return -EIO;
+    const name = PATH_DEC.decode(bytes.subarray(at + DIRENT_HEADER, at + DIRENT_HEADER + nlen));
+    out.push({ ino, type, name });
+    at += (DIRENT_HEADER + nlen + 3) & ~3;
+  }
+  return { entries: out, cookie: next, done: out.length === 0 };
+}
+
+export function statfs() {
+  const n = syscall(SYS_statfs);
+  if (n < 0) return n;
+  const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n));
+  const dv = new DataView(bytes.buffer);
+  return {
+    blocks: dv.getBigUint64(0, true), bfree: dv.getBigUint64(8, true),
+    files: dv.getBigUint64(16, true), ffree: dv.getBigUint64(24, true),
+    bsize: dv.getUint32(32, true), namemax: dv.getUint32(36, true),
+  };
 }
 
 /**
