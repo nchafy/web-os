@@ -20,6 +20,9 @@ import {
   encodeImage, decodeImage, IMAGE_REFUSE, IMAGE_HEADER, MAX_IMAGE,
 } from "../../src/fs/image.mjs";
 import { fsck, MOUNT_RW, MOUNT_RO, MOUNT_FRESH, MOUNT_REFUSE } from "../../src/fs/fsck.mjs";
+import {
+  MountTable, MNT_RO, FS_OPFS, FS_TMPFS, FS_PROC, FS_DEV, FS_PROVIDER, DEV_FIRST,
+} from "../../src/fs/mounts.mjs";
 import { E } from "../../src/abi.mjs";
 
 const results = [];
@@ -552,6 +555,99 @@ function buildVolume(source, ops, firstSeq = 0n) {
     journal: new Uint8Array(records),
     blobs: source.blobNames().map((b) => ({ name: b.name, size: b.size })),
   };
+}
+
+// ---- M3: the mount table -----------------------------------------------------------------
+//
+// The one defect this table exists to prevent is a LONGEST PREFIX TAKEN ON THE STRING rather than
+// on component boundaries, which puts `/usrlocal` inside the `/usr` mount. That reads fine and
+// writes to the wrong volume, so the boundary cases below are the subject and the rest is shape.
+// Mutating `resolve` to a string-prefix match fails exactly the four labels naming `/usrlocal`
+// and `/usrx`, and nothing else — measured, `node bench/fs-fuzz/hosttest.mjs`.
+{
+  const t = new MountTable();
+  const root = t.add("/", { fs: { tag: "opfs" }, type: FS_OPFS });
+  const usr = t.add("/usr", { fs: { tag: "usr" }, type: FS_PROVIDER, flags: MNT_RO });
+  const tmp = t.add("/tmp", { fs: { tag: "tmp" }, type: FS_TMPFS });
+  const proc = t.add("/proc", { fs: { tag: "proc" }, type: FS_PROC });
+  const dev = t.add("/dev", { fs: { tag: "dev" }, type: FS_DEV });
+  const all = [root, usr, tmp, proc, dev];
+
+  // A device number per mount, distinct and non-zero. encodeFilestat writes `st.dev || 0`, so a
+  // zero device and an unset one are the same bytes — which is why DEV_FIRST is 1.
+  check("the root mount's device number is DEV_FIRST", root.dev, DEV_FIRST);
+  check("every mount has a distinct device number", new Set(all.map((r) => r.dev)).size, all.length);
+  checkThat("no mount has device number zero", all.every((r) => r.dev !== 0),
+    "a zero device is indistinguishable from a filesystem that never set one");
+
+  // THE SUBJECT.
+  check("/usrlocal resolves to the root, not the /usr mount",
+    t.resolve("/usrlocal").mount.fs.tag, "opfs");
+  check("/usrlocal keeps its whole path", t.resolve("/usrlocal").rel, "/usrlocal");
+  check("/usrx/y resolves to the root", t.resolve("/usrx/y").mount.fs.tag, "opfs");
+  checkThat("/usrlocal is not read-only", t.readOnlyAt("/usrlocal") === false,
+    "a string-prefix match would inherit the /usr mount's read-only flag");
+
+  // Resolution, and the relative path a filesystem actually sees.
+  check("/usr resolves to the /usr mount", t.resolve("/usr").mount.fs.tag, "usr");
+  check("a mountpoint itself is that mount's root", t.resolve("/usr").rel, "/");
+  check("/usr/bin/ls resolves to the /usr mount", t.resolve("/usr/bin/ls").mount.fs.tag, "usr");
+  check("a mounted path is relative to its mount", t.resolve("/usr/bin/ls").rel, "/bin/ls");
+  check("an unmounted path resolves to the root", t.resolve("/home/a").rel, "/home/a");
+  check("/proc/<pid>/fd/<n> is relative to /proc", t.resolve("/proc/7/fd/3").rel, "/7/fd/3");
+
+  // Lexical normalization happens before matching, so `..` can leave a mount.
+  check("repeated slashes do not change the mount", t.resolve("//usr//bin").rel, "/bin");
+  check("a dot component is dropped", t.resolve("/usr/./bin").rel, "/bin");
+  check("a dotdot can enter a mount", t.resolve("/tmp/../usr").mount.fs.tag, "usr");
+  check("a dotdot can leave a mount", t.resolve("/usr/..").mount.fs.tag, "opfs");
+
+  // Read-only is a mount property with one renderer.
+  checkThat("a read-only mount reports read-only", t.readOnlyAt("/usr/bin/ls"), "/usr is MNT_RO");
+  checkThat("a writable mount does not", t.readOnlyAt("/home/a") === false, "/ is rw");
+
+  // A deeper mount wins over a shallower one, and rows() is deepest-first for a umount sweep.
+  const nested = new MountTable();
+  nested.add("/", { fs: { tag: "r" }, type: FS_OPFS });
+  nested.add("/a/b/c", { fs: { tag: "deep" }, type: FS_TMPFS });
+  nested.add("/a", { fs: { tag: "shallow" }, type: FS_TMPFS });
+  check("rows() is deepest-first", nested.rows().map((r) => r.path), ["/a/b/c", "/a", "/"]);
+  check("the deepest mount wins", nested.resolve("/a/b/c/d").mount.fs.tag, "deep");
+  check("a path above it takes the shallower mount", nested.resolve("/a/b").mount.fs.tag, "shallow");
+
+  // Refusals, each named rather than collapsed. An errno becoming a benign default is this
+  // codebase's recurring bug, so every one of these asserts the CODE.
+  const code = (fn) => { try { fn(); return "<no throw>"; } catch (e) { return e.code; } };
+  check("a relative path cannot be resolved", code(() => t.resolve("usr/bin")), "EINVAL");
+  check("a non-string path cannot be resolved", code(() => t.resolve(null)), "EINVAL");
+  check("a duplicate mountpoint is EBUSY",
+    code(() => t.add("/usr", { fs: {}, type: FS_TMPFS })), "EBUSY");
+  check("an unknown filesystem type is ENODEV",
+    code(() => t.add("/x", { fs: {}, type: "ntfs" })), "ENODEV");
+  check("a relative mountpoint is EINVAL",
+    code(() => t.add("rel", { fs: {}, type: FS_TMPFS })), "EINVAL");
+  check("a mount with no filesystem is EINVAL",
+    code(() => t.add("/y", { fs: null, type: FS_TMPFS })), "EINVAL");
+
+  // docs/ABI.md: "`/` always OPFS". An invariant, not a comment.
+  const bare = new MountTable();
+  check("the root mount must be opfs",
+    code(() => bare.add("/", { fs: {}, type: FS_TMPFS })), "EINVAL");
+  check("nothing mounts before the root",
+    code(() => bare.add("/usr", { fs: {}, type: FS_TMPFS })), "EINVAL");
+  check("resolution without a root is EINVAL", code(() => bare.resolve("/a")), "EINVAL");
+
+  check("the table counts its mounts", t.size, 5);
+  check("at() is an exact lookup, not resolution", t.at("/usr").dev, usr.dev);
+  check("at() misses a path that is not a mountpoint", t.at("/nope"), undefined);
+  checkThat("a mount row is frozen", Object.isFrozen(root),
+    "a mutable row would let a caller clear the read-only flag it was refused by");
+  // Every code this module raises must have an errno, or it reaches a process as -EIO and loses
+  // the reason. FS_CODES is the VFS's table; ENODEV was added to it for `mount`.
+  for (const c of ["EINVAL", "EBUSY", "ENODEV"]) {
+    checkThat(`${c} is a known fs code with an errno`,
+      FS_CODES.includes(c) && typeof E[c] === "number", `${c} would reach a process as EIO`);
+  }
 }
 
 const failed = results.filter((r) => !r.ok);
