@@ -138,7 +138,17 @@ const INTS = {
   // M4. Append-only, never renumbered. `dup` and `dup2` above are M2's and the pipe work reuses
   // them rather than adding a second way to move an fd.
   SYS_pipe2: 39,
-  NSYS: 40,
+  // M4b. Append-only, never renumbered. `ioctl` is here for exactly two requests — the foreground
+  // process group — because that is POSIX's own channel for it and inventing a `tcsetpgrp` syscall
+  // would be new ABI surface for a fact `ioctl` already carries.
+  SYS_pty_open: 40,
+  SYS_tty_get: 41,
+  SYS_tty_set: 42,
+  SYS_tty_winsize_get: 43,
+  SYS_tty_winsize_set: 44,
+  SYS_poll: 45,
+  SYS_ioctl: 46,
+  NSYS: 47,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -154,7 +164,12 @@ const INTS = {
   // makes `read(2)` identical for a generated file and a real one — see src/kernel/files.mjs.
   // F_TMP is a WRITABLE in-memory description: /tmp's bytes live in a Map in the kernel, so
   // unlike F_SYNTH it accepts a write and unlike F_FILE it needs no handle and no round trip.
+  // F_TTY is the SLAVE — a process's controlling terminal, which is what a program opens. The
+  // MASTER is its own kind because the two behave oppositely: a write to the master is INPUT and
+  // goes through the line discipline, a write to the slave is OUTPUT and goes straight to the
+  // master's queue. One kind with a direction flag would need every op to branch on it.
   F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5, F_SYNTH: 6, F_TMP: 7,
+  F_PTY_M: 8,
 
   // Constraint 17: the process table carries a hard cap. 128 is M0's; 1,000 is the design limit.
   PROC_CAP: 128,
@@ -326,6 +341,62 @@ const INTS = {
    */
   OPEN_MAX: 1024,
 
+  /**
+   * The pty's two queues. One line of input and a screenful of output, which is what a terminal
+   * actually holds — a pty is not a bulk transport and a 64 KiB queue per direction would be
+   * 128 KiB of kernel memory per terminal for no reason.
+   */
+  PTY_INPUT_BYTES: 4096,
+  PTY_OUTPUT_BYTES: 16384,
+
+  // ---- termios (M4b) -----------------------------------------------------------------------
+  //
+  // 64 bytes, LINUX's field order and LINUX's flag and cc-index values. The errno space is WASI's
+  // because a wasi-libc binary needs no translation on the error path; this is Linux's because a
+  // program that knows what ICANON is knows it as 0o2, and `docs/ABI.md` names the same flags.
+  TERMIOS_BYTES: 64,
+  TRM_IFLAG: 0, TRM_OFLAG: 4, TRM_CFLAG: 8, TRM_LFLAG: 12,
+  //: 20 control characters at offset 16, which is Linux's NCCS.
+  TRM_CC: 16, TRM_NCCS: 20,
+
+  //: c_lflag bits. Only these three have behaviour; the rest of the word is reserved and MUST be
+  //: preserved across a set so a future flag is not silently cleared by an old caller.
+  ISIG: 0o1,
+  ICANON: 0o2,
+  ECHO: 0o10,
+
+  //: c_cc indices, Linux's. VMIN and VTIME are carried because docs/ABI.md requires them in the
+  //: struct; no behaviour reads them, and that is stated where they are declared rather than left
+  //: for a reader to discover.
+  VINTR: 0, VQUIT: 1, VERASE: 2, VKILL: 3, VEOF: 4, VTIME: 5, VMIN: 6, VSUSP: 10,
+
+  //: The POSIX defaults a fresh pty comes up with: canonical, echoing, signal-generating.
+  TRM_DEF_INTR: 3,      // ^C
+  TRM_DEF_QUIT: 28,     // ^\
+  TRM_DEF_ERASE: 127,   // DEL
+  TRM_DEF_KILL: 21,     // ^U
+  TRM_DEF_EOF: 4,       // ^D
+  TRM_DEF_SUSP: 26,     // ^Z
+
+  // ---- winsize -----------------------------------------------------------------------------
+  WINSIZE_BYTES: 8,
+  WS_ROWS: 0, WS_COLS: 2, WS_XPIXEL: 4, WS_YPIXEL: 6,
+
+  // ---- poll --------------------------------------------------------------------------------
+  //
+  // docs/ABI.md: `poll(nfds, byteregion = nfds x {i32 fd, u16 events, u16 revents}, timeout_ms)`.
+  POLLFD_BYTES: 8,
+  PFD_FD: 0, PFD_EVENTS: 4, PFD_REVENTS: 6,
+  POLLIN: 0x1,
+  POLLOUT: 0x4,
+  POLLERR: 0x8,
+  POLLHUP: 0x10,
+  POLLNVAL: 0x20,
+
+  // ---- ioctl, for the two requests that carry the foreground process group ------------------
+  TIOCGPGRP: 0x540f,
+  TIOCSPGRP: 0x5410,
+
   // `spawn`'s file actions, posix_spawn-shaped. The two a shell needs and no more: a case that
   // does not exist yet must not get a parameter (CLAUDE.md, general enough and no further).
   SPAWN_DUP2: 1,
@@ -344,7 +415,9 @@ export const {
   SYS_close, SYS_read, SYS_pread, SYS_pwrite, SYS_seek, SYS_fstat, SYS_ftruncate,
   SYS_mkdir, SYS_rmdir, SYS_unlink, SYS_rename, SYS_symlink, SYS_readlink, SYS_link,
   SYS_stat, SYS_lstat, SYS_chmod, SYS_chown, SYS_readdir, SYS_truncate, SYS_statfs,
-  SYS_dup, SYS_dup2, SYS_pipe2, NSYS,
+  SYS_dup, SYS_dup2, SYS_pipe2,
+  SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
+  SYS_poll, SYS_ioctl, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -353,7 +426,7 @@ export const {
   DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DIRENT_HEADER,
   BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
-  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP,
+  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP, F_PTY_M,
   PROC_CAP, A_SHM, CALLID_WRAP,
   REARM_MS, HB_PERIOD_MS, HB_MISS_LIMIT,
   GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,
@@ -368,6 +441,14 @@ export const {
   WNOHANG, STAT_EXITED, STAT_KILLED,
   CAP_ALL, FD_INFLIGHT_CAP,
   PIPE_CAPACITY, OPEN_MAX, SPAWN_DUP2, SPAWN_CLOSE,
+  PTY_INPUT_BYTES, PTY_OUTPUT_BYTES,
+  TERMIOS_BYTES, TRM_IFLAG, TRM_OFLAG, TRM_CFLAG, TRM_LFLAG, TRM_CC, TRM_NCCS,
+  ISIG, ICANON, ECHO, VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSUSP,
+  TRM_DEF_INTR, TRM_DEF_QUIT, TRM_DEF_ERASE, TRM_DEF_KILL, TRM_DEF_EOF, TRM_DEF_SUSP,
+  WINSIZE_BYTES, WS_ROWS, WS_COLS, WS_XPIXEL, WS_YPIXEL,
+  POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
+  POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
+  TIOCGPGRP, TIOCSPGRP,
 } = INTS;
 
 /**
@@ -436,6 +517,7 @@ export const SYS_NAME = Object.freeze([
   "mkdir", "rmdir", "unlink", "rename", "symlink", "readlink", "link",
   "stat", "lstat", "chmod", "chown", "readdir", "truncate", "statfs",
   "dup", "dup2", "pipe2",
+  "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
@@ -499,6 +581,9 @@ export const EFBIG = E.EFBIG;
 export const EBUSY = E.EBUSY;
 export const EXDEV = E.EXDEV;
 export const ESPIPE = E.ESPIPE;
+/** M4b. "Not a terminal". What `tty_get`, `tty_set` and `ioctl` answer for an fd that is not a
+ *  pty, and what makes `isatty()` expressible without a second call. */
+export const ENOTTY = E.ENOTTY;
 /** M4. A program that resolved and is not a program this kernel can run. `spawn`'s answer, and
  *  deliberately not EIO: EIO says the storage failed, which is a different afternoon. */
 export const ENOEXEC = E.ENOEXEC;
@@ -728,6 +813,69 @@ export function decodeSpawnRequest(bytes) {
 }
 
 /**
+ * The termios record, in ONE place because the kernel writes it and the process reads it.
+ *
+ * `cc` is a 20-byte array at `TRM_CC` (Linux's NCCS). The three reserved flag words and the unused
+ * cc slots ARE PRESERVED across a round trip, which is the property that matters: a caller built
+ * against today's three `lflag` bits must not silently clear a bit a later milestone adds, so
+ * `tty_set` reads the whole word and the whole array rather than the fields it understands.
+ */
+export function encodeTermios(dv, off, tm) {
+  dv.setUint32(off + TRM_IFLAG, tm.iflag >>> 0, true);
+  dv.setUint32(off + TRM_OFLAG, tm.oflag >>> 0, true);
+  dv.setUint32(off + TRM_CFLAG, tm.cflag >>> 0, true);
+  dv.setUint32(off + TRM_LFLAG, tm.lflag >>> 0, true);
+  for (let i = 0; i < TRM_NCCS; i += 1) {
+    dv.setUint8(off + TRM_CC + i, (tm.cc[i] || 0) & 0xff);
+  }
+}
+
+export function decodeTermios(dv, off) {
+  const cc = new Uint8Array(TRM_NCCS);
+  for (let i = 0; i < TRM_NCCS; i += 1) cc[i] = dv.getUint8(off + TRM_CC + i);
+  return {
+    iflag: dv.getUint32(off + TRM_IFLAG, true),
+    oflag: dv.getUint32(off + TRM_OFLAG, true),
+    cflag: dv.getUint32(off + TRM_CFLAG, true),
+    lflag: dv.getUint32(off + TRM_LFLAG, true),
+    cc,
+  };
+}
+
+/** A fresh pty's termios: canonical, echoing, signal-generating — POSIX's own defaults. */
+export function defaultTermios() {
+  const cc = new Uint8Array(TRM_NCCS);
+  cc[VINTR] = TRM_DEF_INTR;
+  cc[VQUIT] = TRM_DEF_QUIT;
+  cc[VERASE] = TRM_DEF_ERASE;
+  cc[VKILL] = TRM_DEF_KILL;
+  cc[VEOF] = TRM_DEF_EOF;
+  cc[VSUSP] = TRM_DEF_SUSP;
+  // VMIN 1 / VTIME 0 is "return as soon as one byte is available", which is what the
+  // non-canonical path here does. Carried because docs/ABI.md requires the fields; NO BEHAVIOUR
+  // READS THEM, and saying so is better than a reader inferring that VMIN is honoured.
+  cc[VMIN] = 1;
+  cc[VTIME] = 0;
+  return { iflag: 0, oflag: 0, cflag: 0, lflag: ISIG | ICANON | ECHO, cc };
+}
+
+export function encodeWinsize(dv, off, ws) {
+  dv.setUint16(off + WS_ROWS, ws.rows & 0xffff, true);
+  dv.setUint16(off + WS_COLS, ws.cols & 0xffff, true);
+  dv.setUint16(off + WS_XPIXEL, (ws.xpixel || 0) & 0xffff, true);
+  dv.setUint16(off + WS_YPIXEL, (ws.ypixel || 0) & 0xffff, true);
+}
+
+export function decodeWinsize(dv, off) {
+  return {
+    rows: dv.getUint16(off + WS_ROWS, true),
+    cols: dv.getUint16(off + WS_COLS, true),
+    xpixel: dv.getUint16(off + WS_XPIXEL, true),
+    ypixel: dv.getUint16(off + WS_YPIXEL, true),
+  };
+}
+
+/**
  * Derivation and shape assertions, run at module load in both agents.
  *
  * Load-bearing: these fire on the change that breaks them rather than leaving a wrong number to
@@ -892,6 +1040,57 @@ export function selfTest() {
     path: "/x", argv: [], actions: [{ op: SPAWN_CLOSE, a: OPEN_MAX, b: 0 }],
   });
   if (decodeSpawnRequest(hugeFrom) !== null) fail("a spawn close at OPEN_MAX decoded");
+  // M4b. The termios record must fit its published size with no field overlapping another, and
+  // must round-trip EVERY byte — including the three reserved flag words and the unused cc slots,
+  // because `tty_set` preserving them is what stops an old caller clearing a new flag.
+  if (TRM_CC + TRM_NCCS > TERMIOS_BYTES) fail("the termios cc array runs past the record");
+  if (new Set([TRM_IFLAG, TRM_OFLAG, TRM_CFLAG, TRM_LFLAG]).size !== 4) {
+    fail("two termios flag words share an offset");
+  }
+  if (TRM_LFLAG + 4 > TRM_CC) fail("the lflag word overlaps the cc array");
+  const tprobe = new DataView(new ArrayBuffer(TERMIOS_BYTES));
+  const twant = defaultTermios();
+  twant.iflag = 0xdeadbeef; twant.oflag = 0x12345678; twant.cflag = 0xfeedface;
+  twant.cc[19] = 0xab;
+  encodeTermios(tprobe, 0, twant);
+  const tround = decodeTermios(tprobe, 0);
+  for (const key of ["iflag", "oflag", "cflag", "lflag"]) {
+    if (tround[key] !== twant[key] >>> 0) fail(`termios ${key} round-trips as ${tround[key]}`);
+  }
+  for (let i = 0; i < TRM_NCCS; i += 1) {
+    if (tround.cc[i] !== twant.cc[i]) fail(`termios cc[${i}] round-trips as ${tround.cc[i]}`);
+  }
+  const tdef = defaultTermios();
+  if (!(tdef.lflag & ISIG) || !(tdef.lflag & ICANON) || !(tdef.lflag & ECHO)) {
+    fail("a fresh pty must come up canonical, echoing and signal-generating");
+  }
+  if (tdef.cc[VINTR] !== 3) fail("VINTR must default to ^C");
+  if (new Set([VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSUSP]).size !== 8) {
+    fail("two cc indices collide");
+  }
+  if (new Set([ISIG, ICANON, ECHO]).size !== 3) fail("two lflag bits collide");
+  if ((ISIG & ICANON) || (ISIG & ECHO) || (ICANON & ECHO)) fail("the lflag bits are not disjoint");
+
+  const wprobe = new DataView(new ArrayBuffer(WINSIZE_BYTES));
+  encodeWinsize(wprobe, 0, { rows: 24, cols: 80, xpixel: 640, ypixel: 480 });
+  const wround = decodeWinsize(wprobe, 0);
+  if (wround.rows !== 24 || wround.cols !== 80 || wround.xpixel !== 640 || wround.ypixel !== 480) {
+    fail(`winsize round-trips as ${JSON.stringify(wround)}`);
+  }
+  if (WS_YPIXEL + 2 !== WINSIZE_BYTES) fail("winsize fields do not fill the record");
+
+  // poll's pollfd, whose shape docs/ABI.md publishes.
+  if (PFD_FD + 4 !== PFD_EVENTS || PFD_EVENTS + 2 !== PFD_REVENTS) {
+    fail("the pollfd fields are not contiguous");
+  }
+  if (PFD_REVENTS + 2 !== POLLFD_BYTES) fail("a pollfd is not 8 bytes");
+  const pollBits = [POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL];
+  if (new Set(pollBits).size !== 5) fail("two poll bits collide");
+  for (const b of pollBits) {
+    if ((b & (b - 1)) !== 0) fail(`poll bit ${b} is not a single bit`);
+  }
+  if (TIOCGPGRP === TIOCSPGRP) fail("the two ioctl requests are not distinct");
+
   if (PIPE_CAPACITY <= MAX_INLINE) {
     fail(`a pipe capacity of ${PIPE_CAPACITY} cannot hold one maximal ${MAX_INLINE} B write`);
   }

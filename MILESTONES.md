@@ -26,9 +26,9 @@ checks is a wish.
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
-| M4 | Pipes, pty, line discipline | 5 | 1 | 🟡 pipes done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed. pty + line discipline + `poll` are M4b |
-| **M4b** | **pty, line discipline, `poll`** | 2 | | ⬜ **next** |
-| M4a | The terminal gets a real window | 2 | | ⬜ |
+| M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
+| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 33 expectations, 2 controls |
+| **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
@@ -816,12 +816,11 @@ process cannot mount at all.
 
 ---
 
-## M4 — Pipes and process groups · 🟡 pipes done · est 5 d, actual 1 · **ACCEPT**
+## M4 — Pipes and process groups · ✅ done · est 5 d, actual 1 · **ACCEPT**
 
-**Verdict: ACCEPT for the pipe half.** All four of the milestone's stated proofs pass, the negative
-control moves exactly the expectations that depend on it, and the prerequisite experiment is
-retired. **The pty, the line discipline and `poll` are NOT done** and are split out as M4b below —
-they are named here rather than folded into a claim that M4 is finished.
+**Verdict: ACCEPT.** All four of the milestone's stated proofs pass, the negative control moves
+exactly the expectations that depend on it, and the prerequisite experiment is retired. The pty,
+the line discipline and `poll` are **M4b**, recorded below.
 
 ```
 scripts/check.py                       6 checks, 245 expectations (m4: 23)
@@ -910,20 +909,76 @@ parked reader and a parked writer are each a legitimate state. What located them
 page's timeout carry the kernel's park and refcount dump: one run then read
 `readers: 2, writers: 1` for one reader and a dead writer, and the cause was arithmetic.
 
-### What is not done — M4b
+---
 
-`pty_open`, the termios struct, the line discipline (`ICANON`, `ECHO`, `ISIG`,
-`VINTR`/`VQUIT`/`VSUSP`) and `poll`. Two things to know before starting it:
+## M4b — the pty, the line discipline, `poll` · ✅ done · est 2 d, actual 1 · **ACCEPT**
 
-- **`poll` is required by constraint 42 and is absent from M4's build list.** The constraint is
-  normative: "`poll()` MUST be the single wait primitive over fds", because a process has one
-  futex word and one outstanding call, so one window plus a pipe cannot otherwise wake it. The case
-  that hits it first is `docs/designs/REVIEW-FINDINGS.md` finding 1's *corrected* scenario —
-  parked in `read(master)` at idle with no output, keys dead indefinitely — which is M4a's terminal.
-- **`ICANON` and `ECHO` semantics are specified nowhere** in any authored doc. Only `ISIG`/`VINTR`
-  is: Ctrl-C must raise SIGINT on the foreground group even when the UI is wedged. Treat the rest
-  as POSIX-default by assumption and say so where it is implemented. `docs/ABI.md` also requires
-  `VMIN` and `VTIME` in the struct, which M4's flag list omits.
+```
+scripts/check.py                     7 checks, 278 expectations (m4b: 33)
+scripts/check.py --prove-failure     exit 0 — all 278 invert and fire
+scripts/check.py --negative no-isig          m4b fail: 8 red, 25 intact
+scripts/check.py --negative no-poll-wake     m4b fail: 3 red, 30 intact
+bench/m4b-pty/probe.mjs              94 host assertions (the discipline, no browser)
+```
+
+Ten sections over ten fresh kernels, **3.0 s**. Every byte and every signal crosses a real syscall
+from inside a real process worker.
+
+### What the documents specify, and what they do not
+
+`MILESTONES.md` M4 specifies **exactly one** behaviour of the discipline: ISIG with VINTR must
+raise SIGINT on the foreground group *"even when the UI is wedged"*. That is the `wedged_intr`
+section, proved against a stage spinning in a compute loop and issuing a syscall only every 20,000
+iterations.
+
+**`ICANON` and `ECHO` semantics are specified in no authored document** (constraint 106). Line
+buffering, ERASE, KILL, VEOF, the CR LF echo and the destructive backspace-space-backspace are
+POSIX's defaults taken as an assumption, and `src/kernel/pty.mjs` says so where they are
+implemented rather than presenting them as design. `docs/ABI.md` also requires `VMIN` and `VTIME`
+in the struct; they are carried and **nothing reads them**, which is stated at the declaration.
+
+### `poll` is here because a constraint required it, not because the build list did
+
+Constraint 42 is normative — "`poll()` MUST be the single wait primitive over fds" — and M4's build
+list omits it. A process has one futex word and one outstanding call, so one terminal plus a pipe
+cannot otherwise wake it. The case that hits it first is `docs/designs/REVIEW-FINDINGS.md`
+finding 1's **corrected** scenario: parked in `read(master)` at idle with no output, keys dead
+indefinitely. That is M4a's terminal, not M7's window.
+
+Both halves are proved. `poll_ready` shows it reporting readiness and answering POLLNVAL for a
+closed fd; `poll_wait` shows a process **parked** over a pipe and a terminal, woken by the one that
+became ready — and the stage reports what it saw down the pty and its verdict in its exit code, so
+the assertion is on what it observed rather than on its having finished.
+
+### The defect this found, and why it had no symptom before
+
+**Constraint 103.** Teardown decremented an fd refcount once per DESCRIPTION, not per fd — it
+deduplicated, on the reasoning that a dup'd description should close once, which the refcount
+already guarantees. So a process holding one description on two fds leaked a reference forever.
+
+Harmless until now: the only shared description was the sink, whose close is a no-op. A terminal
+stage holds the pty slave on **fd 0 and fd 1**, so the slave end never closed, `slaves` never
+reached 0, and the master's reader parked on an EOF that could never arrive. **No error anywhere** —
+the symptom was a process stuck in `read`, and what located it was the page attaching the kernel's
+park dump to its own timeout.
+
+### The controls
+
+| | Control | Moves |
+| --- | --- | --- |
+| `no-isig` | every pty comes up with ISIG cleared | 8 labels: both Ctrl-C sections, the echoed-byte clause, and the "a fresh pty is signal-generating" clause — the control changes the DEFAULT termios, so that is its own mechanism rather than collateral. Echo, canonical buffering, both poll sections and the pgrp moves hold |
+| `no-poll-wake` | parked polls are never re-evaluated | 3 labels: the blocking-poll section alone. Synchronous readiness reporting does not go through the wake, and a control that moved both would not say which half it removed |
+
+**The harness refused `no-isig` until its eighth label was declared.** With ISIG off the `^C` is
+data, so it is echoed like any other byte — measured as `echo: '\x03'`. Scoring a control on
+*which* labels move is what forced the full consequence to be stated.
+
+### One ring, not four
+
+`src/fs/ring.mjs` was extracted from the pipe before the pty grew three more queues (constraint
+112). A push that straddles the end of the buffer is two copies, and the second is the one a
+hand-written ring forgets. Pure, so `fsfuzz.py` lints it, and the pipe's 79 assertions are what
+showed the extraction was faithful.
 
 ---
 

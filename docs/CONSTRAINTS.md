@@ -802,3 +802,58 @@ cancellation design.
     drops the answer when the caller has moved on, so the child was created, armed to run, and its
     pid returned to nobody. The comment claimed a reap that did not exist. It is now reaped where
     it is still the kernel's to undo.
+
+## What M4b built, and what it found
+
+103. **DEFECT (fixed) — teardown decremented an fd refcount ONCE PER DESCRIPTION, not per fd.**
+    The sweep deduplicated by description, on the reasoning that "a dup'd description is closed
+    once" — which the refcount already guarantees, since `--d.refs <= 0` fires exactly once. What
+    the dedup actually did was LEAK a reference: `FileTable.add`, `.set` and `dup2` all raise
+    `refs` once per fd and `FileTable.close` lowers it once per fd, so a process holding one
+    description on two fds left `refs` at 1 forever. **Harmless until M4b**, because the only
+    shared description was the sink and its close is a no-op. With a pty slave on fd 0 and fd 1 —
+    which is what a terminal stage holds — the slave end never closed, `slaves` never reached 0,
+    and the master's reader parked on an EOF that could never arrive. No error anywhere: the
+    symptom was a process stuck in `read`, and the kernel's park dump is what located it.
+104. **A pty's two ends are two description kinds, because the directions are not symmetric.**
+    `write(master)` is INPUT and runs the line discipline; `write(slave)` is OUTPUT and goes
+    straight to the master's queue. `read(slave)` takes processed input, in canonical mode only
+    whole lines; `read(master)` takes the program's output plus the echo. One kind with a direction
+    flag would make every op branch on it.
+105. **The line discipline's ORDER is load-bearing: signals, then editing, then echo, then
+    buffering.** A signal character echoed before it was recognised leaves a stray `^C` in the
+    output; one buffered first is delivered to the program as data. Neither shows up as an error —
+    both show up as a terminal that behaves oddly. `bench/m4b-pty/probe.mjs` demonstrates both
+    mutations failing.
+106. **`ICANON` and `ECHO` semantics are specified in NO authored document.** `MILESTONES.md` M4
+    specifies exactly one behaviour of the discipline: ISIG with VINTR must raise SIGINT on the
+    foreground group even when the UI is wedged. Everything else — line buffering, ERASE, KILL,
+    VEOF, CR LF echo, the destructive backspace-space-backspace — is **POSIX's default taken as an
+    assumption**, and `src/kernel/pty.mjs` says so where it is implemented rather than presenting
+    it as design. `docs/ABI.md` additionally requires `VMIN` and `VTIME` in the struct; they are
+    carried and **no behaviour reads them**, which is stated at the declaration.
+107. **A pty with no foreground group DROPS a signal rather than broadcasting it.** `fgPgid` 0
+    means "nobody". The alternative — delivering Ctrl-C to every process when the terminal has no
+    foreground group — is a keystroke killing the system.
+108. **`ioctl` implements exactly two requests**, `TIOCGPGRP` and `TIOCSPGRP`, and answers -EINVAL
+    for the rest. POSIX carries `tcgetpgrp`/`tcsetpgrp` through `ioctl`, so inventing a syscall for
+    a fact `ioctl` already names would be new ABI surface for nothing. A `TIOCSPGRP` naming a group
+    that does not exist is ESRCH, and one in another session is EPERM — otherwise a process could
+    aim a terminal's Ctrl-C across a session boundary.
+109. **`poll` is required by constraint 42 and is absent from `MILESTONES.md` M4's build list.**
+    The constraint is normative — "`poll()` MUST be the single wait primitive over fds" — because a
+    process has one futex word and one outstanding call, so one terminal plus a pipe cannot
+    otherwise wake it. M4b implements it for that reason. Parked polls live in ONE list,
+    re-evaluated from `reply` because that is the single funnel every state change passes through;
+    a new pollable kind therefore cannot forget to notify. The list holds at most one entry per
+    process, so the sweep is O(processes polling) — constraint 18's O(interested), not O(N).
+110. **A `poll` that times out must publish its `revents` before answering**, which is why it has
+    its own timer rather than `setTimer`'s. `setTimer` replies 0 itself, and only the poll handler
+    knows the record layout.
+111. **`SIGWINCH` is raised only when the size actually CHANGED.** A program re-asserting the size
+    it already has has not been resized, and a spurious SIGWINCH makes every full-screen program
+    redraw.
+112. **One ring implementation, `src/fs/ring.mjs`.** It was inline in the pipe until the pty needed
+    three more queues, and four hand-written rings is four places for the wrap to be wrong — a push
+    that straddles the end of the buffer is two copies, and the second is the one a hand-written
+    ring forgets. Pure, so `fsfuzz.py` lints it.

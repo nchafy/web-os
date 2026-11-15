@@ -16,11 +16,15 @@ import {
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EXDEV,
+  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, EXDEV, ENOTTY,
+  TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
+  POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
+  encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, unpackI64, packI64,
 } from "../abi.mjs";
 import { KIND_OPS } from "./files.mjs";
 import { Pipe } from "./pipe.mjs";
+import { Pty } from "./pty.mjs";
 import { errnoOfFsError } from "./store.mjs";
 import {
   DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath,
@@ -993,6 +997,274 @@ HANDLERS.readdir = (p, k) => {
     p.r1 = index;
     return replyBytes(p, packed);
   });
+};
+
+/* --------------------------- M4b: the pty, termios, and poll --------------------------- */
+
+/**
+ * pty_open() -> master fd in r0, SLAVE FD IN r1.
+ *
+ * The same two-fds-from-one-call shape as `pipe2`, and for the same reason r1 carries the second.
+ * The opener's process group becomes the pty's FOREGROUND GROUP, which is where the line
+ * discipline sends SIGINT. A shell moves it per pipeline with `ioctl(TIOCSPGRP)`.
+ */
+HANDLERS.pty_open = (p) => {
+  const pty = new Pty();
+  const master = { kind: F_PTY_M, refs: 1, flags: O_RDWR, pty, inflight: 0 };
+  const slave = { kind: F_TTY, refs: 1, flags: O_RDWR, pty, inflight: 0 };
+  const mfd = p.fds.add(master);
+  if (mfd < 0) return mfd;
+  const sfd = p.fds.add(slave);
+  if (sfd < 0) {
+    // Undo, or the caller leaks an fd it was never told about.
+    p.fds.close(mfd);
+    return sfd;
+  }
+  pty.masters = 1;
+  pty.slaves = 1;
+  // The opener's group, not its pid: a shell opens the pty and then puts each pipeline in its own
+  // group, so the initial foreground group is whatever the opener belongs to.
+  pty.fgPgid = p.pgid;
+  p.r1 = sfd;
+  return mfd;
+};
+
+/** The pty behind an fd, or a negative errno. ENOTTY is the POSIX answer for "not a terminal",
+ *  and it is what makes `isatty()` expressible without a second call. */
+function ptyOf(p, fd) {
+  const d = p.fds.get(fd);
+  if (!d) return -EBADF;
+  if (d.kind !== F_TTY && d.kind !== F_PTY_M) return -ENOTTY;
+  return d;
+}
+
+HANDLERS.tty_get = (p) => {
+  const d = ptyOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const record = new Uint8Array(TERMIOS_BYTES);
+  encodeTermios(new DataView(record.buffer), 0, d.pty.getTermios());
+  return replyBytes(p, record);
+};
+
+HANDLERS.tty_set = (p) => {
+  const d = ptyOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const length = Atomics.load(p.ctl, LEN_I32);
+  // EXACTLY the record size. A short buffer would decode reserved words out of whatever the SAB
+  // last held, and a caller that sent half a termios would silently change flags it never set.
+  if (length !== TERMIOS_BYTES) return -EINVAL;
+  const view = new DataView(
+    p.bytes.buffer, p.bytes.byteOffset + DATA_OFF, TERMIOS_BYTES);
+  return d.pty.setTermios(decodeTermios(view, 0));
+};
+
+HANDLERS.tty_winsize_get = (p) => {
+  const d = ptyOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const record = new Uint8Array(WINSIZE_BYTES);
+  encodeWinsize(new DataView(record.buffer), 0, d.pty.getWinsize());
+  return replyBytes(p, record);
+};
+
+/**
+ * tty_winsize_set(fd, rows, cols). docs/ABI.md: a set on the MASTER raises SIGWINCH on the
+ * slave's foreground pgrp.
+ *
+ * Taken from the registers rather than the byte region, which is the signature docs/ABI.md
+ * publishes — `tty_winsize_set(fd, rows, cols)`. The pixel fields are not in that signature and
+ * are preserved rather than zeroed, so a caller that set them through nothing is not surprised.
+ */
+HANDLERS.tty_winsize_set = (p) => {
+  const d = ptyOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const rows = p.ctl[A1] | 0;
+  const cols = p.ctl[A2] | 0;
+  if (rows < 0 || cols < 0 || rows > 0xffff || cols > 0xffff) return -EINVAL;
+  const had = d.pty.getWinsize();
+  return d.pty.setWinsize({ rows, cols, xpixel: had.xpixel, ypixel: had.ypixel });
+};
+
+/**
+ * ioctl(fd, request, byteregion) — TWO REQUESTS, the foreground process group.
+ *
+ * The request space is otherwise unimplemented and answers -EINVAL, which is the honest state of
+ * a call this kernel does not serve. These two exist because POSIX carries `tcgetpgrp`/`tcsetpgrp`
+ * through `ioctl`, and inventing a syscall for a fact `ioctl` already names would be new ABI
+ * surface for nothing. M5's shell needs `tcsetpgrp` to move the foreground group per pipeline.
+ */
+HANDLERS.ioctl = (p, k) => {
+  const d = ptyOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const request = p.ctl[A1] | 0;
+  if (request === TIOCGPGRP) return d.pty.fgPgid;
+  if (request !== TIOCSPGRP) return -EINVAL;
+  const pgid = p.ctl[A2] | 0;
+  if (pgid < 0) return -EINVAL;
+  // THE GROUP MUST EXIST AND SHARE THIS SESSION. Otherwise a process could point a terminal's
+  // foreground group at a group in another session and have Ctrl-C delivered across it — and 0
+  // would mean "nobody", which the discipline treats as "drop the signal" rather than broadcast.
+  if (pgid !== 0) {
+    const members = k.table.pgidMembers(pgid);
+    if (!members.length) return -ESRCH;
+    if (members.some((m) => m.sid !== p.sid)) return -EPERM;
+  }
+  d.pty.fgPgid = pgid;
+  return 0;
+};
+
+/* --------------------------------------- poll ----------------------------------------- */
+
+/**
+ * The parked `poll` calls. Constraint 42: "`poll()` MUST be the single wait primitive over fds",
+ * because a process has one futex word and one outstanding call — so one window plus a pipe
+ * cannot otherwise wake it.
+ *
+ * ONE LIST, re-evaluated when anything replies, rather than a waiter list per pollable object.
+ * A process has one outstanding call, so this list is at most one entry per process and is
+ * bounded by constraint 17's cap; re-evaluating it is O(processes polling), which is
+ * O(interested) in constraint 18's sense and not O(every process).
+ */
+const pollWaiters = [];
+let inPollWake = false;
+
+/** Whether one fd is ready for the events asked about, as a revents mask. */
+function pollOne(p, fd, events) {
+  const d = p.fds.get(fd);
+  if (!d) return POLLNVAL;
+  let revents = 0;
+  if (d.kind === F_PIPE_R) {
+    if (d.pipe.length > 0) revents |= POLLIN;
+    // A pipe with no writer left is readable: the read returns 0, and EOF is a readable event
+    // rather than a condition a poller should sleep through.
+    if (d.pipe.writers === 0) revents |= POLLIN | POLLHUP;
+  } else if (d.kind === F_PIPE_W) {
+    if (d.pipe.free > 0) revents |= POLLOUT;
+    if (d.pipe.readers === 0) revents |= POLLERR;
+  } else if (d.kind === F_TTY || d.kind === F_PTY_M) {
+    const isMaster = d.kind === F_PTY_M;
+    if (d.pty.readable(isMaster)) revents |= POLLIN;
+    revents |= POLLOUT;      // neither direction of a pty ever refuses a write
+    if (isMaster ? d.pty.slaves === 0 : d.pty.masters === 0) revents |= POLLHUP;
+  } else {
+    // A regular file, a generated file, a tmpfs file and the sink are always ready: their reads
+    // and writes never park, so a poller must not sleep on one.
+    revents |= POLLIN | POLLOUT;
+  }
+  // POLLERR, POLLHUP and POLLNVAL are reported whether or not they were asked for, which is
+  // POSIX: a caller cannot mask away the news that its fd is broken.
+  return revents & (events | POLLERR | POLLHUP | POLLNVAL);
+}
+
+/** Evaluate one waiter's whole set. Returns the ready count and fills `revents`. */
+function pollScan(p, entries) {
+  let ready = 0;
+  for (const e of entries) {
+    e.revents = pollOne(p, e.fd, e.events);
+    if (e.revents !== 0) ready += 1;
+  }
+  return ready;
+}
+
+/** Write the revents back into the caller's byte region, in place. */
+function pollPublish(p, entries) {
+  const dv = new DataView(p.bytes.buffer, p.bytes.byteOffset + DATA_OFF,
+    entries.length * POLLFD_BYTES);
+  for (let i = 0; i < entries.length; i += 1) {
+    dv.setUint16(i * POLLFD_BYTES + PFD_REVENTS, entries[i].revents & 0xffff, true);
+  }
+  p.rlen = entries.length * POLLFD_BYTES;
+}
+
+/**
+ * Re-evaluate every parked `poll`. Called from `reply`, which is the one funnel every state change
+ * that could make an fd ready passes through.
+ *
+ * REENTRANCY IS GUARDED: this calls `reply` itself, and without the flag a woken poller would
+ * re-enter the scan from inside its own reply.
+ */
+export function pollWake(k) {
+  if (inPollWake || pollWaiters.length === 0) return;
+  inPollWake = true;
+  try {
+    for (let i = pollWaiters.length - 1; i >= 0; i -= 1) {
+      const w = pollWaiters[i];
+      // The same sequence guard every parked record in this kernel uses: a call already answered
+      // by an interrupt, a teardown or a panic must not be answered again.
+      if (!w.slot.ctl || w.slot.seq !== w.seq) {
+        pollWaiters.splice(i, 1);
+        continue;
+      }
+      const ready = pollScan(w.slot, w.entries);
+      if (ready > 0) {
+        pollWaiters.splice(i, 1);
+        pollPublish(w.slot, w.entries);
+        k.reply(w.slot, ready, 0, ST_RETURN, w.entries.length * POLLFD_BYTES);
+      }
+    }
+  } finally {
+    inPollWake = false;
+  }
+}
+
+/** Drop any parked poll for a slot that is going away. Called from teardown. */
+export function pollForget(slot) {
+  for (let i = pollWaiters.length - 1; i >= 0; i -= 1) {
+    if (pollWaiters[i].slot === slot) pollWaiters.splice(i, 1);
+  }
+}
+
+export function pollPending() {
+  return pollWaiters.length;
+}
+
+HANDLERS.poll = (p, k) => {
+  const nfds = p.ctl[A0] | 0;
+  const timeout = p.ctl[A1] | 0;
+  if (nfds < 0 || nfds > OPEN_MAX) return -EINVAL;
+  if (nfds === 0) {
+    // A poll over no fds is a sleep. Honoured rather than refused, which is POSIX.
+    if (timeout === 0) return 0;
+    k.setTimer(p, timeout < 0 ? 0 : timeout);
+    return PENDING;
+  }
+  const length = Atomics.load(p.ctl, LEN_I32);
+  if (length !== nfds * POLLFD_BYTES) return -EINVAL;
+  const dv = new DataView(p.bytes.buffer, p.bytes.byteOffset + DATA_OFF, length);
+  const entries = [];
+  for (let i = 0; i < nfds; i += 1) {
+    entries.push({
+      fd: dv.getInt32(i * POLLFD_BYTES + PFD_FD, true),
+      events: dv.getUint16(i * POLLFD_BYTES + PFD_EVENTS, true),
+      revents: 0,
+    });
+  }
+  const ready = pollScan(p, entries);
+  if (ready > 0) {
+    pollPublish(p, entries);
+    return ready;
+  }
+  // Nothing ready. timeout 0 is a poll, not a wait.
+  if (timeout === 0) {
+    pollPublish(p, entries);
+    return 0;
+  }
+  // PARK. The record carries the whole set, so whichever fd becomes ready first answers the one
+  // call — which is the thing a single futex word could not otherwise do (constraint 42).
+  const waiter = { slot: p, seq: p.seq, entries };
+  pollWaiters.push(waiter);
+  if (timeout > 0) {
+    // A deadline, as its own timer. On expiry the call answers 0: POSIX's "nothing became ready".
+    const seqAtDispatch = p.seq;
+    k.setPollTimeout(p, timeout, () => {
+      const at = pollWaiters.indexOf(waiter);
+      if (at < 0) return;                       // already answered by a wake
+      if (!p.ctl || p.seq !== seqAtDispatch) { pollWaiters.splice(at, 1); return; }
+      pollWaiters.splice(at, 1);
+      pollPublish(p, entries);
+      k.reply(p, 0, 0, ST_RETURN, entries.length * POLLFD_BYTES);
+    });
+  }
+  return PENDING;
 };
 
 /**

@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M4b — the pty, the line discipline, poll</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
+</head>
+<body>
+<pre id="log">M4b starting…</pre>
+<script>
+  globalThis.M4B = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M4b: the pty, the line discipline, and `poll`.
+ *
+ * MILESTONES.md M4 specifies exactly ONE behaviour of the discipline: Ctrl-C must raise SIGINT on
+ * the foreground group "even when the UI is wedged". `wedged_intr` is that proof, against a stage
+ * spinning in a compute loop. `ICANON` and `ECHO` semantics are specified in no authored document,
+ * so what the other sections assert is POSIX's default taken as the assumption — stated here and
+ * in src/kernel/pty.mjs rather than presented as design.
+ *
+ * `poll` is here because constraint 42 is normative — "the single wait primitive over fds" — even
+ * though M4's build list omits it. A process has one futex word and one outstanding call, so one
+ * terminal plus a pipe cannot otherwise wake it, and that is the case M4a's terminal hits first.
+ *
+ * CONTROLS
+ *   ?no_isig=1       every pty comes up with ISIG cleared; both Ctrl-C proofs must fail
+ *   ?no_poll_wake=1  parked polls are never re-evaluated; the blocking poll must only time out
+ */
+import { SIGINT, POLLIN, POLLNVAL, E } from '/src/abi.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const CFG = {
+  noIsig: params.get('no_isig') === '1',
+  noPollWake: params.get('no_poll_wake') === '1',
+}
+
+Object.assign(globalThis.M4B, { isolated: self.crossOriginIsolated === true })
+globalThis.M4B.proofs = {
+  echo: null, canonical: null, intr: null, wedged_intr: null, raw_isig_off: null,
+  termios: null, winsize: null, poll_ready: null, poll_wait: null, fg_pgrp: null,
+}
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M4B.state = 'aborted'
+  globalThis.M4B.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures.'
+  out.className = 'bad'
+  say(globalThis.M4B.why)
+} else {
+  main().catch((e) => {
+    globalThis.M4B.state = 'error'
+    globalThis.M4B.why = String((e && e.stack) || e)
+    say(globalThis.M4B.why)
+  })
+}
+
+const PROGRAM = '/bench/m4b-fs/program.mjs'
+class KernelFail extends Error {}
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M4B.kernelIsolated = m.isolated === true
+      globalThis.M4B.kernelFingerprint = m.abiFingerprint
+    }
+    if (m.t === 'fault') {
+      globalThis.M4B.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M4B.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M4B.notes.push(m.why)
+    if (m.t === 'teardown-leak') globalThis.M4B.errors.push('teardown-leak pid ' + m.pid)
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M4B.errors.push('kernel worker: ' + (e.message || 'no message'))
+    fail('kernel worker: ' + (e.message || 'no message'))
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); rej(new Error('timed out waiting for ' + t)) }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m), events }
+}
+
+/**
+ * One orchestrator per proof, on its own kernel.
+ *
+ * A fresh kernel each time because every proof opens a pty and kills a process, leaving a zombie
+ * in a ~2.2 s quarantine — sharing one would make each proof's process table depend on how fast
+ * the previous one finished.
+ */
+async function runProof (mode, boot, timeoutMs = 60000) {
+  const k = kernelBoot(boot)
+  try {
+    await k.expect('up', 30000)
+    k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+      cfg: { argv: [mode], uid: 0, gid: 0 }, readyTimeoutMs: 20000 })
+    const spawned = await k.expect('spawned', 20000)
+    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+    await k.expect('ready', 20000)
+    const pid = spawned.pids[0]
+    k.post({ t: 'go', go: { mode: 'park', pid } })
+    let results
+    try {
+      results = await k.expect('results', timeoutMs)
+    } catch (e) {
+      /* A TIMEOUT CARRIES THE STATE. A stopped pty raises no error — a parked reader is a
+       * legitimate state — so the only way to tell a working terminal from a stuck one is the
+       * counts. This is what located the teardown refcount leak in one run. */
+      k.post({ t: 'm4-state' })
+      let st = null
+      try { st = await k.expect('m4-state', 5000) } catch (e2) { st = { why: String(e2) } }
+      globalThis.M4B.stuck = { mode, state: st }
+      throw new Error(mode + ': ' + (e && e.message) + ' — kernel: ' + JSON.stringify(st && st.procs))
+    }
+    const row = results.results.find((r) => r.pid === pid)
+    if (!row) throw new Error(mode + ': no row for pid ' + pid)
+    return row
+  } finally {
+    k.worker.terminate()
+  }
+}
+
+async function main () {
+  const t0 = performance.now()
+  say('M4b: the pty, the line discipline, poll' +
+    (CFG.noIsig ? '  [CONTROL: no_isig]' : '') +
+    (CFG.noPollWake ? '  [CONTROL: no_poll_wake]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.noIsig) boot.noIsig = true
+  if (CFG.noPollWake) boot.noPollWake = true
+  const P = globalThis.M4B.proofs
+
+  /* ---- ECHO, and the program reading the line ------------------------------------------- */
+  const e = await runProof('p_echo', boot)
+  say('echo: ' + JSON.stringify(e.echo) + ' child ' + JSON.stringify(e.child))
+  P.echo = {
+    ok: !!(e.ok && e.echoedLine && e.child && e.child.exited),
+    evidence: {
+      echo: e.echo, echoedAsCrLf: e.echoedLine, child: e.child,
+      fgPgid: e.fgPgid, started: e.started,
+    },
+  }
+
+  /* ---- CANONICAL: nothing readable until the line is terminated -------------------------- */
+  const c = await runProof('p_canon', boot)
+  P.canonical = {
+    ok: !!(c.ok && c.parkedOnPartialLine && c.child && c.child.exited),
+    evidence: {
+      parkedOnPartialLine: c.parkedOnPartialLine, stateWhilePartial: c.stateWhilePartial,
+      child: c.child,
+    },
+  }
+
+  /* ---- THE SPECIFIED BEHAVIOUR: Ctrl-C to the foreground group -------------------------- */
+  const i = await runProof('p_intr', boot)
+  say('intr: child ' + JSON.stringify(i.child) + ' fgPgid ' + i.fgPgid)
+  P.intr = {
+    ok: !!(i.ok && i.killedByInt && i.echoHasRawIntr === false),
+    evidence: {
+      child: i.child, killedByInt: i.killedByInt, fgPgid: i.fgPgid, setPgrp: i.setPgrp,
+      // The ^C must be CONSUMED: not echoed, not delivered as data.
+      echo: i.echo, echoHasRawIntr: i.echoHasRawIntr, SIGINT: i.SIGINT,
+    },
+  }
+
+  /* ---- the same, against a WEDGED process. The sentence the milestone actually states. --- */
+  const w = await runProof('p_wedged', boot)
+  say('wedged: child ' + JSON.stringify(w.child))
+  P.wedged_intr = {
+    ok: !!(w.ok && w.killedByInt),
+    evidence: {
+      child: w.child, killedByInt: w.killedByInt, fgPgid: w.fgPgid,
+      echoHasRawIntr: w.echoHasRawIntr, SIGINT: w.SIGINT,
+    },
+  }
+
+  /* ---- ISIG OFF: the ^C is data. The other side of the same flag. ------------------------ */
+  const r = await runProof('p_raw', boot)
+  P.raw_isig_off = {
+    ok: !!(r.ok && r.exitedNormally && r.setResult === 0),
+    evidence: {
+      setResult: r.setResult, child: r.child, exitedNormally: r.exitedNormally,
+      lflagAfter: r.lflagAfter,
+    },
+  }
+
+  /* ---- termios round-trips, including the words M4b does not use ------------------------- */
+  const tm = await runProof('p_termios', boot)
+  P.termios = {
+    ok: !!(tm.ok && tm.defaultIsCanonEchoIsig && tm.reservedPreserved && tm.lastCcPreserved
+      && tm.lflagApplied && tm.notTtyErrno === tm.ENOTTY),
+    evidence: {
+      defaultLflag: tm.defaultLflag, defaultIsCanonEchoIsig: tm.defaultIsCanonEchoIsig,
+      defaultVintr: tm.defaultVintr,
+      // A caller built against today's three lflag bits must not clear a later one.
+      reservedPreserved: tm.reservedPreserved, lastCcPreserved: tm.lastCcPreserved,
+      lflagApplied: tm.lflagApplied,
+      notTtyErrno: tm.notTtyErrno, ENOTTY: tm.ENOTTY,
+    },
+  }
+
+  /* ---- a resize raises SIGWINCH on the foreground group ---------------------------------- */
+  const ws = await runProof('p_winsize', boot)
+  P.winsize = {
+    ok: !!(ws.ok && ws.resized && ws.sleepInterrupted),
+    evidence: {
+      before: ws.before, after: ws.after, resized: ws.resized,
+      // A non-fatal signal at a parked process is observable as the park ending.
+      sleepInterrupted: ws.sleepInterrupted, child: ws.child,
+    },
+  }
+
+  /* ---- poll REPORTS readiness ------------------------------------------------------------ */
+  const pr = await runProof('p_poll', boot)
+  say('poll: idle ' + pr.idleReady + ', pipe ' + pr.pipeReady + ', tty ' + pr.ttyReady +
+    ', bad ' + pr.badRevents)
+  P.poll_ready = {
+    ok: !!(pr.ok && pr.idleReady === 0 && pr.pipeReady === 1 && (pr.pipeRevents & POLLIN)
+      && pr.ttyReady === 1 && (pr.ttyRevents & POLLIN) && pr.pipeQuietAfterDrain
+      && pr.badRevents === POLLNVAL),
+    evidence: {
+      idleReady: pr.idleReady, pipeReady: pr.pipeReady, pipeRevents: pr.pipeRevents,
+      ttyReady: pr.ttyReady, ttyRevents: pr.ttyRevents,
+      pipeQuietAfterDrain: pr.pipeQuietAfterDrain,
+      badRevents: pr.badRevents, POLLIN, POLLNVAL,
+    },
+  }
+
+  /* ---- poll WAITS on two fds and is woken by one. Constraint 42. ------------------------- */
+  const pw = await runProof('p_pollwait', boot)
+  say('pollwait: stage said ' + JSON.stringify(pw.stageSaid) + ', exit ' + pw.stageVerdict)
+  P.poll_wait = {
+    ok: !!(pw.ok && pw.parkedInPoll && pw.wokeOnPipeOnly && pw.stageVerdict === 0),
+    evidence: {
+      parkedInPoll: pw.parkedInPoll, callsWhileParked: pw.callsWhileParked,
+      // The stage's own account, read off the pty — so this asserts what it SAW.
+      stageSaid: pw.stageSaid, stageVerdict: pw.stageVerdict,
+      nready: pw.nready, pipeRevents: pw.pipeRevents, ttyRevents: pw.ttyRevents,
+      wokeOnPipeOnly: pw.wokeOnPipeOnly, child: pw.child,
+    },
+  }
+
+  /* ---- the foreground group moves, and a bogus one is refused ---------------------------- */
+  const fg = await runProof('p_pgrp', boot)
+  P.fg_pgrp = {
+    ok: !!(fg.ok && fg.initialIsTheStage && fg.bogusRefused && fg.bogusErrno === fg.ESRCH
+      && fg.movedToMine && fg.movedBack),
+    evidence: {
+      initial: fg.initial, stagePid: fg.stagePid, initialIsTheStage: fg.initialIsTheStage,
+      bogusErrno: fg.bogusErrno, bogusRefused: fg.bogusRefused, ESRCH: fg.ESRCH,
+      movedToMine: fg.movedToMine, movedBack: fg.movedBack,
+      afterMine: fg.afterMine, afterBack: fg.afterBack,
+    },
+  }
+
+  globalThis.M4B.config = { noIsig: CFG.noIsig, noPollWake: CFG.noPollWake }
+  const sections = Object.entries(globalThis.M4B.proofs)
+  const ran = sections.filter(([, v]) => v !== null)
+  globalThis.M4B.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
+    ? 'ok' : 'FAIL'
+  globalThis.M4B.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  say('verdict ' + globalThis.M4B.verdict + ' in ' + Math.round(globalThis.M4B.ms) + ' ms')
+  out.className = globalThis.M4B.verdict === 'ok' ? 'ok' : 'bad'
+  globalThis.M4B.state = 'done'
+}
+</script>
+</body>
+</html>

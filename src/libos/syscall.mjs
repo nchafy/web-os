@@ -19,6 +19,10 @@ import {
   SYS_symlink, SYS_rename, SYS_link, SYS_statfs, SYS_ftruncate, SYS_chown,
   SYS_pread, SYS_pwrite, SYS_rmdir, SYS_truncate, SYS_dup, SYS_dup2,
   SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_setpgid, SYS_setsid,
+  SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
+  SYS_poll, SYS_ioctl,
+  TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
+  TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
   SYS_getpgid, SYS_getppid, SYS_exit, encodeSpawnRequest,
   STAT_EXITED, STAT_KILLED, WNOHANG,
   FILESTAT_BYTES, DIRENT_HEADER, decodeFilestat,
@@ -606,6 +610,90 @@ export function getppid() {
 /** Never returns. The kernel reaps the caller, so there is nothing to come back to. */
 export function exit(code = 0) {
   return syscall(SYS_exit, code & 0xff);
+}
+
+/* --------------------------- M4b: the terminal, and poll ---------------------------------
+ *
+ * Grouped on `env.tty` and `env.poll` in src/libos/process.mjs, as `FS` and `PROC` are.
+ */
+
+/** pty_open() -> {master, slave}, or a negative errno. An object, not a pair: a caller that
+ *  mixed up the order of a two-element array would wire a terminal backwards and the mistake
+ *  would look like a program that never prints. */
+export function ptyOpen() {
+  const r = syscall(SYS_pty_open);
+  if (r < 0) return r;
+  return { master: r, slave: r1of() };
+}
+
+/** The termios of a pty fd, decoded, or a negative errno. */
+export function ttyGet(fd) {
+  const n = syscall(SYS_tty_get, fd);
+  if (n < 0) return n;
+  const dv = new DataView(u8.buffer, DATA_OFF, TERMIOS_BYTES);
+  return decodeTermios(dv, 0);
+}
+
+/**
+ * Replace a pty's termios. The caller supplies EVERY field — the three reserved flag words and
+ * all twenty cc slots — so a flag a later milestone adds survives a round trip through a caller
+ * that has never heard of it. `ttyGet`, mutate, `ttySet` is the shape that stays correct.
+ */
+export function ttySet(fd, tm) {
+  const bytes = new Uint8Array(TERMIOS_BYTES);
+  encodeTermios(new DataView(bytes.buffer), 0, tm);
+  return syscall(SYS_tty_set, fd, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+export function ttyWinsizeGet(fd) {
+  const n = syscall(SYS_tty_winsize_get, fd);
+  if (n < 0) return n;
+  return decodeWinsize(new DataView(u8.buffer, DATA_OFF, WINSIZE_BYTES), 0);
+}
+
+export function ttyWinsizeSet(fd, rows, cols) {
+  return syscall(SYS_tty_winsize_set, fd, rows, cols);
+}
+
+/** tcgetpgrp / tcsetpgrp, which POSIX carries through ioctl. */
+export function tcGetPgrp(fd) {
+  return syscall(SYS_ioctl, fd, TIOCGPGRP);
+}
+
+export function tcSetPgrp(fd, pgid) {
+  return syscall(SYS_ioctl, fd, TIOCSPGRP, pgid);
+}
+
+/**
+ * poll(fds, timeoutMs) -> {nready, fds: [{fd, events, revents}]}, or a negative errno.
+ *
+ * THE SINGLE WAIT PRIMITIVE OVER FDS (constraint 42). A process has one futex word and one
+ * outstanding call, so one window plus a pipe cannot otherwise wake it — which is why this exists
+ * before there is a window to wait on.
+ *
+ * `revents` comes back IN PLACE in the byte region, so the returned rows carry it rather than the
+ * caller re-reading the buffer.
+ */
+export function poll(fds, timeoutMs = -1) {
+  const n = fds.length;
+  const bytes = new Uint8Array(n * POLLFD_BYTES);
+  const dv = new DataView(bytes.buffer);
+  for (let i = 0; i < n; i += 1) {
+    dv.setInt32(i * POLLFD_BYTES + PFD_FD, fds[i].fd | 0, true);
+    dv.setUint16(i * POLLFD_BYTES + PFD_EVENTS, fds[i].events & 0xffff, true);
+    dv.setUint16(i * POLLFD_BYTES + PFD_REVENTS, 0, true);
+  }
+  const r = syscall(SYS_poll, n, timeoutMs, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+  if (r < 0) return r;
+  // The kernel wrote revents back into the SAB, not into `bytes`.
+  const out = new DataView(u8.buffer, DATA_OFF, n * POLLFD_BYTES);
+  return {
+    nready: r,
+    fds: fds.map((f, i) => ({
+      fd: f.fd, events: f.events,
+      revents: out.getUint16(i * POLLFD_BYTES + PFD_REVENTS, true),
+    })),
+  };
 }
 
 export function statfs() {

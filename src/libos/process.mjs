@@ -15,6 +15,7 @@ import {
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, linkAt, rename,
   readlink, readdir, statfs, dup, dup2,
   pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
+  ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
 } from "./syscall.mjs";
 
 /**
@@ -41,6 +42,19 @@ const FS = Object.freeze({
  */
 const PROC = Object.freeze({
   pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
+});
+
+/**
+ * M4b's terminal and wait calls, as ONE object on `env.tty`.
+ *
+ * Grouped for the reason `FS` and `PROC` are: constraint 15's seam is asserted by enumerating what
+ * a program was handed, and every value here is a function.
+ */
+const TTY = Object.freeze({
+  ptyOpen, get: ttyGet, set: ttySet,
+  winsizeGet: ttyWinsizeGet, winsizeSet: ttyWinsizeSet,
+  getPgrp: tcGetPgrp, setPgrp: tcSetPgrp,
+  poll,
 });
 
 const now = () => performance.now();
@@ -168,6 +182,7 @@ function onCommand(m) {
       observeHeartbeat, barrierArrive, barrierDepart, barrierCounters, publishProgress,
       fs: FS,
       proc: PROC,
+      tty: TTY,
       pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
     };
     const data = program.run(env, m);

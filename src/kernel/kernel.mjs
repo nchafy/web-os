@@ -17,7 +17,9 @@ import {
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
 import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./files.mjs";
-import { buildCalls, installStall, PENDING } from "./calls.mjs";
+import {
+  buildCalls, installStall, PENDING, pollWake, pollForget, pollPending,
+} from "./calls.mjs";
 import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mjs";
 import { makeInlineIo } from "./io-inline.mjs";
 import { TraceRing, TR_ENTER, TR_EXIT, TRACE_DEFAULT_BYTES } from "./trace.mjs";
@@ -29,6 +31,7 @@ import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
+import { installPtyKernel, setPtyDefaultIsig } from "./pty.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -197,7 +200,20 @@ function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
   p.replies += 1;
   if (r0 < 0 && r1 === -1) p.errors += 1;
   p.inflight = null;
+  // EVERY PARKED `poll` IS RE-EVALUATED HERE, because `reply` is the one funnel every state change
+  // that could make an fd ready passes through — a pipe write, a pty keystroke, a close, a
+  // teardown. Hooking it here rather than threading a callback into each pollable object means a
+  // new kind cannot forget to notify. `pollWake` guards its own reentrancy; the length test keeps
+  // the common case (nothing polling) to one comparison.
+  if (pollWakeEnabled && pollPending()) pollWake(POLL_K);
 }
+
+/** The one thing `pollWake` needs, built once rather than per reply. */
+const POLL_K = { reply };
+
+/** M4b's second control. True in every real boot; the kernel refuses to clear it without
+ *  bench=1. A parked `poll` then only ever answers from its own timeout. */
+let pollWakeEnabled = true;
 
 function fail(p, errno) {
   reply(p, -errno, -1);
@@ -1037,11 +1053,21 @@ function teardown(slot) {
   // -EBADF on an already-null slot and we are iterating; a double-close would fire if a kind's
   // close op shared descriptions across fds. Going through the table by refcount is the one
   // right way.
-  const seen = new Set();
+  // ONE DECREMENT PER FD, not per description.
+  //
+  // This deduplicated by description, on the stated reasoning that "a dup'd description is closed
+  // once" — which the REFCOUNT already guarantees, because `--d.refs <= 0` fires exactly once.
+  // What the dedup actually did was LEAK a reference: `fds.add`, `fds.set` and `dup2` all raise
+  // `refs` once per fd, and `FileTable.close` lowers it once per fd, so a process holding one
+  // description on two fds left `refs` at 1 forever.
+  //
+  // Harmless until M4b, because the only shared description was the sink and its close is a no-op.
+  // With a pty on fd 0 and fd 1 — which is what a terminal stage holds — the slave end never
+  // closed, so `slaves` never reached 0 and the master's reader parked on an EOF that could never
+  // arrive. No error anywhere: the symptom was a process stuck in `read`.
   for (let fd = 0; fd < slot.fds.fds.length; fd += 1) {
     const d = slot.fds.fds[fd];
-    if (!d || seen.has(d)) continue;
-    seen.add(d);
+    if (!d) continue;
     slot.fds.fds[fd] = null;
     if (--d.refs <= 0) {
       try {
@@ -1079,6 +1105,10 @@ function teardown(slot) {
       }
     }
   }
+  // A parked `poll` belongs to a call `answerInflight` has already answered, but the record lives
+  // in calls.mjs rather than on the slot — so it is dropped explicitly. Left behind, it would be
+  // skipped by the sequence guard forever and hold a reference to a freed slot.
+  pollForget(slot);
   // Phase 2: assert. A process whose inflight is still non-null after phase 1 ran answerInflight
   // is a dispatch defect — a handler added without calling reply() through the kernel surface.
   // This is the only time that count is still knowable, which is exactly why item (d) puts the
@@ -1171,6 +1201,39 @@ function hasChild(parent, askedPid) {
     return true;
   }
   return false;
+}
+
+/**
+ * Raise one signal on every member of a process group. The line discipline's whole purpose.
+ *
+ * O(members of that group), which is constraint 18's O(interested): `pgidMembers` is one pass over
+ * the live set and a signal then goes to the group's members alone. It reaches a process that is
+ * wedged and not servicing messages, because delivery is a SAB control word rather than a
+ * postMessage (constraint 16) — which is the sentence "Ctrl-C depends on this" in the constraint.
+ */
+function signalGroup(pgid, sig) {
+  if (!table || pgid <= 0) return 0;
+  const members = table.pgidMembers(pgid);
+  for (const member of members) raiseOne(member, sig);
+  return members.length;
+}
+
+/**
+ * A timer for a parked `poll` that does NOT answer the call itself.
+ *
+ * `setTimer` replies with 0 on expiry, which is right for `clock_nanosleep` and wrong here: a
+ * `poll` that times out must publish its `revents` first, and only `calls.mjs` knows the layout.
+ * So the callback decides, and the sequence guard is the caller's.
+ */
+function setPollTimeout(p, ms, onExpiry) {
+  const seqAtDispatch = p.inflight ? p.inflight.seq : p.seq;
+  setTimeout(() => {
+    if (!p.ctl || p.seq !== seqAtDispatch) {
+      lateReply += 1;
+      return;
+    }
+    onExpiry();
+  }, ms);
 }
 
 /** Record that this parent is parked on a (child pid or any). teardown() reads `waitingFor` to
@@ -1548,6 +1611,8 @@ async function handle(m) {
         // source order and a captured null would make every path call -EIO.
         get mounts() { return mounts; },
         get trace() { return trace; },
+        setPollTimeout,
+        signalGroup,
       });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
@@ -1565,12 +1630,27 @@ async function handle(m) {
       // single writer of SEQ/STATUS/RLEN, so a pipe waking a reader goes through the same release
       // every other answer does, and `raiseOne` is the one place a disposition is consulted.
       installPipeKernel({ reply, raise: raiseOne });
+      // The pty needs to reply to parked readers and to signal a whole process group. Injected
+      // for the same reason the pipe's surface is: this file imports pty.mjs.
+      installPtyKernel({ reply, signalGroup });
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
       // M4's negative control. Stop delivering a fatal SIGPIPE and `yes | head -1` must HANG:
       // head exits, the pipe loses its reader, and yes keeps writing into a pipe nobody reads.
       // Same discipline as installStall and noSigpend — refused unless the page asked for a
       // bench boot, so a hook a later change could leave armed is not possible silently.
+      // M4b's controls. `noIsig` makes every new pty come up with ISIG cleared, so the line
+      // discipline recognises no signal characters at all and Ctrl-C arrives as data —
+      // MILESTONES.md M4's one specified behaviour, removed. `noPollWake` stops re-evaluating
+      // parked polls when anything replies, so a blocked `poll` can only ever time out.
+      if (cfg.noIsig) {
+        if (cfg.bench !== 1) throw new Error("noIsig requires bench=1");
+        setPtyDefaultIsig(false);
+      }
+      if (cfg.noPollWake) {
+        if (cfg.bench !== 1) throw new Error("noPollWake requires bench=1");
+        pollWakeEnabled = false;
+      }
       if (cfg.noSigpipe) {
         if (cfg.bench !== 1) throw new Error("noSigpipe requires bench=1");
         FATAL_DEFAULT.delete(SIGPIPE);
