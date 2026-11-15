@@ -6,8 +6,8 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, O_APPEND,
-  MAX_INLINE, fnv1a, FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, EMFILE,
+  O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
 import { errnoOfFsError } from "./store.mjs";
@@ -37,14 +37,27 @@ export class FileTable {
   add(description, atLeast = 0) {
     let fd = atLeast;
     while (fd < this.fds.length && this.fds[fd]) fd += 1;
+    // EMFILE, which until M4 was unreachable: `pipe2`'s own `if (rfd < 0)` guard was a dead
+    // branch because nothing here had a ceiling. See OPEN_MAX.
+    if (fd >= OPEN_MAX) return -EMFILE;
     if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
     return fd;
   }
 
+  /**
+   * Install a description at an EXPLICIT fd. `dup2` and `spawn`'s file actions.
+   *
+   * THE CEILING IS LOAD-BEARING HERE. This writes into a plain array indexed by fd, so a `dup2` to
+   * fd 2^30 grew the array to a billion entries — and `spawn`'s inheritance loop and `teardown`'s
+   * fd sweep both walk `fds.length` on the kernel thread, so one process could wedge the kernel
+   * for everyone. Returns -EMFILE rather than throwing, because the callers are syscall handlers.
+   */
   set(fd, description) {
+    if (fd < 0 || fd >= OPEN_MAX) return -EMFILE;
     if (description && description.inflight === undefined) description.inflight = 0;
     this.fds[fd] = description;
+    return fd;
   }
 
   close(fd) {
@@ -245,7 +258,12 @@ registerKind(F_PIPE_R, {
     // is what POSIX says and `calls.mjs` already refuses pread on a kind without a position; this
     // is the second line of that defence, for a caller that reached the op directly.
     if (at !== undefined) return -ESPIPE;
-    return d.pipe.read(d.slot, d.slot.seq, p.bytes, dstOff, length);
+    // `p`, THE CALLING PROCESS — never a slot recorded on the description. A description is
+    // SHARED: `dup` aliases it and a spawned child inherits it, so the process that created the
+    // pipe is usually not the one reading it. Recording the creator's slot here parked the record
+    // against the parent and replied to the parent, so the child's read never returned and the
+    // whole pipeline deadlocked with no error anywhere.
+    return d.pipe.read(p, p.seq, p.bytes, dstOff, length);
   },
   close(d) {
     return d.pipe.close(true);
@@ -255,7 +273,8 @@ registerKind(F_PIPE_R, {
 registerKind(F_PIPE_W, {
   write(d, u8, offset, length, p, at) {
     if (at !== undefined) return -ESPIPE;
-    return d.pipe.write(d.slot, d.slot.seq, u8.subarray(offset, offset + length));
+    // `p`, the calling process. See the read op for why a description cannot carry a slot.
+    return d.pipe.write(p, p.seq, u8.subarray(offset, offset + length));
   },
   fsync() {
     // A pipe has nothing to force. 0 rather than -ENOSYS, for the reason the tmpfs gives: `fsync`

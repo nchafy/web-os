@@ -26,7 +26,8 @@ checks is a wish.
 | M2a | A host-runnable kernel, fuzzable codecs | 1 | 0.5 | ✅ done — 10k torn journals, 0 accepted |
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
-| **M4** | **Pipes, pty, line discipline** | 5 | | ⬜ **next** |
+| M4 | Pipes, pty, line discipline | 5 | 1 | 🟡 pipes done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed. pty + line discipline + `poll` are M4b |
+| **M4b** | **pty, line discipline, `poll`** | 2 | | ⬜ **next** |
 | M4a | The terminal gets a real window | 2 | | ⬜ |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
@@ -815,17 +816,114 @@ process cannot mount at all.
 
 ---
 
-## M4 — Pipes, pty, line discipline · 5 days · ~1000 LoC
+## M4 — Pipes and process groups · 🟡 pipes done · est 5 d, actual 1 · **ACCEPT**
 
-**Build.** `pipe2`, process groups, and the line discipline **in the kernel** —
-`ICANON`, `ECHO`, `ISIG`, `VINTR`/`VQUIT`/`VSUSP` — so Ctrl-C raises `SIGINT` on the foreground
-group even when the UI is wedged. The pipe work reuses the `dup2` M2 already shipped
-(`SYS_dup2: 38` in `src/abi.mjs`). Every byte of IPC crosses the kernel (15).
+**Verdict: ACCEPT for the pipe half.** All four of the milestone's stated proofs pass, the negative
+control moves exactly the expectations that depend on it, and the prerequisite experiment is
+retired. **The pty, the line discipline and `poll` are NOT done** and are split out as M4b below —
+they are named here rather than folded into a claim that M4 is finished.
 
-**Proof.** `yes | head -1` terminates; Ctrl-C during `sleep 100 | cat` kills both; a writer killed
-with `-9` makes its blocked reader return 0 (EOF), and a blocked writer whose reader died gets
-`-EPIPE` plus `SIGPIPE` — the two directions differ, see `docs/ABI.md` §5.
-**Negative control.** Stop delivering SIGPIPE; `yes | head -1` must hang.
+```
+scripts/check.py                       6 checks, 245 expectations (m4: 23)
+scripts/check.py --prove-failure       exit 0 — all 243 invert and fire
+scripts/check.py --negative no-sigpipe-signal   m4 fail: 5 red, 18 intact
+bench/m4-pipe/probe.mjs                79 host assertions (the Pipe, no browser)
+bench/m4-intr/probe.py                 the prerequisite experiment, retired
+```
+
+The page run is **1.1 s** over five fresh kernels — one per proof, because each spawns and kills
+several processes and leaves zombies in a ~2.2 s quarantine, so sharing a kernel would make every
+proof depend on how fast the last one finished.
+
+### The four proofs
+
+The milestone states them in shell syntax and there is no shell until M5, so each is built from
+the mechanism the shell will use: `pipe2` + `spawn` with posix_spawn file actions + `setpgid`,
+which is what replaces `fork` (constraint 20). An orchestrator process spawns its own stages, so
+every byte and every signal crosses a real syscall from inside a real process worker.
+
+| | Proof | Result |
+| --- | --- | --- |
+| 1 | `yes \| head -1` terminates | the writer is **killed by SIGPIPE** (signal 13), the reader exits 0 |
+| 2 | Ctrl-C on a pipeline kills both | both stages **killed by SIGINT** (signal 2) |
+| 3 | a writer killed `-9` makes its blocked reader return 0 (EOF) | the reader **exits cleanly**; EOF is 0 and not an errno |
+| 4 | a blocked writer whose reader died gets `-EPIPE` plus SIGPIPE | the writer is **killed by SIGPIPE** |
+
+**The control** (`--negative no-sigpipe-signal`) stops SIGPIPE being fatal and moves proofs 1 and 4
+and nothing else. That split is what makes it specific: EOF is the *other* half of `docs/ABI.md`
+decision 5 and has nothing to do with SIGPIPE, so a control that moved proof 3 too would mean the
+two directions were sharing an implementation. The writer's runaway loop is capped and reports
+`hitCap` rather than hanging, because a real hang gives the harness a timeout and no information.
+
+### What the review changed
+
+The change went to an independent critic. It returned **twelve findings; all twelve verified
+against the code and all are fixed.** Three would have corrupted the kernel's own accounting, and
+**four meant proofs that passed were not testing what they claimed** — which is the more
+uncomfortable half.
+
+| | Finding |
+| --- | --- |
+| 97 | `detachChild` ran before `scheduleFree`, whose timer keyed its free on the entry just removed — so a process slot was **never reclaimed**, and after `PROC_CAP` such children every `spawn` fails forever |
+| 98 | a fatal SIGPIPE had already answered the call, and the pipe answered it **again** — two replies for one call, so `G_INFLIGHT` drifted negative and the issued == replied identity broke |
+| 99 | `getpgid` **ignored its argument** and returned the caller's group |
+| 100 | no fd ceiling, so a `dup2` to fd 2^30 grew the fd array to a billion entries that two kernel-thread loops then walked — one process wedging the kernel |
+| 101 | a faulting process became a ZOMBIE **without teardown**, so it kept its fds open and its pipeline peer parked on an EOF that could never arrive |
+| 102 | an interrupted `spawn` left an **orphan child** running, and the comment claimed a reap that did not exist |
+
+**The four proofs that were not testing their subject**, all in the harness rather than the kernel:
+
+- the "sleeper" stage slept **0 ns** — `clock_nanosleep` was passed `(0, 0)` — so it exited on its
+  own and the two proofs that kill it were racing worker startup.
+- proof 2 sent **two separate `kill(pid)` calls**, not `kill(-pgid)`. `deliverSignal`'s
+  `target < 0` branch and the pgid inheritance this milestone added were untested, while the
+  check's own note claimed "the SIGINT sweep over a process group". It now puts the stages in their
+  own group, verifies the group by reading it back, and sends ONE negative-pid kill — and finding
+  99 is what that assertion caught.
+- both kill proofs signalled stages that were still `SPAWNING`. They now wait until the stage has
+  issued a syscall, **observed through `/proc/<pid>/status`** rather than slept for.
+- the control's documented hang never happened: `yes` broke on the first `-EPIPE`, so `hitCap` was
+  dead instrumentation. `yes` now ignores the error, which is both the documented failure mode and
+  the naive program every pipeline actually contains.
+
+**And the probe could not see findings 98 at all**, because its fake `raise` did not reap — 68
+assertions passed over a double-reply bug. A test double that is gentler than the real thing tests
+a world that does not exist (constraint 98).
+
+### Six defects in the code this built on
+
+Four were in mechanisms that had **never run**. That is the finding worth keeping: `ppid` was
+assigned nowhere, so `waitpid`, `parkParent` and teardown's parent-wake were all unreachable, and
+the moment they became reachable two of them were wrong.
+
+| | Defect |
+| --- | --- |
+| 90 | `spawn` assigned `ppid` nowhere; nothing inherited `pgid` or `sid`, so `kill(-pgid)` could not reach a pipeline |
+| 91 | teardown's parent-wake replied **without detaching the child**, so a parent waiting on two children was answered with the first one's pid twice |
+| 92 | a pipe's open-end counts were raised per HOLDER and dropped per DESCRIPTION, so a pipeline left `writers` at 1 after its only writer exited and the reader parked on an EOF that could never arrive |
+| 93 | the pipe descriptions carried their **creator's** slot, so a child's read parked a record against its parent and replied to the parent |
+| 94 | `pipe2` can return **fd 0** as the read end, because `spawn` leaves fd 0 free — a stage dup'd fd 0 onto fd 0 and then closed it as "the pipe fd" |
+| 96 | `null` from an ops row means "parked", and `null >= 0` is true — a parked read left to fall through answered the caller 0, which on a pipe means EOF |
+
+**92 and 93 both presented as a pipeline that simply stopped**, with no error anywhere, because a
+parked reader and a parked writer are each a legitimate state. What located them was making the
+page's timeout carry the kernel's park and refcount dump: one run then read
+`readers: 2, writers: 1` for one reader and a dead writer, and the cause was arithmetic.
+
+### What is not done — M4b
+
+`pty_open`, the termios struct, the line discipline (`ICANON`, `ECHO`, `ISIG`,
+`VINTR`/`VQUIT`/`VSUSP`) and `poll`. Two things to know before starting it:
+
+- **`poll` is required by constraint 42 and is absent from M4's build list.** The constraint is
+  normative: "`poll()` MUST be the single wait primitive over fds", because a process has one
+  futex word and one outstanding call, so one window plus a pipe cannot otherwise wake it. The case
+  that hits it first is `docs/designs/REVIEW-FINDINGS.md` finding 1's *corrected* scenario —
+  parked in `read(master)` at idle with no output, keys dead indefinitely — which is M4a's terminal.
+- **`ICANON` and `ECHO` semantics are specified nowhere** in any authored doc. Only `ISIG`/`VINTR`
+  is: Ctrl-C must raise SIGINT on the foreground group even when the UI is wedged. Treat the rest
+  as POSIX-default by assumption and say so where it is implemented. `docs/ABI.md` also requires
+  `VMIN` and `VTIME` in the struct, which M4's flag list omits.
 
 ---
 

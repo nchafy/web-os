@@ -1,8 +1,8 @@
 # web-os: continue implementation
 
 Written 2026-11-15 by the session that built the harness through M2, and updated the same day by
-the session that built M3. This file carries only what
-the repository cannot tell you. Everything the repo settles, the repo settles.
+the session that built M3 and M4's pipe half. This file carries only what the repository cannot
+tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
 
@@ -27,43 +27,60 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, **M3**. Each has a record in `MILESTONES.md` with its actual cost and
+Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, and **M4's pipe half** — the pty, the line discipline
+and `poll` are M4b and are not done. Each has a record in `MILESTONES.md` with its actual cost and
 what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 5 checks, 222 expectations |
+| `scripts/check.py` | the suite — 6 checks, 243 expectations |
 | `scripts/check.py --prove-failure` | inverts every expectation; must report failures |
-| `scripts/check.py --negative <control>` | 11 controls; `--controls` lists what each proves |
+| `scripts/check.py --negative <control>` | 12 controls; `--controls` lists what each proves. **Kill stray Chrome between runs** or a sweep reports a false BROKEN |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 91 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
 **Run all of them before and after anything you change.** `scripts/check.py --controls` lists what
 each control proves.
 
-## Next: M4
+## Next: M4b — the pty, the line discipline, and `poll`
 
-**Do the owed experiment first.** `MILESTONES.md` §"Open experiments" item 1 — can `Atomics.notify`
-interrupt a worker inside a *synchronous* OPFS read? 0.5 d, and it is owed **before M4**, not after:
-`docs/ABI.md` marks `read()` INTR-capable without anyone having measured it, so if the answer is no
-the ABI is lying about Ctrl-C and M4's cancellation design changes. Measuring it after building
-pipes means building them twice.
+M4's pipe half is done and verified; `MILESTONES.md` §M4 carries the record and §M4b is the rest.
+**The owed experiment is retired** — a synchronous OPFS read cannot be interrupted, and `read()` is
+INTR-capable anyway because the handles are in the I/O worker. Constraints 86–89,
+`bench/m4-intr/probe.py`.
 
-Then M4 (pipes, pty, line discipline), M4a, M5, M6, then option A (M7–M14).
+Two things to settle before writing code, both found by reading the docs against each other:
 
-### What M3 leaves you
+- **`poll` is required by constraint 42 and is absent from M4's build list.** The constraint is
+  normative: `poll()` MUST be the single wait primitive over fds, because a process has one futex
+  word and one outstanding call, so one window plus a pipe cannot otherwise wake it. The case that
+  hits it first is `docs/designs/REVIEW-FINDINGS.md` finding 1's *corrected* scenario — parked in
+  `read(master)` at idle with no output, keys dead indefinitely — which is M4a's terminal, not M7.
+- **`ICANON` and `ECHO` semantics are specified nowhere** in any authored doc. Only `ISIG`/`VINTR`
+  is: Ctrl-C raises SIGINT on the foreground group even when the UI is wedged. Treat the rest as
+  POSIX-default by assumption and say so where you implement it. `docs/ABI.md` also requires `VMIN`
+  and `VTIME` in the termios struct, which M4's flag list omits.
 
-Four host probes under `bench/m3-*` run without a browser and are the fast loop: `probe.mjs` in each
-of `m3-synth`, `m3-provider`, `m3-trace`, `m3-tmpfs`. Run them before the suite.
+### What M4 leaves you
 
-`bench/m3-fs/program.mjs` has a **`regress` mode**: one row per defect an adversarial review found,
-each reduced to the syscalls that trip it. Three of them faulted the kernel worker from an
-unprivileged process. Add to it rather than starting a new mode.
+`bench/m4-pipe/probe.mjs` (68 assertions) and `bench/m4-intr/probe.py` run without a browser.
+`bench/m4-fs/program.mjs` is the pipeline orchestrator: one mode per proof, spawning its own
+stages. Add a mode rather than a new program.
 
-The one **defect** M3 leaves is constraint 85: the mountpoints have no backing directory, so `ls /`
-does not list `/proc`, `/dev`, `/tmp` or `/usr` even though every path into them resolves. The fix
-is named there. Constraints 77 and 84 are one gap in two guises — the walk does not consult the
-mount table — and M4 does not need it closed.
+**`pipe2` can return fd 0 as the read end** (constraint 94), because `spawn` leaves fd 0 free and
+`fds.add` hands out the lowest. A process building a pipeline MUST open its own stdin first — the
+orchestrator calls `ensureStdin` for exactly this. M5's shell has to do the same or inherit the bug.
+
+**A blocking call parks on SEQ and never inside a synchronous call** (constraint 88, measured). An
+ops row returns `null` to mean parked and `calls.mjs` turns that into PENDING; `null` must be
+tested before any numeric use, because `null >= 0` is true and a parked read that fell through
+answered the caller 0, which on a pipe means EOF (96).
+
+### The four defects that had never run
+
+`ppid` was assigned nowhere, so `waitpid`, `parkParent` and teardown's parent-wake were all
+unreachable — and two of them were wrong the moment they became reachable (constraints 90, 91).
+**Treat any mechanism with no live caller as unverified**, however finished it looks.
 
 ## The method that worked
 

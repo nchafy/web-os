@@ -6,17 +6,14 @@
 // an impossibility, and bench/syscall-contention asserts the rule by grepping this directory.
 
 import {
-  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7,
-  H_MAGIC, H_VERSION, SAB_MAGIC, SAB_VERSION, LEN_I32, DATA_OFF,
-  ST_RETURN, ST_INTR, ST_KDOWN, SIG_BIT,
-  GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,
-  G_THINK_US, G_STALL_US, G_READY,
-  G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN, W_CLOSED, W_DONE,
-  K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP,
-  EINTR, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO,
-  SIGKILL, SIGTERM, SIGINT, SIGHUP, SIGPIPE, SIG_DFL, SIG_IGN, SIG_HANDLE,
-  F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2, ENOEXEC, decodeSpawnRequest,
-  STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
+  SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7, H_MAGIC,
+  H_VERSION, SAB_MAGIC, SAB_VERSION, LEN_I32, DATA_OFF, ST_RETURN, ST_INTR, ST_KDOWN, SIG_BIT,
+  GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT, G_THINK_US,
+  G_STALL_US, G_READY, G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN,
+  W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
+  ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
+  SIGPIPE, SIGABRT, SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
+  ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
 import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./files.mjs";
@@ -751,7 +748,13 @@ function onProcessMessage(slot, m) {
     // `dropped 1` as the only trace.
     const fault = { pid: slot.pid, why: String(m.why) };
     faults.push(fault);
-    slot.state = ZOMBIE;
+    // THROUGH `reap`, not by setting ZOMBIE here. Assigning the state directly left `exitKind` at
+    // -1, so `packStatus(-1, 0)` gave a parent's `waitpid` a status meaning neither exited nor
+    // killed — and, worse, teardown never ran, so the faulted process kept its fds open and a
+    // pipeline peer parked on an EOF that could never arrive. That is constraint 92's symptom
+    // reachable by any child whose program throws. SIGABRT is what a POSIX process gets for
+    // dying on its own fault.
+    reap(slot, STAT_KILLED, SIGABRT);
     post({ t: "fault", ...fault, kernel: kstats() });
     return;
   }
@@ -1067,8 +1070,12 @@ function teardown(slot) {
       const waited = parent.inflight.waitingFor;
       if (waited === -1 || waited === slot.pid) {
         const status = packStatus(slot.exitKind, slot.exitValue);
+        // DETACH BEFORE REPLYING, as `reapForParent` does. Without it the child stayed in `live`
+        // as a ZOMBIE after its parent had been answered, so the parent's next `waitpid` found
+        // the same child and was answered with its pid a second time — and never saw the sibling
+        // it was actually waiting for.
+        detachChild(slot);
         reply(parent, slot.pid, status, ST_RETURN);
-        parent.inflight = null;
       }
     }
   }
@@ -1097,7 +1104,13 @@ function scheduleFree(slot) {
   try { if (IO) IO.unregister(slot.pid); } catch (e) { /* unregister is best-effort */ }
   try { if (slot.worker) slot.worker.terminate(); } catch (e) { /* already gone is fine */ }
   setTimeout(() => {
-    if (table && table.byPid.get(slot.pid) === slot) table.free(slot);
+    // BY SLOT IDENTITY IN THE ALLOCATION ARRAY, not by a `byPid` lookup. `detachChild` removes the
+    // pid so a second `waitpid` cannot find the child, and this used to key its free on the entry
+    // that had just been removed — so `table.free` never ran, `slots[index]` stayed non-null
+    // forever and the SAB, ctl and worker were never released. After PROC_CAP such children every
+    // `spawn` returns -EAGAIN permanently. The waitpid path had the same ordering and became
+    // reachable the moment `ppid` started being assigned.
+    if (table && table.slots[slot.index] === slot) table.free(slot);
   }, TERM_QUARANTINE_MS);
 }
 
@@ -1111,6 +1124,25 @@ function reap(slot, kind, value) {
   post({ t: "reaped", pid: slot.pid, kind, value });
 }
 
+/**
+ * Take a reaped child out of the live set, so a second `waitpid` cannot find it again.
+ *
+ * ONE DEFINITION, because there are two paths that answer a parent and they disagreed. The
+ * `reapForParent` path removed the child; teardown's parent-wake replied and left it in `live` as
+ * a ZOMBIE — so a parent waiting for two children was answered with the FIRST child's pid twice
+ * and never saw the second. That path was unreachable until `ppid` started being assigned, which
+ * is exactly why it was wrong.
+ *
+ * The physical slot stays until `scheduleFree`'s quarantine expires; this removes only the
+ * handles a `waitpid` sweep looks at.
+ */
+function detachChild(child) {
+  if (table.byPid.get(child.pid) === child) {
+    table.byPid.delete(child.pid);
+    table.live.delete(child);
+  }
+}
+
 /** Reply directly with (pid, status): the only call that uses r1 as a value rather than as the
  *  error sentinel. Reply via reply() and return PENDING so the dispatcher does not overwrite r1
  *  with the zero finish() would publish. */
@@ -1118,10 +1150,7 @@ function reapForParent(parent, child) {
   const status = packStatus(child.exitKind, child.exitValue);
   // Remove from live so a follow-up waitpid returns -ECHILD. The physical slot sticks around
   // until scheduleFree's quarantine times out.
-  if (table.byPid.get(child.pid) === child) {
-    table.byPid.delete(child.pid);
-    table.live.delete(child);
-  }
+  detachChild(child);
   reply(parent, child.pid, status, ST_RETURN);
   return PENDING;
 }
@@ -1244,9 +1273,9 @@ function spawnChild(caller) {
   }
 
   // The image load is a fetch, so the call cannot answer on the dispatch thread. `later` carries
-  // the seq guard: if the caller is interrupted or reaped while the program is loading, the child
-  // is still created and the answer is dropped — which is why the child is reaped in that arm
-  // rather than left running with nobody holding its pid.
+  // the seq guard, which DROPS an answer whose caller has moved on — so the child it created must
+  // be reaped here rather than left running with nobody holding its pid.
+  const seqAtSpawn = caller.seq;
   later(caller, async () => {
     let image;
     try {
@@ -1278,7 +1307,13 @@ function spawnChild(caller) {
         child.fds.close(fd);
       }
       d.refs += 1;
-      child.fds.set(fd, d);
+      if (child.fds.set(fd, d) < 0) {
+        // The caller held an fd past the ceiling, which `FileTable.add` and `dup2` now refuse —
+        // so this is unreachable rather than tolerable. Undo the reference and stop inheriting
+        // rather than leave a refcount nothing will close.
+        d.refs -= 1;
+        break;
+      }
     }
     for (const act of req.actions) {
       if (act.op === SPAWN_DUP2) {
@@ -1287,42 +1322,34 @@ function spawnChild(caller) {
         if (act.a === act.b) continue;  // dup2(fd, fd) is a no-op that must not drop a refcount
         if (child.fds.get(act.b)) child.fds.close(act.b);
         src.refs += 1;
-        child.fds.set(act.b, src);
+        if (child.fds.set(act.b, src) < 0) {
+          // Unreachable: `decodeSpawnRequest` refuses an action naming an fd past OPEN_MAX. Not
+          // swallowed, because a refcount raised and then dropped on the floor is a description
+          // that never closes.
+          src.refs -= 1;
+          continue;
+        }
       } else {
         if (child.fds.get(act.a)) child.fds.close(act.a);
       }
     }
-    // A pipe description now held by the child must count the child's end. Done after the actions
-    // so a CLOSEd end is not counted, and before the worker runs so the child cannot read from a
-    // pipe whose writer count has not yet been raised.
-    countPipeEnds(child);
     // ARM THE RUN ON THE CHILD'S OWN `ready`, rather than polling for it. The worker is already
     // constructed and loading its image; `onProcessMessage`'s ready arm posts this `go` the moment
     // the child says it is initialised, so there is no sleep and no window in which the child
     // could be told to run before its program exists.
     child.pendingGo = { mode: "park", argv: req.argv };
+    // THE CALLER MAY BE GONE. `later`'s seq guard would drop this answer silently, leaving a child
+    // running that nobody holds the pid of — and the comment above promised a reap that did not
+    // exist. Checked here, where the child is still ours to undo.
+    if (!caller.ctl || caller.seq !== seqAtSpawn) {
+      reap(child, STAT_KILLED, SIGKILL);
+      return -EINTR;
+    }
     return child.pid;
   });
   return PENDING;
 }
 
-/**
- * Raise the pipe refcounts for every pipe description a slot ended up holding.
- *
- * A pipe's `readers`/`writers` are counts of OPEN DESCRIPTIONS, and the fd table's own refcount
- * cannot serve: two fds on one description are one open end, and `close` on the last fd is what
- * the pipe must see. So the pipe is counted per DISTINCT description, which is what the `seen`
- * set is for — the same deduplication teardown's fd sweep does, for the same reason.
- */
-function countPipeEnds(slot) {
-  const seen = new Set();
-  for (const d of slot.fds.fds) {
-    if (!d || seen.has(d)) continue;
-    seen.add(d);
-    if (d.kind === F_PIPE_R) d.pipe.readers += 1;
-    else if (d.kind === F_PIPE_W) d.pipe.writers += 1;
-  }
-}
 
 // ---------------------------------------------------------------------------- boot
 
@@ -1634,6 +1661,34 @@ async function handle(m) {
       // privileged crosses — a SAB is the channel, and the page already holds the globals one.
       post({ t: "exposed", procs: [...table.live].map((p) => ({ pid: p.pid, sab: p.sab })) });
       return;
+    case "m4-state": {
+      // M4's own account of itself: who is parked, on what, and what every pipe holds.
+      //
+      // A pipeline that stops makes no error anywhere — a parked reader and a parked writer are
+      // both legitimate states — so the only way to tell a working pipe from a deadlocked one is
+      // to look at the counts. Pipes are reached by walking the fd tables because nothing holds a
+      // registry of them: a pipe is alive exactly as long as a description points at it.
+      const pipes = new Map();
+      const procs = [...table.live].map((s) => {
+        const fds = [];
+        s.fds.fds.forEach((d, fd) => {
+          if (!d) return;
+          fds.push({ fd, kind: d.kind, refs: d.refs });
+          if (d.pipe && !pipes.has(d.pipe)) pipes.set(d.pipe, d.pipe.report());
+        });
+        return {
+          pid: s.pid, ppid: s.ppid, pgid: s.pgid, sid: s.sid, state: s.state,
+          calls: s.calls, replies: s.replies, errors: s.errors,
+          // What this process is parked on, if anything. The syscall NAME, because a number
+          // sends the reader to the table.
+          inflight: s.inflight ? (SYS_NAME[s.inflight.nr] || s.inflight.nr) : null,
+          waitingFor: s.inflight ? (s.inflight.waitingFor ?? null) : null,
+          fds,
+        };
+      });
+      post({ t: "m4-state", procs, pipes: [...pipes.values()] });
+      return;
+    }
     case "m3-state":
       post({ t: "m3-state", m3: m3State() });
       return;
