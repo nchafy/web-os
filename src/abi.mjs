@@ -145,7 +145,11 @@ const INTS = {
 
   // File-description kinds. M0 registers F_SINK only; the rest are reserved by name so M2's
   // F_FILE and M4's pipes are rows in the ops table rather than a rewrite.
-  F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5,
+  //
+  // M3 adds F_SYNTH: a description whose bytes are held in memory by the kernel, which is what
+  // `/proc` and `/dev` hand back. It is a row in the same ops table, which is the property that
+  // makes `read(2)` identical for a generated file and a real one — see src/kernel/files.mjs.
+  F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5, F_SYNTH: 6,
 
   // Constraint 17: the process table carries a hard cap. 128 is M0's; 1,000 is the design limit.
   PROC_CAP: 128,
@@ -309,7 +313,7 @@ export const {
   DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DIRENT_HEADER,
   BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
-  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN,
+  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH,
   PROC_CAP, A_SHM, CALLID_WRAP,
   REARM_MS, HB_PERIOD_MS, HB_MISS_LIMIT,
   GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,

@@ -16,12 +16,14 @@ import {
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE,
+  F_FILE, F_SYNTH, EXDEV,
   encodeFilestat, unpackI64, packI64,
 } from "../abi.mjs";
 import { KIND_OPS } from "./files.mjs";
 import { errnoOfFsError } from "./store.mjs";
-import { DIR, FILE, LINK, NAME_MAX } from "../fs/vfs.mjs";
+import {
+  DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath, normalize,
+} from "../fs/vfs.mjs";
 import { ZOMBIE, RUNNING, dropCaps } from "./table.mjs";
 
 /** A handler that will reply later, by calling k.reply() itself. */
@@ -135,10 +137,14 @@ const TYPE_BITS = { [FILE]: S_IFREG, [DIR]: S_IFDIR, [LINK]: S_IFLNK };
 const DIRENT_TYPE = { [FILE]: DT_REG, [DIR]: DT_DIR, [LINK]: DT_LNK };
 
 /** A VFS stat object as a 64-byte Filestat in the caller's byte region. */
-function writeStat(p, info) {
+function writeStat(p, info, dev = 0) {
   const record = new Uint8Array(FILESTAT_BYTES);
   encodeFilestat(new DataView(record.buffer), 0, {
-    dev: 0,
+    // THE MOUNT'S DEVICE NUMBER, which until M3 was a literal zero. It is what makes the mount
+    // table observable from userland: two files on two mounts report two devices, and `st_dev`
+    // plus `st_ino` is how POSIX says to tell two files apart. src/fs/mounts.mjs numbers from 1
+    // so a zero here means nobody set it rather than "the root volume".
+    dev: info.dev !== undefined ? info.dev : dev,
     ino: info.ino,
     // The type bits go in with the permission bits, which is POSIX's own packing and the reason
     // the 10k-file proof can assert "every mode bit intact" against one word.
@@ -168,14 +174,29 @@ function writeStat(p, info) {
  * journal, never before: a blob deleted ahead of the record that unlinks it is a file that
  * reappears after replay with nothing behind it.
  */
-function metaOp(p, k, decide) {
+function metaOp(p, k, path, decide) {
   if (!k.store || !k.store.vfs) return -EIO;
-  if (k.store.readOnly) return -EROFS;
+  const at = resolveMount(p, k, path);
+  if (typeof at === "number") return at;
+  // THE READ-ONLY TEST IS THE MOUNT'S, not the volume's, and this is the one place it is made for
+  // the eight metadata mutations. The volume's own verdict (constraint 28) reaches here as the
+  // root mount's MNT_RO flag, so a read-only volume and a read-only `/usr` refuse identically
+  // instead of through two different tests that could disagree.
+  if (at.mount.readOnly) return -EROFS;
+  // A generated filesystem journals nothing: there is no durable state to record an op against.
+  // Its own mutation methods throw, so this returns the errno and never reaches `k.store.journal`
+  // with a record the store has no volume for.
   let op;
   try {
-    op = decide(credOf(p));
+    op = decide(at.mount.fs, at.rel, credOf(p));
   } catch (error) {
     return errnoOfFsError(error);
+  }
+  if (at.mount.fs !== k.store.vfs) {
+    // Reached only if a generated filesystem ever returns an op record instead of throwing.
+    // Named rather than passed to the journal, which would append a record describing a volume
+    // the op did not happen on.
+    return op === null ? 0 : -EROFS;
   }
   // `null` is a legal no-op: rename of a name onto itself. POSIX says that succeeds.
   if (op === null) return 0;
@@ -190,13 +211,81 @@ function metaOp(p, k, decide) {
 }
 
 /** A metadata read: no journal, no await, so it answers on the dispatch thread. */
-function metaRead(p, k, read) {
+function metaRead(p, k, path, read) {
   if (!k.store || !k.store.vfs) return -EIO;
+  const at = resolveMount(p, k, path);
+  if (typeof at === "number") return at;
   try {
-    return read(credOf(p));
+    return read(at.mount.fs, at.rel, credOf(p), at.mount);
   } catch (error) {
     return errnoOfFsError(error);
   }
+}
+
+/**
+ * A PROCESS-SUPPLIED PATH TO THE FILESYSTEM THAT OWNS IT. The one place the mount table is read.
+ *
+ * Two steps, in this order and not the other: the path is made absolute against the process's cwd
+ * FIRST, then the mount is resolved. Resolving the mount against a relative path would ask which
+ * filesystem owns `../x`, a question with no answer.
+ *
+ * The cwd join is lexical (`normalize`, not resolution), which is `cd -L` and what every shell
+ * does for its own working directory. It differs from resolution exactly when a symlink is
+ * involved — see src/fs/vfs.mjs `normalize`.
+ *
+ * WHAT THIS DOES NOT DO, stated because the gap is invisible otherwise: a symlink is resolved
+ * INSIDE the filesystem that holds it, so a symlink on the OPFS volume pointing into `/proc`
+ * resolves against the OPFS volume and reaches ENOENT. Cross-mount symlink traversal needs the
+ * walk itself to consult the mount table at every component, which this does not. Nothing in M3
+ * crosses a mount by symlink; a milestone that needs it has to move the join into the walk.
+ */
+function resolveMount(p, k, path) {
+  const table = k.mounts;
+  if (!table) return -EIO;
+  try {
+    return table.resolve(absoluteOf(p, path));
+  } catch (error) {
+    return errnoOfFsError(error);
+  }
+}
+
+/** A process-supplied path as an absolute, lexically normalized one. */
+function absoluteOf(p, path) {
+  return normalize(isAbsolute(path) ? path : joinPath(p.cwd || "/", path));
+}
+
+/**
+ * A directory read, dispatched from an fd rather than a path.
+ *
+ * `metaRead`'s sibling: same error translation, same dispatch-thread answer, but the filesystem
+ * comes from the description because `readdir` never sees a path. Separate rather than a flag on
+ * `metaRead`, which would be an abstraction needing a parameter to tell its callers apart.
+ */
+function dirRead(p, k, d, read) {
+  if (!k.store || !k.store.vfs) return -EIO;
+  try {
+    return read();
+  } catch (error) {
+    return errnoOfFsError(error);
+  }
+}
+
+/**
+ * `rename` and `link`: two paths that must land on ONE mount.
+ *
+ * EXDEV is POSIX's own answer and the honest one. A rename across mounts is a copy plus an unlink,
+ * which is a different operation with different failure modes and no atomicity — and the VFS's
+ * rename is a metadata edit that could not express it anyway. Refusing it is what `mv` expects;
+ * `mv` falls back to copy-and-delete when it sees EXDEV.
+ */
+function twoPathOp(p, k, paths, decide) {
+  if (!k.store || !k.store.vfs) return -EIO;
+  const a = resolveMount(p, k, paths[0]);
+  if (typeof a === "number") return a;
+  const b = resolveMount(p, k, paths[1]);
+  if (typeof b === "number") return b;
+  if (a.mount !== b.mount) return -EXDEV;
+  return metaOp(p, k, paths[1], (fs, rel, cred) => decide(fs, a.rel, b.rel, cred));
 }
 
 /**
@@ -254,11 +343,14 @@ HANDLERS.open = (p, k) => {
   if (access === 3) return -EINVAL;
   const wantW = access === O_WRONLY || access === O_RDWR;
   const wantR = access === O_RDONLY || access === O_RDWR;
-  if ((wantW || (flags & O_CREAT)) && k.store.readOnly) return -EROFS;
+  const at = resolveMount(p, k, path);
+  if (typeof at === "number") return at;
+  // The MOUNT's read-only flag, not the volume's. Same rule as metaOp: one test, so a read-only
+  // volume and a read-only mount refuse identically.
+  if ((wantW || (flags & O_CREAT)) && at.mount.readOnly) return -EROFS;
   let decision;
   try {
-    decision = k.store.vfs.openDecision(credOf(p), path, {
-      cwd: p.cwd,
+    decision = at.mount.fs.openDecision(credOf(p), at.rel, {
       create: (flags & O_CREAT) !== 0,
       excl: (flags & O_EXCL) !== 0,
       wantR, wantW,
@@ -268,6 +360,30 @@ HANDLERS.open = (p, k) => {
     });
   } catch (error) {
     return errnoOfFsError(error);
+  }
+  // A GENERATED FILE IS INSTALLED HERE AND ANSWERS ON THE DISPATCH THREAD. There is no journal to
+  // append, no blob to open and no I/O worker to wait for, so routing it through `k.later` would
+  // buy a round trip and nothing else. The bytes were produced by `openDecision` and are the
+  // snapshot this fd will keep reading — see src/kernel/synth.mjs for why open-time and not
+  // read-time.
+  if (decision.synth) {
+    const d = {
+      kind: F_SYNTH,
+      refs: 1,
+      flags,
+      type: decision.type,
+      ino: decision.ino,
+      dev: decision.dev,
+      pos: 0,
+      bytes: decision.bytes,
+      info: decision.info,
+      // The filesystem this description came from, so `readdir` can ask the right one. F_FILE
+      // descriptions leave it undefined and readdir falls back to the OPFS VFS.
+      fs: at.mount.fs,
+      rel: decision.rel,
+      inflight: 0,
+    };
+    return p.fds.add(d);
   }
   k.later(p, async () => {
     if (decision.created) {
@@ -387,7 +503,10 @@ HANDLERS.read = (p, k) => {
 function atOffset(p, k, which) {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  if (d.kind !== F_FILE) return -ESPIPE;
+  // A generated file is seekable, so `pread` is legal on it and ESPIPE would be the wrong refusal.
+  // `pwrite` is refused by the ops table instead: F_SYNTH declares no `write`, which is -ENOSYS.
+  if (d.kind !== F_FILE && d.kind !== F_SYNTH) return -ESPIPE;
+  if (d.kind === F_SYNTH && which === "write") return -EROFS;
   const length = p.ctl[A1] | 0;
   if (length < 0 || length > MAX_INLINE) return -EINVAL;
   const offset = Number(unpackI64(p.ctl[A2], p.ctl[A3]));
@@ -437,12 +556,14 @@ const seekTo = (p, d, next) => {
 HANDLERS.seek = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  if (d.kind !== F_FILE) return -ESPIPE;
+  if (d.kind !== F_FILE && d.kind !== F_SYNTH) return -ESPIPE;
   const offset = Number(unpackI64(p.ctl[A1], p.ctl[A2]));
   const whence = p.ctl[A3] | 0;
   if (whence === SEEK_SET) return seekTo(p, d, offset);
   if (whence === SEEK_CUR) return seekTo(p, d, d.pos + offset);
   if (whence !== SEEK_END) return -EINVAL;
+  // A generated file's extent is the snapshot it already holds, so SEEK_END needs no round trip.
+  if (d.kind === F_SYNTH) return seekTo(p, d, d.bytes.length + offset);
   // `d` is captured, not re-resolved from the fd: the description is what the cursor belongs to,
   // and dup/dup2 mean the fd and the description are not the same thing.
   k.later(p, async () => {
@@ -466,6 +587,9 @@ HANDLERS.seek = (p, k) => {
 HANDLERS.fstat = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
+  // A generated file answers from the description: its size is the snapshot's length, which is
+  // final, so there is nothing to ask storage about.
+  if (d.kind === F_SYNTH) return writeStat(p, { ...d.info, size: d.bytes.length }, d.dev);
   if (d.kind !== F_FILE) return -EINVAL;
   if (!k.store || !k.store.vfs) return -EIO;
   k.later(p, async () => {
@@ -521,53 +645,53 @@ HANDLERS.dup2 = (p, k) => {
 HANDLERS.mkdir = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaOp(p, k, (cred) => k.store.vfs.mkdir(cred, path, {
-    cwd: p.cwd, mode: p.ctl[A0] | 0,
-  }));
+  return metaOp(p, k, path, (fs, rel, cred) => fs.mkdir(cred, rel, { mode: p.ctl[A0] | 0 }));
 };
 
 HANDLERS.rmdir = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaOp(p, k, (cred) => k.store.vfs.rmdir(cred, path, { cwd: p.cwd }));
+  return metaOp(p, k, path, (fs, rel, cred) => fs.rmdir(cred, rel));
 };
 
 HANDLERS.unlink = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaOp(p, k, (cred) => k.store.vfs.unlink(cred, path, { cwd: p.cwd }));
+  return metaOp(p, k, path, (fs, rel, cred) => fs.unlink(cred, rel));
 };
 
 HANDLERS.rename = (p, k) => {
   const paths = readTwoPaths(p);
   if (typeof paths === "number") return paths;
-  return metaOp(p, k, (cred) => k.store.vfs.rename(cred, paths[0], paths[1], { cwd: p.cwd }));
+  return twoPathOp(p, k, paths, (fs, a, b, cred) => fs.rename(cred, a, b));
 };
 
 HANDLERS.symlink = (p, k) => {
   const paths = readTwoPaths(p);
   if (typeof paths === "number") return paths;
-  // (target, linkpath), which is symlink(2)'s order and the order `ln -s` prints.
-  return metaOp(p, k, (cred) => k.store.vfs.symlink(cred, paths[0], paths[1], { cwd: p.cwd }));
+  // (target, linkpath), which is symlink(2)'s order and the order `ln -s` prints. ONLY THE
+  // LINKPATH IS RESOLVED: the target is stored as the bytes the caller gave, never interpreted
+  // here, because a symlink's target is resolved when it is followed and may not exist yet.
+  return metaOp(p, k, paths[1], (fs, rel, cred) => fs.symlink(cred, paths[0], rel));
 };
 
 HANDLERS.link = (p, k) => {
   const paths = readTwoPaths(p);
   if (typeof paths === "number") return paths;
-  return metaOp(p, k, (cred) => k.store.vfs.link(cred, paths[0], paths[1], { cwd: p.cwd }));
+  return twoPathOp(p, k, paths, (fs, a, b, cred) => fs.link(cred, a, b));
 };
 
 HANDLERS.chmod = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaOp(p, k, (cred) => k.store.vfs.chmod(cred, path, p.ctl[A0] | 0, { cwd: p.cwd }));
+  return metaOp(p, k, path, (fs, rel, cred) => fs.chmod(cred, rel, p.ctl[A0] | 0));
 };
 
 HANDLERS.chown = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaOp(p, k, (cred) => k.store.vfs.chown(
-    cred, path, p.ctl[A0] | 0, p.ctl[A1] | 0, { cwd: p.cwd }));
+  return metaOp(p, k, path, (fs, rel, cred) => fs.chown(
+    cred, rel, p.ctl[A0] | 0, p.ctl[A1] | 0));
 };
 
 HANDLERS.truncate = (p, k) => {
@@ -607,37 +731,43 @@ HANDLERS.truncate = (p, k) => {
  * yet. Answering from the metadata alone here is what let `stat` and `fstat` disagree about one
  * file by four bytes that a `pwrite` had already returned a count for.
  */
-function statRecord(p, k, info) {
+function statRecord(p, k, info, mount) {
+  const dev = mount ? mount.dev : 0;
+  // A GENERATED FILESYSTEM'S SIZE IS ALREADY FINAL. `store.sizeOf` resolves an inode against the
+  // blob store's handle rows, and a generated inode is a hash of a path that names no blob — so
+  // asking it would either miss and report the metadata size or, worse, collide with a real
+  // inode's row and report another file's length.
+  if (mount && mount.fs !== k.store.vfs) return writeStat(p, info, dev);
   const sized = k.store.sizeOf(info);
   if (sized && typeof sized.then === "function") {
     k.later(p, async () => {
       const r = await sized;
-      return typeof r === "number" ? r : writeStat(p, r);
+      return typeof r === "number" ? r : writeStat(p, r, dev);
     });
     return PENDING;
   }
-  return writeStat(p, sized);
+  return writeStat(p, sized, dev);
 }
 
 HANDLERS.stat = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaRead(p, k, (cred) =>
-    statRecord(p, k, k.store.vfs.stat(cred, path, { cwd: p.cwd })));
+  return metaRead(p, k, path, (fs, rel, cred, mount) =>
+    statRecord(p, k, fs.stat(cred, rel), mount));
 };
 
 HANDLERS.lstat = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaRead(p, k, (cred) =>
-    statRecord(p, k, k.store.vfs.lstat(cred, path, { cwd: p.cwd })));
+  return metaRead(p, k, path, (fs, rel, cred, mount) =>
+    statRecord(p, k, fs.lstat(cred, rel), mount));
 };
 
 HANDLERS.readlink = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
-  return metaRead(p, k, (cred) => {
-    const target = k.store.vfs.readlink(cred, path, { cwd: p.cwd });
+  return metaRead(p, k, path, (fs, rel, cred) => {
+    const target = fs.readlink(cred, rel);
     return replyBytes(p, new TextEncoder().encode(target));
   });
 };
@@ -656,8 +786,10 @@ HANDLERS.readdir = (p, k) => {
   if (!d) return -EBADF;
   if (d.type !== DIR) return -ENOTDIR;
   const cookie = p.ctl[A1] | 0;
-  return metaRead(p, k, () => {
-    const entries = k.store.vfs.listIno(d.ino);
+  // Resolved from the DESCRIPTION, not from a path: readdir takes an fd, so there is no path to
+  // resolve a mount against, and the mount it came from is recorded on the description at open.
+  return dirRead(p, k, d, () => {
+    const entries = d.kind === F_SYNTH ? d.fs.listRel(d.rel) : k.store.vfs.listIno(d.ino);
     const encoder = new TextEncoder();
     const out = [];
     let used = 0;
@@ -699,11 +831,42 @@ HANDLERS.readdir = (p, k) => {
  * `df` print a number that is not a measurement of anything. `blocks` and `bfree` are therefore
  * bytes, and the quota is whatever the browser reported at boot.
  */
-HANDLERS.statfs = (p, k) => metaRead(p, k, () => {
-  const counted = k.store.vfs.stats();
-  const quota = k.store.quota || { usage: counted.bytes, quota: 0 };
+HANDLERS.statfs = (p, k) => {
+  if (!k.store || !k.store.vfs) return -EIO;
+  // THE PATH IS OPTIONAL, and that is a compatibility decision rather than a loose interface.
+  // docs/ABI.md lists `statfs` in the path group, but the libos stub has always called it with an
+  // empty byte region and means "this filesystem" — so an absent path is the root mount, and a
+  // path names the mount that owns it. Making the path mandatory would break `statfs()` as every
+  // existing caller spells it; ignoring the path would make `statfs("/proc")` report the OPFS
+  // volume's numbers, which is the whole thing a mount table exists to stop.
+  const supplied = Atomics.load(p.ctl, LEN_I32) > 0;
+  let mount;
+  if (supplied) {
+    const path = readPath(p);
+    if (typeof path === "number") return path;
+    const at = resolveMount(p, k, path);
+    if (typeof at === "number") return at;
+    mount = at.mount;
+  } else {
+    if (!k.mounts) return -EIO;
+    mount = k.mounts.root;
+  }
   const record = new Uint8Array(40);
   const dv = new DataView(record.buffer);
+  if (mount.fs !== k.store.vfs) {
+    // A generated filesystem has no blocks and no quota. Zeros, because inventing a size would
+    // make `df` print a number that measures nothing — the same reason the block size below is 1.
+    const s = mount.fs.statfs();
+    dv.setBigUint64(0, BigInt(s.blocks), true);
+    dv.setBigUint64(8, BigInt(s.bfree), true);
+    dv.setBigUint64(16, BigInt(s.files), true);
+    dv.setBigUint64(24, BigInt(s.ffree), true);
+    dv.setUint32(32, 1, true);
+    dv.setUint32(36, NAME_MAX, true);
+    return replyBytes(p, record);
+  }
+  const counted = k.store.vfs.stats();
+  const quota = k.store.quota || { usage: counted.bytes, quota: 0 };
   dv.setBigUint64(0, BigInt(quota.quota || 0), true);
   dv.setBigUint64(8, BigInt(Math.max(0, (quota.quota || 0) - (quota.usage || 0))), true);
   dv.setBigUint64(16, BigInt(counted.inodes), true);
@@ -711,7 +874,7 @@ HANDLERS.statfs = (p, k) => metaRead(p, k, () => {
   dv.setUint32(32, 1, true);
   dv.setUint32(36, NAME_MAX, true);
   return replyBytes(p, record);
-});
+};
 
 HANDLERS.clock_nanosleep = (p, k) => {
   const ns = unpackI64(p.ctl[A0], p.ctl[A1]);
