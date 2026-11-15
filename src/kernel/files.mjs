@@ -6,8 +6,8 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, EBADF, EINVAL, ESPIPE, EMFILE,
-  O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M,
+  EBADF, EINVAL, ESPIPE, EMFILE, O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
 import { errnoOfFsError } from "./store.mjs";
@@ -284,6 +284,59 @@ registerKind(F_PIPE_W, {
   },
   close(d) {
     return d.pipe.close(false);
+  },
+});
+
+/**
+ * F_TTY and F_PTY_M: the two ends of a pty, as two rows.
+ *
+ * THEY ARE OPPOSITE, which is why they are two kinds and not one with a flag:
+ *
+ *   write(slave)  is OUTPUT — straight to the master's queue, unprocessed.
+ *   write(master) is INPUT  — through the line discipline: signals, echo, canonical buffering.
+ *   read(slave)   takes processed input; in canonical mode, only whole lines.
+ *   read(master)  takes the program's output, plus whatever the echo produced.
+ *
+ * `null` means PARKED, as it does for a pipe: the pty holds a record and replies to it when an
+ * event unblocks it (constraint 88).
+ */
+registerKind(F_TTY, {
+  read(d, p, dstOff, length, at) {
+    if (at !== undefined) return -ESPIPE;   // a terminal has no position
+    return d.pty.readInput(p, p.seq, p.bytes, dstOff, length);
+  },
+  write(d, u8, offset, length, p, at) {
+    if (at !== undefined) return -ESPIPE;
+    // `p`, the CALLING process: a slave writer parks when the output ring is full, so the pty
+    // needs the process to reply to. A description is shared, so it cannot carry one.
+    return d.pty.writeOutput(p, p.seq, u8.subarray(offset, offset + length));
+  },
+  fsync() {
+    // Nothing to force. 0 rather than -ENOSYS, as the tmpfs and the pipe answer: `fsync` on a
+    // terminal succeeds everywhere, and a program checking the return would read a correct no-op
+    // as a failure.
+    return 0;
+  },
+  close(d) {
+    return d.pty.close(false);
+  },
+});
+
+registerKind(F_PTY_M, {
+  read(d, p, dstOff, length, at) {
+    if (at !== undefined) return -ESPIPE;
+    return d.pty.readOutput(p, p.seq, p.bytes, dstOff, length);
+  },
+  write(d, u8, offset, length, p, at) {
+    if (at !== undefined) return -ESPIPE;
+    // A terminal does not block the typist: this always accepts everything.
+    return d.pty.writeInput(u8.subarray(offset, offset + length));
+  },
+  fsync() {
+    return 0;
+  },
+  close(d) {
+    return d.pty.close(true);
   },
 });
 

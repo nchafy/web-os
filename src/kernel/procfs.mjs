@@ -43,6 +43,12 @@ const PID_FILES = {
     `fds:\t${countFds(slot)}`,
     `calls:\t${slot.calls}`,
     `replies:\t${slot.replies}`,
+    // THE CALL THIS PROCESS IS PARKED IN, by syscall number, or -1 for none. Published because
+    // "parked" was otherwise unobservable: `state` is `running` for every process that is not a
+    // zombie, so a check asserting a process was blocked in `read` or `poll` was asserting only
+    // that it had not exited. `calls` minus `replies` gives the DEPTH (1 while parked) and this
+    // gives the IDENTITY, which is what a claim about a particular syscall needs.
+    `syscall:\t${slot.inflight ? slot.inflight.nr : -1}`,
     `errors:\t${slot.errors}`,
     // Only meaningful once the process is a zombie. Printed always, with the sentinel visible,
     // because a field that appears and disappears is a field every reader has to branch on.

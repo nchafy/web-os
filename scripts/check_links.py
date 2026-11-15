@@ -16,6 +16,10 @@ AUTHORED = [
     'CLAUDE.md', 'README.md', 'CONTEXT.md', 'PLAN.md', 'MILESTONES.md',
     'docs/CONSTRAINTS.md', 'docs/ABI.md', 'docs/DECISIONS.md', 'docs/GLOSSARY.md',
     'docs/LEARNING-MODE.md', 'bench/coep-tiles/README.md', 'src/README.md',
+    # THE HANDOFF IS AN AUTHORED DOC, and it was not checked. It is the first file the next
+    # session reads and it is almost entirely path references — the commands to run and the files
+    # to read. A stale path there costs more than one in any other doc here.
+    'docs/handoff/CONTINUE-HERE.md',
 ]
 
 #: Referenced on purpose, not built yet. MILESTONES.md says which milestone owes each.

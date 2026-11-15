@@ -24,6 +24,7 @@
 // moved on. Records are also pruned on every operation so a long-lived pipe cannot accumulate them.
 
 import { PIPE_CAPACITY, EPIPE, SIGPIPE, ST_RETURN } from "../abi.mjs";
+import { ByteRing } from "../fs/ring.mjs";
 
 /** The kernel surface a pipe needs. Injected once at boot rather than imported, because
  *  `kernel.mjs` imports this file and the reverse would be a cycle. */
@@ -36,11 +37,9 @@ export function installPipeKernel(surface) {
 export class Pipe {
   constructor(capacity = PIPE_CAPACITY) {
     this.capacity = capacity;
-    this.buf = new Uint8Array(capacity);
-    // A simple head/length ring. Not a pair of indices: with length explicit, "full" and "empty"
-    // are distinguishable without sacrificing a byte, and a wrapped read is two subarray copies.
-    this.head = 0;
-    this.length = 0;
+    // ONE ring implementation, in src/fs/ring.mjs. This was inline until M4b needed three more
+    // queues for the pty, and four hand-written rings is four places for the wrap to be wrong.
+    this.ring = new ByteRing(capacity);
     /**
      * Whether each END is still open: 0 or 1, never more.
      *
@@ -70,31 +69,24 @@ export class Pipe {
   }
 
   get free() {
-    return this.capacity - this.length;
+    return this.ring.free;
   }
 
-  /* ---- the ring ------------------------------------------------------------------------- */
+  /** How many bytes the pipe is holding. Delegated so there is one length. */
+  get length() {
+    return this.ring.length;
+  }
 
-  #push(src) {
-    const n = Math.min(src.length, this.free);
-    if (n === 0) return 0;
-    const at = (this.head + this.length) % this.capacity;
-    const first = Math.min(n, this.capacity - at);
-    this.buf.set(src.subarray(0, first), at);
-    if (first < n) this.buf.set(src.subarray(first, n), 0);
-    this.length += n;
+  /* ---- the ring, with the pipe's own accounting over it --------------------------------- */
+
+  #push(src, from = 0) {
+    const n = this.ring.push(src, from);
     this.stats.written += n;
     return n;
   }
 
   #shift(into, off, want) {
-    const n = Math.min(want, this.length);
-    if (n === 0) return 0;
-    const first = Math.min(n, this.capacity - this.head);
-    into.set(this.buf.subarray(this.head, this.head + first), off);
-    if (first < n) into.set(this.buf.subarray(0, n - first), off + first);
-    this.head = (this.head + n) % this.capacity;
-    this.length -= n;
+    const n = this.ring.shift(into, off, want);
     this.stats.read += n;
     return n;
   }
@@ -158,7 +150,7 @@ export class Pipe {
     // every write through the ring first would make that depend on space the pipe does not have.
     const direct = this.#handToReaders(src);
     if (direct === src.length) return direct;
-    const n = direct + this.#push(src.subarray(direct));
+    const n = direct + this.#push(src, direct);
     if (n > 0) {
       this.#wakeReaders();
       return n;
@@ -220,7 +212,7 @@ export class Pipe {
     while (this.free > 0 && this.waitingWriters.length) {
       const w = this.waitingWriters[0];
       if (!this.#live(w)) { this.waitingWriters.shift(); continue; }
-      const n = this.#push(w.bytes.subarray(w.done));
+      const n = this.#push(w.bytes, w.done);
       w.done += n;
       if (w.done < w.bytes.length) return;   // still short; stays parked
       this.waitingWriters.shift();

@@ -490,6 +490,19 @@ class Control:
     #: one Set lookup either way and no control branch. `yes | head -1` must then HANG: head exits,
     #: the pipe loses its reader, and yes writes into a pipe nobody reads forever.
     NO_SIGPIPE = "no-sigpipe-signal"
+    #: M4b. Every new pty comes up with ISIG cleared, through the cfg.noIsig hook, so the line
+    #: discipline recognises no signal characters at all. MILESTONES.md M4's ONE specified
+    #: behaviour, removed: Ctrl-C must then fail to reach the foreground group.
+    NO_ISIG = "no-isig"
+    #: M4b. Parked `poll` calls are never re-evaluated when anything replies, so a blocking poll
+    #: can only ever answer from its own timeout. Constraint 42's wake, removed.
+    NO_POLL_WAKE = "no-poll-wake"
+    #: M4b. `finish` replies to a call whose handler's own side effect already answered it, so one
+    #: call gets two replies. The double-reply class, restored.
+    NO_FINISH_GUARD = "no-finish-guard"
+    #: M4b. A resize still resizes but raises no SIGWINCH. Exists because the clause asserting the
+    #: signal could not fail until the stage reported its own -EINTR.
+    NO_WINCH = "no-winch"
     ONCE = "once"
 
 
@@ -511,6 +524,10 @@ CONTROL_RUNS = {
     Control.USR_404: ("usr-404",),
     Control.TRACE_TINY: ("trace-tiny",),
     Control.NO_SIGPIPE: ("no-sigpipe-signal",),
+    Control.NO_ISIG: ("no-isig",),
+    Control.NO_POLL_WAKE: ("no-poll-wake",),
+    Control.NO_FINISH_GUARD: ("no-finish-guard",),
+    Control.NO_WINCH: ("no-winch",),
 }
 
 
@@ -2333,6 +2350,185 @@ _NO_SIGPIPE_FAILS = (
     "verdict is ok",
 )
 
+
+# ======================================================================================
+# M4b — the pty, the line discipline, poll
+# ======================================================================================
+
+#: Clause-level, so each control is scored on the labels it is about. The two Ctrl-C clauses and
+#: the blocking-poll clause are the subjects; everything else must hold under both controls.
+M4B_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # ECHO and ICANON, whose semantics no authored document specifies — POSIX defaults, assumed.
+    "echo ok",
+    "a typed line is echoed to the master as CR LF",
+    "canonical ok",
+    "a partial line leaves the reader parked",
+    # THE ONE BEHAVIOUR MILESTONES.md SPECIFIES.
+    "intr ok",
+    "Ctrl-C killed the foreground group with SIGINT",
+    "and the Ctrl-C byte was consumed, not echoed",
+    "wedged_intr ok",
+    "Ctrl-C reached a process spinning in a compute loop",
+    # The other side of the same flag.
+    "raw_isig_off ok",
+    "with ISIG off the Ctrl-C arrives as data",
+    # termios.
+    "termios ok",
+    "a fresh pty is canonical, echoing and signal-generating",
+    "the reserved termios words survive a set",
+    "an fd that is not a terminal is ENOTTY",
+    "winsize ok",
+    "a resize raises SIGWINCH on the foreground group",
+    # A pty op whose signal reaches the CALLER, which every other proof here arranges not to do.
+    "self_signal ok",
+    "a fresh pty's foreground group is the opener's own",
+    "a resize that signals the caller still resizes",
+    "and the caller observes its own interruption",
+    "the channel is not left one reply ahead",
+    "exactly one call was answered by its own side effect",
+    # A negative timeout is infinite, and a refused `dup` leaks no reference.
+    "empty_poll ok",
+    "poll over an empty set with no timeout blocks",
+    "and only a signal ends it",
+    "fd_limit ok",
+    "the fd table really reached its ceiling",
+    "a refused dup leaks no reference, so the reader sees EOF",
+    "and the read that follows returns 0",
+    # Teardown's fd sweep moves readiness without replying; a refused open keeps no handle.
+    "teardown_wake ok",
+    "a process parked in poll with no timeout stays parked",
+    "a dying writer's fd sweep wakes a peer parked in poll",
+    "and the woken poll reported the pipe readable",
+    "open_leak ok",
+    "an open with no fd left is refused with EMFILE",
+    "and keeps no sync access handle, so the file reopens",
+    # poll, which constraint 42 requires and M4's build list omits.
+    "poll_ready ok",
+    "poll reports an idle set as nothing ready",
+    "poll reports a ready pipe and a ready terminal",
+    "poll reports a closed fd as POLLNVAL",
+    "poll_wait ok",
+    "a process parked in poll over two fds was woken by one",
+    "fg_pgrp ok",
+    "the foreground group moves, and a group that does not exist is refused",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m4b.html",
+)
+
+M4B_DOCUMENT = "/www/m4b.html"
+
+M4B_READY = ("(() => { const s = globalThis.M4B && globalThis.M4B.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M4B = """(() => {
+  const M = globalThis.M4B || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    echo: one(P.echo),
+    canonical: one(P.canonical),
+    intr: one(P.intr),
+    wedged_intr: one(P.wedged_intr),
+    raw_isig_off: one(P.raw_isig_off),
+    termios: one(P.termios),
+    winsize: one(P.winsize),
+    self_signal: one(P.self_signal),
+    empty_poll: one(P.empty_poll),
+    fd_limit: one(P.fd_limit),
+    teardown_wake: one(P.teardown_wake),
+    open_leak: one(P.open_leak),
+    poll_ready: one(P.poll_ready),
+    poll_wait: one(P.poll_wait),
+    fg_pgrp: one(P.fg_pgrp),
+  }
+})()"""
+
+M4B_SHAPE = {
+    "state": str, "why": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "echo": (dict, type(None)),
+    "canonical": (dict, type(None)),
+    "intr": (dict, type(None)),
+    "wedged_intr": (dict, type(None)),
+    "raw_isig_off": (dict, type(None)),
+    "termios": (dict, type(None)),
+    "winsize": (dict, type(None)),
+    "self_signal": (dict, type(None)),
+    "empty_poll": (dict, type(None)),
+    "fd_limit": (dict, type(None)),
+    "teardown_wake": (dict, type(None)),
+    "open_leak": (dict, type(None)),
+    "poll_ready": (dict, type(None)),
+    "poll_wait": (dict, type(None)),
+    "fg_pgrp": (dict, type(None)),
+}
+
+#: A pty with no ISIG recognises no signal characters. Both Ctrl-C clauses go, and so does the
+#: "a fresh pty is signal-generating" clause — the control changes the DEFAULT termios, and that
+#: section asserts the default. Declared rather than excused: it is a consequence of the control's
+#: own mechanism, not collateral from something unrelated.
+_NO_ISIG_FAILS = (
+    "intr ok",
+    "Ctrl-C killed the foreground group with SIGINT",
+    # The ^C is DATA with ISIG off, so it is echoed like any other byte — measured as
+    # `echo: '\x03'`. The harness refused the control until this was declared, which is the
+    # point of scoring on labels rather than on pass/fail.
+    "and the Ctrl-C byte was consumed, not echoed",
+    "wedged_intr ok",
+    "Ctrl-C reached a process spinning in a compute loop",
+    "termios ok",
+    "a fresh pty is canonical, echoing and signal-generating",
+    "verdict is ok",
+)
+
+#: A parked poll that is never re-evaluated can only time out. ONE section, which is what makes
+#: this control specific: `poll` reporting readiness synchronously is untouched.
+_NO_POLL_WAKE_FAILS = (
+    "poll_wait ok",
+    "a process parked in poll over two fds was woken by one",
+    "verdict is ok",
+)
+
+_NO_FINISH_GUARD_FAILS = (
+    "self_signal ok",
+    # The caller's own call is answered TWICE. The first reply is the signal's -EINTR and the
+    # second is the handler's 0, so the resize now looks like it SUCCEEDED from the caller's side
+    # — the interruption it must observe is overwritten by the reply that should not exist.
+    "and the caller observes its own interruption",
+    "exactly one call was answered by its own side effect",
+    "verdict is ok",
+)
+
+#: WHAT MUST HOLD under no-winch is the resize itself. `setWinsize` resizes and only then signals,
+#: so removing the signal must leave `a resize that signals the caller still resizes` passing —
+#: a control that moved both would not say which of the two it removed.
+_NO_WINCH_FAILS = (
+    "winsize ok",
+    "a resize raises SIGWINCH on the foreground group",
+    "self_signal ok",
+    # No signal reaches the caller, so there is no interruption to observe and nothing for the
+    # guard to drop. Both are consequences of the one removal rather than collateral.
+    "and the caller observes its own interruption",
+    "exactly one call was answered by its own side effect",
+    "verdict is ok",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -2359,6 +2555,11 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "COOP/COEP, so no filesystem is mounted and www/m2.html aborts before any proof "
                 "runs. Measured: state 'aborted' in 0.0 s. UNMEASURABLE rather than FAIL, because "
                 "a FAIL would claim three proofs were taken and found wanting.",
+        ), "m4b": Expect(
+            UNMEASURABLE,
+            why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
+                "boots and there is no process to give a terminal to. UNMEASURABLE rather than "
+                "FAIL, because a FAIL would claim a line discipline ran and behaved wrongly.",
         ), "m4": Expect(
             UNMEASURABLE,
             why="the same mechanism again: without COOP/COEP there is no SAB, so no kernel boots, "
@@ -2613,6 +2814,114 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "process-group signal still hold",
             failed=_NO_SIGPIPE_FAILS,
             held=held_rest(M4_LABELS, _NO_SIGPIPE_FAILS),
+        )},
+    ),
+    "no-isig": NegativeControl(
+        name="no-isig",
+        why="no_isig=1: every new pty comes up with ISIG cleared (src/kernel/pty.mjs's "
+            "`setPtyDefaultIsig`, armed through the cfg.noIsig hook, which the kernel refuses "
+            "without a bench boot). A flag on the DEFAULT rather than a branch in the discipline's "
+            "hot path, so the headline path is the same single flag test either way.\n"
+            "WHAT MUST BREAK: the one behaviour MILESTONES.md M4 actually specifies — Ctrl-C "
+            "raising SIGINT on the foreground group, including against a process spinning in a "
+            "compute loop. With ISIG off the ^C is DATA: it is buffered, echoed and delivered to "
+            "the program, which then exits normally instead of dying.\n"
+            "THE termios SECTION MOVES TOO, and that is the control's own mechanism rather than "
+            "collateral: it changes the DEFAULT termios, and that section asserts a fresh pty is "
+            "signal-generating. Declared in `failed` rather than excused.\n"
+            "WHAT MUST HOLD: echo, canonical buffering, the reserved-word round trip, SIGWINCH, "
+            "both poll sections and the foreground-group moves. In particular `raw_isig_off` holds, "
+            "because it clears ISIG itself — so the control cannot be satisfied by the flag simply "
+            "being unreadable.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_isig", "1"),),
+        expects={"m4b": Expect(
+            Outcome.FAIL,
+            why="Ctrl-C must stop reaching the foreground group, while every other property of "
+                "the terminal holds",
+            failed=_NO_ISIG_FAILS,
+            held=held_rest(M4B_LABELS, _NO_ISIG_FAILS),
+        )},
+    ),
+    "no-finish-guard": NegativeControl(
+        name="no-finish-guard",
+        why="no_finish_guard=1: `finish` no longer drops a reply for a call whose handler's own "
+            "side effect already answered it (the cfg.noFinishGuard hook clears the flag it "
+            "tests). One call then gets TWO replies.\n"
+            "WHY THE CASE IS REACHABLE AT ALL: `pty_open` sets the foreground group from the "
+            "OPENER's pgid, so a resize issued before a shell has moved that group raises SIGWINCH "
+            "on the process making the call. `raiseOne` interrupts the in-flight call, and the "
+            "handler's return was then replied as well — two SEQ bumps and two G_INFLIGHT "
+            "decrements for one call, which drives the kernel's depth gauge negative and breaks "
+            "the issued == replied identity `check_syscall` asserts.\n"
+            "WHAT MUST BREAK: the self_signal section. The second reply overwrites the "
+            "interruption the caller has to observe, and the kernel's count of calls answered by "
+            "their own side effect goes to 0.\n"
+            "WHAT MUST HOLD: every other section. The guard is one branch in `finish` and touches "
+            "no path where a signal does not reach the caller — in particular `winsize` holds, "
+            "because it moves the foreground group to a child first, which is what made this "
+            "unreachable from the nine sections that came before it.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_finish_guard", "1"),),
+        expects={"m4b": Expect(
+            Outcome.FAIL,
+            why="a call whose signal answered it must not be answered a second time, while every "
+                "proof that signals a CHILD rather than the caller is untouched",
+            failed=_NO_FINISH_GUARD_FAILS,
+            held=held_rest(M4B_LABELS, _NO_FINISH_GUARD_FAILS),
+        )},
+    ),
+    "no-winch": NegativeControl(
+        name="no-winch",
+        why="no_winch=1: a resize still resizes and raises no SIGWINCH (the cfg.noWinch hook "
+            "clears the flag `setWinsize` tests). The SIGNAL is removed; the SIDE EFFECT is "
+            "not.\n"
+            "WHY IT EXISTS: the clause asserting the signal could not fail. It read the stage's "
+            "`exited` flag, which is equally true of a sleep that ran its full 8 seconds and "
+            "returned 0 — so no mutation of the signal path moved it. The stage now exits 0 only "
+            "when its own `clock_nanosleep` returned -EINTR, and this control is what shows that "
+            "assertion is capable of failing.\n"
+            "WHAT MUST BREAK: the SIGWINCH clause and the self_signal section, which both exist "
+            "only because of the signal.\n"
+            "WHAT MUST HOLD: `a resize that signals the caller still resizes`. The resize is "
+            "applied before the signal is raised, so removing the signal must leave it — a "
+            "control that moved both would not say which of the two it removed.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_winch", "1"),),
+        expects={"m4b": Expect(
+            Outcome.FAIL,
+            why="the signal must stop being delivered while the resize it accompanies still "
+                "happens",
+            failed=_NO_WINCH_FAILS,
+            held=held_rest(M4B_LABELS, _NO_WINCH_FAILS),
+        )},
+    ),
+    "no-poll-wake": NegativeControl(
+        name="no-poll-wake",
+        why="no_poll_wake=1: parked `poll` calls are no longer re-evaluated when anything replies "
+            "(the cfg.noPollWake hook clears the flag `reply` tests). A blocking poll can then "
+            "only ever answer from its own timeout.\n"
+            "WHAT MUST BREAK: constraint 42's wake. A process parked in `poll` over a pipe and a "
+            "terminal must be woken by whichever becomes ready first — that is the whole reason "
+            "`poll` exists here, because a process has one futex word and one outstanding call. "
+            "The stage reports what it saw down the pty and signals pass or fail in its EXIT CODE, "
+            "so the failure is "
+            "'it timed out having seen nothing' rather than a harness timeout.\n"
+            "WHAT MUST HOLD: everything else, including `poll_ready` — reporting readiness "
+            "synchronously does not go through the wake at all, and a control that moved both "
+            "would not say which half it removed.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_poll_wake", "1"),),
+        expects={"m4b": Expect(
+            Outcome.FAIL,
+            why="the parked poll must time out instead of waking, while synchronous readiness "
+                "reporting is untouched",
+            failed=_NO_POLL_WAKE_FAILS,
+            held=held_rest(M4B_LABELS, _NO_POLL_WAKE_FAILS),
         )},
     ),
     "kernel-stall": NegativeControl(
@@ -5521,6 +5830,292 @@ def check_m4(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m4.html", env.served_matches_disk(env.document),
                     "the m4.html served does not match www/m4.html on disk")
+
+
+@check(
+    name="m4b",
+    milestone="m4b",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_ISIG, Control.NO_POLL_WAKE,
+              Control.NO_FINISH_GUARD, Control.NO_WINCH),
+    labels=M4B_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M4B_DOCUMENT,
+    ready_expr=M4B_READY,
+    ready_what="globalThis.M4B.state reaching done, aborted or error (www/m4b.html)",
+    # 3.0 s measured for the headline run, 11 s under no-isig where two stages are no longer
+    # killed and run their 8 s sleep to completion. The bound is generous and is still a BOUND: a
+    # stuck pty raises no error, so a terminal that stopped must end as a BROKEN check carrying the
+    # kernel's park state — which www/m4b.html attaches to its own timeout.
+    ready_timeout=240.0,
+    refusal_expr="globalThis.M4B && globalThis.M4B.state",
+    refusal_want="aborted",
+    note="eleven sections over eleven fresh kernels. The milestone specifies exactly ONE "
+         "behaviour of "
+         "the discipline — Ctrl-C raising SIGINT on the foreground group 'even when the UI is "
+         "wedged' — and `wedged_intr` is that proof, against a stage spinning in a compute loop "
+         "and issuing a syscall only every 20,000 iterations. ICANON and ECHO semantics are "
+         "specified in NO authored document, so those sections assert POSIX's defaults taken as "
+         "an assumption, said so in src/kernel/pty.mjs. "
+         "`poll` is here because constraint 42 is normative — the single wait primitive over fds — "
+         "even though M4's build list omits it: a process has one futex word and one outstanding "
+         "call, so one terminal plus a pipe cannot otherwise wake it, which is the case M4a's "
+         "terminal hits first. Both halves are proved: reporting readiness, and PARKING over two "
+         "fds and being woken by one. "
+         "negative controls, four: --negative no-isig clears ISIG on every new pty and both "
+         "Ctrl-C sections must fail while echo, canonical buffering and the poll sections hold; "
+         "--negative no-poll-wake stops re-evaluating parked polls — on a reply AND on a timeout, "
+         "because removing only the first left the timeout answering correctly five seconds late "
+         "and the control broke nothing a check could see; --negative no-finish-guard answers a "
+         "call its handler's own side effect already answered, which only `self_signal` reaches; "
+         "--negative no-winch leaves the resize and removes its signal, which is what shows the "
+         "SIGWINCH clause is capable of failing at all. --negative no-isolation must come out BROKEN: no SAB, so no kernel and "
+         "no process to give a terminal to.",
+)
+def check_m4b(env: Env) -> None:
+    got = env.read(READ_M4B, M4B_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m4b.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m4b.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process exists to give a terminal to."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m4b.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("echo", "canonical", "intr", "wedged_intr", "raw_isig_off", "termios",
+                "winsize", "self_signal", "empty_poll", "fd_limit",
+                "teardown_wake", "open_leak", "poll_ready", "poll_wait", "fg_pgrp")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def same(d, measured, constant):
+        """Two fields from the page, NEITHER allowed to be absent.
+
+        `d.get(a) == d.get(b)` is True when both are missing, because `None == None` — so a clause
+        written that way passes against a page that published neither the errno it measured nor
+        the constant it was compared against. Two clauses here read exactly that way: the ENOTTY
+        check and the POLLNVAL check, each comparing a measurement to a constant that travels in
+        the same evidence object, so one typo in the page would have taken both halves out
+        together and left the clause green.
+        """
+        a, b = d.get(measured), d.get(constant)
+        return a is not None and b is not None and a == b
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- ECHO and ICANON: POSIX defaults, assumed ----------------------------------------
+    e = ev("echo")
+    env.expect_that("echo ok", section_ok("echo"), e)
+    # CR LF, because a bare LF leaves the cursor in the same column on a real terminal.
+    env.expect_that("a typed line is echoed to the master as CR LF",
+                    e.get("echoedAsCrLf") is True, e.get("echo"))
+
+    c = ev("canonical")
+    env.expect_that("canonical ok", section_ok("canonical"), c)
+    env.expect_that("a partial line leaves the reader parked",
+                    c.get("parkedOnPartialLine") is True,
+                    {"state": c.get("stateWhilePartial"), "child": c.get("child")})
+
+    # ---- THE ONE SPECIFIED BEHAVIOUR ------------------------------------------------------
+    i = ev("intr")
+    env.expect_that("intr ok", section_ok("intr"), i)
+    env.expect_that("Ctrl-C killed the foreground group with SIGINT",
+                    i.get("killedByInt") is True,
+                    {"child": i.get("child"), "fgPgid": i.get("fgPgid"),
+                     "SIGINT": i.get("SIGINT")})
+    # The byte must be CONSUMED. Echoing it would put a stray ^C in the output; delivering it
+    # would hand the program its own interrupt as data.
+    env.expect_that("and the Ctrl-C byte was consumed, not echoed",
+                    i.get("echoHasRawIntr") is False, i.get("echo"))
+
+    w = ev("wedged_intr")
+    env.expect_that("wedged_intr ok", section_ok("wedged_intr"), w)
+    env.expect_that("Ctrl-C reached a process spinning in a compute loop",
+                    w.get("killedByInt") is True, w.get("child"))
+
+    r = ev("raw_isig_off")
+    env.expect_that("raw_isig_off ok", section_ok("raw_isig_off"), r)
+    env.expect_that("with ISIG off the Ctrl-C arrives as data",
+                    r.get("exitedNormally") is True and r.get("setResult") == 0,
+                    {"child": r.get("child"), "lflag": r.get("lflagAfter")})
+
+    # ---- termios -------------------------------------------------------------------------
+    tm = ev("termios")
+    env.expect_that("termios ok", section_ok("termios"), tm)
+    env.expect_that("a fresh pty is canonical, echoing and signal-generating",
+                    tm.get("defaultIsCanonEchoIsig") is True,
+                    {"lflag": tm.get("defaultLflag"), "vintr": tm.get("defaultVintr")})
+    # A caller built against today's three lflag bits must not silently clear a later one.
+    env.expect_that("the reserved termios words survive a set",
+                    tm.get("reservedPreserved") is True and tm.get("lastCcPreserved") is True
+                    and tm.get("lflagApplied") is True, tm)
+    env.expect_that("an fd that is not a terminal is ENOTTY",
+                    same(tm, "notTtyErrno", "ENOTTY"),
+                    {"got": tm.get("notTtyErrno"), "ENOTTY": tm.get("ENOTTY")})
+
+    ws = ev("winsize")
+    env.expect_that("winsize ok", section_ok("winsize"), ws)
+    # A NON-FATAL SIGNAL AT A PARKED PROCESS IS OBSERVABLE ONLY AS THE PARK ENDING EARLY. This
+    # read `sleepInterrupted`, which was the stage's `exited` flag — true of a sleep that ran its
+    # full 8 seconds and returned 0, so the clause passed whether or not SIGWINCH was delivered
+    # and no mutation of the signal path could move it. The stage now exits 0 only when its own
+    # `clock_nanosleep` returned -EINTR, and its verdict is what is asserted here.
+    env.expect_that("a resize raises SIGWINCH on the foreground group",
+                    ws.get("resized") is True and ws.get("sleepInterrupted") is True
+                    and ws.get("stageVerdict") == 0,
+                    {"before": ws.get("before"), "after": ws.get("after"),
+                     "stageVerdict": ws.get("stageVerdict"), "child": ws.get("child")})
+
+    # ---- a pty operation whose signal lands on THE CALLER ---------------------------------
+    #
+    # Every other proof here moves the foreground group to a child before signalling, which is
+    # what a shell does per pipeline — so none of them reached the case where the signal's target
+    # is the process making the call. `pty_open` sets the foreground group from the OPENER's pgid,
+    # so a resize before the group moves raises SIGWINCH on the caller. The kernel interrupted the
+    # in-flight call AND then replied to the handler's return as well: two replies for one call,
+    # two SEQ bumps, two G_INFLIGHT decrements.
+    ss = ev("self_signal")
+    env.expect_that("self_signal ok", section_ok("self_signal"), ss)
+    env.expect_that("a fresh pty's foreground group is the opener's own",
+                    ss.get("foregroundIsMine") is True,
+                    {"fgBefore": ss.get("fgBefore"), "myPgid": ss.get("myPgid")})
+    # The resize happens, then the signal — so an interrupted caller still finds it resized. A
+    # resize lost to its own signal would be the other plausible outcome and is not this one.
+    env.expect_that("a resize that signals the caller still resizes",
+                    ss.get("resized") is True,
+                    {"after": ss.get("after"), "setResult": ss.get("setResult")})
+    env.expect_that("and the caller observes its own interruption",
+                    ss.get("sawEintr") is True and ss.get("EINTR") is not None
+                    and ss.get("setResult") == -ss["EINTR"],
+                    {"setResult": ss.get("setResult"), "EINTR": ss.get("EINTR")})
+    # THE CLAUSE WITH THE TEETH. A second reply leaves the channel one ahead of itself, and a
+    # program meets that as a call returning an answer it never asked for.
+    env.expect_that("the channel is not left one reply ahead",
+                    ss.get("channelIntact") is True and same(ss, "nextCall", "myPgid"),
+                    {"drained": ss.get("drained"), "nextCall": ss.get("nextCall"),
+                     "myPgid": ss.get("myPgid")})
+    # And the kernel's own account: EXACTLY ONE call was answered by its own side effect. An exact
+    # count rather than a bound, so the counter cannot absorb a genuine double reply elsewhere.
+    env.expect("exactly one call was answered by its own side effect",
+               ss.get("answeredDuringCall"), 1)
+
+    # ---- a negative timeout is INFINITE, and a refused `dup` leaks nothing ---------------
+    ep = ev("empty_poll")
+    env.expect_that("empty_poll ok", section_ok("empty_poll"), ep)
+    # `poll(NULL, 0, -1)` is POSIX's "block until a signal". It answered 0 immediately, which is a
+    # busy-wait where the caller asked to park. Asserted as the stage still being parked IN `poll`
+    # when the orchestrator looks — not merely alive, which is true of every non-zombie.
+    env.expect_that("poll over an empty set with no timeout blocks",
+                    ep.get("parkedInEmptyPoll") is True and same(ep, "parkedIn", "SYS_poll"),
+                    {"parkedIn": ep.get("parkedIn"), "why": ep.get("parkedWhy")})
+    env.expect_that("and only a signal ends it",
+                    ep.get("endedBySignal") is True,
+                    {"child": ep.get("child"), "SIGINT": ep.get("SIGINT")})
+
+    fl = ev("fd_limit")
+    env.expect_that("fd_limit ok", section_ok("fd_limit"), fl)
+    # Without this the refused dups never happened, so the clause below would assert nothing.
+    env.expect_that("the fd table really reached its ceiling",
+                    fl.get("tableFilled") is True and same(fl, "refusedErrno", "EMFILE"),
+                    {"duped": fl.get("duped"), "refusedErrno": fl.get("refusedErrno"),
+                     "EMFILE": fl.get("EMFILE")})
+    # `dup` raised the description's refcount BEFORE asking for an fd, so every refusal left it
+    # one high and the kind's `close` op — which fires only when the last reference goes — never
+    # fired. A pipe whose writer count never drops leaves its reader on an EOF that cannot
+    # arrive: constraint 92's deadlock reached through -EMFILE, with no error anywhere.
+    # ASKED THROUGH `poll` so the failure REPORTS: with a leaked reference the reader sees
+    # nothing, and a `read` would park forever — ending as a BROKEN check with no expectations,
+    # indistinguishable from a harness fault. A check has to be able to fail, not wedge.
+    env.expect_that("a refused dup leaks no reference, so the reader sees EOF",
+                    fl.get("eofAfterRefusedDups") is True and fl.get("pollResult") == 1
+                    and fl.get("revents") is not None
+                    and (fl["revents"] & fl.get("POLLIN", 0)) != 0,
+                    {"pollResult": fl.get("pollResult"), "revents": fl.get("revents"),
+                     "POLLIN": fl.get("POLLIN")})
+    env.expect("and the read that follows returns 0", fl.get("readResult"), 0)
+
+    tw = ev("teardown_wake")
+    env.expect_that("teardown_wake ok", section_ok("teardown_wake"), tw)
+    env.expect_that("a process parked in poll with no timeout stays parked",
+                    tw.get("parkedInPoll") is True and same(tw, "parkedIn", "SYS_poll"),
+                    {"parkedIn": tw.get("parkedIn"), "why": tw.get("parkedWhy")})
+    # The wake is hooked on `reply` so no pollable kind can forget it, and teardown is the one
+    # path that moves readiness without replying: its only `reply` runs BEFORE the fd sweep that
+    # drops the dying process's pipe `writers` to 0. The poller waited forever.
+    env.expect_that("a dying writer's fd sweep wakes a peer parked in poll",
+                    tw.get("wokenByTeardown") is True,
+                    {"wokeRounds": tw.get("wokeRounds"), "stateAfter": tw.get("stateAfter")})
+    # Woke with the RIGHT answer, not merely woke: the stage exits 0 only if revents carried
+    # POLLIN, which is what a pipe with no writer left must report.
+    env.expect("and the woken poll reported the pipe readable", tw.get("pollerVerdict"), 0)
+
+    ol = ev("open_leak")
+    env.expect_that("open_leak ok", section_ok("open_leak"), ol)
+    env.expect_that("an open with no fd left is refused with EMFILE",
+                    ol.get("openRefused") is True and same(ol, "refusedOpenErrno", "EMFILE"),
+                    {"refusedOpenErrno": ol.get("refusedOpenErrno"), "EMFILE": ol.get("EMFILE")})
+    # `createSyncAccessHandle` is an exclusive lock per file, so a handle the refused open kept
+    # made this one file unopenable by any process for the lifetime of the page — a retryable
+    # errno turned into permanent loss of one file.
+    env.expect_that("and keeps no sync access handle, so the file reopens",
+                    ol.get("reopened") is True and ol.get("text") == "hello",
+                    {"reopenErrno": ol.get("reopenErrno"), "bytes": ol.get("bytes"),
+                     "text": ol.get("text")})
+
+    # ---- poll, both halves ---------------------------------------------------------------
+    pr = ev("poll_ready")
+    env.expect_that("poll_ready ok", section_ok("poll_ready"), pr)
+    env.expect_that("poll reports an idle set as nothing ready", pr.get("idleReady") == 0, pr)
+    env.expect_that("poll reports a ready pipe and a ready terminal",
+                    pr.get("pipeReady") == 1 and pr.get("ttyReady") == 1
+                    and pr.get("pipeQuietAfterDrain") is True,
+                    {"pipe": pr.get("pipeRevents"), "tty": pr.get("ttyRevents"),
+                     "quietAfterDrain": pr.get("pipeQuietAfterDrain")})
+    env.expect_that("poll reports a closed fd as POLLNVAL",
+                    same(pr, "badRevents", "POLLNVAL"),
+                    {"got": pr.get("badRevents"), "POLLNVAL": pr.get("POLLNVAL")})
+
+    pw = ev("poll_wait")
+    env.expect_that("poll_wait ok", section_ok("poll_wait"), pw)
+    # The stage's OWN account, read off the pty, plus its exit code. Asserting on what it saw
+    # rather than only that it finished.
+    env.expect_that("a process parked in poll over two fds was woken by one",
+                    pw.get("parkedInPoll") is True and pw.get("wokeOnPipeOnly") is True
+                    and pw.get("stageVerdict") == 0,
+                    {"said": pw.get("stageSaid"), "exit": pw.get("stageVerdict"),
+                     "parked": pw.get("parkedInPoll")})
+
+    fg = ev("fg_pgrp")
+    env.expect_that("fg_pgrp ok", section_ok("fg_pgrp"), fg)
+    env.expect_that("the foreground group moves, and a group that does not exist is refused",
+                    fg.get("initialIsTheStage") is True and fg.get("bogusRefused") is True
+                    and fg.get("bogusErrno") == fg.get("ESRCH")
+                    and fg.get("movedToMine") is True and fg.get("movedBack") is True, fg)
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m4b.html", env.served_matches_disk(env.document),
+                    "the m4b.html served does not match www/m4b.html on disk")
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
                       labels=("-",), min_expectations=1,
