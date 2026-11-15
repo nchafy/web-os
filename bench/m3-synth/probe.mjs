@@ -196,7 +196,11 @@ const dec = proc.openDecision({}, `/${a.pid}/status`, {});
 checkThat("open marks the decision synthetic", dec.synth === true, dec);
 checkThat("open carries the bytes", dec.bytes.length > 0, dec.bytes.length);
 checkThat("open carries the device", dec.dev === proc.dev, dec.dev);
-check("open on a directory succeeds", proc.openDecision({}, "/", {}).type, DIR);
+// A directory needs O_DIRECTORY here, as it does on the OPFS volume (constraint 82).
+check("open on a directory with O_DIRECTORY succeeds",
+  proc.openDecision({}, "/", { dirOk: true }).type, DIR);
+check("open on a directory without O_DIRECTORY is EISDIR",
+  code(() => proc.openDecision({}, "/", {})), "EISDIR");
 check("O_DIRECTORY on a file is ENOTDIR",
   code(() => proc.openDecision({}, `/${a.pid}/status`, { dirOk: true })), "ENOTDIR");
 // The snapshot must NOT follow later changes -- that is what makes a two-read status coherent.

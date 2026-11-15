@@ -76,7 +76,7 @@ globalThis.M3.proofs = {
   proc_list: null, proc_vanish: null, proc_files: null,
   provider_probe: null, usr_mount: null,
   trace_seq: null, trace_dropped: null,
-  mount_table: null, devices: null, readonly: null,
+  mount_table: null, devices: null, readonly: null, tmpfs: null, regress: null,
 }
 
 
@@ -432,6 +432,34 @@ async function main () {
         available: tr.available, undersized: tr.undersized, shown: tr.shown,
         rowsRendered: tr.rows, issued: CFG.fill, firstRows: tr.firstRows,
       },
+    }
+
+    /* ------------------------------------------------ /tmp, the one writable non-root mount -- */
+    const tmp = await runPid(k, reader, 'tmpfs', ['tmpfs'])
+    say('/tmp: ' + tmp.rows.length + ' calls, ' +
+      (tmp.ok ? 'all ok' : 'failed: ' + tmp.failed.join(', ')))
+    P.tmpfs = {
+      ok: !!tmp.ok,
+      evidence: {
+        rows: tmp.rows,
+        failed: tmp.failed,
+        calls: tmp.rows.length,
+        // Echoed from the kernel so the mount's own accounting is visible beside the syscalls.
+        mounted: st.rows.some((r) => r.path === '/tmp'),
+        writable: st.rows.some((r) => r.path === '/tmp' && !r.readOnly),
+        notDurable: st.rows.some((r) => r.path === '/tmp' && !r.durable),
+      },
+    }
+
+    /* ------------------------------------------- the review's findings, as syscalls ---------- */
+    /* Each of these faulted the kernel or lost a caller's bytes, and none of the ten sections
+     * above reached any of them. A fixed bug becomes a check that would have caught it. */
+    const rg = await runPid(k, reader, 'regress', ['regress'])
+    say('regress: ' + rg.rows.length + ' calls, ' +
+      (rg.ok ? 'all ok' : 'failed: ' + rg.failed.join(', ')))
+    P.regress = {
+      ok: !!rg.ok,
+      evidence: { rows: rg.rows, failed: rg.failed, calls: rg.rows.length },
     }
 
     globalThis.M3.config = {

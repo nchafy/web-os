@@ -149,7 +149,9 @@ const INTS = {
   // M3 adds F_SYNTH: a description whose bytes are held in memory by the kernel, which is what
   // `/proc` and `/dev` hand back. It is a row in the same ops table, which is the property that
   // makes `read(2)` identical for a generated file and a real one — see src/kernel/files.mjs.
-  F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5, F_SYNTH: 6,
+  // F_TMP is a WRITABLE in-memory description: /tmp's bytes live in a Map in the kernel, so
+  // unlike F_SYNTH it accepts a write and unlike F_FILE it needs no handle and no round trip.
+  F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5, F_SYNTH: 6, F_TMP: 7,
 
   // Constraint 17: the process table carries a hard cap. 128 is M0's; 1,000 is the design limit.
   PROC_CAP: 128,
@@ -313,7 +315,7 @@ export const {
   DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DIRENT_HEADER,
   BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
-  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH,
+  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP,
   PROC_CAP, A_SHM, CALLID_WRAP,
   REARM_MS, HB_PERIOD_MS, HB_MISS_LIMIT,
   GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,

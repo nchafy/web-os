@@ -13,16 +13,16 @@ import {
   ENOENT, ENOTDIR, EISDIR, EACCES, ENAMETOOLONG, EROFS, ESPIPE, EOVERFLOW, EMFILE,
   ELIMIT_ERRNO, STAT_EXITED, STAT_KILLED, WNOHANG,
   SIGKILL, SIGSTOP, SIG_DFL, SIG_IGN, SIG_HANDLE, SIG_BIT,
-  O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC,
+  O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE, F_SYNTH, EXDEV,
+  F_FILE, F_SYNTH, F_TMP, EXDEV,
   encodeFilestat, unpackI64, packI64,
 } from "../abi.mjs";
 import { KIND_OPS } from "./files.mjs";
 import { errnoOfFsError } from "./store.mjs";
 import {
-  DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath, normalize,
+  DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath,
 } from "../fs/vfs.mjs";
 import { ZOMBIE, RUNNING, dropCaps } from "./table.mjs";
 
@@ -182,7 +182,7 @@ function metaOp(p, k, path, decide) {
   // the eight metadata mutations. The volume's own verdict (constraint 28) reaches here as the
   // root mount's MNT_RO flag, so a read-only volume and a read-only `/usr` refuse identically
   // instead of through two different tests that could disagree.
-  if (at.mount.readOnly) return -EROFS;
+  if (mountReadOnly(k, at.mount)) return -EROFS;
   // A generated filesystem journals nothing: there is no durable state to record an op against.
   // Its own mutation methods throw, so this returns the errno and never reaches `k.store.journal`
   // with a record the store has no volume for.
@@ -241,16 +241,51 @@ function metaRead(p, k, path, read) {
 function resolveMount(p, k, path) {
   const table = k.mounts;
   if (!table) return -EIO;
+  const abs = absoluteOf(p, path);
+  let at;
   try {
-    return table.resolve(absoluteOf(p, path));
+    at = table.resolve(abs);
   } catch (error) {
     return errnoOfFsError(error);
   }
+  // THE ROOT MOUNT GETS THE PATH AS GIVEN, with `..` intact, because it is the only filesystem
+  // that resolves `..` properly: `src/fs/vfs.mjs`'s walk takes each `..` against the real parent
+  // and follows symlinks first, which is what makes `/a/link-to-b/../c` land in b's parent and
+  // `stat("/missing/../x")` an ENOENT.
+  //
+  // `MountTable.resolve` normalizes LEXICALLY to pick the mount, and it has to: without walking
+  // the tree there is no other way to know which subtree a `..` lands in. Handing that normalized
+  // string on to the VFS was a regression — it popped `..` textually, so a `..` through a
+  // nonexistent or non-directory component stopped failing and a `..` through a symlink resolved
+  // against the name instead of the target. The generated mounts and the tmpfs have no symlinks,
+  // so for them the lexical answer IS the answer.
+  if (at.mount.path === "/") return { mount: at.mount, rel: abs };
+  return at;
 }
 
-/** A process-supplied path as an absolute, lexically normalized one. */
+/** A process-supplied path, made absolute against the caller's cwd. NOT normalized: see
+ *  `resolveMount` for why the root mount must see `..` as the caller wrote it. */
 function absoluteOf(p, path) {
-  return normalize(isAbsolute(path) ? path : joinPath(p.cwd || "/", path));
+  return isAbsolute(path) ? path : joinPath(p.cwd || "/", path);
+}
+
+/**
+ * Whether a mount refuses a write RIGHT NOW.
+ *
+ * The mount row's flag is set once, at boot, from the volume's mount verdict. That is right for
+ * every mount whose read-only-ness cannot change — a generated filesystem, a provider — and WRONG
+ * for the OPFS volume, which `src/kernel/store.mjs` demotes to read-only at runtime after a failed
+ * snapshot (constraint 28: it reports and refuses rather than reseeding).
+ *
+ * The bug that produced: after a demotion the frozen flag still read false, so `metaOp` ran
+ * `decide()`, the VFS APPLIED the op to the in-memory inode table, and only then did the journal
+ * refuse with -EROFS. The caller was told its `mkdir` failed while `stat` showed the directory for
+ * the rest of the session, and it was gone after a reload. The flag is a boot-time fact; the
+ * store's verdict is the live one, so the durable mount asks the store.
+ */
+function mountReadOnly(k, mount) {
+  if (mount.durable) return !!(k.store && k.store.readOnly);
+  return mount.readOnly;
 }
 
 /**
@@ -346,7 +381,7 @@ HANDLERS.open = (p, k) => {
   if (typeof at === "number") return at;
   // The MOUNT's read-only flag, not the volume's. Same rule as metaOp: one test, so a read-only
   // volume and a read-only mount refuse identically.
-  if ((wantW || (flags & O_CREAT)) && at.mount.readOnly) return -EROFS;
+  if ((wantW || (flags & O_CREAT)) && mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
   try {
     decision = at.mount.fs.openDecision(credOf(p), at.rel, {
@@ -365,6 +400,37 @@ HANDLERS.open = (p, k) => {
   // buy a round trip and nothing else. The bytes were produced by `openDecision` and are the
   // snapshot this fd will keep reading — see src/kernel/synth.mjs for why open-time and not
   // read-time.
+  // A TMPFS DESCRIPTION. Like the generated case it answers on the dispatch thread — no journal,
+  // no blob, nothing to await — but it is WRITABLE and it does NOT snapshot: two descriptions on
+  // one tmpfs inode must see each other's writes, as two on one real file do.
+  if (decision.tmpfs) {
+    const d = {
+      kind: F_TMP,
+      refs: 1,
+      flags,
+      type: decision.type,
+      ino: decision.ino,
+      dev: decision.dev,
+      pos: 0,
+      fs: at.mount.fs,
+      rel: decision.rel,
+      info: decision.info,
+      inflight: 0,
+    };
+    if ((flags & O_TRUNC) && wantW && d.type === FILE) {
+      try {
+        at.mount.fs.truncate(d.ino, 0);
+      } catch (error) {
+        return errnoOfFsError(error);
+      }
+    }
+    // O_APPEND IS NOT A SEEK AT OPEN. This set `d.pos` to the size here and was the exact defect
+    // recorded ~60 lines below for the OPFS path: two `>>` descriptions on one file both start at
+    // the same end, both write there, and both are told they wrote — measured there as eight bytes
+    // acknowledged, the file 12 bytes long, and the first writer's four gone. The offset has to be
+    // resolved PER WRITE, which `files.mjs`'s F_TMP `write` now does from `d.flags`.
+    return p.fds.add(d);
+  }
   if (decision.synth) {
     const d = {
       kind: F_SYNTH,
@@ -503,8 +569,11 @@ function atOffset(p, k, which) {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
   // A generated file is seekable, so `pread` is legal on it and ESPIPE would be the wrong refusal.
-  // `pwrite` is refused by the ops table instead: F_SYNTH declares no `write`, which is -ENOSYS.
-  if (d.kind !== F_FILE && d.kind !== F_SYNTH) return -ESPIPE;
+  // THE LINE BELOW IS THE REFUSAL and is load-bearing, which an earlier comment here denied: it
+  // claimed the ops table would answer -ENOSYS, but unlike `HANDLERS.write` this function never
+  // tests `ops.write` before calling it, so deleting the guard on the strength of that comment
+  // would turn `pwrite` on a /proc fd into a TypeError escaping the dispatcher.
+  if (d.kind !== F_FILE && d.kind !== F_SYNTH && d.kind !== F_TMP) return -ESPIPE;
   if (d.kind === F_SYNTH && which === "write") return -EROFS;
   const length = p.ctl[A1] | 0;
   if (length < 0 || length > MAX_INLINE) return -EINVAL;
@@ -555,7 +624,7 @@ const seekTo = (p, d, next) => {
 HANDLERS.seek = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  if (d.kind !== F_FILE && d.kind !== F_SYNTH) return -ESPIPE;
+  if (d.kind !== F_FILE && d.kind !== F_SYNTH && d.kind !== F_TMP) return -ESPIPE;
   const offset = Number(unpackI64(p.ctl[A1], p.ctl[A2]));
   const whence = p.ctl[A3] | 0;
   if (whence === SEEK_SET) return seekTo(p, d, offset);
@@ -563,6 +632,18 @@ HANDLERS.seek = (p, k) => {
   if (whence !== SEEK_END) return -EINVAL;
   // A generated file's extent is the snapshot it already holds, so SEEK_END needs no round trip.
   if (d.kind === F_SYNTH) return seekTo(p, d, d.bytes.length + offset);
+  // A tmpfs extent is known synchronously: the Map holds it — but ONLY for a file. A directory
+  // has no blob entry, so asking its size threw FsError out of a handler the dispatcher does not
+  // wrap, and `open("/tmp", O_DIRECTORY)` then `seek(fd, 0, SEEK_END)` faulted the kernel. A
+  // directory is not seekable to its end; EISDIR is what POSIX says and what `read` already says.
+  if (d.kind === F_TMP) {
+    if (d.type !== FILE) return -EISDIR;
+    try {
+      return seekTo(p, d, d.fs.size(d.ino) + offset);
+    } catch (error) {
+      return errnoOfFsError(error);
+    }
+  }
   // `d` is captured, not re-resolved from the fd: the description is what the cursor belongs to,
   // and dup/dup2 mean the fd and the description are not the same thing.
   k.later(p, async () => {
@@ -589,6 +670,16 @@ HANDLERS.fstat = (p, k) => {
   // A generated file answers from the description: its size is the snapshot's length, which is
   // final, so there is nothing to ask storage about.
   if (d.kind === F_SYNTH) return writeStat(p, { ...d.info, size: d.bytes.length }, d.dev);
+  // A tmpfs answers from its own table, which is authoritative and synchronous. `fstat` must
+  // report the CURRENT size and not the one recorded at open: another description may have
+  // written since, and that is the case fstat exists for.
+  if (d.kind === F_TMP) {
+    try {
+      return writeStat(p, { ...d.fs.vfs.fstat(d.ino), dev: d.dev }, d.dev);
+    } catch (error) {
+      return errnoOfFsError(error);
+    }
+  }
   if (d.kind !== F_FILE) return -EINVAL;
   if (!k.store || !k.store.vfs) return -EIO;
   k.later(p, async () => {
@@ -602,9 +693,16 @@ HANDLERS.fstat = (p, k) => {
 HANDLERS.ftruncate = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  if (d.kind !== F_FILE || d.type !== FILE) return -EINVAL;
+  // The size is parsed BEFORE any kind branch, so a bad argument is EINVAL for every kind rather
+  // than for whichever ones happen to read it first.
   const size = Number(unpackI64(p.ctl[A1], p.ctl[A2]));
   if (!Number.isSafeInteger(size) || size < 0) return -EINVAL;
+  if (d.kind === F_TMP) {
+    if (d.type !== FILE) return -EINVAL;
+    // Synchronous, and the ops row has already turned any FsError into an errno.
+    return KIND_OPS[F_TMP].truncate(d, size);
+  }
+  if (d.kind !== F_FILE || d.type !== FILE) return -EINVAL;
   const ops = KIND_OPS[d.kind];
   if (!ops.truncate) return -ENOSYS;
   return settle(k, p, ops.truncate(d, size));
@@ -707,7 +805,7 @@ HANDLERS.truncate = (p, k) => {
   // for exactly this reason: a single "it refused" would have passed.
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  if (at.mount.readOnly) return -EROFS;
+  if (mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
   try {
     decision = at.mount.fs.openDecision(credOf(p), at.rel, { wantW: true });
@@ -800,7 +898,8 @@ HANDLERS.readdir = (p, k) => {
   // Resolved from the DESCRIPTION, not from a path: readdir takes an fd, so there is no path to
   // resolve a mount against, and the mount it came from is recorded on the description at open.
   return dirRead(p, k, d, () => {
-    const entries = d.kind === F_SYNTH ? d.fs.listRel(d.rel) : k.store.vfs.listIno(d.ino);
+    const entries = (d.kind === F_SYNTH || d.kind === F_TMP)
+      ? d.fs.listRel(d.rel) : k.store.vfs.listIno(d.ino);
     const encoder = new TextEncoder();
     const out = [];
     let used = 0;
@@ -867,13 +966,16 @@ HANDLERS.statfs = (p, k) => {
   if (mount.fs !== k.store.vfs) {
     // A generated filesystem has no blocks and no quota. Zeros, because inventing a size would
     // make `df` print a number that measures nothing — the same reason the block size below is 1.
+    // EVERY FIELD FROM THE FILESYSTEM, including `bsize` and `namemax`. Hardcoding those two here
+    // meant a filesystem that declared a block size could not publish it — one fact with two
+    // renderers, and the kernel's copy winning over the only object that knows the answer.
     const s = mount.fs.statfs();
     dv.setBigUint64(0, BigInt(s.blocks), true);
     dv.setBigUint64(8, BigInt(s.bfree), true);
     dv.setBigUint64(16, BigInt(s.files), true);
     dv.setBigUint64(24, BigInt(s.ffree), true);
-    dv.setUint32(32, 1, true);
-    dv.setUint32(36, NAME_MAX, true);
+    dv.setUint32(32, s.bsize >>> 0, true);
+    dv.setUint32(36, s.namemax >>> 0, true);
     return replyBytes(p, record);
   }
   const counted = k.store.vfs.stats();

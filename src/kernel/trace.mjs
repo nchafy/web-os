@@ -21,7 +21,13 @@ export const TR_NR = 8;       // u16  syscall number
 export const TR_KIND = 10;    // u8   TR_ENTER | TR_EXIT
 export const TR_RSVD = 11;    // u8   zero, so a future field has somewhere to go
 export const TR_R0 = 12;      // i32  a0 on entry, r0 on exit
-export const TR_TIME = 16;    // f64  ms, Date.now()-based so it is comparable across agents
+// f64 ms from `performance.now()` IN THE KERNEL'S AGENT, which is what the dispatcher already
+// holds and hands over. NOT comparable across agents: `performance.now()` is relative to each
+// agent's own time origin, so only DURATIONS cross an agent boundary (the same rule src/abi.mjs
+// states for the deadline pair). Every record in the ring comes from the kernel, so they are all
+// on one clock and comparable with each other — which is what the trace needs. This said
+// "Date.now()-based so it is comparable across agents" and was simply wrong about the value.
+export const TR_TIME = 16;
 export const TR_CALLID = 24;  // u32
 export const TR_EXTRA = 28;   // u32  a1 on entry, reply length on exit
 
