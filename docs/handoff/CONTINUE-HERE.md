@@ -1,7 +1,7 @@
 # web-os: continue implementation
 
 Written 2026-11-15 by the session that built the harness through M2, and updated the same day by
-the session that built M3 and M4's pipe half. This file carries only what the repository cannot
+the session that built M3, M4 and M4b. This file carries only what the repository cannot
 tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
@@ -27,60 +27,70 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, and **M4's pipe half** — the pty, the line discipline
-and `poll` are M4b and are not done. Each has a record in `MILESTONES.md` with its actual cost and
+Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, **M4** and **M4b**. Each has a record in `MILESTONES.md` with its actual cost and
 what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 6 checks, 243 expectations |
+| `scripts/check.py` | the suite — 7 checks, 278 expectations |
 | `scripts/check.py --prove-failure` | inverts every expectation; must report failures |
-| `scripts/check.py --negative <control>` | 12 controls; `--controls` lists what each proves. **Kill stray Chrome between runs** or a sweep reports a false BROKEN |
+| `scripts/check.py --negative <control>` | 14 controls; `--controls` lists what each proves. **Kill stray Chrome between runs** or a sweep reports a false BROKEN |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 91 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
 **Run all of them before and after anything you change.** `scripts/check.py --controls` lists what
 each control proves.
 
-## Next: M4b — the pty, the line discipline, and `poll`
+## Next: M4a — the terminal gets a real window
 
-M4's pipe half is done and verified; `MILESTONES.md` §M4 carries the record and §M4b is the rest.
-**The owed experiment is retired** — a synchronous OPFS read cannot be interrupted, and `read()` is
-INTR-capable anyway because the handles are in the I/O worker. Constraints 86–89,
-`bench/m4-intr/probe.py`.
+`MILESTONES.md` §M4a is the spec. The pty it points at exists and is verified, so this is the UI
+half: drop in `../webxp/src/window.mjs` unstyled and point it at the pty.
 
-Two things to settle before writing code, both found by reading the docs against each other:
+Three things the docs already settle, so do not re-derive them:
 
-- **`poll` is required by constraint 42 and is absent from M4's build list.** The constraint is
-  normative: `poll()` MUST be the single wait primitive over fds, because a process has one futex
-  word and one outstanding call, so one window plus a pipe cannot otherwise wake it. The case that
-  hits it first is `docs/designs/REVIEW-FINDINGS.md` finding 1's *corrected* scenario — parked in
-  `read(master)` at idle with no output, keys dead indefinitely — which is M4a's terminal, not M7.
-- **`ICANON` and `ECHO` semantics are specified nowhere** in any authored doc. Only `ISIG`/`VINTR`
-  is: Ctrl-C raises SIGINT on the foreground group even when the UI is wedged. Treat the rest as
-  POSIX-default by assumption and say so where you implement it. `docs/ABI.md` also requires `VMIN`
-  and `VTIME` in the termios struct, which M4's flag list omits.
+- **That window is a special case with an expiry date.** `MILESTONES.md`: "This window is
+  special-cased, not an ABI. M7 generalises it and deletes the special case. Say so in the code or
+  it becomes the architecture by accident."
+- **It cannot be checked by screenshot** (constraint 40). An inert frame and a working one are the
+  same picture. The proof is "type into the window, assert the pty echoed it"; the control is
+  "detach the pty, the keystroke must not appear."
+- **`poll` is already there and M4a is the reason it exists.** `docs/designs/REVIEW-FINDINGS.md`
+  finding 1's *corrected* scenario is the case this will hit: parked in `read(master)` at idle with
+  no output, keys dead indefinitely. Use `poll` over the window fd and the pty rather than
+  blocking on either.
+- **The "not responding" detector lands here**, deliberately deferred from M1 — a kernel-side timer
+  plus a UI hook, and there was no UI to hook until now.
 
-### What M4 leaves you
+Then M5 (the shell and ten programs), M6, then option A (M7–M14).
 
-`bench/m4-pipe/probe.mjs` (68 assertions) and `bench/m4-intr/probe.py` run without a browser.
-`bench/m4-fs/program.mjs` is the pipeline orchestrator: one mode per proof, spawning its own
-stages. Add a mode rather than a new program.
+### What M4 and M4b leave you
 
-**`pipe2` can return fd 0 as the read end** (constraint 94), because `spawn` leaves fd 0 free and
-`fds.add` hands out the lowest. A process building a pipeline MUST open its own stdin first — the
-orchestrator calls `ensureStdin` for exactly this. M5's shell has to do the same or inherit the bug.
+Six host probes run without a browser and are the fast loop: `probe.mjs` under `bench/m3-synth`,
+`m3-provider`, `m3-trace`, `m3-tmpfs`, `m4-pipe` and `m4b-pty`, plus `bench/m4-intr/probe.py`.
 
-**A blocking call parks on SEQ and never inside a synchronous call** (constraint 88, measured). An
-ops row returns `null` to mean parked and `calls.mjs` turns that into PENDING; `null` must be
-tested before any numeric use, because `null >= 0` is true and a parked read that fell through
-answered the caller 0, which on a pipe means EOF (96).
+`bench/m4-fs/program.mjs` and `bench/m4b-fs/program.mjs` are the orchestrators — one mode per
+proof, each spawning its own stages. Add a mode rather than a new program.
 
-### The four defects that had never run
+**`pipe2` and `pty_open` can return fd 0** (constraint 94), because `spawn` leaves fd 0 free and
+`fds.add` hands out the lowest. Both orchestrators call `ensureStdin` first. M5's shell must too.
+
+**A blocking call parks on SEQ, never inside a synchronous call** (constraint 88, measured). An ops
+row returns `null` to mean parked; `null` must be tested before any numeric use, because `null >= 0`
+is true and a parked read that fell through answered the caller 0 — which on a pipe means EOF (96).
+
+**A test double must not be gentler than the real thing.** M4's pipe probe gave the kernel a fake
+`raise` that did not reap, and 68 assertions passed over a double-reply defect (98).
+
+**A timeout must carry state.** A stopped pipe or pty raises no error — a parked reader is a
+legitimate state — so the pages attach the kernel's park and refcount dump to their own timeouts.
+That is what located constraints 92 and 103, each in one run.
+
+### Treat any mechanism with no live caller as unverified
 
 `ppid` was assigned nowhere, so `waitpid`, `parkParent` and teardown's parent-wake were all
-unreachable — and two of them were wrong the moment they became reachable (constraints 90, 91).
-**Treat any mechanism with no live caller as unverified**, however finished it looks.
+unreachable — and two of them were wrong the moment they became reachable (90, 91). Teardown's fd
+refcount was wrong for every dup'd description and had no symptom until a pty slave sat on two fds
+(103). However finished a path looks, if nothing calls it, nothing has checked it.
 
 ## The method that worked
 
