@@ -6,7 +6,7 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, EBADF, MAX_INLINE, fnv1a, FNV1A_BASIS,
+  F_SINK, F_FILE, F_SYNTH, EBADF, EINVAL, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 
 /** Indexed by kind. A kind with no entry is -ENOSYS, which is the honest state of a call the
@@ -119,6 +119,39 @@ registerKind(F_FILE, {
   },
   close(d) {
     return STORE.closeFd(d);
+  },
+});
+
+/**
+ * F_SYNTH: a generated file. Its bytes were produced at `open` and are held on the description.
+ *
+ * SYNCHRONOUS, and that is the one thing that makes it different from F_FILE: there is no handle,
+ * no blob and no I/O worker, so `read` returns a count rather than a promise and `calls.mjs`'s
+ * settle() path is never entered. Reading `/proc/<pid>/status` therefore costs one syscall and no
+ * round trip.
+ *
+ * `write` is absent rather than present-and-refusing, because the table's own contract is that a
+ * missing op is -ENOSYS (see the head of this file) — and a kind that declared a write only to
+ * refuse it would be a second place the read-only rule is written. The mount's MNT_RO flag is the
+ * first and `metaOp` is where it is read.
+ */
+registerKind(F_SYNTH, {
+  read(d, p, dstOff, length, at) {
+    const from = at === undefined ? d.pos : at;
+    if (from < 0) return -EINVAL;
+    if (from >= d.bytes.length) return 0;        // EOF, which for a generated file is the real end
+    const n = Math.min(length, d.bytes.length - from);
+    p.bytes.set(d.bytes.subarray(from, from + n), dstOff);
+    // Only the cursor path advances it. A pread must not move the cursor — the same rule F_FILE
+    // follows, and the reason `at` travels as an argument.
+    if (at === undefined) d.pos = from + n;
+    return n;
+  },
+  close() {
+    // Nothing to release: the bytes are a plain Uint8Array the garbage collector owns. This exists
+    // so `FileTable.close` has an op to call rather than reaching the `?.` and silently doing
+    // nothing, which would hide a kind that genuinely needed a release.
+    return 0;
   },
 });
 
