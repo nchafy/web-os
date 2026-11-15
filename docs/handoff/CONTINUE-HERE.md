@@ -1,8 +1,8 @@
 # web-os: continue implementation
 
 Written 2026-11-15 by the session that built the harness through M2, and updated the same day by
-the session that built M3 and M4's pipe half. This file carries only what
-the repository cannot tell you. Everything the repo settles, the repo settles.
+the session that built M3 and M4's pipe half. This file carries only what the repository cannot
+tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
 
@@ -27,8 +27,8 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, and **M4's pipe half** (the pty, the line
-discipline and `poll` are M4b and are not done). Each has a record in `MILESTONES.md` with its actual cost and
+Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, and **M4's pipe half** — the pty, the line discipline
+and `poll` are M4b and are not done. Each has a record in `MILESTONES.md` with its actual cost and
 what it changed in the plan. Current gates, all green:
 
 | command | what it is |
