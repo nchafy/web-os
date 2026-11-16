@@ -6,12 +6,28 @@ tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
 
-- **Worktree:** `/Users/chafyni/claude/web-os/.claude/worktrees/m4a-window` — M4a's work is here.
-  M0–M5 are on `.claude/worktrees/m4b-flake`; `webos-impl` is one commit behind it.
-- **Branch:** `m4a-terminal-window`, branched from `f59dc60` (M5 + the program-fetch fix). `main` is
-  still at the scaffold `c3d826f`. Git refuses to move `main` from inside a worktree, so if the
-  user wants it merged:
-  `cd /Users/chafyni/claude/web-os && git merge --ff-only m4a-terminal-window`
+**THE AUTHORITATIVE WORKTREE IS `.claude/worktrees/webos-impl`, ON BRANCH
+`worktree-webos-impl`.** Work there. It is the only branch that contains every commit in the
+repository, and it is pushed.
+
+- **Why this needed saying.** Six worktrees existed on five branches and development had forked in
+  two places at once: M4a on `m4a-terminal-window` and an M5 fix on `worktree-webos-impl`, neither
+  containing the other. Both had appended constraints numbered 155 and 156, because on each branch
+  those numbers were free — so the merge was a reconciliation and not a textual one, and the
+  incoming pair was renumbered 185 and 186. A second fork of that kind costs the same again.
+- **Before starting work, check nothing has forked under you:**
+  `git worktree list` then `git merge-base --is-ancestor <other-branch> HEAD` for each. An ancestor
+  is contained and can be ignored; anything else has to be merged BEFORE more is written on top.
+- **The other worktrees are redundant as of this commit** — `m4a-window`, `m4b-flake`,
+  `learning-mode`, `hobbyist-os-research` and `m6-realm` are all ancestors of this branch, and
+  `main` is still the scaffold `c3d826f`. They are kept rather than deleted because other sessions
+  may hold uncommitted work in them. Confirm each is clean before removing it, and never with
+  `--force`.
+- **`main` is still at the scaffold.** Git refuses to move it from inside a worktree, so:
+  `cd /Users/chafyni/claude/web-os && git merge --ff-only worktree-webos-impl`
+- **If you are a parallel session**, branch from `worktree-webos-impl` and merge back into it
+  often. Do not let two branches grow past one shared ancestor; the constraint numbering alone
+  makes that expensive.
 - **Python:** `.venv/bin/python` (3.8, has `websocket-client`). **Node:** 18.20.2 on PATH.
   **Chrome:** 157.0.8103.52 — `docs/CONSTRAINTS.md`'s older figures were taken on 157.0.8103.38,
   so name the build beside any new number.
@@ -315,7 +331,17 @@ refcount was wrong for every dup'd description and had no symptom until a pty sl
   the main session's calls were reliable when subagents were not.
 - **Kill stray Chrome between runs:** `pgrep -f "showup-chrome-" | wc -l`, then
   `pkill -f "showup-chrome-"`. Leftovers compete for the renderer and corrupt latency numbers. One
-  earlier run accumulated 136.
+  earlier run accumulated 136; an M4a session found 20 left by its own runs.
+  **WAIT TEN SECONDS, NOT FIVE.** Measured by the M5 session: a run started five seconds after
+  `pkill` came back BROKEN on three checks with `connection closed mid-frame`, and ten seconds was
+  reliable. `pkill` returns before Chrome is gone, and constraint 121's flake has the same
+  signature — so a single red immediately after a kill is unmeasured, not a failure.
+- **Read `sysctl vm.swapusage` before believing any browser result.** M4a could not run
+  `scripts/check.py` AT ALL for a stretch: swap read 24.2 GB of 23.5 GB used with ~390 MB free and
+  Chrome was killed mid-run every time, which arrives as exit 144 and as BROKEN checks reporting
+  `socket is already closed`. The harness fails closed and says it measured nothing, which is the
+  correct outcome and easy to misread as a defect in the change under test. At 14.6 GB used the
+  same gates passed unchanged.
 - **Never run two browser-driving things at once.** Doing so produced "Chrome could not be driven:
   connection closed mid-frame" — the harness correctly refused to report, but the measurement was
   mine contaminating my own.
