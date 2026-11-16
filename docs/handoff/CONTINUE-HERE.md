@@ -321,6 +321,23 @@ Two smaller ones worth carrying forward:
   synchronous `run` held "one program at a time" by construction; the async one does not, so it is
   now a guard that faults on re-entry (204).
 
+## The fastest way to see the system work at all
+
+`scripts/serve.py`, then `http://127.0.0.1:8000/www/m4a.html?live=1`. One kernel, one window, one
+shell, no proofs — `/usr/bin/sh` in its own process on a real pty, prompt in about 80 ms. Click the
+terminal and type. `ls /usr/bin`, `ps`, `kill %1`, Ctrl-C and Ctrl-D all work.
+
+**M6 is visible from that prompt**, which is the only answer to "is the interactive shell in the
+stripped realm too?" that comes from inside the realm:
+
+- `/bench/m6-realm/program.mjs p_show` — prints every binding the process cannot reach, and the
+  syscall channel still answering. Needs no arguments and writes nothing.
+- `/bench/m6-realm/program.mjs p_fault` — the bypass snippet with no try/catch. The process dies
+  of SIGABRT and the page logs the fault with a stack.
+
+Both are rows in `BENCH_ENTRIES` (`src/kernel/providerfs.mjs`); a bench program a PROCESS spawns
+needs one, because `SYS_spawn` loads from the filesystem.
+
 ## TEST A SECOND ENGINE BEFORE BELIEVING A GREEN SUITE
 
 Twice now, in two consecutive milestones, a human opening the page found an engine split that 394

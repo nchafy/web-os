@@ -71,6 +71,11 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 - **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and twenty negative controls over ten checks and 394 expectations.
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
+- **There is a working terminal, and you can watch M6 from inside it.** `scripts/serve.py`, then
+  `http://127.0.0.1:8000/www/m4a.html?live=1` — a real window with `/usr/bin/sh` in its own
+  process over a real pty. `ls /usr/bin`, `ps`, `echo hi` and Ctrl-C all work. Typing
+  `/bench/m6-realm/program.mjs p_show` prints what that shell's realm cannot reach, from inside
+  it; `p_fault` runs the bypass snippet and the process dies of it.
 - **A process cannot reach the system except through the syscall channel.** M6: a process
   worker's realm is stripped before its program text is evaluated, and a Content-Security-Policy
   on the response that creates that realm bounds its module loader — because `import(expr)` is not
