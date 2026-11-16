@@ -2207,6 +2207,11 @@ READ_M3 = """(() => {
     fingerprint: Number(M.kernelFingerprint || 0),
     cfg: M.config || {},
     errors: (M.errors || []).map(String),
+    // THE STATE A STALLED PROOF RECORDED. www/m4b.html has written this for two milestones and
+    // nothing ever read it, so every BROKEN run reported a bare message and threw away the one
+    // artifact that localises the stall: which proof, which handshake step, and every message the
+    // kernel did send before it stopped.
+    stuck: M.stuck ? JSON.stringify(M.stuck) : '',
     faults: (M.faults || []).map((f) => String(f && f.why)),
     notes: (M.notes || []).map(String),
     mount_table: one(P.mount_table),
@@ -2390,6 +2395,7 @@ M4B_LABELS = (
     "and the caller observes its own interruption",
     "the channel is not left one reply ahead",
     "exactly one call was answered by its own side effect",
+    "the program loader never reached its deadline",
     # A negative timeout is infinite, and a refused `dup` leaks no reference.
     "empty_poll ok",
     "poll over an empty set with no timeout blocks",
@@ -5878,7 +5884,13 @@ def check_m4b(env: Env) -> None:
     if got["state"] == "error":
         env.unmeasurable(
             "www/m4b.html reported state 'error' before producing proofs: %s. Nothing below was "
-            "measured." % (got["why"] or "no reason given"))
+            "measured.%s"
+            % (got["why"] or "no reason given",
+               # The stalled proof's own record: the step that timed out and the kernel messages
+               # that did arrive. Without it a stall is only a sentence.
+               ("\n    stalled: %s" % got["stuck"]) if got["stuck"] else
+               "\n    (www/m4b.html recorded no `stuck` state, so the stall was not in a proof's "
+               "handshake)"))
     if got["state"] == "aborted":
         env.unmeasurable(
             "www/m4b.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
@@ -6015,6 +6027,14 @@ def check_m4b(env: Env) -> None:
     # count rather than a bound, so the counter cannot absorb a genuine double reply elsewhere.
     env.expect("exactly one call was answered by its own side effect",
                ss.get("answeredDuringCall"), 1)
+    # THE PROGRAM FETCH'S DEADLINE DID NOT FIRE. It exists so a stalled load fails `spawn` rather
+    # than hanging it (constraint 123), and a healthy run must never reach it — a non-zero count
+    # means the bound has become the normal path, which is a different system from the one every
+    # other expectation here was measured against.
+    env.expect_that("the program loader never reached its deadline",
+                    ss.get("programFetchTimeouts") == 0 and ss.get("programFetchRetries") == 0,
+                    {"timeouts": ss.get("programFetchTimeouts"),
+                     "retries": ss.get("programFetchRetries")})
 
     # ---- a negative timeout is INFINITE, and a refused `dup` leaks nothing ---------------
     ep = ev("empty_poll")

@@ -392,6 +392,38 @@ constraint 42 actually makes.
 
 *Evidence: measured. Constraints 115, 116.*
 
+## D21 · A program fetch is bounded and retried once; the m4b flake is exposure, not a defect
+
+**Decided:** `programImage` fetches under a 5 s `AbortController` deadline and retries once.
+**Rejected:** leaving it unbounded; racing a timer against the fetch; dropping `cache: "no-store"`
+so Chrome's HTTP cache would serve twelve of thirteen loads.
+
+`spawn` cannot answer until the program is loaded, and both the page-driven batch and `SYS_spawn`
+await that load — so an unbounded fetch makes process creation hang rather than fail. The calling
+process parks on a reply that never comes, with no errno and nothing in the trace.
+
+Measured, which is what turned this from a theory into a defect. `bench/kernel-churn/probe.py`
+boots kernels and does nothing else: **0 stalls in 360 boots idle, 3 in 540 under threefold
+contention — 0.56% per boot**, two of the three on exactly this await. At 0.56% per boot a page
+booting thirteen kernels fails about 1 run in 14, and `www/m4b.html` was failing at 1 in 12. The
+arithmetic closing like that is the reason this explanation is believed and the five earlier ones
+were not.
+
+A racing timer was the other way to bound it and is worse: the losing fetch stays outstanding, so
+the connection the stall is about is still held. `AbortController` ends the request.
+
+Dropping `no-store` would have removed twelve of the thirteen network round trips and most of the
+exposure, and it is the wrong trade: the harness's whole discipline is that a check must never
+read a stale copy of what it is testing, and a cached program is exactly that.
+
+**The flake itself is not a defect in what m4b tests.** It is the only check that boots one kernel
+per proof, so it meets the per-boot risk thirteen times; the stall is in the page-to-kernel
+bootstrap, before any behaviour under test, and it fails closed — BROKEN, never a pass. The
+fresh-kernel-per-proof design stays, because its reason is sound: a zombie sits in a ~2.2 s
+quarantine and sharing one kernel would make each proof depend on how fast the last one finished.
+
+*Evidence: measured. Constraints 123, 124.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record
