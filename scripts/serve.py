@@ -31,6 +31,46 @@ ISOLATION_HEADERS = (
     ("Cross-Origin-Embedder-Policy", "require-corp"),
 )
 
+#: Every response under this prefix carries the process realm's policy. A PREFIX and not the one
+#: filename, because `src/libos/` IS the process realm in file form (CLAUDE.md) — and because the
+#: worker's entry path is `src/kernel/kernel.mjs`'s business (`RUNTIME_URL`), so a server that
+#: named the file would be a second copy of a constant the kernel owns.
+PROCESS_REALM_PREFIX = "/src/libos/"
+
+#: M6's second half. A Content-Security-Policy on the response that CREATES the process realm.
+#:
+#: WHERE IT IS DELIVERED IS A MEASURED FACT, not a preference. `bench/m6-realm/csp-probe.py`
+#: measured all four deliveries on Chrome 157.0.8103.52: a policy on the DOCUMENT changes nothing
+#: for a dedicated module worker's loader — the `document` mode is behaviour-identical to `none`,
+#: with zero violations reported — so it has to be on the worker script's own response.
+#: `docs/CONSTRAINTS.md` 187 carries the table, and 188 records the correction to 139, which named
+#: the document.
+#:
+#: WHAT EACH DIRECTIVE IS FOR:
+#:   script-src 'self' blob:   `'self'` because the libos's own static imports are same-origin;
+#:                             `blob:` because a program image IS a blob URL (src/kernel/exec.mjs).
+#:                             Absent `'unsafe-eval'`, which is what refuses `eval` and
+#:                             `new Function` — measured, in the program as well as in the worker.
+#:   connect-src 'none'        the network, for the bindings the strip already removed. Belt and
+#:                             braces on purpose: the strip is in-realm and this is not.
+#:   default-src 'none'        everything not named above.
+#:
+#: `worker-src 'none'` WAS HERE AND HAD TO COME OUT, because Firefox applies a worker script's own
+#: `worker-src` to THAT WORKER'S OWN CREATION: with it, Firefox refuses to start the very worker
+#: the policy describes, and the process worker never runs. The failure is silent by nature — an
+#: error event with an empty message, no filename and line 0 — so the kernel could only report
+#: `process 1 runtime: error`. Chrome applies the directive to workers created BY the realm, which
+#: is what M6 wanted it for. Measured on Firefox 156.0.1 / Chrome 157.0.8103.52, both directions
+#: and against `child-src 'none'` too, which Firefox treats the same. Constraint 206.
+#: NOTHING IS LOST: `src/libos/lockdown.mjs` deletes `Worker`, `SharedWorker` AND
+#: `URL.createObjectURL`, so a process cannot construct a worker at all. The policy was belt and
+#: braces there, and the strip is the mechanism constraint 53 actually requires.
+#: The two halves are disjoint and both are needed: this policy does NOT touch OPFS, `indexedDB`,
+#: `caches` or `URL.createObjectURL` (measured), and the strip does not touch the module loader.
+PROCESS_REALM_CSP = (
+    "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
+)
+
 #: Extensions the stdlib guesses wrongly or not at all. `.mjs` as `text/plain` is a module that
 #: never loads, and the browser's error names neither the file nor the reason.
 EXTRA_TYPES = {
@@ -76,6 +116,40 @@ class _Limited:
 
 class Handler(SimpleHTTPRequestHandler):
     isolate = True
+    #: M6. False omits the process realm's policy, to prove a check that needs it fails without
+    #: it. The same role `isolate` plays for COOP/COEP — a control that cannot be switched off has
+    #: not been shown to be the control.
+    csp = True
+
+    def _in_process_realm(self) -> bool:
+        """Does this response create, or sit inside, the process realm?
+
+        ASKED OF THE RESOLVED FILE, never of the request's spelling, and that is the whole point
+        of this function. Two spellings of one file must not get two different policies, in either
+        direction: `/src/libos/../kernel/kernel.mjs` is the KERNEL, which fetches providers and
+        mints program images, so handing it `connect-src 'none'` would break the system with no
+        visible cause — and anything that resolves to `src/libos/` is a process realm and must
+        carry the policy however it was asked for.
+
+        A NORMALIZED PREFIX TEST WAS NOT ENOUGH, and an adversarial review measured it:
+        `GET /%2fsrc/libos/process.mjs` served the real `process.mjs` — byte-identical, 13,675
+        bytes — with NO policy, because `unquote` runs after `urlparse` and `normpath` keeps the
+        two leading slashes that `%2f` produces, while `translate_path` collapses them and serves
+        the file anyway. A process worker created from that URL would have had an unbounded module
+        loader: `eval` and a computed `import(expr)` both work. Deferring to `translate_path` —
+        the same resolution that decides which bytes are sent — closes the whole class rather than
+        the spelling that was found.
+        """
+        try:
+            resolved = os.path.realpath(self.translate_path(self.path))
+            realm = os.path.realpath(os.path.join(
+                getattr(self, "directory", os.getcwd()),
+                *PROCESS_REALM_PREFIX.strip("/").split("/")))
+        except (OSError, ValueError):
+            # A path the resolver cannot make sense of is not a response this server will serve
+            # from the process realm either. Fail closed in the direction that matters: no claim.
+            return False
+        return resolved == realm or resolved.startswith(realm + os.sep)
 
     def send_head(self):
         # The default root is the repository root, which contains .git and .claude. Nothing
@@ -189,6 +263,8 @@ class Handler(SimpleHTTPRequestHandler):
         if self.isolate:
             for name, value in ISOLATION_HEADERS:
                 self.send_header(name, value)
+        if self.csp and self._in_process_realm():
+            self.send_header("Content-Security-Policy", PROCESS_REALM_CSP)
         # No-store, because a cached pre-isolation response is a confusing half-hour.
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
@@ -224,6 +300,13 @@ def main(argv: list[str] | None = None) -> int:
         help="omit COOP/COEP. Only for proving that a check which requires isolation fails "
         "without it — a harness nobody has seen fail is a harness nobody has checked.",
     )
+    ap.add_argument(
+        "--no-csp",
+        action="store_true",
+        help="omit the process realm's Content-Security-Policy on %s. M6's second negative "
+        "control: a program's computed `import(expr)` and its `eval` must then SUCCEED."
+        % PROCESS_REALM_PREFIX,
+    )
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -234,7 +317,10 @@ def main(argv: list[str] | None = None) -> int:
     os.chdir(root)
 
     Handler.isolate = not args.no_isolation
+    Handler.csp = not args.no_csp
     state = "ISOLATED" if Handler.isolate else "NOT ISOLATED (--no-isolation)"
+    if not Handler.csp:
+        state += ", NO PROCESS-REALM CSP (--no-csp)"
     print(f"serve.py: {root}", file=sys.stderr)
     print(f"serve.py: http://127.0.0.1:{args.port}/  [{state}]", file=sys.stderr)
     if os.path.isdir(os.path.join(root, "www")):

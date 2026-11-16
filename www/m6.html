@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M6 — neuter the process realm</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
+</head>
+<body>
+<pre id="log">M6 starting…</pre>
+<script>
+  globalThis.M6 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M6's page harness: the realm a program is evaluated in, and what it can no longer reach.
+ *
+ *   PROOF 1  realm       every binding constraint 41 names is absent, and every CALL fails
+ *   PROOF 2  volume      the kernel's own bytes survive a uid-1000 process that tries to write
+ *                        them by inode through ambient OPFS. THE HEADLINE
+ *   PROOF 3  loader      a COMPUTED `import(expr)` and `eval` are refused — the half no scanner
+ *                        can do and `fetch` has nothing to do with (constraint 139)
+ *   PROOF 4  fault       MILESTONES.md M6's own proof: the bypass snippet, no try/catch. The
+ *                        program faults and /proc loses it
+ *   PROOF 5  policy      the policy is on the wire, on the response that creates the realm
+ *
+ * TWO CONTROLS, one per half, because the halves are independent and a control that moved both
+ * would prove neither:
+ *   ?no_lockdown=1   the realm is NOT stripped (cfg.noLockdown, refused without bench=1).
+ *                    MILESTONES.md: "Skip the stripping; the same program must succeed."
+ *   served --no-csp  the policy is NOT sent. The loader rows must then REACH.
+ *
+ * WHY ONE KERNEL FOR PROOFS 1-4 and not one per proof: the victim file has to outlive the process
+ * that wrote it and be read back by a third, and a fresh kernel per step would be a fresh mount
+ * of the same volume — more moving parts in the one place this check is about.
+ */
+import { E } from '/src/abi.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = { noLockdown: params.get('no_lockdown') === '1' }
+
+/* A FRESH VICTIM PATH PER LOAD. The volume is durable, so a previous run's tampered file would
+ * still be there — and under the control this check deliberately corrupts one. A name nothing
+ * else will meet keeps the control repeatable. */
+const VICTIM = '/m6-victim-' + Math.random().toString(36).slice(2, 10)
+
+const PROGRAM = '/bench/m6-realm/program.mjs'
+
+Object.assign(globalThis.M6, { isolated: self.crossOriginIsolated === true })
+globalThis.M6.proofs = { realm: null, volume: null, loader: null, fault: null, policy: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M6.state = 'aborted'
+  globalThis.M6.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, so no process realm.'
+  out.className = 'bad'
+  say(globalThis.M6.why)
+} else {
+  main().catch((e) => {
+    globalThis.M6.state = 'error'
+    globalThis.M6.why = String((e && e.stack) || e)
+    say(globalThis.M6.why)
+  })
+}
+
+class KernelFail extends Error {}
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M6.kernelIsolated = m.isolated === true
+      globalThis.M6.kernelCfg = m.cfg
+    }
+    if (m.t === 'fault') {
+      globalThis.M6.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + String(m.why).slice(0, 160))
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M6.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M6.notes.push(m.why)
+    if (m.t === 'teardown-leak') globalThis.M6.errors.push('teardown-leak pid ' + m.pid)
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M6.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    /* THE TIMER MUST ONLY RETIRE ITS OWN WAITER. `waiters` is keyed by message type, so a second
+     * `expect('results')` replaces the first — and the first's timer used to fire later and
+     * delete the SECOND one, after which the message landed in `pending`, which `expect` reads
+     * only on entry. The step then sat out its whole timeout and reported a timeout with nothing
+     * wrong. Reachable here and nowhere else in the suite, because the fault race below abandons
+     * a `results` waiter by design. Found by an adversarial review. */
+    const entry = (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) }
+    const timer = setTimeout(() => {
+      if (waiters.get(t) === entry) waiters.delete(t)
+      rej(new Error('timed out waiting for ' + t))
+    }, ms)
+    waiters.set(t, entry)
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m), events }
+}
+
+/**
+ * Run one program to completion on an EXISTING kernel, and return its row.
+ *
+ * `faultOk` is for PROOF 4 and nowhere else: `p_fault` is a program that MUST die, so a step that
+ * treated a fault as an error could not express the proof. It resolves with `{faulted: true}` when
+ * the kernel reports the fault, and with the program's own result when it does not — which is
+ * exactly the pair the control has to move.
+ */
+async function step (k, mode, { uid = 0, args = [], faultOk = false, timeoutMs = 60000 } = {}) {
+  const faultsBefore = globalThis.M6.faults.length
+  k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+    cfg: { argv: [mode, VICTIM, ...args.map(String)], uid, gid: uid }, readyTimeoutMs: 20000 })
+  const spawned = await k.expect('spawned', 20000)
+  if (spawned.refused) throw new Error(mode + ': spawn refused: ' + spawned.why)
+  const pid = spawned.pids[0]
+  await k.expect('ready', 20000)
+  k.post({ t: 'go', go: { mode: 'park', pid } })
+  if (!faultOk) {
+    const results = await k.expect('results', timeoutMs)
+    const row = results.results.find((r) => r.pid === pid)
+    if (!row) {
+      throw new Error(mode + ': no row for pid ' + pid + '; got ' +
+        JSON.stringify(results.results.map((r) => r.pid)))
+    }
+    return { pid, ...row }
+  }
+  /* A RACE WITH NO WINNER DECLARED: whichever arrives, the fault or the result, is the answer.
+   * Both are legitimate outcomes here — that IS the control — so this must not wait for one and
+   * time out on the other. */
+  const result = k.expect('results', timeoutMs).then((r) => ({ kind: 'result', r }), () => null)
+  const settled = await Promise.race([
+    result,
+    (async () => {
+      const until = performance.now() + timeoutMs
+      while (performance.now() < until) {
+        if (globalThis.M6.faults.length > faultsBefore) return { kind: 'fault' }
+        await new Promise((r) => setTimeout(r, 50))
+      }
+      return { kind: 'timeout' }
+    })(),
+  ])
+  if (settled && settled.kind === 'fault') {
+    const fault = globalThis.M6.faults[globalThis.M6.faults.length - 1]
+    return { pid, faulted: true, faultPid: fault.pid, faultWhy: String(fault.why).slice(0, 300) }
+  }
+  if (settled && settled.kind === 'result') {
+    const row = settled.r.results.find((r) => r.pid === pid)
+    return { pid, faulted: false, ...(row || {}) }
+  }
+  return { pid, faulted: false, why: mode + ': neither a result nor a fault within the deadline' }
+}
+
+/**
+ * Run another mode on a process that is ALREADY LIVE, with new argv.
+ *
+ * THIS EXISTS TO WIN A RACE AGAINST THE TERMINATE QUARANTINE. A reaped process keeps its pid for
+ * TERM_QUARANTINE_MS = 2,200 ms (constraint 14) and then leaves the table, after which
+ * `/proc/<pid>/status` answers ENOENT — so the read that proves the bypass program faulted has to
+ * happen inside that window. Spawning a fresh process to do it costs a worker start, the libos
+ * module graph (every response is `no-store`) and `measureClock`, none of which is bounded below
+ * 2.2 s on a loaded machine; an adversarial review priced that as a flake waiting to happen, and
+ * correct kernel behaviour scored as a defect is exactly the mistake constraint 195 records in
+ * the other direction. A `go` to a live process is one `postMessage`.
+ *
+ * `go.argv` wins over the process's spawn argv in `src/libos/process.mjs`, which is what lets one
+ * process run a second mode at all.
+ */
+async function goOn (k, pid, mode, args = [], timeoutMs = 30000) {
+  k.post({ t: 'go', go: { mode: 'park', pid, argv: [mode, VICTIM, ...args.map(String)] } })
+  const results = await k.expect('results', timeoutMs)
+  const row = results.results.find((r) => r.pid === pid)
+  if (!row) {
+    throw new Error(mode + ': no row for live pid ' + pid + '; got ' +
+      JSON.stringify(results.results.map((r) => r.pid)))
+  }
+  return { pid, ...row }
+}
+
+async function main () {
+  const t0 = performance.now()
+  say('M6: neuter the process realm' + (CFG.noLockdown ? '  [CONTROL: no_lockdown]' : ''))
+  say('victim: ' + VICTIM)
+  const boot = { bench: 1 }
+  if (CFG.noLockdown) boot.noLockdown = true
+  const P = globalThis.M6.proofs
+
+  /* ---- PROOF 5 first: the policy, on the wire ------------------------------------------- */
+  /* BEFORE THE KERNEL, because this is the one fact that decides whether the loader rows below
+   * mean anything. A page that measured refusals without knowing whether a policy was served
+   * could not tell a bounded realm from a broken one. */
+  let policy = { ok: false, why: 'not read' }
+  try {
+    const r = await fetch('/src/libos/process.mjs', { method: 'GET', cache: 'no-store' })
+    const header = r.headers.get('content-security-policy') || ''
+    policy = {
+      ok: header.includes("script-src") && header.includes("blob:"),
+      header,
+      present: header !== '',
+      // The directives this check is about, named so a policy that changed shape fails loudly
+      // rather than passing on a substring.
+      scriptSrc: /script-src ([^;]*)/.exec(header) ? /script-src ([^;]*)/.exec(header)[1].trim() : '',
+      connectSrc: /connect-src ([^;]*)/.exec(header) ? /connect-src ([^;]*)/.exec(header)[1].trim() : '',
+      workerSrc: /worker-src ([^;]*)/.exec(header) ? /worker-src ([^;]*)/.exec(header)[1].trim() : '',
+      unsafeEval: header.includes("'unsafe-eval'"),
+      status: r.status,
+    }
+  } catch (e) {
+    policy = { ok: false, why: String(e && e.message) }
+  }
+  say('policy on /src/libos/process.mjs: ' + (policy.header || '(none)'))
+  P.policy = { ok: policy.present === true && policy.unsafeEval === false, evidence: policy }
+
+  const k = kernelBoot(boot)
+  globalThis.M6.events = k.events
+  try {
+    await k.expect('up', 30000)
+
+    /* ---- the victim ------------------------------------------------------------------- */
+    const victim = await step(k, 'p_victim', { uid: 0 })
+    say('p_victim: inode ' + victim.ino + ', mode ' + (victim.mode || 0).toString(8) +
+      ', ' + victim.size + ' bytes, realm ' +
+      (victim.realm && victim.realm.skipped ? 'NOT stripped' : 'stripped'))
+    if (!victim.ok) throw new Error('p_victim failed: ' + victim.why)
+
+    /* ---- PROOF 1 and 2 and 3: one attacker, three questions --------------------------- */
+    const atk = await step(k, 'p_attack', { uid: 1000, args: [victim.ino] })
+    const rows = atk.rows || {}
+    const reached = atk.reached || []
+    say('p_attack (uid 1000): reached ' + (reached.length ? reached.join(', ') : 'NOTHING'))
+    for (const [name, r] of Object.entries(rows)) {
+      say('  ' + name.padEnd(18) + (r.ok ? 'REACHED  ' + r.value : 'refused  ' + String(r.why).slice(0, 90)))
+    }
+
+    const verify = await step(k, 'p_verify', { uid: 0, args: [atk.pid] })
+    say('p_verify: the kernel reads ' + JSON.stringify(verify.got) +
+      ' — ' + (verify.intact ? 'INTACT' : 'TAMPERED'))
+
+    const realmKeys = atk.realmKeys || {}
+    const stripped = (atk.realm && atk.realm.stripped) || []
+    P.realm = {
+      ok: !!(rows.syscallRefused && rows.syscallRefused.ok
+        && rows.syscallsStillWork && rows.syscallsStillWork.ok
+        && rows.storage && !rows.storage.ok
+        && rows.fetch && !rows.fetch.ok
+        && rows.xhr && !rows.xhr.ok
+        && rows.indexedDB && !rows.indexedDB.ok
+        && rows.caches && !rows.caches.ok
+        && rows.nestedWorker && !rows.nestedWorker.ok
+        && rows.createObjectURL && !rows.createObjectURL.ok),
+      evidence: {
+        reached, realmKeys, stripped,
+        absent: (atk.realm && atk.realm.absent) || [],
+        skipped: !!(atk.realm && atk.realm.skipped),
+        syscallRefused: rows.syscallRefused, syscallsStillWork: rows.syscallsStillWork,
+        storage: rows.storage, fetch: rows.fetch, xhr: rows.xhr,
+        indexedDB: rows.indexedDB, caches: rows.caches, webSocket: rows.webSocket,
+        sharedWorker: rows.sharedWorker, importScripts: rows.importScripts,
+        nestedWorker: rows.nestedWorker, createObjectURL: rows.createObjectURL,
+      },
+    }
+    P.volume = {
+      ok: !!(verify.ok && verify.intact && rows.tamper && !rows.tamper.ok),
+      evidence: {
+        tamper: rows.tamper,
+        intact: verify.intact, tampered: verify.tampered,
+        got: verify.got, want: verify.want,
+        ino: victim.ino, mode: victim.mode, unlinked: verify.unlinked,
+      },
+    }
+    P.loader = {
+      ok: !!(rows.importData && !rows.importData.ok
+        && rows.eval && !rows.eval.ok
+        && rows.newFunction && !rows.newFunction.ok
+        && rows.allowedImport && rows.allowedImport.ok),
+      evidence: {
+        importData: rows.importData, importBlob: rows.importBlob,
+        eval: rows.eval, newFunction: rows.newFunction,
+        // The refusal's own name, from inside the realm. A thrown "Failed to fetch dynamically
+        // imported module" cannot say whether a policy refused the load or nothing was
+        // listening; this can.
+        violations: atk.violations || [],
+        // THE POSITIVE CONTROL. A policy that refused everything would satisfy every clause
+        // above and run no program at all.
+        allowedImport: rows.allowedImport,
+      },
+    }
+
+    /* ---- PROOF 4: the bypass snippet, no try/catch ------------------------------------ */
+    const fault = await step(k, 'p_fault', { uid: 1000, faultOk: true, timeoutMs: 30000 })
+    say('p_fault: ' + (fault.faulted
+      ? 'FAULTED — ' + String(fault.faultWhy).slice(0, 120)
+      : 'returned ' + JSON.stringify(fault.bypassed === true ? fault.names : fault.why)))
+    /* ON THE VICTIM'S PROCESS, which is uid 0 and still live, for the quarantine reason goOn
+     * carries. It has already returned one result; a second `go` with new argv runs another mode
+     * in the same worker. */
+    const afterFault = await goOn(k, victim.pid, 'p_procfault', [fault.pid])
+    say('/proc/' + fault.pid + ': state ' + afterFault.state + ', exitkind ' +
+      afterFault.exitKind + ', exitvalue ' + afterFault.exitValue)
+    P.fault = {
+      ok: !!(fault.faulted && afterFault.ok && afterFault.state === 'zombie'
+        && afterFault.exitKind === afterFault.wantKind
+        && afterFault.exitValue === afterFault.wantValue),
+      evidence: {
+        faulted: !!fault.faulted, faultWhy: fault.faultWhy || '',
+        bypassed: fault.bypassed === true, names: fault.names || [],
+        pid: fault.pid,
+        state: afterFault.state, exitKind: afterFault.exitKind, exitValue: afterFault.exitValue,
+        wantKind: afterFault.wantKind, wantValue: afterFault.wantValue,
+        status: afterFault.status, why: afterFault.why || '',
+        /* THE READ CAN EXPIRE, AND THAT IS NOT A FAILED PROOF. A reaped pid leaves the table when
+         * the ~2.2 s quarantine ends (constraint 14), so a late read finds ENOENT and knows
+         * nothing about whether the process faulted. The check turns this into an unmeasurable
+         * run rather than a red one. `goOn` exists to make it rare; this makes it honest. */
+        expired: afterFault.expired === true,
+      },
+    }
+
+    globalThis.M6.verdict = Object.values(P).every((p) => p && p.ok) ? 'ok' : 'failed'
+    globalThis.M6.state = 'done'
+    say('verdict: ' + globalThis.M6.verdict + '  (' + Math.round(performance.now() - t0) + ' ms)')
+    out.className = globalThis.M6.verdict === 'ok' ? 'ok' : 'bad'
+  } finally {
+    k.worker.terminate()
+  }
+}
+</script>
+</body>
+</html>

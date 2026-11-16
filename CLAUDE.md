@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 112 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 207 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 17 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 29 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  112 normative constraints  ← cite these
+  CONSTRAINTS.md  207 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -96,6 +96,7 @@ src/
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
     console.mjs   /dev/console: M4a's window, as a file description. Special-cased; M7 deletes it
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
+    lockdown.mjs  M6: what a program's realm loses, as data. Fails CLOSED and says why
   bin/            the programs in /usr/bin, one file each. `true.mjs` states the program contract
   wm/             userland window manager
     window.mjs    the frame, ported unstyled from ../webxp. Geometry, clamp, drag, arrow keys
@@ -104,6 +105,7 @@ www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
   m4a.html        the window and the terminal. The one page a check types REAL keys into
+  m6.html         the realm, the volume, the loader and the fault. M6's five proofs
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
@@ -164,6 +166,13 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
   worker costs 378 µs each. (18)
 - **The process table has a hard cap.** The renderer dies between 3,200 and 4,800 workers and
   every process shares it. (17)
+- **A program's realm is STRIPPED before its text is evaluated, and the policy is served on
+  `src/libos/`.** Two halves, measurably disjoint: `src/libos/lockdown.mjs` removes the bindings
+  (ambient OPFS above all) and a Content-Security-Policy on the response that creates the realm
+  bounds the module loader, because `import(expr)` is not `fetch` and no scanner can catch it.
+  Adding a binding back is reverting M6; a capability a userland program needs arrives as a
+  syscall. It is HARDENING, NOT A SECURITY BOUNDARY — say so wherever it is described. (41, 53,
+  187, 199)
 
 ## Deliberate decisions that look like bugs
 
@@ -241,6 +250,11 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
+- **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
+  that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
+  started in Firefox at all (206) — both with every expectation green, both found by a human
+  opening the page. Before reporting a milestone done, open it in a second engine.
+  `firefox --headless --screenshot` is enough, because these pages print their own log.
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 
@@ -252,6 +266,10 @@ scripts/serve.py --no-isolation     # omit the headers, to prove a check fails w
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
 scripts/check.py --controls         # what negative controls exist and what each proves
+node bench/m6-realm/probe.mjs       # M6's lockdown under node, including its refusal path
+bench/m6-realm/controls.py          # and three mutations of it, scored on which checks move
+bench/m6-realm/csp-probe.py         # WHERE a policy must be delivered, measured not assumed
+scripts/serve.py --no-csp           # omit the process realm's policy, to prove a check fails
 scripts/fsfuzz.py                   # the fs codecs under Node + 10k torn journals (no browser)
 scripts/check_links.py              # every path reference in the authored docs resolves
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control

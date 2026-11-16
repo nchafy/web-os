@@ -35,7 +35,7 @@ repository, and it is pushed.
 ## Read these first, in this order
 
 `CLAUDE.md` has an onboarding table — follow it. Short version: `CONTEXT.md`, then
-`docs/CONSTRAINTS.md` (124 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
+`docs/CONSTRAINTS.md` (205 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
 `MILESTONES.md`. Then `docs/DECISIONS.md` before arguing with any decision.
 
 Do not re-derive anything those files settle. They are the product of adversarial review, and
@@ -43,13 +43,18 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5 and **M4a**. Each has a record in
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a and **M6**. The spine is COMPLETE; the next milestone is M7, the first of option A. Each has a record in
 `MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 9 checks, 363 expectations. Measured 2026-11-16: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 26 |
+| `scripts/check.py` | the suite — 10 checks, 394 expectations. Measured 2026-11-16: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 26, m6 31 |
 | `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |
+| `scripts/check.py --negative no-lockdown` | M6's first control — the process realm is not stripped, so a uid-1000 process writes the kernel's blob by inode. 14 red, 17 intact, and every LOADER clause must hold |
+| `scripts/check.py --negative no-csp` | M6's second control — the process realm's policy is not served, so a computed `import(expr)` and `eval` work again. 8 red, 23 intact, and every REALM clause must hold |
+| `node bench/m6-realm/probe.mjs` | 25 host checks over the lockdown, including the ONE path no browser can reach: its refusal to evaluate program text when a binding survives |
+| `bench/m6-realm/controls.py` | 3 mutations of the lockdown, scored on WHICH checks move. `shallow` is the obvious mistake (own-property `delete` removes nothing here); `no-verify` is the dangerous one (a green report over an open realm) |
+| `bench/m6-realm/csp-probe.py` | WHERE a policy has to be delivered, as a measurement: four deliveries, its own second origin for the off-origin row. `--no-isolation` proves it refuses to report |
 | `node bench/m4a-console/probe.mjs` | 65 host checks over `/dev/console`: the queue, the parks, detach, and the detector's two edges. No browser |
 | `node bench/m4a-window/probe.mjs` | 29 host checks over the window's clamp — the one part of `src/wm/` whose failure is invisible on screen |
 | `node bench/m3-synth/probe.mjs` | 98 host checks over `/proc` and `/dev`, 13 of them `/dev/console`'s in the mount table |
@@ -235,18 +240,36 @@ was left copied rather than extracted because every page is a shipped milestone 
 `served_matches_disk` asserts, and a half-done extraction is worse than a whole duplication. The
 next page is the ninth copy; extract it then, and re-run every check.
 
-## Next: M6 — neuter the process realm
+## What M6 changed that touches everything after it
 
-`MILESTONES.md` §M6 is the spec and constraint 41 is the list. **The one thing M5 left open is
-M6's and it is the hard half:** a program's static imports are an allowlist of exact literals now,
-but a DYNAMIC `import(expr)` with a computed argument cannot be caught by reading the text, and
-deleting `fetch` does not close it because `import` IS the module loader. A
-Content-Security-Policy on the document is the answer (constraint 139).
+**THE SPINE IS DONE.** M7 is next and `MILESTONES.md` §M7 plus `PLAN.md` §5 are the spec. Three
+things M6 leaves behind that a later milestone will meet:
 
-M4a adds one thing to M6's list that was not there before: **`src/wm/` runs in the PAGE, not in a
-process**, so the realm stripping does not touch it — but `www/m4a.html` holds the kernel's own
-message port, and a CSP that forbids what the page needs would break the one supervisor every
-bench boots through. Check the page before the policy.
+- **A PROGRAM RUNS IN A STRIPPED REALM NOW**, and a window milestone is the first thing likely to
+  want something from it. `src/libos/lockdown.mjs` is the list, as data. If M7 needs a capability
+  for a userland window manager, it arrives as a SYSCALL — adding a row back is reverting the
+  milestone. `OffscreenCanvas` is transferred over the port and is unaffected; it is not a
+  binding the strip touches.
+- **`src/libos/` RESPONSES CARRY A CONTENT-SECURITY-POLICY** (`scripts/serve.py`,
+  `PROCESS_REALM_PREFIX`). Anything new in that directory inherits it: no `fetch`, no `eval`,
+  no `data:` import. **Do not add `worker-src` or `child-src` back** — Firefox applies them to
+  the worker's own creation and no process starts at all (constraint 206). Nested workers are
+  closed by the strip, not by the policy. A file that needs any of those does not belong in the process
+  realm. The kernel's own worker is unaffected — `src/kernel/` carries no policy, deliberately,
+  because the kernel fetches providers and mints the program images.
+- **A program's `run` MAY BE ASYNC** and the libos awaits it (197). Every program in `src/bin/`
+  stays synchronous; a syscall blocks in `Atomics.wait` and needs no await.
+
+**M6 did NOT ship a document policy and that was a decision, not an omission** (D27, constraint
+200). If a later milestone wants one for the page's own sake, it needs its own control, and
+`www/m4a.html` — the supervisor every bench boots through — is what it has to not break.
+
+**What M6 leaves open, and it is written down rather than implied** (constraint 199):
+`script-src 'self'` means a program can still dynamically import ANY same-origin module. CSP
+cannot express a path without an origin and the origin is a runtime port, so this is not
+tightenable in the header. It is also why M6 is **hardening and not a security boundary** —
+same-origin is not a security boundary, and the threat model for v1 is first-party only. Keep
+saying that wherever M6 is described.
 
 ### What M4 and M4b leave you
 
@@ -277,6 +300,46 @@ That is what located constraints 92 and 103, each in one run.
 unreachable — and two of them were wrong the moment they became reachable (90, 91). Teardown's fd
 refcount was wrong for every dup'd description and had no symptom until a pty slave sat on two fds
 (103). However finished a path looks, if nothing calls it, nothing has checked it.
+
+## What M6's review found, because it is the generalisable one
+
+**A GUARD WRITTEN AGAINST A LIST OF SPELLINGS IS A GUARD AGAINST THAT LIST.** M6's policy decided
+whether to bound a realm by testing the request path's prefix. It was hardened once — normalized,
+seven spellings checked, committed with a message saying so — and the critic then served the same
+file with no policy using an eighth: `GET /%2fsrc/libos/process.mjs`, 200, byte-identical, no
+header, module loader unbounded. The fix was not a longer list. It was to ask the question of the
+RESOLVED FILE, through the same `translate_path` that decides which bytes are sent, so the policy
+follows the bytes and no spelling can disagree with it.
+
+Two smaller ones worth carrying forward:
+
+- **An untaken measurement is not a failed proof.** M6's `/proc` read can expire with the ~2.2 s
+  terminate quarantine, which says nothing about whether the process faulted. It reports `expired`
+  and the check raises UNMEASURABLE. A harness that scores correct kernel behaviour as a defect is
+  worse than one that says it could not measure.
+- **An `await` added to a message handler removes a serialization nobody wrote down.** The
+  synchronous `run` held "one program at a time" by construction; the async one does not, so it is
+  now a guard that faults on re-entry (204).
+
+## TEST A SECOND ENGINE BEFORE BELIEVING A GREEN SUITE
+
+Twice now, in two consecutive milestones, a human opening the page found an engine split that 394
+green expectations could not: M4a's `setPointerCapture` (175) and M6's `worker-src` (206). The
+second one stopped every process from starting, so the system did not work at all in Firefox while
+the suite was entirely green.
+
+- **The suite drives Chrome only.** That is a recorded gap, not a surprise, and the cost is now
+  measured twice.
+- **Firefox is drivable for a bench without CDP.** Mozilla removed CDP support, but
+  `firefox --headless --screenshot` renders the page — and these pages print their own log as
+  text, so the PNG is readable evidence. Hold the load event open with a slow subresource or the
+  capture lands before the page has finished. `bench/m6-realm/` has no Firefox harness yet; the
+  method is written down here because it took longer to find than to use.
+- **A negative control doubles as a diagnostic.** `serve.py --no-csp` separated "the policy" from
+  "something else" in one run. Build the switch when you build the subject.
+- **A worker that will not start reports NOTHING useful** — empty message, no filename, line 0 —
+  so the kernel can only say `process N runtime: error`. If you see that string, suspect the
+  worker's own response headers or its module graph, and reach for `--no-csp` first.
 
 ## The method that worked
 

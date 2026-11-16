@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M6 — what a process realm reaches, and what a policy bounds</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+pre{white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="log">probe starting…</pre>
+<script>
+  globalThis.M6PROBE = { state: 'starting', modes: {}, isolated: self.crossOriginIsolated === true }
+</script>
+<script type="module">
+/**
+ * M6's measurement, BEFORE any of M6 is written.
+ *
+ * Two questions, neither of which may be answered from memory:
+ *
+ *   1. What does a same-origin dedicated MODULE worker actually reach? Constraint 41 lists the
+ *      bindings to delete and constraint 53 says a nested worker defeats the process table's cap.
+ *      Each row here is a CALL, not a `typeof`.
+ *   2. WHERE must a Content-Security-Policy be delivered to bound that worker's module loader?
+ *      A policy on the document and a policy on the worker script are different deliveries and
+ *      the spec treats them differently. Constraint 139 names the document; this measures it.
+ *
+ * The worker stands in for a process worker: same origin, same `type: "module"`, no kernel. The
+ * fast loop is one page load rather than a kernel boot, and nothing here is on the headline path.
+ */
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const REMOTE = params.get('remote') || ''
+const MODES = (params.get('modes') || 'none,worker,document,both').split(',')
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  /* ABORT RATHER THAN REPORT. A row measured without isolation is a row about a different
+   * renderer: CLAUDE.md §Verification requires every bench to refuse here. */
+  globalThis.M6PROBE.state = 'aborted'
+  globalThis.M6PROBE.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer
+  say(globalThis.M6PROBE.why)
+} else {
+  main().catch((e) => {
+    globalThis.M6PROBE.state = 'error'
+    globalThis.M6PROBE.why = String((e && e.stack) || e)
+    say(globalThis.M6PROBE.why)
+  })
+}
+
+/** One worker, one policy delivery, one set of rows. The mode is in the URL of BOTH the document
+ *  and the worker script, because the server decides which responses carry a policy from it. */
+function runMode (mode) {
+  return new Promise((resolve, reject) => {
+    const url = '/bench/m6-realm/csp-worker.mjs?csp=' + encodeURIComponent(mode)
+    let w = null
+    try {
+      w = new Worker(url, { type: 'module', name: 'm6probe-' + mode })
+    } catch (error) {
+      resolve({ started: false, why: 'construct threw: ' + ((error && error.message) || error) })
+      return
+    }
+    const timer = setTimeout(() => {
+      w.terminate()
+      resolve({ started: false, why: 'the worker never answered within 20 s' })
+    }, 20000)
+    w.onmessage = (e) => { clearTimeout(timer); w.terminate(); resolve({ started: true, ...e.data }) }
+    w.onerror = (e) => {
+      clearTimeout(timer)
+      w.terminate()
+      /* A WORKER THAT DID NOT START IS NOT A POLICY RESULT. If the policy refused the worker's own
+       * static import the realm has no rows at all, and reporting that as "everything refused"
+       * would read as a working lockdown. */
+      resolve({ started: false, why: 'onerror: ' + (e.message || e.type || 'no message') })
+    }
+    w.postMessage({ remoteBase: REMOTE })
+  })
+}
+
+async function main () {
+  say('remote origin: ' + (REMOTE || '(none given — the off-origin row will say so)'))
+  for (const mode of MODES) {
+    const row = await runMode(mode)
+    globalThis.M6PROBE.modes[mode] = row
+    say('--- csp=' + mode + (row.started ? '' : '  WORKER DID NOT RUN: ' + row.why))
+    if (!row.started) continue
+    for (const [name, r] of Object.entries(row.rows || {})) {
+      if (name === 'imports') {
+        for (const [k, v] of Object.entries(r)) {
+          say('  import ' + k.padEnd(12) + (v.ok ? 'REACHED  ' + v.value : 'refused  ' + v.why))
+        }
+      } else {
+        say('  ' + name.padEnd(19) + (r.ok ? 'REACHED  ' + r.value : 'refused  ' + r.why))
+      }
+    }
+    say('  violations: ' + JSON.stringify((row.violations || []).map((v) => v.directive + ' ' + v.blockedURI)))
+  }
+  globalThis.M6PROBE.state = 'done'
+  say('done')
+}
+</script>
+</body>
+</html>

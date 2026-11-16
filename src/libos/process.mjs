@@ -33,6 +33,8 @@ import {
  */
 import * as std from "./std.mjs";
 import * as shlex from "./shlex.mjs";
+/** M6. The realm strip, run before any program text is evaluated. Constraints 41 and 53. */
+import { lockdown } from "./lockdown.mjs";
 
 /**
  * M2's file API, as ONE object on `env.fs`.
@@ -95,6 +97,13 @@ let pid = 0;
 let myIndex = 0;
 let program = null;
 let clock = null;
+/**
+ * M6's report on this realm: what was stripped, what the platform did not expose, and whether the
+ * control skipped the strip. Carried in `ready` and in every result for the same reason `clock`
+ * is — a property of the process worker the page cannot otherwise see, and a check that could only
+ * assert "the call failed" could not tell a stripped realm from a broken one.
+ */
+let realm = null;
 /**
  * THE PROCESS'S OWN argv, from its spawn. A process's arguments belong to the process, not to a
  * broadcast: a page driving several DIFFERENT programs against one kernel would otherwise have to
@@ -170,6 +179,8 @@ self.onunhandledrejection = (e) => {
 };
 
 let exiting = false;
+/** True while a `go` is in flight. One program at a time per process; see `onCommand`. */
+let running = false;
 
 /** M0's signal hook: count, and honour the SIGKILL bit by stopping. M1 replaces the body with
  *  handler dispatch; the seam is here so M1's negative control has something to remove. */
@@ -202,6 +213,21 @@ self.onmessage = async (ev) => {
       if (!String(m.image).startsWith("blob:")) {
         throw new Error(`process ${pid}: program image ${m.image} is not a kernel-loaded blob`);
       }
+      /**
+       * M6. THE REALM IS STRIPPED HERE, and the line below is why this line is here.
+       *
+       * `import(m.image)` evaluates the program's module body, so anything after it is after the
+       * program has already run — and a program's first statement would hold a reference to
+       * whatever this was going to delete. Constraints 41 and 53.
+       *
+       * It throws when a binding survives, and the catch below faults the process: a realm that
+       * could not be stripped must not evaluate program text (src/libos/lockdown.mjs). The
+       * `noLockdown` cfg flag is M6's negative control, which the kernel refuses to pass without a
+       * bench boot (src/kernel/kernel.mjs) — the same discipline as every other control hook.
+       */
+      realm = (m.cfg && m.cfg.noLockdown)
+        ? { skipped: true, stripped: [], absent: [], remaining: [], where: {} }
+        : { skipped: false, ...lockdown() };
       program = await import(m.image);
       // Phase 2 of spawn. The kernel marks RUNNING on this, and it can only arrive because the
       // kernel returned to its event loop after posting init — a kernel that spawned and then
@@ -212,6 +238,7 @@ self.onmessage = async (ev) => {
         abiFingerprint: ABI_FINGERPRINT,
         isolated: self.crossOriginIsolated === true,
         clock,
+        realm,
         cfg: m.cfg,
       });
     } catch (error) {
@@ -222,8 +249,41 @@ self.onmessage = async (ev) => {
   panic(`unexpected kernel message ${m && m.t}`);
 };
 
-function onCommand(m) {
+/**
+ * A PROGRAM'S `run` MAY BE ASYNC, and this function is async because of it.
+ *
+ * M6 is why. Every binding constraint 41 takes away is promise-shaped — `navigator.storage`,
+ * `caches`, `import(expr)` — so a program that demonstrates the hole cannot finish inside one
+ * synchronous turn, and `{ ...promise }` spreads to `{}`: the result would have arrived EMPTY,
+ * with nothing anywhere saying why. Awaiting a non-thenable is a no-op, so a synchronous program
+ * is unaffected except for one microtask between its return and its result, which is after the
+ * program has finished and inside no measurement.
+ *
+ * The throw still lands in the same place. `await` inside `try` carries a rejection to the catch
+ * below, so a program that returns a rejected promise faults exactly as one that threw — which
+ * `p_fault` in `bench/m6-realm/program.mjs` depends on, and which would silently have become "no
+ * result, no fault, and a page waiting out its timeout" had this stayed synchronous.
+ */
+async function onCommand(m) {
   if (!m || m.t !== "go") return;
+  /**
+   * ONE `go` AT A TIME, AND A SECOND ONE IS A FAULT.
+   *
+   * The synchronous version held this by construction: `run` returned before the next message
+   * task could be delivered. An async `run` suspends, so a second `go` arriving meanwhile would
+   * start a CONCURRENT run in the same realm and post a second result — and the kernel satisfies
+   * `results.length >= goCount` at the first, so the page reads one batch and the extra result is
+   * orphaned in its pending queue. Nothing in the suite issues two, which is exactly why this is
+   * a guard and not a queue: the invariant is unchanged, and a caller that breaks it now gets a
+   * fault naming the invariant instead of a second result nobody reads. Found by an adversarial
+   * review of the async change (constraint 197).
+   */
+  if (running) {
+    panic(`process ${pid}: a second go arrived while a program was still running. One go per `
+      + "process at a time; the result of the first would have been overtaken");
+    return;
+  }
+  running = true;
   try {
     // What the program receives, and nothing else. No SAB, no port, no handle.
     const env = {
@@ -239,13 +299,14 @@ function onCommand(m) {
       shlex: SHLEX,
       pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
     };
-    const data = program.run(env, m);
+    const data = await program.run(env, m);
     port.postMessage({
       t: "result",
       pid,
       data: {
         ...data,
         clock,
+        realm,
         abiFingerprint: ABI_FINGERPRINT,
         isolated: self.crossOriginIsolated === true,
         exiting,
@@ -262,5 +323,10 @@ function onCommand(m) {
     });
   } catch (error) {
     panic(error && error.stack);
+  } finally {
+    // CLEARED EVEN WHEN THE PROGRAM FAULTED, so a worker that survives a caught throw can be
+    // given another program — which `www/m6.html` relies on: it runs a second mode on a live
+    // process to read `/proc` inside the terminate quarantine.
+    running = false;
   }
 }

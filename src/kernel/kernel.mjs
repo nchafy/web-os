@@ -827,9 +827,13 @@ function spawn(image, programCfg, index = 0, parent = null) {
       uid: slot.uid,
       // The image, not a path to fetch: the program text has already crossed the wire once.
       image: image.imageUrl,
-      // The M1 negative control travels to the process, because the entry check it
-      // removes lives in the process's own stub (constraint 16).
-      cfg: { ...programCfg, index, noSigpend: !!cfg.noSigpend },
+      // The M1 and M6 negative controls travel to the process, because what each one removes
+      // lives in the process's own realm: the signal check at syscall entry (constraint 16), and
+      // the realm strip that runs before program text is evaluated (constraints 41, 53). Both are
+      // read off the BOOT cfg rather than the spawn's, so a process cannot ask for either on its
+      // own behalf, and `noLockdown` is refused outright without a bench boot — the gate is at
+      // boot (see the control hooks below), so by here it is already known to be legitimate.
+      cfg: { ...programCfg, index, noSigpend: !!cfg.noSigpend, noLockdown: !!cfg.noLockdown },
     },
     [channel.port2],
   );
@@ -2062,6 +2066,13 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("noSigpipe requires bench=1");
         FATAL_DEFAULT.delete(SIGPIPE);
       }
+      // M6's control. `noLockdown` tells every process worker this kernel spawns to SKIP the realm
+      // strip, so the bypass program must then succeed — MILESTONES.md M6's own words: "Skip the
+      // stripping; the same program must succeed. If it does not, the check is testing nothing."
+      // Gated like every other hook here, and gated HARD: this one hands a process ambient OPFS
+      // over the kernel's own volume, so a kernel that could be asked for it outside a bench is
+      // the defect the whole milestone is about.
+      if (cfg.noLockdown && cfg.bench !== 1) throw new Error("noLockdown requires bench=1");
       // M2's negative control, both stages. Same discipline as installStall: a hook a later change
       // could leave armed is worse than one requiring a hand edit, so bench=1 is the gate, and the
       // echoed cfg above is how each proves it was applied.

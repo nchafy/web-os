@@ -30,9 +30,9 @@ checks is a wish.
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 54 expectations, 4 controls |
 | M5 | The shell, eleven programs, exec through the filesystem | 6 | 1.5 | ✅ done — **ACCEPT**, 38 expectations, 6 controls, 14 review findings fixed |
 | M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 26 expectations, 1 control |
-| **M6** | **Neuter the process realm** | 2 | | ⬜ **next** |
+| M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
-| M7 | A window is a file description | 4 | | ⬜ A |
+| **M7** | **A window is a file description** | 4 | | ⬜ **next (option A)** |
 | M8 | The window surface | 3 | | ⬜ A |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
 | M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
@@ -1235,22 +1235,94 @@ including a two-stage pair where collapsing the image cache key must move NOTHIN
 
 ---
 
-## M6 — Neuter the process realm · 2 days · ~300 LoC
+## M6 — Neuter the process realm · done · 0.5 days · ~1,500 LoC
 
-Closes the hole that makes everything above decorative. A process worker is same-origin, so it has
-ambient OPFS access and can open the kernel's blob store by inode and write it — no credential
-checked, no syscall made. Confirmed against every candidate design.
+Closed the hole that made everything above decorative. A process worker is same-origin, so it had
+ambient OPFS access and could open the kernel's blob store by inode and write it — no credential
+checked, no syscall made.
 
-**Build.** `src/libos/` strips the realm before evaluating program text: delete
-`WorkerNavigator.prototype.storage`, plus `fetch`, `XMLHttpRequest`, `importScripts`, `indexedDB`,
-`caches`, `WebSocket`, `Worker` (41).
+**It is two halves, and they are measurably disjoint.** That was the milestone's one surprise and
+it changed the build.
 
-**Proof.** A program containing the bypass snippet fails, and `/proc` shows it faulted.
-**Negative control.** Skip the stripping; the same program must **succeed**. If it does not, the
-check is testing nothing.
+- `src/libos/lockdown.mjs` strips the realm before program text is evaluated: `fetch`,
+  `XMLHttpRequest`, `importScripts`, `indexedDB`, `caches`, `WebSocket`, `Worker`, `SharedWorker`,
+  `navigator.storage`, `URL.createObjectURL` and `revokeObjectURL` (41, 53). Eleven rows as DATA,
+  each naming what it reaches, removed by walking the prototype chain — `delete self.fetch` removes
+  nothing, because nothing here is an own property.
+- `scripts/serve.py` sends a Content-Security-Policy over `src/libos/`:
+  `default-src 'none'; script-src 'self' blob:; connect-src 'none'`. That is
+  constraint 139's open half — a computed `import(expr)` is the module loader, not `fetch`, so no
+  scanner over program text and no deletion can reach it.
 
-**Label honestly in the docs:** hardening, not a security boundary. Same-origin is not a security
-boundary. Threat model is first-party only for v1.
+**`WHERE` THE POLICY GOES WAS MEASURED, AND 139 HAD IT WRONG.** 139 says "a Content-Security-Policy
+on the document is the answer". The policy is the answer; the document is not the place — on a
+dedicated module worker's loader a document policy changes NOTHING, measured across four
+deliveries with zero violations reported (`bench/m6-realm/csp-probe.py`, constraint 187; the
+correction is 188). It goes on the response that creates the realm.
+
+**Proof,** `scripts/check.py --only m6` — 31 expectations, 1.1 s, `www/m6.html`:
+
+- **the volume, which is the headline.** uid 0 writes a 0600 file and closes it; a uid-1000
+  process is told EACCES by the syscall channel, then opens the kernel's blob BY INODE through
+  ambient OPFS and writes it; a third process, uid 0, reads the file back through the syscall
+  channel. The bytes must be unchanged.
+- **the realm.** Every binding in constraint 41's list, asserted as an absent BINDING and as a
+  failed CALL — both, because the policy refuses `fetch` at the network while an unstripped
+  process still holds it.
+- **the loader.** A computed `data:` import, `eval` and `new Function` all refused, with the
+  realm's own `securitypolicyviolation` event naming `script-src` — the throw cannot attribute the
+  refusal, the event can. Positive control: the one same-origin specifier still loads.
+- **the fault.** MILESTONES' own words: the bypass snippet with no try/catch. It faults, and
+  `/proc/<pid>/status` reads `state: zombie`, `exitkind: 1`, `exitvalue: 6` (SIGABRT). Not "the
+  directory is gone" — a reaped process keeps its pid for the quarantine (195).
+
+**Negative controls, one per half, and neither is satisfiable by the other's mechanism.**
+`--negative no-lockdown` skips the strip: 14 red, 17 intact — the tamper succeeds
+(KERNEL-OWNED-SECRET becomes TAMPERED-BY-PROCESS, and the kernel serves the tampered bytes), and
+the bypass program RETURNS instead of dying, which is MILESTONES' "the same program must succeed".
+`--negative no-csp` withholds the policy: 8 red, 23 intact — the computed import and `eval` come
+back while the realm stays stripped and the volume stays intact.
+
+**Plus a host gate the browser cannot reach.** `lockdown()` refuses to continue when a binding
+survives, and on Chrome 157 every target is configurable, so that branch has no caller in a
+browser — an unverified mechanism by this repo's own rule. `node bench/m6-realm/probe.mjs` reaches
+it with a double (25 checks) and `bench/m6-realm/controls.py` proves the coupling with three
+mutations: a shallow delete, the verification removed, and an absent binding credited as stripped.
+The mutation harness paid for itself on the first run by catching a clause in the probe that
+passed over a report that was never produced.
+
+**One change to the spine.** A program's `run` may now be async and the libos awaits it:
+`{ ...promise }` spreads to `{}`, so the unawaited version would have posted an EMPTY result with
+nothing saying why. Every capability M6 removes is promise-shaped, so the program that
+demonstrates the hole cannot be synchronous (197).
+
+**Six findings from an independent critic, all six fixed, and one was the milestone's own
+subject.** `GET /%2fsrc/libos/process.mjs` served `process.mjs` byte-for-byte with NO policy —
+`unquote` runs after `urlparse`, `normpath` keeps the two leading slashes, and `translate_path`
+collapses them and serves the file anyway — so a process worker created from that URL had an
+unbounded module loader. The commit that was supposed to have closed the spelling question had
+claimed "including percent-encoded", which was true of an encoded slash in the middle of the path
+and not of a leading one. Fixed by asking the resolved FILE rather than the spelling, and the
+`%2f` form is now asserted on the wire before Chrome starts. Also fixed: the `/proc` read racing
+the 2.2 s quarantine, an abandoned waiter's timer retiring a later waiter, the serialization the
+async `run` removed, and two documentation defects. Constraints 201–205.
+
+**AND THEN AN OPERATOR OPENED IT IN FIREFOX, where no process would start at all.** The policy
+carried `worker-src 'none'`, and Firefox applies a worker script's own `worker-src` to that
+worker's own creation — so it refused to start the very worker the policy describes. The symptom
+was `FAULT pid 1: process 1 runtime: error`, because a worker that will not start fires an error
+event with an empty message, no filename and line 0: a swallowed failure in the one path this
+repository's rules say must name what failed. 394 green expectations could not see it; a human
+opening the page saw it immediately (constraints 206, 207).
+The directive is out and nothing is lost — the strip deletes `Worker`, `SharedWorker` and
+`URL.createObjectURL`, which is the mechanism constraint 53 asked for. **M6 now passes end to end
+in Firefox 156 as well as Chrome 157:** verdict ok in 530 ms, same refusals, same intact volume,
+same `state: zombie, exitkind: 1, exitvalue: 6`.
+
+**Label honestly, and the docs do:** hardening, not a security boundary. Same-origin is not a
+security boundary and the threat model is first-party only for v1. What remains open is written
+down rather than implied — `script-src 'self'` still permits any same-origin module (199) — and
+M6 ships no document policy on purpose (200).
 
 ---
 

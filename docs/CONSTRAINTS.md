@@ -1585,3 +1585,226 @@ number in code, so the pair with fewer citations moved. Nothing else about them 
     reported it that way. A log that only reports the past cannot distinguish a slow step from a
     stalled one. The page now prints `… <mode>` before each proof.
 
+## M6 — neuter the process realm
+
+Measured on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro unless a row says otherwise. The
+two harnesses are `bench/m6-realm/csp-probe.py` (four policy deliveries against a stand-in module
+worker, with its own second origin) and `bench/m6-realm/probe.mjs` plus
+`bench/m6-realm/controls.py` (the lockdown under Node, and three mutations of it). The product
+gate is `scripts/check.py --only m6`, with `--negative no-lockdown` and `--negative no-csp`.
+
+187. **A CONTENT-SECURITY-POLICY ON THE DOCUMENT DOES NOTHING FOR A DEDICATED MODULE WORKER'S
+    LOADER.** Four deliveries measured, one page load each, `bench/m6-realm/csp-probe.py`; the
+    `document` column is behaviour-identical to `none` and reports ZERO violations.
+
+    | attempted from the worker | none | document | worker | both |
+    |---|---|---|---|---|
+    | `navigator.storage` → write an OPFS file | reached | reached | **reached** | **reached** |
+    | `fetch`, `XMLHttpRequest` | reached | reached | refused (`connect-src`) | refused |
+    | `indexedDB`, `caches` | reached | reached | **reached** | **reached** |
+    | `new Worker(blob)` | reached | reached | reached † | reached † |
+
+    † `worker-src 'none'` refused it when this was first measured, and that directive had to come out: constraint 206. The realm strip is what closes a nested worker, which is what constraint 53 asked for in the first place.
+    | `URL.createObjectURL` | reached | reached | **reached** | **reached** |
+    | `eval`, `new Function` | reached | reached | refused (no `'unsafe-eval'`) | refused |
+    | computed `import("da"+"ta:…")` | reached | reached | refused (`script-src-elem`) | refused |
+    | computed `import("<other origin>/x.mjs")` | reached | reached | refused (`script-src-elem`) | refused |
+    | `import("blob:…")` | reached | reached | reached | reached |
+    | `import("/src/abi.mjs")` static | reached | reached | reached | reached |
+    | violation events in-realm | 0 | 0 | 10 | 10 |
+
+    So the policy is served on the response that CREATES the realm. `scripts/serve.py` sends it
+    for every path under `src/libos/` — a prefix and not a filename, because that directory IS the
+    process realm in file form and the worker's entry path belongs to
+    `src/kernel/kernel.mjs`'s `RUNTIME_URL`.
+    The off-origin row needs a cooperating second origin: a module script is fetched in CORS mode,
+    so the probe starts a second loopback server sending `Access-Control-Allow-Origin: *`.
+    Without it that row would read "refused" for a reason the policy had nothing to do with.
+188. **Constraint 139 named the wrong delivery point, and this corrects it.** It says "the answer
+    is a Content-Security-Policy on the document". The policy is the answer; the document is not
+    the place. 139 is otherwise unchanged and its measurement stands — the correction is where the
+    header goes. Recorded here rather than by editing 139, which is the standing rule for a
+    finding that turns out wrong.
+189. **The policy and the realm strip are DISJOINT, and both are required.** The policy leaves
+    ambient OPFS, `indexedDB`, `caches` and `URL.createObjectURL` completely untouched (187), so
+    only the strip closes them; `import(expr)` is the module loader and not `fetch`, so only the
+    policy closes that. The two negative controls assert the disjointness rather than asserting
+    it twice: `--negative no-lockdown` must break every realm clause while every loader clause
+    HOLDS, and `--negative no-csp` the reverse. Measured: 14 red / 17 intact and 8 red / 23
+    intact.
+190. **`blob:` MUST stay in `script-src`, so `URL.createObjectURL` MUST leave the realm.** A
+    program image IS a blob URL (`src/kernel/exec.mjs`), so a policy that refused the scheme would
+    refuse every program. With the scheme allowed, a process that can mint a blob URL can
+    evaluate text no linker ever saw — measured, `import blob` reached under every delivery. The
+    deletion of `createObjectURL` is therefore load-bearing and not hygiene, and
+    `revokeObjectURL` goes with it so nobody puts half the pair back.
+191. **`script-src` without `'unsafe-eval'` refuses `eval` and `new Function`, inside the program
+    as well as in the worker.** Measured both ways — `EvalError: … because 'unsafe-eval' is not an
+    allowed source of script` from the worker's own code AND from inside a blob module. No
+    program in `src/bin/` evaluates text, so this costs the system nothing; a program that needed
+    `eval` would make the policy unshippable, which is why it is written down.
+192. **A policy delivered on the worker script DOES reach a module imported from `blob:`.** The
+    load-bearing case, because a program is never the worker's own script. Measured from inside
+    the blob: the computed `data:` import, the off-origin import and `eval` were all refused there
+    under the `worker` delivery and all three reached under `none`. CSP is per-realm and a blob
+    module shares the worker's realm; this is the measurement rather than the inference.
+193. **`SharedWorker` and `importScripts` are not in a Chrome 157 dedicated module worker at
+    all**, so the lockdown reports them ABSENT rather than stripped. They stay on the target list
+    anyway: "the platform happens not to expose it here" is not a boundary, and an engine that did
+    expose them would otherwise look identical in the report. The `credit-absent` mutation in
+    `bench/m6-realm/controls.py` is what keeps the distinction honest.
+194. **The `WebSocket` constructor does NOT throw under `connect-src 'none'`.** It returns, the
+    violation fires, and the connection is refused asynchronously — measured as
+    `webSocket REACHED constructed` with a `connect-src ws://…` violation beside it. A check
+    asserting "the constructor failed" would therefore pass only because of the realm strip, and
+    a reader could not tell which half had done it. The strip is what makes the binding absent;
+    the policy is what makes the connection impossible.
+195. **A faulted process is a ZOMBIE in `/proc`, not an absence**, so MILESTONES.md M6's "`/proc`
+    shows it faulted" is asserted as `state: zombie`, `exitkind: 1` (STAT_KILLED),
+    `exitvalue: 6` (SIGABRT) — read out of `/proc/<pid>/status`. The first version of the clause
+    asserted the directory was GONE and failed: a reaped process keeps its pid for the ~2 s
+    terminate quarantine (constraint 14), so that clause was racing the quarantine and calling
+    correct kernel behaviour a defect.
+196. **The lockdown MUST fail closed, and nothing in a browser can reach that path.** Every target
+    on Chrome 157 is configurable, so `lockdown()` never has to refuse there — and a mechanism
+    with no live caller is unverified. It is reached with a double under Node
+    (`bench/m6-realm/probe.mjs`, 25 checks) and its coupling is proved by three mutations
+    (`bench/m6-realm/controls.py`): a SHALLOW delete, which is the realistic mistake because
+    nothing in a worker realm is an own property and `delete obj[name]` therefore returns true and
+    removes nothing; REMOVING THE VERIFICATION, which would report "everything stripped" over an
+    open realm; and crediting an absent binding as stripped. The mutation harness earned its place
+    immediately: it caught a clause in the probe that passed over a report that was never produced
+    (`remaining.length === 0` is true of the caught default when `lockdown` throws) and a section
+    that moved under a mutation it was not about.
+197. **A program's `run` may be async, and `{ ...promise }` spreads to `{}`.** Every capability
+    constraint 41 removes is promise-shaped, so the program that demonstrates the hole cannot
+    finish in one synchronous turn — and the libos used to post `data: { ...program.run(env, m) }`
+    unawaited, which would have sent an EMPTY result with nothing anywhere saying why. The libos
+    awaits it (`src/libos/process.mjs`), a rejected promise faults the process exactly as a throw
+    does, and every program in `src/bin/` stays synchronous because a syscall blocks in
+    `Atomics.wait` and needs no await.
+198. **A dynamic root-relative specifier does not resolve inside a program.** `import("/x.mjs")`
+    from a blob module answers `Failed to resolve module specifier` before any policy is
+    consulted, because a blob URL has an opaque path (constraint 125, now with its dynamic twin).
+    The kernel's linker rewrites literal specifiers it can see; a computed one it cannot. M6's
+    positive control therefore imports `self.location.origin + "/src/abi.mjs"` — which is also the
+    honest statement of what the policy still permits (199).
+199. **WHAT M6 DOES NOT CLOSE, recorded rather than implied.** `script-src 'self'` means a program
+    can still dynamically import ANY same-origin module, so the loader is bounded by what the
+    server serves rather than by what the kernel allows. CSP source expressions cannot name a
+    path without an origin, and the origin is a runtime port, so narrowing this further is not
+    expressible in the header. It is also why M6 is **hardening and not a security boundary**:
+    same-origin is not a security boundary, the threat model for v1 is first-party only, and
+    nothing here stops the author of a program from doing what the page can already do. Say so
+    wherever M6 is described — `MILESTONES.md`, `src/libos/lockdown.mjs` and the check's own note
+    all do.
+200. **M6 ships no document policy, deliberately.** It would buy nothing for the subject (187) and
+    the document is the supervisor every bench boots through: `www/m4a.html` holds the kernel's own
+    `MessagePort`, every page carries inline script, and `scripts/check.py` byte-compares served
+    bytes against disk — so a nonce cannot be injected and a document policy would have to carry
+    `'unsafe-inline'`. A page-hardening policy is a separate change with its own risk and its own
+    control.
+
+## M6's adversarial review — six findings, all six fixed
+
+The critic was given the artifact and the acceptance criteria and not the author's conclusion. It
+verified rather than read: it ran the host probe, the mutation harness, `--list`, `--controls` and
+`check_links`, scored both new controls' failed/held partitions clause by clause against the page,
+and grepped the tree for any in-tree use of the eleven stripped bindings. Five findings were small;
+one was the milestone's own subject, in the commit that was supposed to have closed it.
+
+201. **A PERCENT-ENCODED LEADING SLASH SERVED THE PROCESS REALM WITH NO POLICY.** `GET
+    /%2fsrc/libos/process.mjs` returned `process.mjs` byte-for-byte — 13,675 bytes, status 200 —
+    and NO `Content-Security-Policy`, because `unquote` runs after `urlparse`, `posixpath.normpath`
+    preserves the two leading slashes `%2f` produces, and `translate_path` collapses them and
+    serves the file anyway. A process worker created from that URL had an unbounded module loader:
+    `eval`, `new Function` and a computed `import(expr)` all work. The hole M6 exists to close,
+    reachable by one spelling.
+    **The commit before it had made this worse by claiming otherwise** — "seven spellings checked,
+    including percent-encoded" was true of an encoded slash in the MIDDLE of the path and not of a
+    leading one, which is the one that matters.
+    **Fixed by asking the resolved FILE, never the spelling**: `_in_process_realm` defers to
+    `translate_path`, the same resolution that decides which bytes are sent, so two spellings of
+    one file cannot get two policies in either direction. Verified over thirteen spellings either
+    side of the boundary, and `_assert_policy` in `scripts/check.py` now asserts the `%2f` form on
+    the wire before Chrome starts — with the bug restored, that gate refuses at exit 3 and names
+    the two spellings.
+    **The lesson is the one this repo keeps relearning:** a guard written against a list of
+    spellings is a guard against that list. The question has to be asked of the thing the
+    behaviour depends on, which here is the file.
+202. **THE `/proc` READ RACED THE TERMINATE QUARANTINE.** The clause proving the bypass program
+    faulted reads `/proc/<pid>/status`, and a reaped pid leaves the table when
+    `TERM_QUARANTINE_MS = 2,200` expires (constraint 14). The read was being done by a FRESHLY
+    SPAWNED process — a worker start, the libos module graph re-fetched because every response is
+    `no-store`, and `measureClock(200000)` — with nothing bounding that below 2.2 s on a loaded
+    machine. It would have scored correct kernel behaviour as a defect, which is constraint 195's
+    mistake in the other direction.
+    **Fixed twice over:** the read now runs on an ALREADY-LIVE process through a second `go` with
+    new argv (one `postMessage`, no spawn), and an ENOENT answer is reported as `expired` and
+    raised as UNMEASURABLE rather than red — an untaken measurement is not a failed proof.
+203. **An abandoned waiter's timer deleted a later waiter for the same message.** `www/m6.html`'s
+    `expect` keys waiters by message type, so a second `expect('results')` replaces the first —
+    and the first's timer still fired and deleted the SECOND one, after which the message landed
+    in a pending queue `expect` only reads on entry. The step would then sit out its own timeout
+    and report a timeout with nothing wrong. Reachable only here, because the fault race abandons
+    a `results` waiter by design. Fixed by having the timer retire only its own entry.
+204. **Making a program's `run` awaitable removed a serialization the synchronous version held by
+    construction.** A second `go` arriving while an async `run` is suspended would start a
+    concurrent run in the same realm and post a second result — and the kernel satisfies
+    `results.length >= goCount` at the first, so the page reads one batch and the extra is
+    orphaned. Nothing in the suite issues two, which is why the fix is a GUARD and not a queue:
+    the invariant is unchanged, and a caller that breaks it now faults naming the invariant
+    instead of silently overtaking a result. Constraint 197's twin.
+205. **Two documentation defects of the kind this repo treats as defects.** A comment in
+    `src/libos/lockdown.mjs` said a failed removal was "recorded by its absence from `where`"
+    directly above the line that pushes it INTO `where` — so a reader debugging a refusal would
+    have misread an error entry as a successful deletion. And `p_verify` still computed and
+    returned a `procGone` field that nothing read and that was always false, with two comments
+    describing the abandoned design constraint 195 records. Both removed. A comment asserting an
+    invariant is not evidence that the invariant holds, and a field nothing reads is a claim
+    nothing checks.
+
+## What a second engine found, in an hour, with M6 already green
+
+206. **`worker-src 'none'` ON A WORKER'S OWN SCRIPT STOPS FIREFOX STARTING THAT WORKER.** Firefox
+    applies a worker script's own `worker-src` to THAT WORKER'S creation, so the policy M6 shipped
+    told Firefox to refuse the very worker it describes and no process ever ran. Chrome applies the
+    directive to workers created BY the realm, which is what it was in the policy for. Bisected on
+    Firefox 156.0.1 against Chrome 157.0.8103.52, one headless run per variant:
+
+    | policy on `src/libos/process.mjs` | Firefox |
+    |---|---|
+    | `…; worker-src 'none'` (as shipped) | the worker never starts |
+    | `…; child-src 'none'` | the same — Firefox treats them alike here |
+    | `default-src 'none'; script-src 'self' blob:; connect-src 'none'` | starts, runs its graph |
+    | no policy | starts |
+
+    **THE FAILURE IS SILENT BY NATURE**, which is most of why it survived a green suite and an
+    adversarial review: a worker that will not start fires an error event with an EMPTY message, no
+    filename and line 0, so the kernel's `worker.onerror` could only report
+    `process 1 runtime: error` — a swallowed failure, in the one place this repository's own rule
+    says an error path must name what failed. The operator reported that string; nothing in the
+    suite could have.
+    **Removed, and nothing is lost:** `src/libos/lockdown.mjs` deletes `Worker`, `SharedWorker` AND
+    `URL.createObjectURL`, so a process cannot construct a worker at all. The directive was belt
+    and braces over a strip that is the mechanism constraint 53 actually requires, and the artifact
+    says so: with it gone, the `nestedWorker` row reads `reached` under every policy delivery and
+    `refused  TypeError: URL.createObjectURL is not a function` under the strip.
+    **With it out, M6 passes end to end in Firefox** — every binding refused, the kernel's bytes
+    intact, the bypass program faulted, `/proc` reading `state: zombie, exitkind: 1, exitvalue: 6`,
+    verdict ok in 530 ms. Firefox's messages are better than Chrome's: `EvalError: call to eval()
+    blocked by CSP`.
+207. **CONSTRAINT 175 WAS RIGHT AND THE PRICE IS NOW MEASURED.** "The suite drives one engine" was
+    recorded as a gap after M4a's `setPointerCapture`; M6 is the second time an engine split landed
+    in shipped code, and this one disabled the whole system rather than one window's drag. Both
+    were found by a human opening the page, not by 394 green expectations.
+    **What made the second one cheap to find was a switch that already existed**: `serve.py
+    --no-csp` is M6's own negative control, and one run with it told the difference between "the
+    policy" and "something else in the realm" in under a minute. A control built for the harness
+    paid for itself as a diagnostic.
+    **Firefox is reachable for a bench without a CDP driver**, which was not obvious: Firefox
+    removed CDP support, but `firefox --headless --screenshot` renders the page, and a page that
+    prints its own log as text is therefore readable from a PNG. Holding the load event open with
+    a slow subresource is what makes the capture land after the page has finished. That is how
+    206's table was taken.
+
