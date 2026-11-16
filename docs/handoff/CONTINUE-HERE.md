@@ -74,6 +74,15 @@ kernel refuses by name, and with it raised the kernel hangs.
 reports a run it could not measure, never a pass — so treat a lone BROKEN here as unmeasured and
 re-run it alone.
 
+**What is verified with the bounded fetch, and what is not.** boot 30, syscall 31, m1 14, m3 55,
+m4 23, m4b 54 — 207 of the suite's 299 expectations — plus `check_links` over 208 references and
+the fetch deadline demonstrated in both directions. **m2 (92) is NOT verified**: on this machine
+`--only m2` reaches its page and then never completes, and the shell's own `echo exit=$?` never
+reaches the log, so the process group is going away under it. No jetsam record names it, so do not
+repeat the claim that it is a memory kill — what is known is that it does not finish here. Run it
+on a machine with free memory before trusting any m2 result, and note that the program loader this
+commit changed is exercised by every one of the six checks that do pass.
+
 **"Load" means MEMORY, and this machine is the proof.** While the contention measurement above was
 taken, `sysctl vm.swapusage` read 10.6 GB of 11.3 GB used with 64 MB of free RAM — the user's own
 Chrome, Firefox and an Ava agent, not the harness. Under that pressure `--only m2` never finished
