@@ -68,16 +68,25 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   as nested workers, and the SAB ABI, measured closed-loop at N ∈ {1, 4, 16, 64, 128}. ACCEPT.
   `bench/syscall-contention/`, and `scripts/check.py --negative kernel-stall` keeps the negative
   control re-runnable.
-- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and four negative controls.
+- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and twenty negative controls over ten checks and 394 expectations.
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
+- **A process cannot reach the system except through the syscall channel.** M6: a process
+  worker's realm is stripped before its program text is evaluated, and a Content-Security-Policy
+  on the response that creates that realm bounds its module loader — because `import(expr)` is not
+  `fetch` and no scanner over program text can catch it. The hole is in the record both ways: with
+  the strip skipped, a uid-1000 process that the syscall channel refuses opens the kernel's blob
+  for that same file by inode and rewrites it. `scripts/check.py --only m6`, with
+  `--negative no-lockdown` and `--negative no-csp` as one control per half. **Hardening, not a
+  security boundary** — same-origin is not a security boundary, and the threat model for v1 is
+  first-party only.
 - **Map tiles survive cross-origin isolation.** `bench/coep-tiles/` loads OpenFreeMap vector tiles
   plus OpenStreetMap, OpenTopoMap and Esri raster tiles under `COEP: require-corp` with zero
   blocked requests — and carries a negative control that fires, so the zero means something.
 
 ## Mockups
 
-Nothing is built yet, but the intended shape is drawn and rendered:
+The spine is built — M0 through M6, with the window half (M7 onward) still ahead. The intended shape of what is not yet built is drawn and rendered:
 
 - [`mockups/milestones.html`](mockups/milestones.html) — what is on screen at each milestone, M0
   through M14. Honest about the first five having no user interface at all.

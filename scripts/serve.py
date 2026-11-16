@@ -111,6 +111,21 @@ class Handler(SimpleHTTPRequestHandler):
     #: not been shown to be the control.
     csp = True
 
+    def _in_process_realm(self) -> bool:
+        """Does this response create, or sit inside, the process realm?
+
+        NORMALIZED FIRST, and both directions matter. `/src/libos/../kernel/kernel.mjs` is a
+        request for the KERNEL that starts with the prefix as written — and the kernel fetches
+        providers and mints program images, so handing it `connect-src 'none'` would break the
+        system in a way whose cause is invisible. The reverse spelling,
+        `/src/kernel/../libos/process.mjs`, is a process realm that a raw prefix test would leave
+        unbounded. `posixpath.normpath` collapses both before the question is asked.
+        """
+        from posixpath import normpath
+        from urllib.parse import unquote, urlparse
+        path = normpath(unquote(urlparse(self.path).path))
+        return path.startswith(PROCESS_REALM_PREFIX)
+
     def send_head(self):
         # The default root is the repository root, which contains .git and .claude. Nothing
         # dot-prefixed is ever part of the OS being served, so refuse it rather than rely on
@@ -223,7 +238,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.isolate:
             for name, value in ISOLATION_HEADERS:
                 self.send_header(name, value)
-        if self.csp and self.path.split("?")[0].startswith(PROCESS_REALM_PREFIX):
+        if self.csp and self._in_process_realm():
             self.send_header("Content-Security-Policy", PROCESS_REALM_CSP)
         # No-store, because a cached pre-isolation response is a confusing half-hour.
         self.send_header("Cache-Control", "no-store")
