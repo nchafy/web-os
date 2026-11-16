@@ -45,13 +45,13 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import cdp  # noqa: E402  (after sys.path, by design: scripts/ is not a package)
+from serve import PROCESS_REALM_CSP  # noqa: E402
 
-#: The process realm's policy, as this probe tests it. `'self'` because the libos's own static
-#: imports are same-origin, and `blob:` because a program image IS a blob URL (src/kernel/exec.mjs).
-#: `connect-src 'none'` and `worker-src 'none'` are the two that cost a process something.
-WORKER_CSP = (
-    "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
-)
+#: THE POLICY THIS REPOSITORY SERVES, imported and never restated. A bench measuring a policy the
+#: server does not send is a bench about a system nobody runs — and this file carried its own copy
+#: until the shipped one lost `worker-src 'none'`, at which point the two disagreed about the
+#: subject. `scripts/serve.py` is the one definition and says why each directive is there.
+WORKER_CSP = PROCESS_REALM_CSP
 
 #: The document's policy. Every www page carries INLINE script, and the server serves static
 #: bytes that `scripts/check.py` byte-compares against disk — so a nonce cannot be injected and

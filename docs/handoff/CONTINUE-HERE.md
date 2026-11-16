@@ -251,8 +251,10 @@ things M6 leaves behind that a later milestone will meet:
   milestone. `OffscreenCanvas` is transferred over the port and is unaffected; it is not a
   binding the strip touches.
 - **`src/libos/` RESPONSES CARRY A CONTENT-SECURITY-POLICY** (`scripts/serve.py`,
-  `PROCESS_REALM_PREFIX`). Anything new in that directory inherits it: no `fetch`, no `eval`, no
-  nested worker, no `data:` import. A file that needs any of those does not belong in the process
+  `PROCESS_REALM_PREFIX`). Anything new in that directory inherits it: no `fetch`, no `eval`,
+  no `data:` import. **Do not add `worker-src` or `child-src` back** — Firefox applies them to
+  the worker's own creation and no process starts at all (constraint 206). Nested workers are
+  closed by the strip, not by the policy. A file that needs any of those does not belong in the process
   realm. The kernel's own worker is unaffected — `src/kernel/` carries no policy, deliberately,
   because the kernel fetches providers and mints the program images.
 - **A program's `run` MAY BE ASYNC** and the libos awaits it (197). Every program in `src/bin/`
@@ -318,6 +320,26 @@ Two smaller ones worth carrying forward:
 - **An `await` added to a message handler removes a serialization nobody wrote down.** The
   synchronous `run` held "one program at a time" by construction; the async one does not, so it is
   now a guard that faults on re-entry (204).
+
+## TEST A SECOND ENGINE BEFORE BELIEVING A GREEN SUITE
+
+Twice now, in two consecutive milestones, a human opening the page found an engine split that 394
+green expectations could not: M4a's `setPointerCapture` (175) and M6's `worker-src` (206). The
+second one stopped every process from starting, so the system did not work at all in Firefox while
+the suite was entirely green.
+
+- **The suite drives Chrome only.** That is a recorded gap, not a surprise, and the cost is now
+  measured twice.
+- **Firefox is drivable for a bench without CDP.** Mozilla removed CDP support, but
+  `firefox --headless --screenshot` renders the page — and these pages print their own log as
+  text, so the PNG is readable evidence. Hold the load event open with a slow subresource or the
+  capture lands before the page has finished. `bench/m6-realm/` has no Firefox harness yet; the
+  method is written down here because it took longer to find than to use.
+- **A negative control doubles as a diagnostic.** `serve.py --no-csp` separated "the policy" from
+  "something else" in one run. Build the switch when you build the subject.
+- **A worker that will not start reports NOTHING useful** — empty message, no filename, line 0 —
+  so the kernel can only say `process N runtime: error`. If you see that string, suspect the
+  worker's own response headers or its module graph, and reach for `--no-csp` first.
 
 ## The method that worked
 

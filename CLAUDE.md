@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 205 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 207 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 29 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  205 normative constraints  ← cite these
+  CONSTRAINTS.md  207 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -250,6 +250,11 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
+- **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
+  that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
+  started in Firefox at all (206) — both with every expectation green, both found by a human
+  opening the page. Before reporting a milestone done, open it in a second engine.
+  `firefox --headless --screenshot` is enough, because these pages print their own log.
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 

@@ -1602,7 +1602,9 @@ gate is `scripts/check.py --only m6`, with `--negative no-lockdown` and `--negat
     | `navigator.storage` → write an OPFS file | reached | reached | **reached** | **reached** |
     | `fetch`, `XMLHttpRequest` | reached | reached | refused (`connect-src`) | refused |
     | `indexedDB`, `caches` | reached | reached | **reached** | **reached** |
-    | `new Worker(blob)` | reached | reached | refused (`worker-src`) | refused |
+    | `new Worker(blob)` | reached | reached | reached † | reached † |
+
+    † `worker-src 'none'` refused it when this was first measured, and that directive had to come out: constraint 206. The realm strip is what closes a nested worker, which is what constraint 53 asked for in the first place.
     | `URL.createObjectURL` | reached | reached | **reached** | **reached** |
     | `eval`, `new Function` | reached | reached | refused (no `'unsafe-eval'`) | refused |
     | computed `import("da"+"ta:…")` | reached | reached | refused (`script-src-elem`) | refused |
@@ -1761,4 +1763,48 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     describing the abandoned design constraint 195 records. Both removed. A comment asserting an
     invariant is not evidence that the invariant holds, and a field nothing reads is a claim
     nothing checks.
+
+## What a second engine found, in an hour, with M6 already green
+
+206. **`worker-src 'none'` ON A WORKER'S OWN SCRIPT STOPS FIREFOX STARTING THAT WORKER.** Firefox
+    applies a worker script's own `worker-src` to THAT WORKER'S creation, so the policy M6 shipped
+    told Firefox to refuse the very worker it describes and no process ever ran. Chrome applies the
+    directive to workers created BY the realm, which is what it was in the policy for. Bisected on
+    Firefox 156.0.1 against Chrome 157.0.8103.52, one headless run per variant:
+
+    | policy on `src/libos/process.mjs` | Firefox |
+    |---|---|
+    | `…; worker-src 'none'` (as shipped) | the worker never starts |
+    | `…; child-src 'none'` | the same — Firefox treats them alike here |
+    | `default-src 'none'; script-src 'self' blob:; connect-src 'none'` | starts, runs its graph |
+    | no policy | starts |
+
+    **THE FAILURE IS SILENT BY NATURE**, which is most of why it survived a green suite and an
+    adversarial review: a worker that will not start fires an error event with an EMPTY message, no
+    filename and line 0, so the kernel's `worker.onerror` could only report
+    `process 1 runtime: error` — a swallowed failure, in the one place this repository's own rule
+    says an error path must name what failed. The operator reported that string; nothing in the
+    suite could have.
+    **Removed, and nothing is lost:** `src/libos/lockdown.mjs` deletes `Worker`, `SharedWorker` AND
+    `URL.createObjectURL`, so a process cannot construct a worker at all. The directive was belt
+    and braces over a strip that is the mechanism constraint 53 actually requires, and the artifact
+    says so: with it gone, the `nestedWorker` row reads `reached` under every policy delivery and
+    `refused  TypeError: URL.createObjectURL is not a function` under the strip.
+    **With it out, M6 passes end to end in Firefox** — every binding refused, the kernel's bytes
+    intact, the bypass program faulted, `/proc` reading `state: zombie, exitkind: 1, exitvalue: 6`,
+    verdict ok in 530 ms. Firefox's messages are better than Chrome's: `EvalError: call to eval()
+    blocked by CSP`.
+207. **CONSTRAINT 175 WAS RIGHT AND THE PRICE IS NOW MEASURED.** "The suite drives one engine" was
+    recorded as a gap after M4a's `setPointerCapture`; M6 is the second time an engine split landed
+    in shipped code, and this one disabled the whole system rather than one window's drag. Both
+    were found by a human opening the page, not by 394 green expectations.
+    **What made the second one cheap to find was a switch that already existed**: `serve.py
+    --no-csp` is M6's own negative control, and one run with it told the difference between "the
+    policy" and "something else in the realm" in under a minute. A control built for the harness
+    paid for itself as a diagnostic.
+    **Firefox is reachable for a bench without a CDP driver**, which was not obvious: Firefox
+    removed CDP support, but `firefox --headless --screenshot` renders the page, and a page that
+    prints its own log as text is therefore readable from a PNG. Holding the load event open with
+    a slow subresource is what makes the capture land after the page has finished. That is how
+    206's table was taken.
 

@@ -53,12 +53,22 @@ PROCESS_REALM_PREFIX = "/src/libos/"
 #:                             `new Function` — measured, in the program as well as in the worker.
 #:   connect-src 'none'        the network, for the bindings the strip already removed. Belt and
 #:                             braces on purpose: the strip is in-realm and this is not.
-#:   worker-src 'none'         constraint 53's nested worker, refused a second way.
 #:   default-src 'none'        everything not named above.
+#:
+#: `worker-src 'none'` WAS HERE AND HAD TO COME OUT, because Firefox applies a worker script's own
+#: `worker-src` to THAT WORKER'S OWN CREATION: with it, Firefox refuses to start the very worker
+#: the policy describes, and the process worker never runs. The failure is silent by nature — an
+#: error event with an empty message, no filename and line 0 — so the kernel could only report
+#: `process 1 runtime: error`. Chrome applies the directive to workers created BY the realm, which
+#: is what M6 wanted it for. Measured on Firefox 156.0.1 / Chrome 157.0.8103.52, both directions
+#: and against `child-src 'none'` too, which Firefox treats the same. Constraint 206.
+#: NOTHING IS LOST: `src/libos/lockdown.mjs` deletes `Worker`, `SharedWorker` AND
+#: `URL.createObjectURL`, so a process cannot construct a worker at all. The policy was belt and
+#: braces there, and the strip is the mechanism constraint 53 actually requires.
 #: The two halves are disjoint and both are needed: this policy does NOT touch OPFS, `indexedDB`,
 #: `caches` or `URL.createObjectURL` (measured), and the strip does not touch the module loader.
 PROCESS_REALM_CSP = (
-    "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+    "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
 )
 
 #: Extensions the stdlib guesses wrongly or not at all. `.mjs` as `text/plain` is a module that
