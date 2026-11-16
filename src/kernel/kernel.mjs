@@ -536,6 +536,26 @@ let dispatch = onSyscall;
  */
 const images = new Map();
 let programFetches = 0;
+/** Program fetches abandoned on the deadline below, and the retries that followed them. A check
+ *  asserts these are 0 in a healthy run, so the bound cannot quietly become the normal path. */
+let programFetchTimeouts = 0;
+let programFetchRetries = 0;
+
+/**
+ * HOW LONG A PROGRAM FETCH MAY TAKE, and why it is bounded at all.
+ *
+ * `spawn` cannot answer until the program is loaded, so an unbounded fetch makes process creation
+ * HANG rather than fail: the calling process is parked on a reply that never comes, with no errno
+ * and nothing in the trace. Measured: `bench/kernel-churn/probe.py` boots kernels and does nothing
+ * else — 0 stalls in 360 boots idle, 3 in 540 under threefold contention (0.56% per boot), two of
+ * them on exactly this await. A real deployment loading over a flaky origin has the same exposure
+ * with none of the contention.
+ *
+ * 5 s is ~15x the worst boot seen under contention (1,295 ms end to end, of which the fetch is a
+ * part), so a healthy load never reaches it, and two attempts fit inside the 15 s a caller allows.
+ */
+const PROGRAM_FETCH_MS = 5000;
+const PROGRAM_FETCH_TRIES = 2;
 
 /**
  * A STATIC import or `export ... from` specifier, and only a path-shaped one: `/x`, `./x`, `../x`.
@@ -547,14 +567,53 @@ let programFetches = 0;
  */
 const STATIC_SPECIFIER = /(\bfrom\s*|\bimport\s*)(["'])(\.{0,2}\/[^"']*)\2/g;
 
+/**
+ * Fetch a program's text, under a deadline, retried once.
+ *
+ * THE DEADLINE IS THE POINT. A stalled fetch is indistinguishable from a slow one to the caller,
+ * and `spawn` awaits this — so without a bound a transient stall is a process parked forever
+ * instead of a `spawn` that returns -ENOEXEC. The retry is there because the stall this was
+ * written for is transient: it is a load artifact, so the second attempt succeeds.
+ *
+ * `AbortController` rather than a racing timer, because a racing promise leaves the original
+ * request outstanding — the thing being guarded against would still be holding a connection.
+ */
+async function programText(url) {
+  let last = null;
+  for (let attempt = 0; attempt < PROGRAM_FETCH_TRIES; attempt += 1) {
+    if (attempt > 0) programFetchRetries += 1;
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), PROGRAM_FETCH_MS);
+    try {
+      const response = await fetch(url, { cache: "no-store", signal: control.signal });
+      programFetches += 1;
+      if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+      // THE BODY IS UNDER THE SAME DEADLINE as the headers: a response whose headers arrive and
+      // whose body never does is the same hang. The timer is cleared only once both have.
+      const text = await response.text();
+      clearTimeout(timer);
+      return text;
+    } catch (error) {
+      clearTimeout(timer);
+      // An abort is this deadline firing; anything else is the server or the URL, and retrying a
+      // 404 buys nothing. Only the stall is worth a second attempt.
+      if (control.signal.aborted) {
+        programFetchTimeouts += 1;
+        last = new Error(
+          `program fetch for ${url} did not complete within ${PROGRAM_FETCH_MS} ms`);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw last;
+}
+
 async function programImage(programUrl) {
   const cached = images.get(programUrl);
   if (cached) return cached;
   const url = new URL(programUrl, self.location.href).href;
-  const response = await fetch(url, { cache: "no-store" });
-  programFetches += 1;
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  const text = await response.text();
+  const text = await programText(url);
   let resolved = 0;
   const linked = text.replace(STATIC_SPECIFIER, (all, lead, quote, specifier) => {
     resolved += 1;
@@ -1010,6 +1069,9 @@ function kstats() {
     calls: kCalls,
     serviceMeanUs: kCalls ? (kServiceMs * 1000) / kCalls : 0,
     notifyWoke, notify0, lateReply, dropped, badCallId, asyncFail, intr: intrCount,
+    // The program loader's own health. Both 0 in a healthy run; a non-zero timeout count means
+    // `spawn` was about to hang before the deadline caught it.
+    programFetches, programFetchTimeouts, programFetchRetries,
     // Published so the double-reply class stays assertable rather than merely prevented: a check
     // can require this to be exactly the number of signals that reached a calling process, and a
     // climb anywhere else is a real defect. See `finish`.
