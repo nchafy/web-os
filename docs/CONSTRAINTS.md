@@ -1197,3 +1197,36 @@ fine, and the two worst defeated M5's own central claim.
     property that matters is unchanged: **a run that could not be measured is reported as BROKEN,
     never as a pass**. Treat a single red here as unmeasured and re-run it alone, with Chrome given
     time to exit — `pkill` returns before it is gone.
+154. **Findings the review returned that were ANSWERED rather than fixed**, each with the reason —
+    `~/.claude/rules/adversarial-review.md` requires a confirmed finding to be one or the other,
+    never left unaddressed and unmentioned.
+    - **`exec` requires READ permission as well as execute**, so a `--x` program is refused where
+      Linux would run it. KEPT: this kernel has to read the program text to run it — there is no
+      loader that can execute bytes it cannot see — so read permission is genuinely required rather
+      than incidentally demanded. For uid 0, `#may` ignores the read bit anyway.
+    - **`chdir` puts no ceiling on the stored cwd**, so `mkdir a; cd a` in a loop grows `p.cwd`
+      without bound and every later path call of that process pays `joinPath` + `normalize` over it
+      ON THE KERNEL THREAD (constraint 56 gives the kernel 200 ms before parked processes declare
+      it dead). KEPT: Linux is equally unbounded here, the growth is linear in syscalls the process
+      made, and a ceiling would be a number with no source. Named so the next reader of constraint
+      56 knows where to look.
+    - **The exec gate has no timeout**, so a `store` operation that never settles wedges every
+      FUTURE exec in the system rather than only its own. KEPT: nothing in `store` can fail to
+      settle — `iocore.request` wraps everything and returns an errno — so a hang there is already
+      a kernel defect, and a timeout would answer it by running two program reads into one shared
+      buffer, which is the thing the gate exists to prevent.
+    - **`SynthFS` checks ANY execute bit** where the VFS checks the triad for the caller's
+      credential. KEPT and recorded at the line (constraint 129): generated nodes own no uid or gid
+      worth consulting, every one of them is served 0o555 or 0o444, so the two models agree on
+      every file that exists. The divergence is latent and it over-grants, which is why it is
+      written down rather than left to be discovered.
+    - **`env.write` can return a SHORT count and every program tests only `< 0`.** A sink that
+      accepted part of a write would drop output and report exit 0. KEPT as a recorded shape: the
+      critic could not reach it — a full pipe parks rather than short-counting, and
+      `src/libos/syscall.mjs`'s `write` already loops — so there is no caller to fix and no check
+      that could fail. The address is `src/libos/std.mjs`'s `out`, and the fix if it ever becomes
+      reachable is a loop there rather than in eleven programs.
+    - **`ps` joins argv with spaces**, so `sh -c "echo a b"` renders as `sh -c echo a b` and an
+      argument containing a space is indistinguishable from two arguments. KEPT: `/proc/<pid>/cmdline`
+      is NUL-separated and carries the information, so a reader that needs it has it; quoting in
+      `ps` output is a convention this system has no need to pick yet.

@@ -416,6 +416,21 @@ function waitJob(sh, job) {
   return last;
 }
 
+/**
+ * Record one line's pipeline, BOUNDED.
+ *
+ * The trace exists because a page cannot see a pipeline from outside: the shell reports its own
+ * pids and statuses so a proof can assert "three processes" without parsing output. It is returned
+ * whole in the result, so it is capped — `MAX_LINES` is 100,000 and an unbounded row per line is a
+ * message that grows without limit for a session nobody is measuring.
+ */
+const TRACE_KEEP = 256;
+
+function pushTrace(sh, row) {
+  sh.trace.push(row);
+  if (sh.trace.length > TRACE_KEEP) sh.trace.shift();
+}
+
 /** A wait status as a shell status: 128 + signal for a death, the exit code otherwise. The 128
  *  offset is the convention every shell uses, and it is what makes `$?` distinguish `exit 2` from
  *  a SIGINT. */
@@ -700,7 +715,7 @@ function startBackground(sh, job, children, line) {
   sh.jobs.push(job);
   sh.lastBg = children[children.length - 1];
   sh.env.std.say(sh.env, `[${job.id}] ${sh.lastBg}\n`);
-  sh.trace.push({ line, pids: children, pgid: job.pgid, background: true });
+  pushTrace(sh, { line, pids: children, pgid: job.pgid, background: true });
   return 0;
 }
 
@@ -716,7 +731,7 @@ function runForeground(sh, job, children, line) {
   if (sh.tty >= 0) env.tty.setPgrp(sh.tty, job.pgid);
   try {
     const status = waitJob(sh, job);
-    sh.trace.push({ line, pids: children, pgid: job.pgid, status, background: false });
+    pushTrace(sh, { line, pids: children, pgid: job.pgid, status, background: false });
     return status;
   } finally {
     if (sh.tty >= 0) env.tty.setPgrp(sh.tty, sh.pgid);
