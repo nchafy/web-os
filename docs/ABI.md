@@ -191,6 +191,19 @@ bare winid) so `poll()` is the single wait primitive, and it also returns a tran
 `WIN_CLOSE_REQUEST` event. Three `dataobj_*` calls are added for a typed clipboard and
 drag-and-drop. Constraints 42–45.
 
+**M4a added NO CALL.** The whole window group is still M7's and M8's, and none of it is
+implemented. What M4a built is `/dev/console`: a character device whose description is kind `F_WIN`
+and which is therefore reached through `open`, `read`, `write`, `poll` and `close` — calls that
+already existed. The window is a FILE DESCRIPTION from the first day there is a window, which is
+the half of constraint 42 that cannot be retrofitted; `win_create` replaces the one producer of
+that description and nothing else changes. `src/kernel/console.mjs` carries the special-case
+notice and `docs/DECISIONS.md` D25 the alternatives it rejected.
+
+Two errnos answer for it, and they are not interchangeable (constraint 159): **ENXIO** for a name
+with no device behind it — `/dev/console` exists on every kernel and a window does not — and
+**EHOSTGONE** for a window that existed and was destroyed, which is a hangup and raises SIGHUP on
+the foreground group.
+
 ---
 
 ## The five decisions that carry the design

@@ -29,8 +29,8 @@ checks is a wish.
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 54 expectations, 4 controls |
 | M5 | The shell, eleven programs, exec through the filesystem | 6 | 1.5 | ✅ done — **ACCEPT**, 38 expectations, 6 controls, 14 review findings fixed |
-| **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
-| M6 | Neuter the process realm | 2 | | ⬜ |
+| M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 26 expectations, 1 control |
+| **M6** | **Neuter the process realm** | 2 | | ⬜ **next** |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | | ⬜ A |
 | M8 | The window surface | 3 | | ⬜ A |
@@ -1071,16 +1071,68 @@ showed the extraction was faithful.
 
 ---
 
-## M4a — The terminal gets a real window · 2 days · ~200 LoC
+## M4a — The terminal gets a real window · done · 1 day · ~1,250 LoC
 
-Exists so there is something on screen before day 30. Drop in `../webxp/src/window.mjs` unstyled
-and point it at the pty.
+**ACCEPT.** A real browser keypress reaches a shell on a real pty and the PTY's echo puts the
+character on the screen. 26 expectations in 6.38 s over two fresh kernels.
 
-**This window is special-cased, not an ABI. M7 generalises it and deletes the special case.** Say
-so in the code or it becomes the architecture by accident.
+**Built.** `src/kernel/console.mjs` is `/dev/console`: one host-backed device, a keystroke queue
+one way and a post to the page the other, with a row in `src/kernel/files.mjs`'s ops table
+(`F_WIN`, the kind the ABI reserved by name) and a row in `pollOne`. `src/bin/term.mjs` is the
+terminal emulator AS A PROCESS — it opens the console, opens a pty, spawns `/usr/bin/sh` on the
+slave in its own foreground group, and polls BOTH sources. `src/wm/window.mjs` is
+`../webxp/src/window.mjs` ported unstyled: the two-box geometry, the clamp, the pointer drag and
+the keyboard equivalent of it. `src/wm/terminal.mjs` is the widget, and **it draws nothing on a
+keypress**. `www/m4a.html` wires the four together.
 
-**Proof.** Type into the window; assert the pty echoed it.
-**Negative control.** Detach the pty; the keystroke must not appear.
+**The special case, and its expiry.** One console, created by the kernel when the page attaches a
+window, with `open("/dev/console")` as its only producer. Said in `src/kernel/console.mjs`'s
+header, in `src/bin/term.mjs`'s, and in `docs/DECISIONS.md` D25. What M7 keeps is the ONE decision
+underneath it: **a window is a file description, so `poll` is the single wait primitive** — the ops
+row and the poll row survive `win_create` unchanged. Everything else goes.
+
+**`poll` was built in M4b for this milestone and this is the bill.**
+`docs/designs/REVIEW-FINDINGS.md` finding 1's *corrected* scenario is the one M4a walks into:
+parked in `read(master)` at idle with nothing flowing, the keys are dead indefinitely. Asserted
+from the kernel's own park state and not from the keystroke having worked — `inflight: "poll"`,
+holding fd 3 kind 5 (`F_WIN`) and fd 4 kind 8 (`F_PTY_M`). Constraint 157.
+
+**The not-responding detector landed here**, deferred from M1 for want of a UI to hook. It measures
+the AGE OF THE OLDEST UNCOLLECTED KEYSTROKE, not syscall silence — a process in `sleep 60` is
+silent and healthy. Caption at 1,000 ms, End Process at 5,000 ms (`docs/designs/fidelity-first.md`'s
+thresholds), measured at 1,020 ms and 4,006 ms, cleared in 26 ms. Hysteresis is the DRAIN and not a
+second time, and both edges are checked on the DOM caption. Constraint 163, decision D26.
+
+**Two defects it found in code it built on.** `Enter` as carriage return types a line the shell
+never receives: the discipline commits on byte 10 and implements no `ICRNL`, so the prompt accepted
+typing and never answered (constraint 162). And `bench/m3-provider/probe.mjs`'s `implied
+directories exist` had been RED since M5 — a literal `["include","lib"]` against a manifest that
+grew eleven `bin/*` rows — unseen because the host probes are not in the registry (constraint 164).
+
+**Proof.** `scripts/check.py --only m4a` — four sections: the echo (prompt, real keys, the window's
+own delivery count, the echo, the shell running the line, Ctrl-C survived, Ctrl-D ending the
+session), the park state, the frame's geometry at both clamped extremes, and the detector's two
+edges. **THE KEYS ARE REAL:** the page announces `phase: await-keys` and stops; the check focuses
+the terminal and presses them through `Input.dispatchKeyEvent`, so the widget receives `isTrusted`
+events — `src/wm/terminal.mjs` counts trusted and synthesised keys separately and the check asserts
+on the trusted count. Measured 11 real, 0 synthetic.
+
+**Negative control.** `scripts/check.py --negative pty-detach` — a write to the pty master accepts
+its bytes and DISCARDS them. 6 red, 20 intact. Every other link keeps working, so what disappears
+is the echo and nothing else; `the window delivered the keystroke to the kernel` HOLDS at 11 of 11
+bytes counted by the device. **That is the control's whole point:** a widget that echoed locally
+would satisfy this milestone's proof with no pty behind it at all, and nothing else in the suite
+can tell the two apart.
+
+**Gates.** `scripts/check.py --only m4a` (26 expectations, 6.4 s),
+`scripts/check.py --negative pty-detach` (6 red, 20 intact),
+`scripts/check.py --only m4a --negative no-isolation` (BROKEN: no SAB, so no kernel and no pty),
+and `node bench/m3-synth/probe.mjs` (98 host checks, 13 of them the new device's).
+
+**Cost.** ~1,250 lines against the plan's ~200. The estimate assumed the window was the work. The
+window is 240 lines; the device, the relay process, the widget, the detector and the check are the
+other thousand — and three of those five are things `MILESTONES.md` and the handoff asked for in
+the same breath as the window without counting them.
 
 ---
 

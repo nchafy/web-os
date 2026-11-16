@@ -1,0 +1,500 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M4a — the terminal gets a real window</title>
+<style>
+/* STRUCTURAL ONLY, AND THAT IS THE MILESTONE'S INSTRUCTION: "drop in ../webxp/src/window.mjs
+   UNSTYLED". A window needs to be positioned to be a window and a terminal needs a monospace cell
+   to be a terminal; everything else — the Aero frame, the glass, the gradients — is M11. Nothing
+   here is a token and nothing here should be copied forward. */
+body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+#log { margin:8px; white-space:pre-wrap }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:420px; margin:8px; border:1px solid #334; overflow:hidden }
+.window { position:absolute; display:flex; flex-direction:column; background:#1b1e24;
+  border:1px solid #556; box-sizing:border-box }
+.window-title { display:flex; align-items:center; gap:8px; padding:2px 4px; background:#2a2f38;
+  cursor:move; flex:0 0 auto }
+.window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
+.is-not-responding .window-title { background:#3a3030; color:#bbb }
+.title-buttons { display:flex; gap:4px }
+.title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
+  cursor:pointer }
+.window-body { flex:1 1 auto; min-height:0; display:flex }
+.terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
+  background:#000; color:#ddd; font:inherit }
+.terminal:focus { outline:1px solid #6a8 }
+</style>
+</head>
+<body>
+<pre id="log">M4a starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M4A = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+  }
+</script>
+<script type="module">
+/**
+ * M4a's page harness: the terminal gets a real window.
+ *
+ *   PROOF 1  typed into the window, the PTY echoed it — and the keys were REAL browser keys
+ *   PROOF 2  the relay was parked in `poll` over the window AND the master when the key arrived
+ *   PROOF 3  the window is a window: real input moves it and the geometry reads back, clamped
+ *   PROOF 4  the not-responding detector, both edges
+ *
+ * CONTROL ?pty_detach=1 — a write to the pty master accepts its bytes and DISCARDS them. Every
+ * other link keeps working: the key event reaches the widget, the widget reaches /dev/console, the
+ * device wakes the relay, the relay writes the master and is told it succeeded. Only the pty stops
+ * being the pty, so the echo stops and PROOF 1 must go red while PROOF 3 (geometry) and the
+ * "window delivered the keystroke to the kernel" clause must HOLD. `MILESTONES.md` M4a: "Detach
+ * the pty; the keystroke must not appear."
+ *
+ * WHY THAT IS THE RIGHT CUT. A terminal widget that echoed locally would pass this milestone's
+ * proof with no pty behind it at all. This control is the only thing in the suite that tells the
+ * two apart, which is why `src/wm/terminal.mjs` carries the no-local-echo notice at the top.
+ */
+import { POLLIN, SIGINT, F_WIN, F_PTY_M } from '/src/abi.mjs'
+import { Win } from '/src/wm/window.mjs'
+import { Terminal } from '/src/wm/terminal.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const CFG = { ptyDetach: params.get('pty_detach') === '1' }
+
+/* THE RELAY IS A PROGRAM AND THE PAGE SPAWNS IT BY URL. The page is the supervisor
+ * (docs/DECISIONS.md D18) and its own `t: "spawn"` still takes a URL; the same file is also a row
+ * in USR_ENTRIES, so `/usr/bin/term` is startable by a shell. Two routes to ONE program, which is
+ * the point: nothing about this terminal is privileged. */
+const RELAY = '/src/bin/term.mjs'
+
+/** How long to wait for an outside driver to type real keys before the page types them itself.
+ *  `scripts/check.py --only m4a` is that driver. Standing alone in a browser the page still
+ *  completes, and reports `drivenBy: 'page'` so the difference is never silent. */
+const REAL_KEY_WAIT_MS = 8000
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** Poll a predicate until it holds. Returns the ms waited, or -1 on timeout. A terminal that
+ *  stopped raises no error anywhere, so every wait here is bounded and reports. */
+async function until (what, ms = 5000, step = 25) {
+  const t0 = performance.now()
+  for (;;) {
+    if (what()) return performance.now() - t0
+    if (performance.now() - t0 > ms) return -1
+    await sleep(step)
+  }
+}
+
+Object.assign(globalThis.M4A, { isolated: self.crossOriginIsolated === true })
+globalThis.M4A.proofs = { echo: null, parked: null, geometry: null, health: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M4A.state = 'aborted'
+  globalThis.M4A.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No window, no kernel, no proofs.'
+  out.className = 'bad'
+  say(globalThis.M4A.why)
+} else {
+  main().catch((e) => {
+    globalThis.M4A.state = 'error'
+    globalThis.M4A.why = String((e && e.stack) || e)
+    say(globalThis.M4A.why)
+  })
+}
+
+class KernelFail extends Error {}
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const listeners = []
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M4A.kernelIsolated = m.isolated === true
+      globalThis.M4A.kernelCfg = m.cfg
+    }
+    if (m.t === 'fault') {
+      globalThis.M4A.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M4A.errors.push('kernel: ' + m.t + ': ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M4A.notes.push(m.why)
+    // THE UNSOLICITED KINDS. `console-out` is the screen, `console-health` is the caption, and
+    // `console-fed` is the kernel's receipt for one keystroke — none is a reply to anything, so
+    // they are dispatched to listeners rather than queued for an `expect`. QUEUEING THEM WOULD
+    // LEAK: a session's keystrokes and output arrive in the hundreds, and `pending` only ever
+    // shrinks when something expects that exact kind.
+    for (const fn of listeners) fn(m)
+    if (m.t === 'console-out' || m.t === 'console-health' || m.t === 'console-fed') return
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M4A.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => {
+      waiters.delete(t); rej(new Error('timed out waiting for ' + t))
+    }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return {
+    worker,
+    expect,
+    post: (m) => worker.postMessage(m),
+    on: (fn) => { listeners.push(fn) },
+    events,
+  }
+}
+
+/**
+ * Build one terminal session: a kernel, a console, a window, a terminal widget, and the relay.
+ *
+ * `startRelay: false` leaves the window attached with NOTHING holding `/dev/console`, which is
+ * what PROOF 4 needs: keystrokes queue unread and the detector has something to detect.
+ */
+async function session (boot, { startRelay = true, title = 'Terminal' } = {}) {
+  const k = kernelBoot(boot)
+  await k.expect('up', 30000)
+  k.post({ t: 'console-attach' })
+  await k.expect('console-attached', 10000)
+  const health = []
+  const win = new Win({
+    title,
+    into: desktop,
+    onEndProcess: () => { win.el.dataset.endPressed = '1' },
+    onClose: () => { k.post({ t: 'console-detach' }); return true },
+  })
+  const term = new Terminal({
+    into: win.bodyEl,
+    onKeys: (bytes) => k.post({ t: 'console-in', bytes }),
+  })
+  k.on((m) => {
+    if (m.t === 'console-out') term.write(new Uint8Array(m.bytes))
+    if (m.t === 'console-health') {
+      health.push({ level: m.level, staleMs: m.staleMs })
+      // THE KERNEL DECIDES AND THE WINDOW DISPLAYS. The page does not compute the condition: that
+      // is `src/kernel/console.mjs`'s job, because it is the side that can see the queue.
+      win.setHealth(m.level)
+    }
+  })
+  term.focus()
+  let pid = 0
+  if (startRelay) {
+    k.post({
+      t: 'spawn', count: 1, programUrl: RELAY,
+      cfg: { argv: ['term', '--ceiling', '120000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
+    })
+    const spawned = await k.expect('spawned', 20000)
+    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+    await k.expect('ready', 20000)
+    pid = spawned.pids[0]
+    k.post({ t: 'go', go: { mode: 'park', pid } })
+  }
+  const consoleState = async () => {
+    k.post({ t: 'console-state' })
+    return (await k.expect('console-state', 5000)).console
+  }
+  const procState = async () => {
+    k.post({ t: 'm4-state' })
+    return await k.expect('m4-state', 5000)
+  }
+  return { k, win, term, health, pid, consoleState, procState }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1 and PROOF 2: type into the window, and assert the PTY echoed it.
+   -------------------------------------------------------------------------------------------- */
+
+async function pEcho (boot) {
+  const s = await session(boot, { title: 'Terminal' })
+  const ev = { }
+  try {
+    // The shell paints a prompt on the terminal before anything is typed. Through the whole chain:
+    // sh writes the slave, the discipline queues it on the master, the relay reads the master and
+    // writes /dev/console, the kernel posts it, the widget renders it.
+    const promptMs = await until(() => /\$ /.test(s.term.screen()), 20000)
+    ev.sawPrompt = promptMs >= 0
+    ev.promptMs = Math.round(promptMs)
+    ev.banner = s.term.screen()
+
+    // PROOF 2, TAKEN NOW, BECAUSE IT IS ONLY TRUE NOW. The shell is parked in `read` on its
+    // terminal and NOTHING IS FLOWING — the idle case `docs/designs/REVIEW-FINDINGS.md` finding 1
+    // names as the one its critic missed. The relay must be parked in `poll`, not in `read`, or the
+    // keystroke below could not wake it.
+    const before = await s.procState()
+    const relay = (before.procs || []).find((p) => p.pid === s.pid) || {}
+    ev.relayInflight = relay.inflight || null
+    ev.relayFds = relay.fds || []
+    ev.parkedInPoll = relay.inflight === 'poll'
+    globalThis.M4A.proofs.parked = {
+      ok: !!(ev.parkedInPoll && ev.sawPrompt),
+      evidence: {
+        relayPid: s.pid, inflight: ev.relayInflight, fds: ev.relayFds,
+        // The relay holds BOTH: a window fd and a pty master. That is the two-source process
+        // finding 1 is about, and the reason `poll` had to exist before there was a window.
+        kinds: (ev.relayFds || []).map((f) => f.kind),
+        // THE TWO NUMBERS TRAVEL WITH THE EVIDENCE, imported from src/abi.mjs rather than
+        // written down in the check: a kind number in two languages is two places one fact is
+        // recorded, and the harness cannot import a .mjs. Every other check publishes its
+        // errnos and signals the same way.
+        F_WIN,
+        F_PTY_M,
+        sawPrompt: ev.sawPrompt, promptMs: ev.promptMs,
+      },
+    }
+
+    // ---- the typing ------------------------------------------------------------------------
+    //
+    // REAL KEYS FIRST. The page announces itself and waits for a driver; `scripts/check.py` sees
+    // the phase, focuses the terminal and presses keys through Chrome's own input pipeline, so the
+    // event the widget receives is `isTrusted`. Standing alone the page types for itself after a
+    // bounded wait and SAYS SO.
+    globalThis.M4A.phase = 'await-keys'
+    const got = await until(() => s.term.trustedKeys > 0, REAL_KEY_WAIT_MS)
+    ev.drivenBy = got >= 0 ? 'cdp' : 'page'
+    if (got < 0) typeSynthetic(s.term, 'echo typed\n')
+    globalThis.M4A.phase = 'typed'
+
+    // THE ECHO. The characters on screen were not put there by the widget — see
+    // src/wm/terminal.mjs. They came back through the pty.
+    const echoMs = await until(() => /echo typed/.test(s.term.screen()), 10000)
+    ev.echoedTheLine = echoMs >= 0
+    ev.echoMs = Math.round(echoMs)
+    // AND THE SHELL RAN IT. `echo typed` prints `typed` on a line of its own, which is the proof
+    // that the bytes reached a program and not merely the discipline.
+    const ranMs = await until(() => /^typed$/m.test(s.term.screen()), 10000)
+    ev.ranTheLine = ranMs >= 0
+    ev.afterTyping = s.term.screen()
+    ev.trustedKeys = s.term.trustedKeys
+    ev.synthKeys = s.term.synthKeys
+    ev.keyBytesOut = s.term.keyBytesOut
+
+    // THE HELD CLAUSE UNDER THE CONTROL: the window DID deliver the keystroke to the kernel. With
+    // the pty detached the echo stops and this stays true, which is what makes the control specific
+    // rather than "something broke".
+    const cs = await s.consoleState()
+    ev.console = cs
+    ev.windowDelivered = (cs.keyBytes || 0) >= ev.keyBytesOut && ev.keyBytesOut > 0
+
+    // CTRL-C AT A PROMPT, synthesised: the shell's own group is the terminal's foreground, so the
+    // discipline raises SIGINT on the shell — which must survive it and prompt again. A program
+    // would die; that is the difference.
+    const screenBeforeIntr = s.term.screen()
+    typeSynthetic(s.term, '\x03')
+    const intrMs = await until(() => s.term.screen().length > screenBeforeIntr.length + 1, 5000)
+    ev.promptAfterCtrlC = intrMs >= 0 && /\$ /.test(s.term.screen().slice(screenBeforeIntr.length))
+    const afterIntr = await s.procState()
+    ev.shellAliveAfterIntr = (afterIntr.procs || []).length >= 2
+
+    // CTRL-D ends the session, and the relay must notice and exit — which is what proves the
+    // hangup half of the loop rather than the keystroke half.
+    typeSynthetic(s.term, '\x04')
+    let relayRow = null
+    if (s.pid) {
+      try {
+        const results = await s.k.expect('results', 15000)
+        relayRow = (results.results || []).find((r) => r.pid === s.pid) || null
+      } catch (e) {
+        // A TIMEOUT CARRIES STATE. A stopped relay raises no error — a parked poll is legitimate —
+        // so the kernel's own park and console state is attached rather than left to be guessed.
+        relayRow = { why: 'no result: ' + e.message, state: await s.procState(),
+          console: await s.consoleState() }
+      }
+    }
+    ev.relay = relayRow
+    ev.relayExited = !!(relayRow && relayRow.exit === 0)
+    ev.relayWhy = relayRow ? relayRow.why : ''
+
+    globalThis.M4A.proofs.echo = {
+      ok: !!(ev.sawPrompt && ev.echoedTheLine && ev.ranTheLine && ev.drivenBy === 'cdp'
+        && ev.windowDelivered && ev.promptAfterCtrlC && ev.relayExited),
+      evidence: ev,
+    }
+    return s
+  } finally {
+    s.k.worker.terminate()
+  }
+}
+
+/** The fallback typist, and the Ctrl-C/Ctrl-D driver. Synthesised events reach this widget's own
+ *  handler and nothing in front of it, which is why `trustedKeys` is counted separately. */
+function typeSynthetic (term, text) {
+  for (const ch of text) {
+    const init = { bubbles: true, cancelable: true }
+    if (ch === '\n') Object.assign(init, { key: 'Enter' })
+    else if (ch === '\x03') Object.assign(init, { key: 'c', ctrlKey: true })
+    else if (ch === '\x04') Object.assign(init, { key: 'd', ctrlKey: true })
+    else Object.assign(init, { key: ch })
+    term.el.dispatchEvent(new KeyboardEvent('keydown', init))
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: the window is a window. Real input moves it; the geometry reads back.
+   -------------------------------------------------------------------------------------------- */
+
+function pGeometry () {
+  // A SEPARATE WINDOW AND NO KERNEL. This proof is about the frame, and giving it its own window
+  // means a geometry failure cannot be mistaken for a terminal failure.
+  const win = new Win({ title: 'Geometry', into: desktop, x: 120, y: 60, w: 300, h: 200 })
+  try {
+    const read = () => ({
+      x: Number(win.el.dataset.x), y: Number(win.el.dataset.y),
+      w: Number(win.el.dataset.w), h: Number(win.el.dataset.h),
+    })
+    const start = read()
+    // ARROW KEYS ON THE FOCUSED TITLE BAR — the keyboard equivalent of the drag, and a gesture a
+    // check can drive. READ BACK FROM THE DOM, never from the object: an inert frame and a working
+    // one are the same picture (constraint 40), and `dataset` is what `apply()` actually wrote.
+    win.barEl.focus()
+    const arrow = (key) => win.barEl.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+    arrow('ArrowRight'); arrow('ArrowRight'); arrow('ArrowDown')
+    const moved = read()
+    // A POINTER DRAG, with real PointerEvents through the capture path the mouse uses.
+    const drag = (type, x, y) => win.barEl.dispatchEvent(new PointerEvent(type, {
+      pointerId: 1, clientX: x, clientY: y, button: 0, buttons: 1, bubbles: true, cancelable: true,
+    }))
+    const r0 = win.barEl.getBoundingClientRect()
+    drag('pointerdown', r0.left + 20, r0.top + 5)
+    drag('pointermove', r0.left + 60, r0.top + 35)
+    drag('pointerup', r0.left + 60, r0.top + 35)
+    const dragged = read()
+    // THE CLAMP, at the extreme: pushed hard left, the title bar must still be grabbable. A layout
+    // is verified at both extremes and not one (CLAUDE.md), so the far side is checked too.
+    win.moveBy(-5000, 0)
+    const clampedLeft = read()
+    win.moveBy(10000, 0)
+    const clampedRight = read()
+    const surface = win.surface()
+    return {
+      ok: moved.x === start.x + 20 && moved.y === start.y + 10
+        && dragged.x === moved.x + 40 && dragged.y === moved.y + 30
+        && clampedLeft.x > -clampedLeft.w && clampedRight.x < surface.w
+        && clampedLeft.w === start.w && clampedRight.w === start.w,
+      evidence: { start, moved, dragged, clampedLeft, clampedRight, surface,
+        // Published so a failure says WHICH gesture moved nothing, rather than "geometry failed".
+        keyboardDelta: { x: moved.x - start.x, y: moved.y - start.y },
+        pointerDelta: { x: dragged.x - moved.x, y: dragged.y - moved.y } },
+    }
+  } finally {
+    win.destroy()
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: the not-responding detector, BOTH EDGES.
+   -------------------------------------------------------------------------------------------- */
+
+async function pHealth (boot) {
+  // NO RELAY. Nothing holds /dev/console, so keystrokes queue unread — which is precisely the
+  // condition the detector is about: the window has work waiting and is not collecting it. A
+  // terminal whose process has died is the realistic form of this, and it needs no scaffolding
+  // inside a shipped program to reproduce.
+  const s = await session(boot, { startRelay: false, title: 'Wedged' })
+  try {
+    typeSynthetic(s.term, 'x')
+    const greyMs = await until(() => s.win.health >= 1, 4000)
+    const caption1 = s.win.headingEl.textContent
+    const endHiddenAtGrey = s.win.endBtn.hidden
+    const endMs = await until(() => s.win.health >= 2, 10000)
+    const caption2 = s.win.headingEl.textContent
+    const endShown = !s.win.endBtn.hidden
+    const stale = await s.consoleState()
+
+    // THE CLEARING EDGE. Start the relay NOW: it opens /dev/console, drains the queue, and the
+    // caption must come back. A threshold with no tested lower edge is a threshold that latches,
+    // and the latch would not be visible in any of the clauses above.
+    s.k.post({
+      t: 'spawn', count: 1, programUrl: RELAY,
+      cfg: { argv: ['term', '--ceiling', '20000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
+    })
+    const spawned = await s.k.expect('spawned', 20000)
+    await s.k.expect('ready', 20000)
+    s.k.post({ t: 'go', go: { mode: 'park', pid: spawned.pids[0] } })
+    const clearedMs = await until(() => s.win.health === 0, 15000)
+    const caption3 = s.win.headingEl.textContent
+
+    return {
+      ok: greyMs >= 0 && endMs >= 0 && endShown && endHiddenAtGrey && clearedMs >= 0
+        && / \(Not Responding\)$/.test(caption1) && !/ \(Not Responding\)$/.test(caption3),
+      evidence: {
+        greyMs: Math.round(greyMs), endMs: Math.round(endMs), clearedMs: Math.round(clearedMs),
+        caption1, caption2, caption3, endHiddenAtGrey, endShown,
+        // The kernel's own numbers at the moment the second threshold fired, so the caption is not
+        // the only witness.
+        staleMs: stale.staleMs, queued: stale.queued, level: stale.level,
+        transitions: s.health,
+      },
+    }
+  } finally {
+    s.k.worker.terminate()
+  }
+}
+
+/* ---------------------------------------------------------------------------------------- */
+
+async function main () {
+  const t0 = performance.now()
+  say('M4a: the terminal gets a real window' + (CFG.ptyDetach ? '  [CONTROL: pty_detach]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.ptyDetach) boot.ptyDetach = true
+  const P = globalThis.M4A.proofs
+
+  await pEcho(boot)
+  const e = P.echo.evidence
+  say('echo: prompt ' + e.sawPrompt + ' in ' + e.promptMs + ' ms, driven by ' + e.drivenBy +
+    ' (' + e.trustedKeys + ' real / ' + e.synthKeys + ' synthetic keys), echoed ' +
+    e.echoedTheLine + ', ran ' + e.ranTheLine + ', relay exit ' +
+    (e.relay && e.relay.exit) + ' ' + JSON.stringify(e.relayWhy))
+  say('parked: relay inflight ' + JSON.stringify(e.relayInflight) +
+    ' holding kinds ' + JSON.stringify(P.parked.evidence.kinds))
+
+  P.geometry = pGeometry()
+  say('geometry: keyboard ' + JSON.stringify(P.geometry.evidence.keyboardDelta) +
+    ', pointer ' + JSON.stringify(P.geometry.evidence.pointerDelta) +
+    ', clamped x ' + P.geometry.evidence.clampedLeft.x + '/' +
+    P.geometry.evidence.clampedRight.x)
+
+  P.health = await pHealth(boot)
+  say('health: grey at ' + P.health.evidence.greyMs + ' ms, End Process at ' +
+    P.health.evidence.endMs + ' ms, cleared in ' + P.health.evidence.clearedMs + ' ms')
+
+  globalThis.M4A.config = { ptyDetach: CFG.ptyDetach, SIGINT, POLLIN }
+  const sections = Object.entries(P)
+  const ran = sections.filter(([, v]) => v !== null)
+  globalThis.M4A.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
+    ? 'ok' : 'FAIL'
+  globalThis.M4A.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  say('verdict ' + globalThis.M4A.verdict + ' in ' + Math.round(globalThis.M4A.ms) + ' ms')
+  out.className = globalThis.M4A.verdict === 'ok' ? 'ok' : 'bad'
+  globalThis.M4A.state = 'done'
+}
+</script>
+</body>
+</html>

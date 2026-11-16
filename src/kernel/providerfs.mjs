@@ -55,6 +55,12 @@ export const USR_ENTRIES = Object.freeze([
   // `head`, `grep` and `std.eachLine` are all written around. Without it that property was
   // asserted by comment only, because this system had no endless source.
   Object.freeze({ name: "bin/yes", path: "src/bin/yes.mjs" }),
+  // M4a. THE TERMINAL EMULATOR IS A PROGRAM, not part of the shell and not part of the page: it
+  // holds a pty master and a window fd and moves bytes between them. A row here is what makes
+  // `term` startable BY A SHELL and not only by the page, which is the difference between a
+  // userland program and a privileged one — `CLAUDE.md`: "The shell is a userland client of the
+  // same ABI."
+  Object.freeze({ name: "bin/term", path: "src/bin/term.mjs" }),
 ]);
 
 /**

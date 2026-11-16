@@ -13,7 +13,7 @@ import {
   W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
   ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
   SIGPIPE, SIGABRT, SIGQUIT, SIGILL, SIGSEGV,
-  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
+  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, F_WIN, ENODEV, ENXIO, MAX_INLINE, SPAWN_DUP2,
   ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
@@ -33,7 +33,10 @@ import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
-import { installPtyKernel, setPtyDefaultIsig, setPtyWinch } from "./pty.mjs";
+import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
+import {
+  Console, installConsoleKernel, NOT_RESPONDING_MS, END_PROCESS_MS,
+} from "./console.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -77,6 +80,19 @@ const FATAL_DEFAULT = new Set([
 
 let trace = null;
 let mounts = null;
+/**
+ * M4a. THE one console, or null when the page has attached no window.
+ *
+ * NULL IS A STATE AND NOT AN ABSENCE. `/dev/console` is a name in a mount table that is static at
+ * boot (constraint 78); the window is not, and the page may attach one at any point or never. So
+ * `open("/dev/console")` on a kernel with no window answers -ENXIO — a device file with no device
+ * behind it — and that is a different event from a window that existed and was destroyed, which is
+ * -EHOSTGONE. A relay must be able to tell "there is no terminal here" from "my terminal closed".
+ *
+ * ONE, because M4a is a special case with an expiry date: M7 replaces this with `win_create` and a
+ * process may then hold several. `src/kernel/console.mjs`'s header carries the notice.
+ */
+let console1 = null;
 /**
  * M5. The exec loader, and the buffer a durable-volume program is read into.
  *
@@ -232,11 +248,23 @@ function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
   // teardown. Hooking it here rather than threading a callback into each pollable object means a
   // new kind cannot forget to notify. `pollWake` guards its own reentrancy; the length test keeps
   // the common case (nothing polling) to one comparison.
-  if (pollWakeEnabled && pollPending()) pollWake(POLL_K);
+  pollWakeAll();
 }
 
 /** The one thing `pollWake` needs, built once rather than per reply. */
 const POLL_K = { reply };
+
+/**
+ * Re-evaluate every parked `poll`, under the one flag that governs re-evaluation.
+ *
+ * ONE SPELLING, because there are now three callers: `reply` above, teardown, and M4a's console —
+ * whose keystrokes arrive by `postMessage` and therefore pass through no reply at all. A second
+ * copy of the `pollWakeEnabled && pollPending()` pair is a second place for the `no-poll-wake`
+ * control to be forgotten, which is exactly how that control came to need re-scoping once already.
+ */
+function pollWakeAll() {
+  if (pollWakeEnabled && pollPending()) pollWake(POLL_K);
+}
 
 /** M4b's second control. True in every real boot; the kernel refuses to clear it without
  *  bench=1. A parked `poll` then only ever answers from its own timeout. */
@@ -1039,6 +1067,53 @@ function tick() {
   hbTick += 1;
   // No notify: processes only ever READ the heartbeat, so there is nobody to wake.
   Atomics.store(g, G_HEARTBEAT, ++hb);
+  // M4a's not-responding detector rides this timer rather than keeping its own. O(1) and
+  // edge-triggered — `consoleSample` posts only on a transition.
+  consoleSample();
+}
+
+/* -------------------------------------------------------------------- M4a: the console
+
+   The device's three kernel-side duties: hand out a description, tell the page when the window
+   stops collecting its input, and let the page attach and detach the DOM object behind it.      */
+
+/**
+ * `open("/dev/console")` reached a character device. Returns a description or a negative errno.
+ *
+ * ENXIO is the honest answer for a name with no device: see `console1`'s declaration. ENODEV is
+ * for a name this kernel has no driver for at all, which cannot happen while `devfs.mjs`'s
+ * CHARDEVS table is the only producer of the name — asserted rather than assumed, because a row
+ * added there without a row here would otherwise return `undefined` and fault the kernel on the
+ * first read.
+ */
+function openChardev(name, flags) {
+  if (name !== "console") return -ENODEV;
+  if (!console1) return -ENXIO;
+  console1.opens += 1;
+  return { kind: F_WIN, refs: 1, flags, console: console1, inflight: 0 };
+}
+
+/**
+ * Attach a window. Idempotent in the sense that matters: a second attach REPLACES the device, so
+ * the old one's parked readers are answered -EHOSTGONE rather than left waiting on a window that
+ * is gone.
+ */
+function consoleAttach() {
+  if (console1) console1.detach();
+  console1 = new Console();
+  return console1.report();
+}
+
+/** Called from the heartbeat. Posts only on a transition — see `Console.sample`. */
+function consoleSample() {
+  if (!console1) return;
+  const level = console1.sample();
+  if (level < 0) return;
+  post({
+    t: "console-health", level, staleMs: Math.round(console1.staleMs()),
+    queued: console1.keys.length,
+    notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
+  });
 }
 
 /**
@@ -1884,6 +1959,10 @@ async function handle(m) {
         // so the control broke nothing a check could see and the harness refused it. One flag
         // governs both.
         get pollReevaluates() { return pollWakeEnabled; },
+        // M4a. `open` resolved a path to a CHARACTER DEVICE and needs the object behind the name.
+        // The table is here and not in `calls.mjs` because the console's lifetime is the page's
+        // business — it is attached and detached by a message, not by a syscall.
+        chardev: openChardev,
       });
       // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
       // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
@@ -1904,6 +1983,15 @@ async function handle(m) {
       // The pty needs to reply to parked readers and to signal a whole process group. Injected
       // for the same reason the pipe's surface is: this file imports pty.mjs.
       installPtyKernel({ reply, signalGroup });
+      // M4a. The console needs to reply to a parked reader, to post cells to the page, to wake a
+      // parked `poll` that NOTHING ELSE WILL WAKE (a keystroke arrives by postMessage and so
+      // passes through no reply), and a clock for the not-responding detector.
+      installConsoleKernel({
+        reply,
+        post,
+        now,
+        pollWake: () => pollWakeAll(),
+      });
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
       // M4's negative control. Stop delivering a fatal SIGPIPE and `yes | head -1` must HANG:
@@ -1930,6 +2018,13 @@ async function handle(m) {
       if (cfg.noWinch) {
         if (cfg.bench !== 1) throw new Error("noWinch requires bench=1");
         setPtyWinch(false);
+      }
+      // M4a's control. `ptyDetach` makes a write to the master accept its bytes and discard them,
+      // so the window, the device and the relay all keep working and the pty alone stops. See
+      // `Pty.writeInput` for what the control is about and why nothing else in the suite covers it.
+      if (cfg.ptyDetach) {
+        if (cfg.bench !== 1) throw new Error("ptyDetach requires bench=1");
+        setPtyDetached(true);
       }
       if (cfg.noFinishGuard) {
         if (cfg.bench !== 1) throw new Error("noFinishGuard requires bench=1");
@@ -2084,6 +2179,37 @@ async function handle(m) {
     }
     case "m3-state":
       post({ t: "m3-state", m3: m3State() });
+      return;
+    /* ---- M4a: the window, which is the page's half of /dev/console --------------------- */
+    //
+    // THESE FOUR ARE SERVED FROM THE PAGE'S PORT AND FROM NOWHERE ELSE. A process's messages
+    // arrive on its own MessagePort and go to `onProcessMessage`, which answers an unknown kind
+    // with an error; this switch is reached only by the kernel worker's own `onmessage`, which is
+    // the page. So a process cannot forge a keystroke or detach a window — it has no route to
+    // this code at all. `src/kernel/console.mjs`'s header states the same property.
+    case "console-attach":
+      post({ t: "console-attached", console: consoleAttach() });
+      return;
+    case "console-in": {
+      // The page typed. `bytes` is a Uint8Array over a transferred or cloned buffer; the device
+      // copies what it keeps.
+      if (!console1) { post({ t: "error", why: "console-in with no window attached" }); return; }
+      const bytes = m.bytes instanceof Uint8Array ? m.bytes : new Uint8Array(m.bytes || 0);
+      const took = console1.feed(bytes);
+      // ECHOED BACK AS AN ACCOUNT, not as a courtesy: `took` is how the page learns a keystroke
+      // was DROPPED, and a terminal that loses input silently is the one failure a user cannot
+      // diagnose. See CONSOLE_INPUT_BYTES.
+      post({ t: "console-fed", offered: bytes.length, took, console: console1.report() });
+      return;
+    }
+    case "console-detach":
+      // The window was closed. Every parked reader is answered -EHOSTGONE: a process parked in
+      // `read` cannot be told on its next call, because it will not make one.
+      if (!console1) { post({ t: "console-detached", answered: 0 }); return; }
+      post({ t: "console-detached", answered: console1.detach(), console: console1.report() });
+      return;
+    case "console-state":
+      post({ t: "console-state", console: console1 ? console1.report() : null });
       return;
     case "trace-read":
       // The trace as TEXT, through the same renderer `/dev/trace` uses, so the page and a process

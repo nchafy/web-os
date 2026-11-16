@@ -1285,3 +1285,90 @@ could not explain, which is answered in 153 above.
     AND A SLOW CHECK IS NOT A DEAD ONE: m2 was reported here as "never finishes" on the strength
     of an empty unbuffered log and a `pgrep` reading zero, and it then completed in 105.55 s with
     all 92 expectations passing. Waiting long enough is part of measuring.
+
+## M4a — the terminal gets a real window
+
+Measured 2026-11-16 on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro / 120 Hz / dpr 2, by
+`scripts/check.py --only m4a` (26 expectations, 6.38 s), `scripts/check.py --negative pty-detach`
+(6 red, 20 intact) and `node bench/m3-synth/probe.mjs` (98 host checks).
+
+157. **A window is a FILE DESCRIPTION, and `poll` is how a process waits on it.** M4a's
+    `/dev/console` is an `F_WIN` description with a row in `src/kernel/files.mjs`'s ops table and a
+    row in `pollOne`, so a terminal process waits on its window and its pty master in ONE call.
+    This is constraint 42 and `docs/designs/REVIEW-FINDINGS.md` finding 1 made real, and finding
+    1's *corrected* scenario is what it costs to get wrong: parked in `read(master)` at idle with
+    nothing flowing, the keystrokes queue unread and the keys are dead indefinitely. MEASURED, as
+    the state the kernel reports rather than as a property inferred from the keystroke working:
+    with the shell at a prompt and no output moving, `/proc`-equivalent park state reads
+    `inflight: "poll"` for the relay, holding fd 3 kind 5 (`F_WIN`) and fd 4 kind 8 (`F_PTY_M`).
+    M7 replaces the one producer of that description — `open("/dev/console")` — with `win_create`,
+    and the ops row and the poll row survive unchanged. That is the part of M4a that is not a
+    special case.
+158. **A character device is not a generated file, and `/dev`'s read-only mount is about its
+    TREE.** `/dev` is mounted `MNT_RO` because no file can be created, renamed or unlinked there.
+    Writing to `/dev/console` changes no tree: it puts bytes in a kernel object. So `open` carves
+    one exception out of the mount's write refusal, asked of `SynthFS.chardevAt` — a lookup over
+    names DECLARED in `src/kernel/devfs.mjs`'s CHARDEVS table, never a generator call, because
+    `/dev/trace`'s generator renders the whole trace and `open` asks this question on every open of
+    every generated mount. `O_CREAT` is still refused: a mount with no `mknod` cannot make a
+    device.
+    THE ORDER OF THE TWO TESTS IS LOAD-BEARING AND WAS WRONG FIRST. Taking the node before the
+    refusal changed what a write to a path that does not exist answers — `open("/proc/nope",
+    O_WRONLY)` went from EROFS to ENOENT — and `bench/m3-synth/probe.mjs`'s `/proc refuses open
+    with O_CREAT with EROFS` is the check that caught it. A reorder inside a permission test is
+    not a refactor.
+159. **A device file with no device is ENXIO; a window that existed and was destroyed is
+    EHOSTGONE.** The mount table is static at boot (constraint 78) and a window is not, so
+    `/dev/console` is a name on every kernel and an object on only some. The two states are
+    different events and a relay must be able to tell "there is no terminal here" from "my
+    terminal closed" — the first is a configuration, the second is a hangup that must raise SIGHUP
+    on the foreground group. `docs/ABI.md` reserved EHOSTGONE for exactly the second
+    ("the DOM object behind a host fd was destroyed", errno 100) and M4a is its first caller.
+160. **A keystroke is the one readiness in this system that arrives with no syscall reply behind
+    it, so the console wakes `poll` itself.** `pollWake` is hooked on `reply`, "the one funnel every
+    state change that could make an fd ready passes through" (constraint 109) — and a keystroke
+    passes through no funnel: it is a `postMessage` from the page. Without the explicit wake a
+    relay parked in `poll` sleeps until its timeout, which is the lost wake teardown's fd sweep
+    produced once already. The `pollWakeEnabled` flag governs this wake too, through one
+    `pollWakeAll` spelling, because a second copy of the pair is a second place `--negative
+    no-poll-wake` can be forgotten.
+161. **A terminal widget MUST NOT echo.** The character a user sees is the pty's echo, which
+    travelled widget → `/dev/console` → `term` → `write(master)` → the line discipline → back.
+    A widget that echoed locally would look identical AND WOULD SATISFY M4a's PROOF WITH NO PTY
+    BEHIND IT — which is what `--negative pty-detach` exists to catch and the only thing in the
+    suite that can. It is also wrong in substance: `ECHO` is a termios flag the program owns, and
+    a password prompt clears it.
+    THE CONTROL CUTS AT `Pty.writeInput`, which accepts its bytes and discards them, so every
+    other link keeps working — the key event reaches the widget, the widget reaches the device, the
+    device wakes the relay, the relay writes the master and is told it succeeded. Measured: exactly
+    `echo ok`, the echo clause, the shell-ran-it clause, the Ctrl-C clause, the Ctrl-D clause and
+    the verdict go red; the other twenty hold, INCLUDING `the window delivered the keystroke to the
+    kernel` at 11 of 11 bytes counted by the device itself.
+162. **Enter is LINE FEED, not carriage return.** `src/kernel/pty.mjs` commits a canonical line on
+    byte 10 and implements no `ICRNL`, so a terminal sending 13 types a line the shell never
+    receives: the discipline echoes the bare CR, the cursor returns to column 0, and `read(slave)`
+    stays parked for ever. MEASURED — it was the first defect in `src/wm/terminal.mjs`, and the
+    symptom was a prompt that accepted typing and never answered. `bench/m5-sh/program.mjs` writes
+    `"\n"` to the master, which was the existing statement of this contract and is now written
+    where a terminal author meets it.
+163. **"Not responding" is the AGE OF THE OLDEST UNCOLLECTED KEYSTROKE, not the absence of a
+    syscall.** Deferred from M1 for want of a UI to hook. A process in `sleep 60` makes no syscall
+    and is perfectly well; a window with input waiting that nobody is taking is the condition a
+    user means. The kernel's existing heartbeat samples it — O(1), edge-triggered, so the page is
+    told about a transition and never once per tick. Thresholds are
+    `docs/designs/fidelity-first.md`'s: caption at 1,000 ms, End Process affordance at 5,000 ms.
+    MEASURED: 1,020 ms and 4,006 ms after the first transition, from a kernel reporting
+    `staleMs: 5026` at level 2.
+    HYSTERESIS IS THE DRAIN, NOT A SECOND TIME. Entering needs a stale queue; LEAVING NEEDS AN
+    EMPTY ONE, so a process that reads one byte of a thousand it has been sitting on has not
+    recovered. Both edges are checked, and they are checked on the DOM caption — what a reader
+    would actually hit — rather than on a class or a flag. Measured clearing: 26 ms after a relay
+    opened the device.
+    THE WEDGE NEEDS NO SCAFFOLDING. The proof attaches a window with NO relay, which is the
+    realistic form of the condition (a terminal whose process died) and keeps test-only behaviour
+    out of a shipped program.
+164. **`bench/m3-provider/probe.mjs`'s `implied directories exist` had been red since M5.** It
+    compared the mount's top level against the literal `["include","lib"]`, and M5 added eleven
+    `bin/*` rows to `USR_ENTRIES`. Nobody saw it go red because the host probes are not in
+    `scripts/check.py`'s registry and are run by hand. Now derived from the manifest. A list that
+    is a copy of a table is a list that drifts from it, and this one drifted for a whole milestone.

@@ -213,9 +213,59 @@ class Session:
             self.call("Input.dispatchKeyEvent", **params)
 
     def type_text(self, text: str) -> None:
-        """Put text into the focused field in one `Input.insertText`, which is enough
-        because no code path listens for keystrokes."""
+        """Put text into the focused field in one `Input.insertText`.
+
+        This does NOT produce key events. It is right for a form field, which reads `value`,
+        and WRONG for anything that listens for keystrokes - M4a's terminal is the first such
+        thing in this project, and `type_keys` below is what it needs.
+        """
         self.call("Input.insertText", text=text)
+
+    def type_keys(self, text: str) -> None:
+        """Type `text` as real per-character key events.
+
+        One `keyDown` carrying `text`, then `keyUp`, per character - so a `keydown` listener sees
+        a trusted event with the right `key`, which `insertText` never delivers. `Enter` is sent
+        as its own named key because its `key` is "Enter" and not "\\n", and a terminal's line
+        discipline is driven by the byte that mapping produces.
+
+        The virtual key code is left at 0 for printable characters: Chrome does not need it to
+        deliver a `text`-carrying `keyDown`, and a table of codes per character would be a second
+        keyboard layout to keep correct.
+        """
+        for ch in text:
+            if ch in ("\n", "\r"):
+                self.press("Enter")
+                continue
+            for event_type in ("keyDown", "keyUp"):
+                params = {"type": event_type, "key": ch, "code": "", "modifiers": 0}
+                if event_type == "keyDown":
+                    params["text"] = ch
+                    params["unmodifiedText"] = ch
+                self.call("Input.dispatchKeyEvent", **params)
+
+    #: Chrome's `modifiers` bitmask: Alt 1, Ctrl 2, Meta 4, Shift 8.
+    CTRL = 2
+
+    def press_ctrl(self, letter: str) -> None:
+        """Ctrl plus one letter, as a real keypress.
+
+        NO `text`, deliberately. A real Ctrl-C delivers `key: "c"` with the control modifier set
+        and inserts nothing; it is the LISTENER that turns that into byte 0x03 (see
+        `src/wm/terminal.mjs` `bytesForKey`). Sending `text: "\\x03"` would test a translation
+        Chrome does not perform and the widget would never see the modifier.
+        """
+        code = ord(letter.upper())
+        for event_type in ("rawKeyDown", "keyUp"):
+            self.call(
+                "Input.dispatchKeyEvent",
+                type=event_type,
+                key=letter.lower(),
+                code=f"Key{letter.upper()}",
+                windowsVirtualKeyCode=code,
+                nativeVirtualKeyCode=code,
+                modifiers=self.CTRL,
+            )
 
     def throttle(self, *, download_bps: float, upload_bps: float, latency_ms: float, cpu: float):
         """Shape the network and CPU to the reference profile.

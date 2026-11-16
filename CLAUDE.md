@@ -94,11 +94,16 @@ src/
     trace.mjs     the syscall trace ring. Reads no clock; see constraint 72
     providers.mjs the provider table as DATA, and the only place a request URL is built
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
+    console.mjs   /dev/console: M4a's window, as a file description. Special-cased; M7 deletes it
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
-  wm/             userland window manager                (empty until M7)
+  bin/            the programs in /usr/bin, one file each. `true.mjs` states the program contract
+  wm/             userland window manager
+    window.mjs    the frame, ported unstyled from ../webxp. Geometry, clamp, drag, arrow keys
+    terminal.mjs  the terminal widget. IT DOES NOT ECHO — constraint 161
 www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
+  m4a.html        the window and the terminal. The one page a check types REAL keys into
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
