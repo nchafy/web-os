@@ -32,7 +32,14 @@ import {
   E, O_RDONLY, O_RDWR, O_CREAT, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGKILL, SIGWINCH,
   ISIG, ICANON, ECHO,
   VINTR, MAX_INLINE, POLLIN, packI64, SYS_read, SYS_poll, OPEN_MAX,
-} from "../../src/abi.mjs";
+// ABSOLUTE, NOT RELATIVE, and M5 is why. This program is spawned BY A PROCESS, so the kernel
+// loads it out of the filesystem and links it as a program (src/kernel/exec.mjs): a program's image
+// is a Blob URL whose path is opaque, so a RELATIVE specifier inside it has nothing to resolve
+// against and the module fails to load — measured, every stage here faulted with SIGABRT and
+// "never issued a syscall". An absolute specifier resolves against the document and comes out as
+// the same URL src/libos/process.mjs already has in its module map, so it costs no fetch and works
+// under BOTH loaders: the page's own spawn rewrites `/x` the same way.
+} from "/src/abi.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();

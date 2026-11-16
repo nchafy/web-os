@@ -148,7 +148,16 @@ const INTS = {
   SYS_tty_winsize_set: 44,
   SYS_poll: 45,
   SYS_ioctl: 46,
-  NSYS: 47,
+  // M5. Append-only, never renumbered. THE SHELL IS WHY: `slot.cwd` has existed since M2 and was
+  // inherited at spawn and otherwise immovable, so `cd` was not expressible — and a shell whose
+  // working directory cannot change is not a shell. `/proc/<pid>/cwd` already publishes it
+  // (src/kernel/table.mjs says in as many words that "the call that moves it" was still owed), so
+  // this adds the write side of a fact the system already reports.
+  //
+  // THERE IS NO `getcwd`, and that is not an omission: `/proc/<pid>/cwd` answers it with calls
+  // that already exist, and a second renderer of one fact is what CLAUDE.md forbids.
+  SYS_chdir: 47,
+  NSYS: 48,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -417,7 +426,7 @@ export const {
   SYS_stat, SYS_lstat, SYS_chmod, SYS_chown, SYS_readdir, SYS_truncate, SYS_statfs,
   SYS_dup, SYS_dup2, SYS_pipe2,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
-  SYS_poll, SYS_ioctl, NSYS,
+  SYS_poll, SYS_ioctl, SYS_chdir, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -518,6 +527,7 @@ export const SYS_NAME = Object.freeze([
   "stat", "lstat", "chmod", "chown", "readdir", "truncate", "statfs",
   "dup", "dup2", "pipe2",
   "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
+  "chdir",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order.
@@ -612,6 +622,46 @@ export const TEARDOWN_ERRNO = E.ECONNABORTED;
 /** Signals 1..31 occupy one bit each in SIGPEND. */
 export function SIG_BIT(sig) {
   return 1 << (sig - 1);
+}
+
+/**
+ * Signal NAME -> number, for `kill -TERM` and for printing a death.
+ *
+ * WRITTEN OUT, not derived from the `SIG*` keys of INTS, and the reason is `SIGPEND`: it is in
+ * INTS and it is a WORD INDEX, not a signal. A filter would have had to name it as an exception,
+ * and an exception list is the thing that goes stale. What keeps this honest instead is
+ * `selfTest()`, which asserts in both directions — every row equals the constant it names, and
+ * every `SIG`-prefixed integer in INTS is either in this table or is one of the two declared
+ * non-signals. Add a signal and forget this table and the module refuses to load.
+ */
+export const SIGNALS = Object.freeze({
+  HUP: SIGHUP, INT: SIGINT, QUIT: SIGQUIT, ILL: SIGILL, ABRT: SIGABRT,
+  KILL: SIGKILL, USR1: SIGUSR1, SEGV: SIGSEGV, USR2: SIGUSR2, PIPE: SIGPIPE,
+  ALRM: SIGALRM, TERM: SIGTERM, CHLD: SIGCHLD, CONT: SIGCONT, STOP: SIGSTOP,
+  TSTP: SIGTSTP, TTIN: SIGTTIN, TTOU: SIGTTOU, WINCH: SIGWINCH,
+});
+
+/** Number -> name, for a one-line "killed by" that reads. Derived, so it cannot disagree. */
+export const SIGNAL_NAME = Object.freeze(
+  Object.fromEntries(Object.entries(SIGNALS).map(([name, n]) => [n, name])),
+);
+
+/**
+ * `kill`'s argument, as a number: `9`, `KILL` or `SIGKILL`. Null for anything else.
+ *
+ * ONE PARSER, because the shell needs it for `kill %1` and the program needs it for `kill -9`, and
+ * two copies of "is this a signal" is two places `SIGKILL` could stop being recognised.
+ */
+export function signalOf(spec) {
+  if (typeof spec === "number") return Object.hasOwn(SIGNAL_NAME, spec) ? spec : null;
+  if (typeof spec !== "string" || spec === "") return null;
+  if (/^\d+$/.test(spec)) {
+    const n = Number(spec);
+    return Object.hasOwn(SIGNAL_NAME, n) ? n : null;
+  }
+  const upper = spec.toUpperCase();
+  const bare = upper.startsWith("SIG") ? upper.slice(3) : upper;
+  return Object.hasOwn(SIGNALS, bare) ? SIGNALS[bare] : null;
 }
 
 // The four pure codecs. Total functions over integers, and nothing else.
@@ -1093,6 +1143,29 @@ export function selfTest() {
 
   if (PIPE_CAPACITY <= MAX_INLINE) {
     fail(`a pipe capacity of ${PIPE_CAPACITY} cannot hold one maximal ${MAX_INLINE} B write`);
+  }
+
+  // M5. The signal table, BOTH WAYS, because the hazard is a signal added to INTS and not to it.
+  for (const [name, n] of Object.entries(SIGNALS)) {
+    if (INTS[`SIG${name}`] !== n) fail(`SIGNALS.${name} is ${n}, not INTS.SIG${name}`);
+    if (SIGNAL_NAME[n] !== name) fail(`signal ${n} does not name itself back`);
+  }
+  // `SIGPEND` is a WORD INDEX and `SIG_BIT`/`SIG_DFL`/`SIG_IGN`/`SIG_HANDLE` are not signals.
+  // Every other SIG-prefixed integer must be in the table.
+  const NOT_SIGNALS = new Set(["SIGPEND", "SIG_DFL", "SIG_IGN", "SIG_HANDLE"]);
+  for (const key of Object.keys(INTS)) {
+    if (!key.startsWith("SIG") || NOT_SIGNALS.has(key)) continue;
+    if (SIGNAL_NAME[INTS[key]] === undefined) {
+      fail(`${key} is a signal INTS declares and SIGNALS does not carry`);
+    }
+  }
+  if (signalOf("9") !== SIGKILL || signalOf("KILL") !== SIGKILL
+      || signalOf("sigkill") !== SIGKILL || signalOf(SIGKILL) !== SIGKILL) {
+    fail("signalOf does not accept a number, a name and a SIG-prefixed name alike");
+  }
+  if (signalOf("NOPE") !== null || signalOf("") !== null || signalOf("0") !== null
+      || signalOf(99) !== null || signalOf(null) !== null) {
+    fail("signalOf accepted something that is not a signal");
   }
 
   if (!ABI_FINGERPRINT) fail("fingerprint is zero");

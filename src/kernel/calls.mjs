@@ -27,7 +27,7 @@ import { Pipe } from "./pipe.mjs";
 import { Pty } from "./pty.mjs";
 import { errnoOfFsError } from "./store.mjs";
 import {
-  DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath,
+  DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath, normalize,
 } from "../fs/vfs.mjs";
 import { ZOMBIE, RUNNING, dropCaps } from "./table.mjs";
 
@@ -131,7 +131,7 @@ function readTwoPaths(p) {
  * shares one identity and the mode bits are decoration — which is exactly what the predecessor's
  * single `this.uid` did.
  */
-function credOf(p) {
+export function credOf(p) {
   return { uid: p.uid, gid: p.gid };
 }
 
@@ -248,7 +248,7 @@ function metaRead(p, k, path, read) {
  * walk itself to consult the mount table at every component, which this does not. Nothing in M3
  * crosses a mount by symlink; a milestone that needs it has to move the join into the walk.
  */
-function resolveMount(p, k, path) {
+export function resolveMount(p, k, path) {
   const table = k.mounts;
   if (!table) return -EIO;
   const abs = absoluteOf(p, path);
@@ -1400,6 +1400,51 @@ HANDLERS.statfs = (p, k) => {
   dv.setUint32(32, 1, true);
   dv.setUint32(36, NAME_MAX, true);
   return replyBytes(p, record);
+};
+
+/**
+ * chdir(path). M5's one new call, and the shell is why: `cd`.
+ *
+ * THE STORED VALUE IS LEXICALLY NORMALIZED AND ABSOLUTE, which is `cd -L` and what every shell
+ * does for its own working directory. It differs from resolution exactly when a symlink is
+ * involved, and the alternative — storing the resolved path — would make `cd dir/..` land
+ * somewhere the user did not type. `resolveMount`'s own comment carries the same rule for the
+ * same reason.
+ *
+ * THE DIRECTORY MUST EXIST AND BE SEARCHABLE AT THE MOMENT OF THE CALL. `wantX` on a directory is
+ * POSIX's search permission, and it goes through the filesystem's own `openDecision` so the mode
+ * bits keep one interpreter — the same route `SYS_spawn`'s execute check takes.
+ *
+ * NOTHING IS PINNED. A later `rmdir` of the current directory succeeds and the cwd becomes a path
+ * that resolves to nothing, exactly as it does on Linux with an unlinked cwd; the next relative
+ * path then answers ENOENT. Holding a reference would mean a process could keep a directory alive
+ * by sitting in it, which is state outside the process table — constraint 15's own rule.
+ */
+HANDLERS.chdir = (p, k) => {
+  if (!k.store || !k.store.vfs) return -EIO;
+  const path = readPath(p);
+  if (typeof path === "number") return path;
+  const at = resolveMount(p, k, path);
+  if (typeof at === "number") return at;
+  /* THE TYPE FIRST, THEN THE PERMISSION, and the order is a fix. Asking for `wantX` in one call
+   * made the VFS check the execute bit on whatever was there — so `chdir("/tmp/notes.txt")` on a
+   * 0o644 file answered EACCES ("Permission denied") and the `-ENOTDIR` below was DEAD for every
+   * non-executable file, while the same call on `/proc/1/status` answered ENOTDIR because the
+   * generated filesystem tests the type itself. One operation, two answers, chosen by mount — the
+   * family constraint 82 records. A shell printing "Permission denied" for `cd somefile` sends a
+   * reader looking at mode bits. */
+  try {
+    const typed = at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true });
+    if (typed.type !== DIR) return -ENOTDIR;
+    // The SEARCH permission, POSIX's name for the execute bit on a directory, through the
+    // filesystem that owns the mode bits. Second call, same path, and it is the only way to keep
+    // one interpreter of those bits while answering ENOTDIR first.
+    at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true, wantX: true });
+  } catch (error) {
+    return errnoOfFsError(error);
+  }
+  p.cwd = normalize(absoluteOf(p, path));
+  return 0;
 };
 
 HANDLERS.clock_nanosleep = (p, k) => {
