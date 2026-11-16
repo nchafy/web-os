@@ -146,7 +146,9 @@ if str(HERE) not in sys.path:
 
 import cdp  # noqa: E402  - scripts/ is sys.path[0] when this file is the entry point
 from cdp import CDPError, Session  # noqa: E402
-from serve import ISOLATION_HEADERS, Handler  # noqa: E402
+from serve import (  # noqa: E402
+    ISOLATION_HEADERS, PROCESS_REALM_CSP, PROCESS_REALM_PREFIX, Handler,
+)
 
 #: Pinned to the machine every figure in docs/CONSTRAINTS.md was measured on: dpr 2, desktop.
 #: cdp.py's emulate_device defaults mobile=True (cdp.py:236-238), which is wrong for a desktop
@@ -301,7 +303,8 @@ class Serving:
         return body == expected
 
 
-def _recording_handler(isolate: bool, log: List[Served], lock: threading.Lock):
+def _recording_handler(isolate: bool, log: List[Served], lock: threading.Lock,
+                       csp: bool = True):
     """A per-server Handler subclass.
 
     Per-server and not Handler itself: Handler.isolate (serve.py:45) is a class attribute and
@@ -313,6 +316,9 @@ def _recording_handler(isolate: bool, log: List[Served], lock: threading.Lock):
         pass
 
     Recording.isolate = isolate
+    # M6's second control, per server for the reason `isolate` is: both are class attributes on
+    # serve.py's Handler, and two servers in one process would otherwise share them.
+    Recording.csp = csp
 
     def send_response(self, code, message=None):
         self._recorded_status = int(code)
@@ -353,7 +359,7 @@ def _recording_handler(isolate: bool, log: List[Served], lock: threading.Lock):
 
 
 @contextlib.contextmanager
-def serve(root, *, canonical=None, port: int = 0, isolate: bool = True,
+def serve(root, *, canonical=None, port: int = 0, isolate: bool = True, csp: bool = True,
           documents: Tuple[str, ...] = ("/",)) -> Iterator[Serving]:
     """A ThreadingHTTPServer on a daemon thread, in this process, on an OS-chosen port.
 
@@ -370,7 +376,7 @@ def serve(root, *, canonical=None, port: int = 0, isolate: bool = True,
     log: List[Served] = []
     lock = threading.Lock()
     handler = functools.partial(
-        _recording_handler(isolate, log, lock), directory=str(root))
+        _recording_handler(isolate, log, lock, csp), directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     bound = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -379,11 +385,53 @@ def serve(root, *, canonical=None, port: int = 0, isolate: bool = True,
     try:
         for document in documents:
             _assert_serving(serving, document)
+        _assert_policy(serving, csp)
         yield serving
     finally:
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=10)
+
+
+#: The one response M6's policy has to be on: the script that creates a process realm. Named here
+#: so the gate below and `check_m6` cannot disagree about which response they mean.
+PROCESS_REALM_SCRIPT = PROCESS_REALM_PREFIX + "process.mjs"
+
+
+def _assert_policy(serving: Serving, csp: bool) -> None:
+    """The second gate before Chrome exists: is M6's policy on the wire, or provably not?
+
+    Both directions, and the second is the point. `--negative no-csp` is satisfied by a loader
+    that reached a `data:` module — but a run where the switch silently failed to apply would
+    report the policy as broken instead of reporting the control as unapplied, which is the
+    harness lying about its own world. So the mode is asserted on the wire, exactly as
+    `_assert_serving` asserts COOP/COEP.
+
+    Skipped for a root that has no `src/libos/` — a www-only or fixture tree serves no process
+    realm, so there is nothing to carry a policy and nothing to claim.
+    """
+    on_disk = serving.root / PROCESS_REALM_SCRIPT.strip("/")
+    if not on_disk.is_file():
+        return
+    try:
+        with _harness_get(serving.base + PROCESS_REALM_SCRIPT) as response:
+            response.read()
+            header = response.headers.get("Content-Security-Policy")
+    except (urllib.error.URLError, OSError) as error:
+        raise ServeError(
+            "GET %s%s failed, so this run cannot say whether the process realm is bounded: %s"
+            % (serving.base, PROCESS_REALM_SCRIPT, error), reason=Gate.FETCH_FAILED) from error
+    if csp and header != PROCESS_REALM_CSP:
+        raise ServeError(
+            "serve(csp=True) did not put scripts/serve.py's process-realm policy on %s; saw %r, "
+            "want %r. A process's module loader would be unbounded and M6's loader half would be "
+            "measuring a different system."
+            % (PROCESS_REALM_SCRIPT, header, PROCESS_REALM_CSP), reason=Gate.WIRE_HEADERS)
+    if not csp and header is not None:
+        raise ServeError(
+            "serve(csp=False) still sent a policy on %s (%r). The negative control did not "
+            "remove what it claims to remove."
+            % (PROCESS_REALM_SCRIPT, header), reason=Gate.WIRE_HEADERS)
 
 
 def _assert_serving(serving: Serving, document: str = "/") -> None:
@@ -514,6 +562,17 @@ class Control:
     #: device and the relay all keep working and the pty alone stops being the pty. It is what
     #: tells a real echo from a terminal widget echoing locally.
     PTY_DETACH = "pty-detach"
+    #: M6, half one. The realm strip does not run, so a process keeps the whole platform — and
+    #: `navigator.storage` over the kernel's own volume above all (constraints 41, 53). Through the
+    #: cfg.noLockdown hook, which the kernel refuses without a bench boot and which travels to the
+    #: process because that is where the strip lives. MILESTONES.md M6's own control: "Skip the
+    #: stripping; the same program must succeed."
+    NO_LOCKDOWN = "no-lockdown"
+    #: M6, half two. The process realm's Content-Security-Policy is not served, so the module
+    #: loader is unbounded again: a COMPUTED `import(expr)` and `eval` both work (constraint 139).
+    #: A SERVER switch rather than a query parameter, because a policy is a response header — the
+    #: same shape as `no-isolation`, and for the same reason.
+    NO_CSP = "no-csp"
     ONCE = "once"
 
 
@@ -540,6 +599,8 @@ CONTROL_RUNS = {
     Control.NO_FINISH_GUARD: ("no-finish-guard",),
     Control.NO_WINCH: ("no-winch",),
     Control.PTY_DETACH: ("pty-detach",),
+    Control.NO_LOCKDOWN: ("no-lockdown",),
+    Control.NO_CSP: ("no-csp",),
 }
 
 
@@ -1170,6 +1231,27 @@ class Env:
         self.expect_that(label, hit is not None,
                          "no console error containing %r arrived, so the error path that was "
                          "supposed to fire did not" % needle)
+
+    def claim_console(self, needle: str, why: str) -> int:
+        """Claim a console entry a NEGATIVE CONTROL provokes, asserting nothing.
+
+        WHY THIS IS NOT `expect_console`. That method records an expectation, and an expectation
+        a check only sometimes records breaks the label inventory every control's `held` set is
+        derived from. These messages are not a product expectation at all: in a normal run they
+        cannot happen, because the binding that would produce them is gone.
+
+        WHY IT IS NOT AN ALLOWANCE EITHER. It is reached only when the check has already read,
+        from the page, that the control under which they are expected is in force — so the
+        normal run stays strict and an unclaimed console error there is still a failure. `why` is
+        required and goes nowhere: it exists so the call site has to say what it is excusing.
+
+        Returns how many entries it claimed, so a caller can tell "excused" from "never arrived".
+        """
+        assert why, "claim_console needs a reason at the call site"
+        self._drain_console()
+        hits = [e for e in self.console_seen if needle in e.text and e not in self.claimed]
+        self.claimed.extend(hits)
+        return len(hits)
 
     def _drain_console(self, *, quiesce: float = 0.0) -> None:
         # A round trip first: cdp.py only reads events off the socket during a call, so without
@@ -2743,6 +2825,149 @@ _PTY_DETACH_FAILS = (
 )
 
 
+# ======================================================================================
+# M6 - neuter the process realm
+# ======================================================================================
+
+#: Clause-level, and split along the SEAM THE TWO HALVES SIT ON: the realm strip removes bindings
+#: (`src/libos/lockdown.mjs`) and the policy bounds the module loader (`scripts/serve.py`). The
+#: two controls below move disjoint subsets of this inventory, which is the measured claim that
+#: neither half is doing the other's work.
+#:
+#: EACH REALM CLAUSE ASSERTS THE BINDING'S ABSENCE AND THE CALL'S FAILURE, both. A clause that
+#: only asserted the call would hold under `no-lockdown`, because the policy refuses `fetch` at
+#: the network while the process still HOLDS the binding - and constraint 41 is about what a
+#: process can reach, not only about what the renderer will send.
+M6_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # The policy, on the wire, read back by the page from the response that creates the realm.
+    "policy ok",
+    "the process realm's script carries a policy",
+    "and the policy names script-src without 'unsafe-eval'",
+    # The realm. Constraint 41's list, as calls and as bindings.
+    "realm ok",
+    "a uid-1000 process is refused the file by the syscall channel",
+    "and its own syscalls still work",
+    "the lockdown reports every target stripped and none surviving",
+    "ambient OPFS is gone",
+    "the network is gone",
+    "the durable stores are gone",
+    "a process cannot construct a worker",
+    "a process cannot mint a blob URL",
+    # THE HEADLINE. MILESTONES.md M6: the kernel's own volume, by inode, with no credential.
+    "volume ok",
+    "the tamper by inode was refused",
+    "and the kernel's own bytes are unchanged",
+    # The loader. Constraint 139's open half.
+    "loader ok",
+    "a computed data: import is refused",
+    "and the realm's own violation event names script-src",
+    "eval and new Function are refused",
+    "while the one same-origin specifier still loads",
+    # MILESTONES.md M6's own proof, in its words.
+    "fault ok",
+    "the bypass program faulted",
+    "and /proc shows it killed by SIGABRT",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m6.html",
+)
+
+M6_DOCUMENT = "/www/m6.html"
+
+M6_READY = ("(() => { const s = globalThis.M6 && globalThis.M6.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M6 = """(() => {
+  const M = globalThis.M6 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.kernelCfg || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why).slice(0, 200)),
+    realm: one(P.realm),
+    volume: one(P.volume),
+    loader: one(P.loader),
+    fault: one(P.fault),
+    policy: one(P.policy),
+  }
+})()"""
+
+M6_SHAPE = {
+    "state": str, "why": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "realm": (dict, type(None)),
+    "volume": (dict, type(None)),
+    "loader": (dict, type(None)),
+    "fault": (dict, type(None)),
+    "policy": (dict, type(None)),
+}
+
+#: What SKIPPING THE REALM STRIP must break, and only this. MILESTONES.md M6's own control:
+#: "Skip the stripping; the same program must succeed. If it does not, the check is testing
+#: nothing."
+#:
+#: Measured under the control on Chrome 157.0.8103.52: `tamper REACHED 2.1:
+#: "KERNEL-OWNED-SECRET" -> "TAMPERED-BY-PROCESS"`, and the kernel then read the tampered bytes
+#: back through its own syscall channel.
+#:
+#: THE LOADER CLAUSES ARE IN THE HELD SET, and that is this control's specificity: the policy is
+#: still served, so a computed `data:` import and `eval` are still refused. A control that moved
+#: those too could not distinguish the realm strip from the policy - and measuring where the
+#: policy has to be delivered (constraint 187) is what showed they are different mechanisms.
+_NO_LOCKDOWN_FAILS = (
+    "realm ok",
+    "the lockdown reports every target stripped and none surviving",
+    "ambient OPFS is gone",
+    "the network is gone",
+    "the durable stores are gone",
+    "a process cannot construct a worker",
+    "a process cannot mint a blob URL",
+    "volume ok",
+    "the tamper by inode was refused",
+    "and the kernel's own bytes are unchanged",
+    # `p_fault` is MILESTONES.md's "same program": with the realm intact it RETURNS the volume's
+    # root listing instead of dying, so both clauses move together.
+    "fault ok",
+    "the bypass program faulted",
+    "and /proc shows it killed by SIGABRT",
+    "verdict is ok",
+)
+
+#: What WITHHOLDING THE POLICY must break, and only this. The mirror of the control above.
+#:
+#: Measured under the control on Chrome 157.0.8103.52: `importData REACHED data: evaluated in a
+#: process`, `eval REACHED 2`, `newFunction REACHED 4` - and every realm clause HELD, with the
+#: volume intact and the bypass program still faulting.
+#:
+#: "the policy names script-src without 'unsafe-eval'" IS IN THE FAILED SET AND HAD TO BE WRITTEN
+#: THAT WAY: a clause reading "the header does not contain 'unsafe-eval'" is satisfied by a
+#: response carrying NO POLICY AT ALL, so it would have passed under this control while `eval`
+#: worked. The clause asserts that `script-src` is present AND lacks the keyword.
+_NO_CSP_FAILS = (
+    "policy ok",
+    "the process realm's script carries a policy",
+    "and the policy names script-src without 'unsafe-eval'",
+    "loader ok",
+    "a computed data: import is refused",
+    "and the realm's own violation event names script-src",
+    "eval and new Function are refused",
+    "verdict is ok",
+)
+
+
 #: A pty with no ISIG recognises no signal characters. Both Ctrl-C clauses go, and so does the
 #: "a fresh pty is signal-generating" clause — the control changes the DEFAULT termios, and that
 #: section asserts the default. Declared rather than excused: it is a consequence of the control's
@@ -2830,6 +3055,15 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "boots, no process exists and there is nothing to load a shell into. UNMEASURABLE "
                 "rather than FAIL, because a FAIL would claim a pipeline of three processes was "
                 "built and found wrong.",
+        ), "m6": Expect(
+            UNMEASURABLE,
+            why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
+                "boots and there is no process realm to strip. UNMEASURABLE rather than FAIL, "
+                "because a FAIL would claim a program had tried to write the kernel's volume and "
+                "been stopped — and nothing ran at all. Note that the POLICY is still on the wire "
+                "in this phase (it is a header on src/libos/, independent of COOP/COEP) and still "
+                "proves nothing here: a policy over a realm no process ever entered bounds "
+                "nothing.",
         ), "m4a": Expect(
             UNMEASURABLE,
             why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
@@ -3238,6 +3472,62 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "carried them to the pty keeps working",
             failed=_PTY_DETACH_FAILS,
             held=held_rest(M4A_LABELS, _PTY_DETACH_FAILS),
+        )},
+    ),
+    "no-lockdown": NegativeControl(
+        name="no-lockdown",
+        why="no_lockdown=1: a process worker's realm is NOT stripped before its program text is "
+            "evaluated (the cfg.noLockdown hook, refused without a bench boot and carried to the "
+            "process, because the strip lives in the process's own realm). MILESTONES.md M6's own "
+            "control, in its words: 'Skip the stripping; the same program must succeed. If it does "
+            "not, the check is testing nothing.'\n"
+            "WHAT MUST BREAK, and it is the whole milestone: a uid-1000 process reaches "
+            "`navigator.storage`, opens the kernel's blob for a 0600 root-owned file BY INODE, and "
+            "writes it - measured, KERNEL-OWNED-SECRET becomes TAMPERED-BY-PROCESS - after "
+            "which the kernel reads the tampered bytes back through its own syscall channel. "
+            "`indexedDB`, `caches` and `URL.createObjectURL` come back with it, a blob module "
+            "evaluates, and `p_fault` - the bypass snippet with no try/catch - RETURNS the "
+            "volume's root listing instead of dying.\n"
+            "WHAT MUST HOLD, and this is what makes it a control rather than a broken world: "
+            "every LOADER clause. The policy is still served, so a computed `data:` import and "
+            "`eval` are still refused and the one same-origin specifier still loads. The syscall "
+            "channel also holds - the file is still EACCES to this process, which is what shows "
+            "the bypass went around the credential rather than through a system with no "
+            "permissions.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_lockdown", "1"),),
+        expects={"m6": Expect(
+            Outcome.FAIL,
+            why="the realm must hand a process the platform again, including the kernel's own "
+                "volume, while the module loader stays bounded",
+            failed=_NO_LOCKDOWN_FAILS,
+            held=held_rest(M6_LABELS, _NO_LOCKDOWN_FAILS),
+        )},
+    ),
+    "no-csp": NegativeControl(
+        name="no-csp",
+        why="serve(csp=False): the process realm's Content-Security-Policy is not sent on "
+            "`/src/libos/`. A SERVER switch and not a query parameter, because a policy is a "
+            "response header - the same shape as `no-isolation`, and `_assert_policy` asserts its "
+            "absence on the wire before Chrome starts, so a control that failed to apply reports "
+            "itself rather than reporting the product.\n"
+            "WHAT MUST BREAK: constraint 139's half. A COMPUTED `import(expr)` is the module "
+            "loader, which no scanner over program text can catch and which deleting `fetch` does "
+            "not touch - measured, `data: evaluated in a process` - and `eval` and `new Function` "
+            "come back with it (`script-src` without `'unsafe-eval'` is what refused them).\n"
+            "WHAT MUST HOLD: every REALM clause, the volume, and the fault. The strip is "
+            "in-realm and owes nothing to a header: ambient OPFS is still gone, the kernel's bytes "
+            "are still intact, and the bypass program still faults with SIGABRT. The two halves "
+            "being disjoint is a measured claim (constraint 187), and these two controls are where "
+            "it is asserted.",
+        serve_kwargs={"csp": False},
+        fixture=None,
+        expects={"m6": Expect(
+            Outcome.FAIL,
+            why="the module loader must be unbounded again while the realm stays stripped",
+            failed=_NO_CSP_FAILS,
+            held=held_rest(M6_LABELS, _NO_CSP_FAILS),
         )},
     ),
     "no-poll-wake": NegativeControl(
@@ -5070,6 +5360,9 @@ class Phase:
     #: root where a fixture built a deliberately different one and verified its own patch.
     roots: Dict[str, Tuple[pathlib.Path, pathlib.Path]]
     isolated: bool
+    #: M6. False serves no process-realm policy. The third way a phase builds a broken world,
+    #: beside the headers and the fixture, and a server-side one because a policy is a header.
+    csp: bool
     checks: Tuple[Check, ...]
     #: Selected, and not run by this phase. Carried so the report can say so with a reason
     #: instead of leaving a gap for the reader to infer.
@@ -5249,6 +5542,7 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
         control = CONTROLS[args.negative]
         fixture_root = control.fixture(root) if control.fixture else root
         isolated = bool(control.serve_kwargs.get("isolate", True))
+        policy = bool(control.serve_kwargs.get("csp", True))
         # Only what this control scores. A check the control declares nothing about would be
         # dragged through a broken world, and gate_negative would neither score it nor be able
         # to say what its result meant: under --negative empty-root a kernel check would serve a
@@ -5261,7 +5555,7 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
                       roots=phase_roots(scored, www=fixture_root,
                                         www_canonical=fixture_root if control.fixture
                                         else CANONICAL),
-                      isolated=isolated, checks=scored,
+                      isolated=isolated, csp=policy, checks=scored,
                       filtered=tuple(
                           (c, "CONTROLS[%r] declares no expectation for it, so this phase would "
                               "run it against a broken world and score nothing"
@@ -5279,8 +5573,8 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
             return [], 4
         out.append(Phase(mode=MODE_INVERT,
                          roots=phase_roots(selected, www=root, www_canonical=CANONICAL),
-                         isolated=True, checks=selected, filtered=(), inverted=True,
-                         label="--prove-failure invert"))
+                         isolated=True, csp=True, checks=selected, filtered=(),
+                         inverted=True, label="--prove-failure invert"))
     if args.prove_failure in (MODE_NO_ISOLATION, "both"):
         sensitive = tuple(c for c in selected if Control.NO_ISOLATION in c.controls)
         if not sensitive:
@@ -5290,7 +5584,7 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
         out.append(Phase(
             mode=MODE_NO_ISOLATION,
             roots=phase_roots(sensitive, www=root, www_canonical=CANONICAL),
-            isolated=False, checks=sensitive,
+            isolated=False, csp=True, checks=sensitive,
             filtered=tuple((c, "not isolation-sensitive (no %s control), so this phase does not "
                                "run it" % Control.NO_ISOLATION)
                            for c in selected if c not in sensitive),
@@ -5298,8 +5592,8 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
     if not out:
         out.append(Phase(mode=MODE_NORMAL,
                          roots=phase_roots(selected, www=root, www_canonical=CANONICAL),
-                         isolated=True, checks=selected, filtered=(), inverted=False,
-                         label="normal"))
+                         isolated=True, csp=True, checks=selected, filtered=(),
+                         inverted=False, label="normal"))
     return out, None
 
 
@@ -5323,6 +5617,7 @@ def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> Ph
             served, canonical = phase.roots[name]
             servings[name] = stack.enter_context(serve(
                 served, canonical=canonical, port=0, isolate=phase.isolated,
+                csp=phase.csp,
                 documents=tuple(dict.fromkeys(
                     documents[c.name] for c in phase.checks if c.root == name))))
         # Nesting order is load-bearing: ExitStack unwinds last-in-first-out, so Chrome closes
@@ -6899,6 +7194,270 @@ def check_m4a(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m4a.html", env.served_matches_disk(env.document),
                     "the m4a.html served does not match www/m4a.html on disk")
+
+
+@check(
+    name="m6",
+    milestone="m6",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_LOCKDOWN, Control.NO_CSP),
+    labels=M6_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M6_DOCUMENT,
+    ready_expr=M6_READY,
+    ready_what="globalThis.M6.state reaching done, aborted or error (www/m6.html)",
+    # 0.8 s measured for the whole page on one kernel: six processes, no I/O beyond one 20-byte
+    # file. The bound is generous because a process that faults when it should not leaves the page
+    # waiting, and a BROKEN check carrying the page's own log beats a suite that never returns.
+    ready_timeout=180.0,
+    refusal_expr="globalThis.M6 && globalThis.M6.state",
+    refusal_want="aborted",
+    note="five proofs over ONE kernel, because the victim file has to outlive the process that "
+         "wrote it. MILESTONES.md M6's proof is 'a program containing the bypass snippet fails, "
+         "and /proc shows it faulted', and its control is 'skip the stripping; the same program "
+         "must succeed' - `p_fault` in bench/m6-realm/program.mjs is that program, four lines "
+         "with no try/catch, and it is a separate mode from the one that reports the detail "
+         "because a faulted process has no result.\n"
+         "THE HEADLINE IS THE VOLUME. A uid-1000 process is told EACCES by the syscall channel "
+         "for a 0600 root-owned file, then tries the same write through ambient OPFS, by inode, "
+         "against the kernel's own flat blob directory (constraint 26) - and a third process, "
+         "uid 0, reads the file back through the syscall channel to say whether the bytes moved. "
+         "Under --negative no-lockdown they DO: KERNEL-OWNED-SECRET becomes "
+         "TAMPERED-BY-PROCESS and the kernel serves the tampered bytes as though nothing had "
+         "happened.\n"
+         "M6 IS TWO HALVES AND THEY ARE MEASURABLY DISJOINT. The realm strip "
+         "(src/libos/lockdown.mjs) removes bindings; the Content-Security-Policy "
+         "(scripts/serve.py) bounds the module loader, which no strip can reach because "
+         "`import(expr)` is not `fetch`. WHERE the policy is delivered was measured rather than "
+         "assumed: on the DOCUMENT it changes nothing at all for a dedicated module worker, so it "
+         "goes on the response that creates the realm (bench/m6-realm/csp-probe.py, constraints "
+         "187 and 188 - 188 corrects constraint 139, which named the document).\n"
+         "negative controls: --negative no-lockdown must break every realm clause, the volume and "
+         "the fault while every LOADER clause holds; --negative no-csp must break every loader "
+         "clause while every REALM clause, the volume and the fault hold. Neither is satisfiable "
+         "by the other's mechanism, which is the point. --negative no-isolation must come out "
+         "BROKEN: no SAB, so no kernel, so no process realm to strip.\n"
+         "LABELLED HONESTLY, in the docs and here: this is HARDENING, NOT A SECURITY BOUNDARY. "
+         "Same-origin is not a security boundary and the threat model is first-party only. What "
+         "remains reachable is recorded rather than implied - `script-src 'self'` means a program "
+         "can still dynamically import any same-origin module, which is why "
+         "'while the one same-origin specifier still loads' is written as a positive control and "
+         "not as a boast.",
+)
+def check_m6(env: Env) -> None:
+    got = env.read(READ_M6, M6_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m6.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m6.html aborted: %s. Without cross-origin isolation there is no SAB, so no "
+            "kernel, so no process realm to strip." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m6.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("realm", "volume", "loader", "fault", "policy")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    # A FAULT IS NOT AN ERROR HERE, and that distinction is this check's subject: proof 4 is a
+    # program that MUST fault. `errors` carries only what the kernel reported as an error or a
+    # panic, so a faulted process does not appear in it (constraint 140).
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    def refused(rows, name):
+        """A row the attacker reported, and it must NOT have succeeded.
+
+        `not row.get("ok")` would be True for a row that is ABSENT, so the row's presence is
+        asserted separately: a page that stopped reporting `tamper` at all would otherwise read
+        as a tamper that was refused.
+        """
+        row = rows.get(name)
+        return isinstance(row, dict) and row.get("ok") is False
+
+    def reached(rows, name):
+        row = rows.get(name)
+        return isinstance(row, dict) and row.get("ok") is True
+
+    # ---- PROOF 5: the policy, on the wire ------------------------------------------------
+    # FIRST, because it decides what the loader clauses below mean. A page that measured
+    # refusals without knowing whether a policy was served could not tell a bounded realm from a
+    # broken one.
+    po = ev("policy")
+    env.expect_that("policy ok", section_ok("policy"), po)
+    env.expect_that("the process realm's script carries a policy", po.get("present") is True,
+                    {"header": po.get("header"), "status": po.get("status")})
+    # BOTH HALVES IN ONE CLAUSE, and the first half is why: "the header does not contain
+    # 'unsafe-eval'" is satisfied by a response carrying no policy at all, so it would pass under
+    # --negative no-csp while `eval` worked.
+    env.expect_that(
+        "and the policy names script-src without 'unsafe-eval'",
+        bool(po.get("scriptSrc")) and po.get("unsafeEval") is False,
+        {"script-src": po.get("scriptSrc"), "unsafe-eval": po.get("unsafeEval")})
+
+    # ---- PROOF 1: the realm ---------------------------------------------------------------
+    rl = ev("realm")
+    keys = rl.get("realmKeys") or {}
+    env.expect_that("realm ok", section_ok("realm"), rl)
+    # THE BASELINE EVERY ROW BELOW IS READ AGAINST. If the syscall channel had not refused this
+    # process, the rows below would be measuring a system with no permissions rather than a realm
+    # with a hole in it.
+    env.expect_that("a uid-1000 process is refused the file by the syscall channel",
+                    (rl.get("syscallRefused") or {}).get("ok") is True,
+                    rl.get("syscallRefused"))
+    env.expect_that("and its own syscalls still work",
+                    (rl.get("syscallsStillWork") or {}).get("ok") is True,
+                    rl.get("syscallsStillWork"))
+    env.expect_that(
+        "the lockdown reports every target stripped and none surviving",
+        rl.get("skipped") is False and len(rl.get("stripped") or []) >= 6
+        and bool(keys) and all(value is False for value in keys.values()),
+        {"skipped": rl.get("skipped"), "stripped": rl.get("stripped"),
+         "absent": rl.get("absent"), "present": {k: v for k, v in keys.items() if v}})
+    env.expect_that(
+        "ambient OPFS is gone",
+        keys.get("navigator.storage") is False and refused(rl, "storage"),
+        {"binding": keys.get("navigator.storage"), "storage": rl.get("storage")})
+    env.expect_that(
+        "the network is gone",
+        keys.get("fetch") is False and keys.get("XMLHttpRequest") is False
+        and refused(rl, "fetch") and refused(rl, "xhr"),
+        {"fetch": keys.get("fetch"), "XMLHttpRequest": keys.get("XMLHttpRequest"),
+         "rows": [rl.get("fetch"), rl.get("xhr")]})
+    env.expect_that(
+        "the durable stores are gone",
+        keys.get("indexedDB") is False and keys.get("caches") is False
+        and refused(rl, "indexedDB") and refused(rl, "caches"),
+        {"indexedDB": keys.get("indexedDB"), "caches": keys.get("caches"),
+         "rows": [rl.get("indexedDB"), rl.get("caches")]})
+    # Constraint 53, which is why this is a correctness requirement and not only hardening: a
+    # worker a process makes for itself is invisible to the process table while still holding a
+    # renderer slot, so the cap in constraint 17 is enforced over a number that is not the real
+    # one until this is gone.
+    env.expect_that(
+        "a process cannot construct a worker",
+        keys.get("Worker") is False and keys.get("SharedWorker") is False
+        and refused(rl, "nestedWorker"),
+        {"Worker": keys.get("Worker"), "SharedWorker": keys.get("SharedWorker"),
+         "nested": rl.get("nestedWorker")})
+    # The policy MUST allow `blob:` - a program image is one - so this is the only thing standing
+    # between a program and an image of its own making.
+    env.expect_that(
+        "a process cannot mint a blob URL",
+        keys.get("URL.createObjectURL") is False and refused(rl, "createObjectURL"),
+        {"binding": keys.get("URL.createObjectURL"), "row": rl.get("createObjectURL")})
+
+    # UNDER --negative no-lockdown THE POLICY DOES THE TALKING, and it talks in the console.
+    #
+    # With the realm unstripped a process HOLDS `fetch`, `WebSocket` and `Worker` again, so the
+    # calls are made and the policy refuses them out loud — three messages that cannot occur in a
+    # normal run, because there the bindings are not there to call. Claimed rather than asserted
+    # (see Env.claim_console), and reached only on the page's own report that the strip was
+    # skipped, so the normal run stays strict.
+    # CHROME HAS TWO WORDINGS FOR A REFUSED CONNECTION and the first version of this list only
+    # had one: `fetch` logged "Refused to connect because it violates the document's Content
+    # Security Policy" in one run and "Connecting to '<url>' violates the following Content
+    # Security Policy directive: \"connect-src 'none'\"" in the next. Both are claimed, by the
+    # directive name where it appears and by the other wording where it does not.
+    if rl.get("skipped") is True:
+        for needle, why in (
+            ("""directive: "connect-src 'none'\"""",
+             "fetch, XHR and WebSocket exist again; connect-src 'none' refuses each request"),
+            ("Refused to connect because it violates",
+             "the same refusal, in Chrome's other wording for it"),
+            ("""directive: "worker-src 'none'\"""",
+             "Worker and createObjectURL exist again; worker-src 'none' refuses the nested worker"),
+        ):
+            env.claim_console(needle, why)
+
+    # ---- PROOF 2: THE HEADLINE. The kernel's own volume ----------------------------------
+    vo = ev("volume")
+    env.expect_that("volume ok", section_ok("volume"), vo)
+    env.expect_that("the tamper by inode was refused",
+                    (vo.get("tamper") or {}).get("ok") is False, vo.get("tamper"))
+    # READ BACK THROUGH THE SYSCALL CHANNEL by a third process, not asserted from the attacker's
+    # own report: the question is what the KERNEL now serves for that file, and only the kernel
+    # can answer it.
+    env.expect_that(
+        "and the kernel's own bytes are unchanged",
+        vo.get("intact") is True and vo.get("tampered") is False,
+        {"got": vo.get("got"), "want": vo.get("want"), "ino": vo.get("ino")})
+
+    # ---- PROOF 3: the loader (constraint 139's open half) --------------------------------
+    lo = ev("loader")
+    env.expect_that("loader ok", section_ok("loader"), lo)
+    env.expect_that("a computed data: import is refused",
+                    (lo.get("importData") or {}).get("ok") is False, lo.get("importData"))
+    # THE REFUSAL, NAMED BY THE REALM THAT WAS REFUSED. A thrown
+    # "Failed to fetch dynamically imported module" cannot attribute anything: it reads the same
+    # whether a policy refused the load or nothing was listening at the other end. The
+    # `securitypolicyviolation` event names the blocked URI and the directive, from inside the
+    # process realm, so this is the clause that says the POLICY did it.
+    #
+    # FIRST WRITTEN AS env.expect_console AND THAT WAS WRONG: the needle
+    # "violates the following Content Security Policy directive" also matches the worker-src
+    # message the no-lockdown control provokes, which arrives FIRST, so the clause claimed the
+    # wrong entry and left the one it was about unclaimed. An in-realm event cannot be confused
+    # with another refusal in the same way.
+    data_violations = [v for v in (lo.get("violations") or [])
+                       if str(v.get("blockedURI", "")).startswith("data")
+                       and "script-src" in str(v.get("directive", ""))]
+    env.expect_that("and the realm's own violation event names script-src",
+                    bool(data_violations),
+                    {"violations": lo.get("violations")})
+    # The same refusal, as Chrome logs it. CLAIMED and not asserted: the event above is the
+    # evidence, and this only keeps the end-of-check sweep from reporting the renderer's own
+    # correct behaviour as an error nobody looked at.
+    env.claim_console("Loading the script 'data:text/javascript",
+                      "the policy refused the computed data: import, which is proof 3's subject")
+    env.expect_that(
+        "eval and new Function are refused",
+        (lo.get("eval") or {}).get("ok") is False
+        and (lo.get("newFunction") or {}).get("ok") is False,
+        {"eval": lo.get("eval"), "newFunction": lo.get("newFunction")})
+    # THE POSITIVE CONTROL. A policy that refused everything would satisfy every clause above and
+    # run no program at all. It is also the honest statement of what remains reachable.
+    env.expect_that("while the one same-origin specifier still loads",
+                    (lo.get("allowedImport") or {}).get("ok") is True, lo.get("allowedImport"))
+
+    # ---- PROOF 4: MILESTONES.md M6's own proof -------------------------------------------
+    fa = ev("fault")
+    env.expect_that("fault ok", section_ok("fault"), fa)
+    env.expect_that("the bypass program faulted",
+                    fa.get("faulted") is True and fa.get("bypassed") is False,
+                    {"faulted": fa.get("faulted"), "bypassed": fa.get("bypassed"),
+                     "names": fa.get("names"), "why": fa.get("faultWhy")})
+    # NOT "the directory is gone": a reaped process is a zombie for the ~2 s terminate quarantine
+    # (constraint 14), so /proc both can and should still show it - with the kind and value it
+    # died of. An absence clause here would be racing the quarantine.
+    env.expect_that(
+        "and /proc shows it killed by SIGABRT",
+        fa.get("state") == "zombie" and fa.get("exitKind") == fa.get("wantKind")
+        and fa.get("exitValue") == fa.get("wantValue"),
+        {"state": fa.get("state"), "exitkind": fa.get("exitKind"),
+         "exitvalue": fa.get("exitValue"), "status": fa.get("status")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m6.html", env.served_matches_disk(env.document),
+                    "the m6.html served does not match www/m6.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

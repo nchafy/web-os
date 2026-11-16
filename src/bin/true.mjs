@@ -23,6 +23,11 @@
 // the return value is the exit code and `env.proc.exit(n)` is the same thing said earlier.
 // Returning nothing is exit 0.
 //
+// `run` MAY BE ASYNC. The libos awaits it (src/libos/process.mjs), and a rejected promise faults
+// the process exactly as a throw does. Every program in this directory is synchronous and should
+// stay that way — a syscall blocks in `Atomics.wait` and needs no await — but M6's realm probe
+// cannot be, because every capability it asks about is promise-shaped.
+//
 // A PROGRAM MAY NOT IMPORT ANYTHING EXCEPT `/src/abi.mjs`. The kernel rewrites absolute
 // specifiers against the document, so `/src/abi.mjs` comes out of the module map
 // `src/libos/process.mjs` already populated; any other module would be a network fetch per

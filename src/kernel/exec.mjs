@@ -108,10 +108,13 @@ export const EXEC_VIEW_ID = -1;
  * WHAT THIS DOES NOT CLOSE, stated because the gap is invisible otherwise: a DYNAMIC
  * `import(expr)` whose argument is computed at run time cannot be caught by reading the text, and
  * no scanner can. The literal forms are caught — `import("…")` goes through the same extraction —
- * but `import("htt" + "ps://…")` does not. The answer is a Content-Security-Policy on the
- * document, which bounds what the renderer will fetch whatever the text says; `scripts/serve.py`
- * sends one, and M6 owns making the process realm unable to reach the network at all
- * (constraint 41). Recorded as constraint 139.
+ * but `import("htt" + "ps://…")` does not. Recorded as constraint 139.
+ *
+ * M6 CLOSED IT, and not where 139 said it would. A Content-Security-Policy is the answer, but it
+ * has to be delivered on the response that creates the PROCESS REALM — `src/libos/process.mjs` —
+ * and not on the document: a document policy was measured to change nothing at all for a
+ * dedicated module worker's loader (`bench/m6-realm/csp-probe.py`, constraints 187 and 188).
+ * `scripts/serve.py` sends it over `src/libos/`, and `src/libos/lockdown.mjs` is the other half.
  * ======================================================================================
  */
 export const PROGRAM_IMPORTS = Object.freeze(["/src/abi.mjs"]);

@@ -31,6 +31,36 @@ ISOLATION_HEADERS = (
     ("Cross-Origin-Embedder-Policy", "require-corp"),
 )
 
+#: Every response under this prefix carries the process realm's policy. A PREFIX and not the one
+#: filename, because `src/libos/` IS the process realm in file form (CLAUDE.md) — and because the
+#: worker's entry path is `src/kernel/kernel.mjs`'s business (`RUNTIME_URL`), so a server that
+#: named the file would be a second copy of a constant the kernel owns.
+PROCESS_REALM_PREFIX = "/src/libos/"
+
+#: M6's second half. A Content-Security-Policy on the response that CREATES the process realm.
+#:
+#: WHERE IT IS DELIVERED IS A MEASURED FACT, not a preference. `bench/m6-realm/csp-probe.py`
+#: measured all four deliveries on Chrome 157.0.8103.52: a policy on the DOCUMENT changes nothing
+#: for a dedicated module worker's loader — the `document` mode is behaviour-identical to `none`,
+#: with zero violations reported — so it has to be on the worker script's own response.
+#: `docs/CONSTRAINTS.md` 187 carries the table, and 188 records the correction to 139, which named
+#: the document.
+#:
+#: WHAT EACH DIRECTIVE IS FOR:
+#:   script-src 'self' blob:   `'self'` because the libos's own static imports are same-origin;
+#:                             `blob:` because a program image IS a blob URL (src/kernel/exec.mjs).
+#:                             Absent `'unsafe-eval'`, which is what refuses `eval` and
+#:                             `new Function` — measured, in the program as well as in the worker.
+#:   connect-src 'none'        the network, for the bindings the strip already removed. Belt and
+#:                             braces on purpose: the strip is in-realm and this is not.
+#:   worker-src 'none'         constraint 53's nested worker, refused a second way.
+#:   default-src 'none'        everything not named above.
+#: The two halves are disjoint and both are needed: this policy does NOT touch OPFS, `indexedDB`,
+#: `caches` or `URL.createObjectURL` (measured), and the strip does not touch the module loader.
+PROCESS_REALM_CSP = (
+    "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+)
+
 #: Extensions the stdlib guesses wrongly or not at all. `.mjs` as `text/plain` is a module that
 #: never loads, and the browser's error names neither the file nor the reason.
 EXTRA_TYPES = {
@@ -76,6 +106,10 @@ class _Limited:
 
 class Handler(SimpleHTTPRequestHandler):
     isolate = True
+    #: M6. False omits the process realm's policy, to prove a check that needs it fails without
+    #: it. The same role `isolate` plays for COOP/COEP — a control that cannot be switched off has
+    #: not been shown to be the control.
+    csp = True
 
     def send_head(self):
         # The default root is the repository root, which contains .git and .claude. Nothing
@@ -189,6 +223,8 @@ class Handler(SimpleHTTPRequestHandler):
         if self.isolate:
             for name, value in ISOLATION_HEADERS:
                 self.send_header(name, value)
+        if self.csp and self.path.split("?")[0].startswith(PROCESS_REALM_PREFIX):
+            self.send_header("Content-Security-Policy", PROCESS_REALM_CSP)
         # No-store, because a cached pre-isolation response is a confusing half-hour.
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
@@ -224,6 +260,13 @@ def main(argv: list[str] | None = None) -> int:
         help="omit COOP/COEP. Only for proving that a check which requires isolation fails "
         "without it — a harness nobody has seen fail is a harness nobody has checked.",
     )
+    ap.add_argument(
+        "--no-csp",
+        action="store_true",
+        help="omit the process realm's Content-Security-Policy on %s. M6's second negative "
+        "control: a program's computed `import(expr)` and its `eval` must then SUCCEED."
+        % PROCESS_REALM_PREFIX,
+    )
     args = ap.parse_args(argv)
 
     root = os.path.abspath(args.root)
@@ -234,7 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     os.chdir(root)
 
     Handler.isolate = not args.no_isolation
+    Handler.csp = not args.no_csp
     state = "ISOLATED" if Handler.isolate else "NOT ISOLATED (--no-isolation)"
+    if not Handler.csp:
+        state += ", NO PROCESS-REALM CSP (--no-csp)"
     print(f"serve.py: {root}", file=sys.stderr)
     print(f"serve.py: http://127.0.0.1:{args.port}/  [{state}]", file=sys.stderr)
     if os.path.isdir(os.path.join(root, "www")):

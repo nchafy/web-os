@@ -544,6 +544,75 @@ afford a per-window event queue whose age is the same measurement over a wider s
 *Evidence: measured — caption at 1,020 ms, End Process at 4,006 ms after the first transition,
 cleared 26 ms after a relay drained the queue. Constraint 163.*
 
+## D27 — the process realm's policy goes on the worker script, and M6 ships no document policy
+
+Constraint 139 left M6 one job and named the place to do it: "a Content-Security-Policy on the
+document". Two candidate deliveries were measured before anything was written
+(`bench/m6-realm/csp-probe.py`, four modes, one page load each).
+
+**Chosen: the policy is sent for every response under `src/libos/`.** A prefix rather than the one
+filename, because that directory is the process realm in file form and the worker's entry path is
+`src/kernel/kernel.mjs`'s `RUNTIME_URL` — a server naming the file would be a second copy of a
+constant the kernel owns.
+
+**Rejected: a policy on the document.** Not on judgement: it does nothing. A document policy left
+a dedicated module worker's loader completely unbounded — the `document` mode is
+behaviour-identical to `none`, with zero violation events — so the computed `data:` import, the
+off-origin import and `eval` all still worked. Constraint 187 carries the table and 188 records
+the correction to 139.
+
+**Rejected: shipping a document policy anyway, for the page's own sake.** It would buy nothing for
+M6's subject and it is not free. `www/m4a.html` holds the kernel's own `MessagePort` and is the
+supervisor every bench boots through; every page carries inline script; and `scripts/check.py`
+byte-compares served bytes against disk, so a nonce cannot be injected and the policy would have
+to carry `'unsafe-inline'`. Page hardening is a separate change with its own control. Constraint
+200.
+
+*Evidence: measured. Four deliveries against a stand-in module worker with its own second origin,
+Chrome 157.0.8103.52. The off-origin row needs a cooperating origin — a module script is fetched
+in CORS mode — so the probe starts a second loopback server sending
+`Access-Control-Allow-Origin: *`; without it the row would read "refused" for a reason the policy
+had nothing to do with.*
+
+## D28 — `blob:` stays allowed and `URL.createObjectURL` is deleted instead
+
+A program image IS a blob URL (`src/kernel/exec.mjs`), so `script-src` must permit the scheme or no
+program runs at all. With the scheme permitted, a process that can mint a blob URL can evaluate
+text no linker ever saw — measured, `import("blob:…")` succeeds under every policy delivery.
+
+**Chosen: delete `URL.createObjectURL` from the process realm**, and `revokeObjectURL` with it, so
+the realm cannot produce the one scheme the policy has to trust. Constraint 190.
+
+**Rejected: a nonce or hash on the program image.** CSP hashes cover inline script, not a module
+fetched from a blob URL, and a nonce cannot be attached to a URL the kernel mints at run time.
+
+**Rejected: evaluating the program some other way than `import(blob:)`.** `importScripts` is not
+available in a module worker, and `eval` is refused by the same policy — on purpose (191).
+
+*Evidence: measured. `bench/m6-realm/csp-probe.py` rows `import blob` (reached under all four
+deliveries) and `insideBlob` (a program's own computed imports, refused under the worker
+delivery).*
+
+## D29 — the lockdown fails closed, and is verified against a double rather than a browser
+
+`lockdown()` throws when a binding it was asked to remove survives, and the caller evaluates
+program text on the next line. The alternative — report it and continue — is strictly worse than
+no lockdown at all: the check would be green and the realm would still reach the kernel's volume.
+
+**The branch has no caller in a browser.** Every target on Chrome 157 is configurable, so nothing a
+page can do makes a deletion fail. By this repo's own rule that makes it unverified, so
+`lockdown(scope)` takes the global as an argument and `bench/m6-realm/probe.mjs` reaches the
+refusal with a non-configurable double under Node. `bench/m6-realm/controls.py` then proves the
+probe is coupled to its subject with three mutations.
+
+**Rejected: trusting `delete`'s return value.** `delete obj[name]` returns true when there was no
+OWN property to remove, which is the case for every binding here — `fetch` lives on
+`WorkerGlobalScope.prototype`. The shallow version therefore reports success and removes nothing;
+it is the `shallow` mutation, and it exists because it is the obvious way to write this.
+
+*Evidence: measured. 25 host checks, three mutations each moving exactly its declared set.
+Constraints 196 and 41.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record
