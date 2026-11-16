@@ -18,6 +18,7 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
   cursor:move; flex:0 0 auto }
 .window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
 .is-not-responding .window-title { background:#3a3030; color:#bbb }
+.is-starting .window-title { background:#2a2f38; color:#8a93a0 }
 .title-buttons { display:flex; gap:4px }
 .title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
   cursor:pointer }
@@ -64,7 +65,16 @@ const out = document.getElementById('log')
 const desktop = document.getElementById('desktop')
 const say = (s) => { out.textContent += s + '\n' }
 const params = new URLSearchParams(location.search)
-const CFG = { ptyDetach: params.get('pty_detach') === '1' }
+/* `?live=1` — JUST A TERMINAL, and no proofs at all.
+ *
+ * `MILESTONES.md` M4a: "Exists so there is something on screen before day 30." The proofs are a
+ * harness; this is the thing itself. It boots ONE kernel, attaches a window, starts the relay and
+ * stops — so it is also the only path light enough to debug on a loaded machine, where the full
+ * page's five kernels get the renderer killed. */
+const CFG = {
+  ptyDetach: params.get('pty_detach') === '1',
+  liveOnly: params.get('live') === '1',
+}
 
 /* THE RELAY IS A PROGRAM AND THE PAGE SPAWNS IT BY URL. The page is the supervisor
  * (docs/DECISIONS.md D18) and its own `t: "spawn"` still takes a URL; the same file is also a row
@@ -92,12 +102,19 @@ const REAL_KEY_WAIT_MS = 60000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-/** Poll a predicate until it holds. Returns the ms waited, or -1 on timeout. A terminal that
- *  stopped raises no error anywhere, so every wait here is bounded and reports. */
+/**
+ * Poll a predicate until it holds. Returns the ms waited, or -1 on timeout. A terminal that
+ * stopped raises no error anywhere, so every wait here is bounded and reports.
+ *
+ * THE PREDICATE IS AWAITED, and it was not. A `Promise` is always truthy, so the first `async`
+ * predicate passed to this — a check that the killed relay had released the device — returned
+ * TRUE IMMEDIATELY and its clause passed without measuring anything. Awaiting is correct for a
+ * synchronous predicate too, which is why there is one spelling and not two.
+ */
 async function until (what, ms = 5000, step = 25) {
   const t0 = performance.now()
   for (;;) {
-    if (what()) return performance.now() - t0
+    if (await what()) return performance.now() - t0
     if (performance.now() - t0 > ms) return -1
     await sleep(step)
   }
@@ -221,8 +238,10 @@ async function session (boot, { startRelay = true, title = 'Terminal' } = {}) {
     if (m.t === 'console-health') {
       health.push({ level: m.level, staleMs: m.staleMs })
       // THE KERNEL DECIDES AND THE WINDOW DISPLAYS. The page does not compute the condition: that
-      // is `src/kernel/console.mjs`'s job, because it is the side that can see the queue.
-      win.setHealth(m.level)
+      // is `src/kernel/console.mjs`'s job, because it is the side that can see the queue — and it
+      // is also the only side that knows whether anyone has opened the device yet, which is the
+      // difference between "(Starting…)" and "(Not Responding)".
+      win.setHealth(m.level, m.starting === true)
     }
   })
   term.focus()
@@ -533,24 +552,47 @@ function pGeometry () {
    -------------------------------------------------------------------------------------------- */
 
 async function pHealth (boot) {
-  // NO RELAY. Nothing holds /dev/console, so keystrokes queue unread — which is precisely the
-  // condition the detector is about: the window has work waiting and is not collecting it. A
-  // terminal whose process has died is the realistic form of this, and it needs no scaffolding
-  // inside a shipped program to reproduce.
-  const s = await session(boot, { startRelay: false, title: 'Terminal (no process)' })
+  /* A RELAY THAT OPENED THE DEVICE AND THEN DIED, which is the condition the detector is for.
+   *
+   * This used to attach a window with NO relay at all, and that fixture had to go: a device nobody
+   * has ever opened is STARTING, not wedged, and reporting it as "(Not Responding)" is the wrong
+   * diagnosis — it told a reader their booting terminal was broken (constraint 181). So the proof
+   * now builds a WORKING terminal, kills its emulator process with End Process, and only then
+   * types. `openedEver` stays set through the death, so the stale clock governs and the caption
+   * greys — about a terminal that genuinely is not coming back.
+   *
+   * It is the better fixture on its own terms too: it needs no test-only behaviour in a shipped
+   * program, and it exercises the kernel's own `end-process` path, which is the very button the
+   * second threshold reveals.
+   */
+  const s = await session(boot, { startRelay: true, title: 'Terminal' })
   try {
+    // FIRST, A TERMINAL THAT WORKS. Without this the proof could pass against a window that was
+    // never wired up, which is the failure this whole milestone is about.
+    const promptMs = await until(() => /\$ /.test(s.term.screen()), 20000)
+    const beforeKill = await s.consoleState()
+
+    // NOW KILL THE EMULATOR, through the kernel's own End Process path: kill(-SIGKILL), reap,
+    // terminate the worker. The device's fds go with it, so `opens` returns to 0 while
+    // `openedEver` stays set — which is exactly a terminal whose emulator has died.
+    s.k.post({ t: 'end-process', pid: s.pid })
+    const released = await until(async () => {
+      const c = await s.consoleState()
+      return !!c && c.opens === 0
+    }, 8000, 150)
+
     typeSynthetic(s.term, 'x')
-    const greyMs = await until(() => s.win.health >= 1, 4000)
+    const greyMs = await until(() => s.win.health >= 1, 6000)
     const caption1 = s.win.headingEl.textContent
     const endHiddenAtGrey = s.win.endBtn.hidden
-    const endMs = await until(() => s.win.health >= 2, 10000)
+    const endMs = await until(() => s.win.health >= 2, 12000)
     const caption2 = s.win.headingEl.textContent
     const endShown = !s.win.endBtn.hidden
     const stale = await s.consoleState()
 
-    // THE CLEARING EDGE. Start the relay NOW: it opens /dev/console, drains the queue, and the
-    // caption must come back. A threshold with no tested lower edge is a threshold that latches,
-    // and the latch would not be visible in any of the clauses above.
+    /* THE CLEARING EDGE. A new relay opens the device, drains the queue, and the caption must come
+     * back. A threshold with no tested lower edge is a threshold that latches, and the latch would
+     * not be visible in any clause above. */
     s.k.post({
       t: 'spawn', count: 1, programUrl: RELAY,
       cfg: { argv: ['term', '--ceiling', '20000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
@@ -561,15 +603,30 @@ async function pHealth (boot) {
     const clearedMs = await until(() => s.win.health === 0, 15000)
     const caption3 = s.win.headingEl.textContent
 
+    const clauses = {
+      'the terminal worked before it was killed': promptMs >= 0,
+      'killing the emulator released the device': released >= 0,
+      'the caption greys when keystrokes go uncollected':
+        greyMs >= 0 && / \(Not Responding\)$/.test(caption1),
+      'End Process appears only at the second threshold':
+        endHiddenAtGrey === true && endShown === true && endMs >= 0,
+      'and the caption clears when a new relay drains the queue':
+        clearedMs >= 0 && !/ \(Not Responding\)$/.test(caption3),
+    }
+    const failed = Object.keys(clauses).filter((k) => !clauses[k])
     return {
-      ok: greyMs >= 0 && endMs >= 0 && endShown && endHiddenAtGrey && clearedMs >= 0
-        && / \(Not Responding\)$/.test(caption1) && !/ \(Not Responding\)$/.test(caption3),
+      ok: failed.length === 0,
       evidence: {
-        greyMs: Math.round(greyMs), endMs: Math.round(endMs), clearedMs: Math.round(clearedMs),
+        clauses, failed,
+        promptMs: Math.round(promptMs),
+        greyMs: Math.round(greyMs), endMs: Math.round(endMs),
+        clearedMs: Math.round(clearedMs),
         caption1, caption2, caption3, endHiddenAtGrey, endShown,
         // The kernel's own numbers at the moment the second threshold fired, so the caption is not
-        // the only witness.
+        // the only witness — and `openedEver` is what makes this a wedge rather than a boot.
         staleMs: stale.staleMs, queued: stale.queued, level: stale.level,
+        openedEver: stale.openedEver, starting: stale.starting,
+        opensBeforeKill: beforeKill.opens, killedPid: s.pid,
         transitions: s.health,
       },
     }
@@ -581,11 +638,101 @@ async function pHealth (boot) {
 
 /* ---------------------------------------------------------------------------------------- */
 
+/**
+ * Open one terminal and report, in detail, what it took to get there.
+ *
+ * EVERY STEP IS REPORTED, because "the terminal is not responding" has four possible causes and
+ * the page used to distinguish none of them: the kernel did not come up, the mount the shell lives
+ * on was refused, the relay was never spawned, or the relay is running and not reading. The last
+ * one is the only genuine defect and it is the one a bare "not responding" caption cannot tell you.
+ */
+async function liveOnly (boot) {
+  say('live mode: one kernel, one window, one shell. No proofs.')
+  const k = kernelBoot(boot)
+  const up = await k.expect('up', 30000)
+  // THE MOUNT REPORT, FIRST. `/usr` is where `sh` and `term` live, so a refused mount is a
+  // terminal that cannot start — and it is reported at boot rather than as a missing prompt.
+  k.post({ t: 'm3-state' })
+  const mounts = (await k.expect('m3-state', 10000)).m3 || {}
+  const usr = mounts.usr || {}
+  say('kernel up: isolated ' + (up.isolated === true) + ', root mount ' +
+    JSON.stringify((up.fs || {}).mode) + ', /usr ' +
+    (usr.ok ? usr.entries + ' entries' : 'FAILED: ' + JSON.stringify(usr.why)))
+  globalThis.M4A.mounts = { rows: (mounts.rows || []).map((r) => r.path), usr, fs: up.fs }
+  if (!usr.ok) {
+    say('REFUSING TO GO ON: /usr did not mount, so there is no /usr/bin/sh to start.')
+    globalThis.M4A.state = 'error'
+    globalThis.M4A.why = '/usr did not mount: ' + JSON.stringify(usr.why)
+    return
+  }
+  k.post({ t: 'console-attach' })
+  await k.expect('console-attached', 10000)
+  const health = []
+  const win = new Win({
+    title: 'Terminal',
+    into: desktop,
+    onEndProcess: () => { win.el.dataset.endPressed = '1' },
+    onClose: () => { k.post({ t: 'console-detach' }); return true },
+  })
+  const term = new Terminal({
+    into: win.bodyEl,
+    onKeys: (bytes) => k.post({ t: 'console-in', bytes }),
+  })
+  k.on((m) => {
+    if (m.t === 'console-out') term.write(new Uint8Array(m.bytes))
+    if (m.t === 'console-health') { health.push(m); win.setHealth(m.level, m.starting === true) }
+  })
+  k.post({
+    t: 'spawn', count: 1, programUrl: RELAY,
+    cfg: { argv: ['term', '--ceiling', '3600000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
+  })
+  const spawned = await k.expect('spawned', 20000)
+  if (spawned.refused) {
+    say('THE RELAY WAS REFUSED: ' + spawned.why)
+    globalThis.M4A.state = 'error'
+    globalThis.M4A.why = 'spawn refused: ' + spawned.why
+    return
+  }
+  await k.expect('ready', 20000)
+  const pid = spawned.pids[0]
+  k.post({ t: 'go', go: { mode: 'park', pid } })
+  say('relay spawned as pid ' + pid + '; waiting for the shell to paint a prompt…')
+  term.focus()
+
+  /* AND THEN WAIT FOR THE PROMPT, rather than declaring success on having spawned something.
+   * A relay that is running and not reading looks exactly like a working one from the page's
+   * side — the only difference visible from here is that nothing is ever painted. */
+  const promptMs = await until(() => /\$ /.test(term.screen()), 20000)
+  globalThis.M4A.live = { k, win, term, health, pid }
+  if (promptMs < 0) {
+    k.post({ t: 'm4-state' })
+    let state = null
+    try { state = await k.expect('m4-state', 5000) } catch (e) { state = { why: String(e) } }
+    k.post({ t: 'console-state' })
+    let con = null
+    try { con = (await k.expect('console-state', 5000)).console } catch (e) { con = null }
+    const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
+    say('NO PROMPT in 20 s. The relay is pid ' + pid + ', parked in ' +
+      JSON.stringify(row && row.inflight) + ', holding fds ' +
+      JSON.stringify((row && row.fds) || []) + '.')
+    say('the console device says ' + JSON.stringify(con))
+    globalThis.M4A.state = 'error'
+    globalThis.M4A.why = 'the shell painted no prompt in 20 s'
+    globalThis.M4A.stuck = { relay: row, console: con, procs: (state && state.procs) || [] }
+    return
+  }
+  say('prompt in ' + Math.round(promptMs) + ' ms. Click the terminal and type: ' +
+    '`ls /usr/bin`, `echo hi`, `ps`.')
+  globalThis.M4A.verdict = 'live'
+  globalThis.M4A.state = 'done'
+}
+
 async function main () {
   const t0 = performance.now()
   say('M4a: the terminal gets a real window' + (CFG.ptyDetach ? '  [CONTROL: pty_detach]' : ''))
   const boot = { bench: 1 }
   if (CFG.ptyDetach) boot.ptyDetach = true
+  if (CFG.liveOnly) return liveOnly(boot)
   const P = globalThis.M4A.proofs
 
   await pEcho(boot)

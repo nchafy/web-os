@@ -95,6 +95,8 @@ export class Win {
     this.closed = false;
     /** 0 responding, 1 greyed caption, 2 End Process offered. Written only by `setHealth`. */
     this.health = 0;
+    /** Whether the window's device is still waiting for its first opener. Also only `setHealth`. */
+    this.starting = false;
     this.#build();
     this.apply();
   }
@@ -282,12 +284,23 @@ export class Win {
    * `CLAUDE.md`: "What the reader would actually hit MUST be asserted, not a property that implies
    * it." A class alone would let a check pass against a window whose caption never changed.
    */
-  setHealth(level) {
+  setHealth(level, starting = false) {
     this.health = level | 0;
-    const suffix = this.health > 0 ? " (Not Responding)" : "";
+    /* THREE CAPTIONS, BECAUSE THERE ARE THREE STATES AND TWO OF THEM ARE NOT FAILURES.
+     *
+     * "(Starting…)" is a terminal whose process has not yet opened its device. A page that called
+     * that "(Not Responding)" told a reader their working terminal was broken, which is what
+     * happened — typing in the first moment of a session greyed the caption of something that was
+     * merely still coming up. `src/kernel/console.mjs` `openedEver` carries the distinction. */
+    this.starting = !!starting;
+    const suffix = this.health > 0
+      ? " (Not Responding)"
+      : (this.starting ? " (Starting…)" : "");
     this.headingEl.textContent = this.titleText + suffix;
     this.el.classList.toggle("is-not-responding", this.health > 0);
+    this.el.classList.toggle("is-starting", this.health === 0 && this.starting);
     this.el.dataset.health = String(this.health);
+    this.el.dataset.starting = this.starting ? "1" : "0";
     // The affordance appears only at the SECOND threshold. A window that has been quiet for a
     // second is usually just busy; one that has been quiet for five is the case the button is for.
     this.endBtn.hidden = this.health < 2;
@@ -295,7 +308,7 @@ export class Win {
 
   setTitle(text) {
     this.titleText = String(text);
-    this.setHealth(this.health);
+    this.setHealth(this.health, this.starting);
   }
 
   close() {

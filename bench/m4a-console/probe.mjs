@@ -155,8 +155,16 @@ const ENC = new TextEncoder(), DEC = new TextDecoder();
   const r = makeSlot();
   reset();
   clock = 10000;
+  // A PROCESS HAS OPENED THIS DEVICE, which is what makes the question "is it responding" mean
+  // anything at all. Without it the device is STARTING and the detector correctly stays quiet —
+  // see the starting-is-not-wedged section below, which is the defect this line encodes.
+  con.openedEver = true;
   check("an idle console is not stale", con.staleMs(), 0);
-  check("and reports no transition", con.sample(), -1);
+  // ACQUIRING AN OPENER IS A TRANSITION, and the page needs it: the level does not move when a
+  // relay finally opens the device, so a page told only about levels would leave "(Starting…)" on
+  // a working terminal for ever. Both axes are reported.
+  check("acquiring an opener is itself a transition", con.sample(), 0);
+  check("and then it is quiet", con.sample(), -1);
   con.feed(ENC.encode("xyz"));
   check("a keystroke nobody took starts the clock", con.staleMs(), 0);
   clock = 10000 + NOT_RESPONDING_MS - 1;
@@ -183,6 +191,47 @@ const ENC = new TextEncoder(), DEC = new TextDecoder();
   check("a collected keystroke leaves the console responding", con.staleMs(), 0);
 }
 
+// ---- STARTING IS NOT WEDGED -------------------------------------------------------------
+//
+// THE REGRESSION THIS EXISTS FOR, reported from a real browser as a terminal that said
+// "(Not Responding)" while it was still coming up. The detector measured the age of the oldest
+// uncollected keystroke and nothing more, so a relay that had not opened the device YET — spawn,
+// program load, open, all of which take a moment — looked exactly like one that had died. A person
+// who typed in that window got the wrong diagnosis about a working terminal.
+{
+  const con = new Console();
+  const r = makeSlot();
+  reset();
+  clock = 100000;
+  check("a device nobody has opened reports itself STARTING", con.starting(), true);
+  con.feed(ENC.encode("typed-too-early"));
+  clock = 100000 + END_PROCESS_MS * 3;
+  // THE CLAUSE THAT WAS FALSE. Keystrokes queued, the clock long past both thresholds, and the
+  // honest answer is still level 0: nothing is ignoring the input, nothing has claimed it yet.
+  check("and never reports not-responding, however long the queue waits", con.sample(), -1);
+  check("its level stays 0", con.level, 0);
+  checkThat("while the queue is genuinely waiting", con.report().queued > 0, con.report());
+
+  // THE FIRST OPEN IS WHAT ARMS THE DETECTOR. `openedEver` is set by the kernel's chardev arm; the
+  // probe sets it directly because `open` is a syscall and this file has no kernel.
+  con.openedEver = true;
+  check("the transition out of starting is itself reported", con.sample(), 2);
+  check("and starting is now false", con.starting(), false);
+
+  // AND A DEVICE THAT WAS OPENED AND THEN CLOSED IS STILL ARMED, which is the real case: a relay
+  // that died. `opens` falls back to 0 and `openedEver` does not.
+  con.opens = 1;
+  con.close();
+  check("a closed device has no openers", con.report().opens, 0);
+  check("but it is still armed, because its process DID open it", con.starting(), false);
+  checkThat("so a dead emulator is still detected", con.staleMs() > END_PROCESS_MS,
+    con.staleMs());
+  // Draining clears it, as before.
+  con.readKeys(r, r.seq, new Uint8Array(64), 0, 64);
+  check("draining clears the clock", con.staleMs(), 0);
+  check("and the level drops", con.sample(), 0);
+}
+
 // ---- a destroyed window is not a slow one -----------------------------------------------
 //
 // THE REGRESSION THIS EXISTS FOR. `detach` cleared the queue and left `unreadSince` set, so
@@ -194,6 +243,7 @@ const ENC = new TextEncoder(), DEC = new TextDecoder();
   const con = new Console();
   reset();
   clock = 50000;
+  con.openedEver = true;        // a relay had it; see above
   con.feed(ENC.encode("abc"));
   clock = 50000 + END_PROCESS_MS + 1;
   check("the wedged window reports level 2", con.sample(), 2);

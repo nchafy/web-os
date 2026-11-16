@@ -1101,6 +1101,8 @@ function openChardev(name, flags) {
   if (name !== "console") return -ENODEV;
   if (!console1) return -ENXIO;
   console1.opens += 1;
+  // THE FIRST OPEN IS WHAT MAKES "NOT RESPONDING" MEANINGFUL. See `Console.openedEver`.
+  console1.openedEver = true;
   return { kind: F_WIN, refs: 1, flags, console: console1, inflight: 0 };
 }
 
@@ -1124,7 +1126,7 @@ function consoleAttach() {
    * attach REPLACES the device — so the state has to be published where the replacement happens
    * rather than left to a caller to remember. */
   post({
-    t: "console-health", level: 0, staleMs: 0, queued: 0,
+    t: "console-health", level: 0, staleMs: 0, queued: 0, starting: true,
     notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
   });
   return console1.report();
@@ -1137,7 +1139,7 @@ function consoleSample() {
   if (level < 0) return;
   post({
     t: "console-health", level, staleMs: Math.round(console1.staleMs()),
-    queued: console1.keys.length,
+    queued: console1.keys.length, starting: console1.starting(),
     notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
   });
 }

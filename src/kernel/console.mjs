@@ -93,6 +93,22 @@ export class Console {
     this.attached = true;
     /** Open descriptions, so `poll` can report POLLHUP once the last one goes. */
     this.opens = 0;
+    /**
+     * Whether ANY process has ever opened this device.
+     *
+     * STARTING IS NOT WEDGED, and the detector could not tell them apart. A relay is spawned, loads
+     * its program, mounts nothing and opens `/dev/console` — all of which takes a moment — and a
+     * person who types in that moment put keystrokes in a queue nobody has yet promised to read.
+     * The stale clock then ran and the caption said "(Not Responding)" about a terminal that was
+     * still coming up. Reported from a real browser, and it is the WRONG DIAGNOSIS: nothing is
+     * ignoring the input, nothing has claimed it yet.
+     *
+     * Once this is true it STAYS true, which is what makes the real case still detectable: a relay
+     * that opened the device and then died has `openedEver` set and `opens` back at 0, so the clock
+     * governs and the caption greys. That is a terminal whose emulator process is gone, which is
+     * what the detector is for.
+     */
+    this.openedEver = false;
     /** Parked readers: {slot, seq, into, off, want}. Same record shape the pipe parks. */
     this.waitingReaders = [];
     /**
@@ -106,6 +122,10 @@ export class Console {
     /** The level this device last reported to the page: 0 responding, 1 greyed, 2 End Process.
      *  Edge-triggered, so the kernel posts on a CHANGE and not once per heartbeat. */
     this.level = 0;
+    /** What `starting()` was when the level was last reported, so a device that acquires its first
+     *  opener publishes that transition too — otherwise the page's "(Starting…)" caption would
+     *  never come off, because the LEVEL does not change when a relay finally opens the device. */
+    this.reportedStarting = true;
     this.stats = {
       keyBytes: 0, cellBytes: 0, reads: 0, writes: 0, posts: 0, dropped: 0,
       readerParks: 0, stale: 0, detachedReads: 0, detachedWrites: 0,
@@ -285,11 +305,21 @@ export class Console {
    * afford it.
    */
   sample() {
-    const ms = this.staleMs();
+    // NOT RESPONDING REQUIRES SOMEBODY WHO WAS SUPPOSED TO RESPOND. See `openedEver`.
+    const ms = this.openedEver ? this.staleMs() : 0;
     const next = ms >= END_PROCESS_MS ? 2 : (ms >= NOT_RESPONDING_MS ? 1 : 0);
-    if (next === this.level) return -1;
+    // EITHER AXIS MOVING IS A TRANSITION. A relay opening the device changes `starting` and not
+    // the level, and a page told only about levels would show "(Starting…)" for ever.
+    if (next === this.level && this.starting() === this.reportedStarting) return -1;
     this.level = next;
+    this.reportedStarting = this.starting();
     return next;
+  }
+
+  /** Whether this device is waiting for its first opener. The page shows this as "(Starting…)",
+   *  which is a different thing to say than "(Not Responding)" and the only honest one. */
+  starting() {
+    return !this.openedEver;
   }
 
   close() {
@@ -308,6 +338,8 @@ export class Console {
       parked: this.waitingReaders.length,
       level: this.level,
       staleMs: Math.round(this.staleMs()),
+      openedEver: this.openedEver,
+      starting: this.starting(),
       ...this.stats,
     };
   }

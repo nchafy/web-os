@@ -1517,3 +1517,45 @@ which is the point worth keeping.
     person opening the page then sat in front of an apparently hung terminal for a minute, measured
     at 66 s for the whole run. It is now two waits: a short one on the DRIVER DECLARING ITSELF,
     then a long one on that driver's keys. The page completes in 8.6 s unattended.
+
+## M4a, after the operator used it
+
+181. **"Not responding" requires somebody who was supposed to respond.** The detector measured the
+    age of the oldest uncollected keystroke and nothing else, so a relay that had not opened
+    `/dev/console` YET — spawn, program load, open, all of which take a moment — was
+    indistinguishable from one that had died. Reported from a real browser: a terminal that said
+    "(Not Responding)" while it was still coming up. That is the WRONG DIAGNOSIS, not a late one:
+    nothing was ignoring the input, nothing had claimed it.
+    `Console.openedEver` is the gate. Until a process has opened the device the level stays 0 and
+    the device reports `starting`, which the window renders as "(Starting…)" — a different thing to
+    say, and the only honest one. Once set it STAYS set, so the real case is still caught: a relay
+    that opened the device and then died has `openedEver` true and `opens` back at 0, the clock
+    governs, and the caption greys.
+    BOTH AXES ARE EDGE-REPORTED. Acquiring a first opener does not change the LEVEL, so a page told
+    only about levels left "(Starting…)" on a working terminal for ever.
+    The control moves exactly two labels in `bench/m4a-console/probe.mjs` — `and never reports
+    not-responding, however long the queue waits` and `its level stays 0` — and leaves the other 75.
+182. **The detector's own proof was testing the wrong fixture, and the fix exposed it.** `pHealth`
+    attached a window with NO relay at all, which constraint 181 now classifies as starting rather
+    than wedged — so the proof would have passed against nothing. It is re-based on the honest
+    condition: build a WORKING terminal, prove it works, kill its emulator through the kernel's own
+    `end-process` path, and only then type. That needs no test-only behaviour in a shipped program
+    and it exercises the very button the second threshold reveals.
+    THE DOCUMENTED CLAIM WAS ALREADY THIS. The earlier record called the no-relay fixture "the
+    realistic form of this (a terminal whose process died)" — it was not: a process that died is
+    exactly what `openedEver` distinguishes from one that never came, and the fixture was the
+    second case while the prose claimed the first.
+183. **`until(async () => …)` passed vacuously, because a Promise is truthy.** The page's poll
+    helper tested `what()` rather than `await what()`, so the first asynchronous predicate given to
+    it — a check that a killed relay had released the device — returned true IMMEDIATELY and its
+    clause measured nothing. Awaiting is correct for a synchronous predicate too, so there is one
+    spelling and not two. Found by reading the helper while adding the caller, which is the only
+    reason it is not in the suite as a green clause that proves nothing.
+184. **`www/m4a.html?live=1` exists because "the terminal is not responding" had four possible
+    causes and the page distinguished none of them.** The kernel may not have come up; `/usr` — where
+    `sh` and `term` live — may have been refused; the relay may never have been spawned; or the
+    relay may be running and not reading. Only the last is a defect in this milestone, and a bare
+    greyed caption cannot tell a reader which it is. Live mode boots ONE kernel, reports the mount
+    state and the relay's pid, waits for a prompt, and on failure prints what the relay is parked in
+    and what the device reports. It is also the only path light enough to debug on a machine where
+    the full page's five kernels get the renderer killed.
