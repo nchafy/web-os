@@ -6,7 +6,7 @@
 // worker, where the handles are — and nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN,
   EBADF, EINVAL, ESPIPE, EMFILE, O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // For the tmpfs row below. store.mjs imports nothing from this file, so this is not a cycle.
@@ -337,6 +337,44 @@ registerKind(F_PTY_M, {
   },
   close(d) {
     return d.pty.close(true);
+  },
+});
+
+/**
+ * F_WIN: a window, as a file description. M4a's `/dev/console`.
+ *
+ * ONE KIND AND NOT TWO, which is the opposite of the pipe and the pty, and the asymmetry is the
+ * reason: a pipe end and a pty end each face one way, so each is its own row. A window faces both
+ * ways through ONE description — reading it takes keystrokes, writing it paints cells — exactly as
+ * a terminal device does. There is nothing to tell apart, so there is no flag and no split.
+ *
+ * `null` from `readKeys` means PARKED, as it does for a pipe and a pty: an idle terminal is the
+ * normal state and the call is answered when a keystroke arrives (constraint 88).
+ *
+ * `src/kernel/console.mjs`'s header carries the special-case notice and its expiry: M7 replaces
+ * this description's one producer (`open("/dev/console")`) with `win_create`, and this row is what
+ * survives that change.
+ */
+registerKind(F_WIN, {
+  read(d, p, dstOff, length, at) {
+    if (at !== undefined) return -ESPIPE;     // a window has no position
+    // `p`, THE CALLING PROCESS, never a slot on the description: a description is shared by `dup`
+    // and by spawn-inheritance, so the process that opened the console is usually not the one
+    // reading it. The pipe's row records the measurement behind that rule.
+    return d.console.readKeys(p, p.seq, p.bytes, dstOff, length);
+  },
+  write(d, u8, offset, length, p, at) {
+    if (at !== undefined) return -ESPIPE;
+    return d.console.writeCells(u8.subarray(offset, offset + length));
+  },
+  fsync() {
+    // Nothing to force. 0 rather than -ENOSYS, for the reason the tmpfs, the pipe and the terminal
+    // all give: `fsync` on a terminal succeeds everywhere, and a program checking the return would
+    // read a correct no-op as a failure.
+    return 0;
+  },
+  close(d) {
+    return d.console.close();
   },
 });
 

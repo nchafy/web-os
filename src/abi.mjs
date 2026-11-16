@@ -601,6 +601,15 @@ export const ENOEXEC = E.ENOEXEC;
  *  SIGPIPE. Derived from the table like every other name here, never written as an index. */
 export const EPIPE = E.EPIPE;
 export const EOVERFLOW = E.EOVERFLOW;
+/** M4a. `open` on a character device whose device is not there — `/dev/console` on a kernel to
+ *  which no window has been attached. Linux's own answer for the case, and deliberately NOT
+ *  ENOENT: the file exists, the device does not, and a caller that cannot tell those apart would
+ *  go looking for a mount problem. Distinct from EHOSTGONE, which is a window that DID exist. */
+export const ENXIO = E.ENXIO;
+/** M4a. A character-device name with no driver behind it. Unreachable while
+ *  `src/kernel/devfs.mjs`'s CHARDEVS table is the only producer of such a name; it exists so a row
+ *  added there without a kernel arm is refused rather than faulting the kernel on its first read. */
+export const ENODEV = E.ENODEV;
 /** Every operation on a file description whose inode is gone. POSIX has no errno for it because
  *  POSIX never reaches the state: it keeps an unlinked file alive until the last descriptor
  *  closes. M2 does not, so it refuses CONSISTENTLY under one name instead of answering some calls

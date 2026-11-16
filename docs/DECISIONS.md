@@ -493,6 +493,57 @@ re-run.
 *Evidence: measured — Ctrl-C at a prompt printed no new prompt while the shell was alive and still
 read the next line. Constraint 131.*
 
+## D25 — the window is a file description, and `/dev/console` is the special case
+
+**M4a.** A terminal process waits on its window and its pty master in ONE `poll`, because the
+window is an `F_WIN` file description with a row in the ops table and a row in `pollOne`. The
+SPECIAL CASE is narrow and named: there is exactly one console, the kernel creates it when the page
+attaches a window, and `open("/dev/console")` is its only producer.
+
+**What it rejected.** Three alternatives, each of which would have been cheaper this week.
+
+- **The page relays keystrokes straight into the pty master through the kernel's message port.**
+  ~40 lines, no device, no `F_WIN`. Rejected because it makes the KERNEL the terminal emulator: the
+  page would hold a privilege no process can express, and `CLAUDE.md`'s "the shell is a userland
+  client of the same ABI" would be fiction at the first window. It also leaves `poll` with nothing
+  to wait on, so `docs/designs/REVIEW-FINDINGS.md` finding 1 would be re-opened by the next
+  windowed program rather than answered by this one.
+- **`win_create` now, returning an fd and an `OffscreenCanvas`.** That is M7 and M8, and M4a's
+  budget is two days. Building a third of it here would make the half-built version the thing M7
+  has to be compatible with.
+- **A `winid` with `win_poll`, as `docs/designs/fidelity-first.md` originally specified.** Refused
+  by finding 1 on the evidence: a process has one futex word, so a window that is not an fd needs a
+  busy-poll loop to be serviced alongside a pty. Constraint 42 already settled it; this is where it
+  is paid for.
+
+**What it costs.** One errno pair to keep straight (ENXIO for a name with no device, EHOSTGONE for
+a window that was destroyed, constraint 159) and one explicit `pollWake` the console must perform
+itself, because a keystroke arrives by `postMessage` and passes through no reply (constraint 160).
+
+*Evidence: measured — with the shell idle and nothing flowing, the relay's park state reads
+`inflight: "poll"` holding kind 5 and kind 8. `scripts/check.py --only m4a`.*
+
+## D26 — the not-responding detector measures uncollected input, not syscall silence
+
+**M4a**, deferred from M1 for want of a UI to hook.
+
+**What it rejected.** "Has this process made a syscall recently", which is the obvious reading of a
+heartbeat and is wrong in both directions: a process in `sleep 60` is silent and healthy, and a
+process spinning in a syscall loop with a full input queue is busy and unresponsive. What is
+measured instead is the age of the oldest keystroke nobody has taken — the condition a user means
+by "not responding", and the only one this device can observe without asking the process anything.
+
+**What it rejected second.** A timer of its own. It rides the kernel's existing heartbeat, O(1) and
+edge-triggered: a message per window per tick is the fan-out constraint 18 forbids, at the moment
+the UI can least afford it.
+
+**What it leaves open.** A process that is wedged with NO input waiting is not detected, and that
+is honest rather than overlooked: nothing is being ignored, so there is nothing to report. M7 can
+afford a per-window event queue whose age is the same measurement over a wider set of inputs.
+
+*Evidence: measured — caption at 1,020 ms, End Process at 4,006 ms after the first transition,
+cleared 26 ms after a relay drained the queue. Constraint 163.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

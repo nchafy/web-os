@@ -16,7 +16,7 @@ import {
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, EXDEV, ENOTTY,
+  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   encodeTermios, decodeTermios, encodeWinsize,
@@ -431,7 +431,14 @@ HANDLERS.open = (p, k) => {
   if (typeof at === "number") return at;
   // The MOUNT's read-only flag, not the volume's. Same rule as metaOp: one test, so a read-only
   // volume and a read-only mount refuse identically.
-  if ((wantW || (flags & O_CREAT)) && mountReadOnly(k, at.mount)) return -EROFS;
+  //
+  // A CHARACTER DEVICE IS THE ONE EXCEPTION, and it is an exception to a conflation rather than to
+  // the rule. `/dev` is mounted MNT_RO because its TREE cannot change — no file can be created,
+  // renamed or unlinked there. Writing to `/dev/console` changes no tree: it puts bytes in a
+  // kernel object. The flag answers "can the directory structure change", and a device write is
+  // not that question. O_CREAT is still refused, because a mount with no `mknod` cannot make one.
+  const chardev = at.mount.fs.chardevAt ? at.mount.fs.chardevAt(at.rel) : null;
+  if (((flags & O_CREAT) || (wantW && !chardev)) && mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
   try {
     decision = at.mount.fs.openDecision(credOf(p), at.rel, {
@@ -480,6 +487,24 @@ HANDLERS.open = (p, k) => {
     // acknowledged, the file 12 bytes long, and the first writer's four gone. The offset has to be
     // resolved PER WRITE, which `files.mjs`'s F_TMP `write` now does from `d.flags`.
     return p.fds.add(d);
+  }
+  // A CHARACTER DEVICE: the description is a kernel OBJECT, not bytes. M4a's `/dev/console` is
+  // the only one, and `src/kernel/console.mjs`'s header says why it exists and when it goes.
+  //
+  // -ENXIO FOR A NAME WITH NO DEVICE BEHIND IT. The node exists in `/dev` whether or not the page
+  // ever attached a window, because the mount table is static at boot (constraint 78) and the
+  // window is not. ENOENT would be a lie — the file is there — and 0 bytes would be worse: a
+  // relay would read EOF and report a clean exit from a terminal that was never connected.
+  if (decision.chardev) {
+    const d = k.chardev(decision.chardev, flags, decision);
+    if (typeof d === "number") return d;
+    const fd = p.fds.add(d);
+    // UNDONE ON FAILURE, or the device counts an open the caller was never told about. `fds.add`
+    // answers -EMFILE once the process holds OPEN_MAX descriptions, and the count only ever comes
+    // back down through a `close` on an fd that does not exist. `pipe2` and `pty_open` both undo
+    // their end counts the same way and say so; this arm is the one that did not.
+    if (fd < 0) KIND_OPS[d.kind].close(d);
+    return fd;
   }
   if (decision.synth) {
     const d = {
@@ -1169,6 +1194,15 @@ function pollOne(p, fd, events) {
     // where that asymmetry lives.
     if (d.pty.writable(isMaster)) revents |= POLLOUT;
     if (isMaster ? d.pty.slaves === 0 : d.pty.masters === 0) revents |= POLLHUP;
+  } else if (d.kind === F_WIN) {
+    // THE ROW THAT MAKES A WINDOW WAITABLE ALONGSIDE A PTY. `docs/designs/REVIEW-FINDINGS.md`
+    // finding 1: without it a terminal process must park on one of the two and go deaf to the
+    // other. Constraint 42.
+    if (d.console.readable()) revents |= POLLIN;
+    if (d.console.writable()) revents |= POLLOUT;
+    // The window was destroyed. Reported whether or not it was asked for, as POLLHUP always is:
+    // a caller cannot mask away the news that its window is gone.
+    if (d.console.hungUp()) revents |= POLLHUP;
   } else {
     // A regular file, a generated file, a tmpfs file and the sink are always ready: their reads
     // and writes never park, so a poller must not sleep on one.

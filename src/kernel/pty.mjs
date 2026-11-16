@@ -64,6 +64,19 @@ export function setPtyWinch(on) {
   winchEnabled = !!on;
 }
 
+/**
+ * M4a's negative control: the master's input side is detached.
+ *
+ * FALSE in every real boot, and the kernel refuses to set it without a bench boot — the same
+ * discipline `defaultIsig` and `winchEnabled` follow. `writeInput` carries the reason this is the
+ * right place to cut.
+ */
+let detached = false;
+
+export function setPtyDetached(on) {
+  detached = !!on;
+}
+
 export class Pty {
   constructor() {
     /** Processed input, waiting for the slave to read it. In canonical mode a line lands here
@@ -261,6 +274,20 @@ export class Pty {
 
   /** write(master): INPUT. Always accepts everything — a terminal does not block the typist. */
   writeInput(src) {
+    // M4a'S NEGATIVE CONTROL, and the one line it needs. `MILESTONES.md` M4a: "Detach the pty; the
+    // keystroke must not appear." The bytes are ACCEPTED and DISCARDED, so every other link in the
+    // chain is left working — the key event reaches the widget, the widget reaches the device, the
+    // device wakes the relay, the relay writes the master, and the write succeeds. Only the pty
+    // stops being the pty.
+    //
+    // That is what makes the control specific. A terminal widget that echoed a keystroke locally
+    // would satisfy M4a's proof with no pty behind it at all, and this is the switch that tells
+    // the two apart: with the pty detached, a locally-echoing widget still shows the character and
+    // the check must go RED. Nothing else in the suite can catch that defect.
+    if (detached) {
+      this.stats.discarded += src.length;
+      return src.length;
+    }
     // Typing after a ^D means the user did not mean end of file after all.
     if (src.length > 0) this.pendingEof = false;
     for (let i = 0; i < src.length; i += 1) this.#inputByte(src[i]);
