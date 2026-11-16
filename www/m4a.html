@@ -75,7 +75,13 @@ const RELAY = '/src/bin/term.mjs'
 /** How long to wait for an outside driver to type real keys before the page types them itself.
  *  `scripts/check.py --only m4a` is that driver. Standing alone in a browser the page still
  *  completes, and reports `drivenBy: 'page'` so the difference is never silent. */
-const REAL_KEY_WAIT_MS = 8000
+/* 60 s, AND THE SIZE IS THE POINT. The check reads `phase` AFTER `ready_expr` resolved on it, so
+ * anything this page does on a timer in between is a race the check loses: the fallback would fire,
+ * `phase` would read 'typed', the check would type nothing, and the run would end UNMEASURABLE
+ * with nothing to say why. 8 s was enough for a fast machine and not enough to be a guarantee.
+ * Nothing waits this long in practice — the driver types within milliseconds — and a browser run
+ * with no driver pays it once. */
+const REAL_KEY_WAIT_MS = 60000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -190,7 +196,20 @@ async function session (boot, { startRelay = true, title = 'Terminal' } = {}) {
     into: win.bodyEl,
     onKeys: (bytes) => k.post({ t: 'console-in', bytes }),
   })
+  /* THE KERNEL'S RECEIPT FOR EVERY KEYSTROKE, AND SOMETHING THAT READS IT. `console-fed` carries
+   * how many bytes the device TOOK of the bytes it was OFFERED, and it exists because a terminal
+   * that loses input silently is the one failure a user cannot diagnose — which it was, until this
+   * listener: the message was dispatched and nothing anywhere consumed it, so the counter was an
+   * unread receipt and the claim was untrue. Summed here and asserted by the echo proof. */
+  const fed = { offered: 0, took: 0, dropped: 0 }
   k.on((m) => {
+    if (m.t === 'console-fed') {
+      fed.offered += m.offered
+      fed.took += m.took
+      // NOT `|| fed.dropped`: a reported zero is a fact and `0 || x` discards it, which is this
+      // codebase's recurring bug in miniature — an honest value collapsed into a default.
+      if (m.console) fed.dropped = m.console.dropped
+    }
     if (m.t === 'console-out') term.write(new Uint8Array(m.bytes))
     if (m.t === 'console-health') {
       health.push({ level: m.level, staleMs: m.staleMs })
@@ -220,7 +239,7 @@ async function session (boot, { startRelay = true, title = 'Terminal' } = {}) {
     k.post({ t: 'm4-state' })
     return await k.expect('m4-state', 5000)
   }
-  return { k, win, term, health, pid, consoleState, procState }
+  return { k, win, term, health, fed, pid, consoleState, procState }
 }
 
 /* --------------------------------------------------------------------------------------------
@@ -296,7 +315,11 @@ async function pEcho (boot) {
     // rather than "something broke".
     const cs = await s.consoleState()
     ev.console = cs
+    // DELIVERY IS THREE FACTS AND NOT ONE: the device counted the bytes, it took every byte it
+    // was offered, and it dropped none. A queue that overflowed would still satisfy the first.
+    ev.fed = { ...s.fed }
     ev.windowDelivered = (cs.keyBytes || 0) >= ev.keyBytesOut && ev.keyBytesOut > 0
+      && s.fed.offered > 0 && s.fed.took === s.fed.offered && (cs.dropped || 0) === 0
 
     // CTRL-C AT A PROMPT, synthesised: the shell's own group is the terminal's foreground, so the
     // discipline raises SIGINT on the shell — which must survive it and prompt again. A program

@@ -255,12 +255,23 @@ function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
 const POLL_K = { reply };
 
 /**
- * Re-evaluate every parked `poll`, under the one flag that governs re-evaluation.
+ * Re-evaluate every parked `poll`, under the flag that governs re-evaluation.
  *
- * ONE SPELLING, because there are now three callers: `reply` above, teardown, and M4a's console —
- * whose keystrokes arrive by `postMessage` and therefore pass through no reply at all. A second
- * copy of the `pollWakeEnabled && pollPending()` pair is a second place for the `no-poll-wake`
- * control to be forgotten, which is exactly how that control came to need re-scoping once already.
+ * TWO CALLERS: `reply` above, and M4a's console — whose keystrokes arrive by `postMessage` and
+ * therefore pass through no reply at all (constraint 160). One spelling, because a second copy of
+ * the `pollWakeEnabled && pollPending()` pair is a second place for the `no-poll-wake` control to
+ * be forgotten, which is how that control came to need re-scoping once already.
+ *
+ * TEARDOWN IS NOT A CALLER AND THAT IS NOT AN OVERSIGHT. Its wake is a bare
+ * `if (pollPending()) pollWake(POLL_K)` and is deliberately left UNGATED, which predates M4a. The
+ * consequence is real and should be known: under `no-poll-wake` a peer parked in `poll` over a
+ * dying process's pipe is still woken by the fd sweep, so the control's own claim — "a parked
+ * `poll` then only ever answers from its own timeout" — holds for the reply path and NOT for that
+ * one. Gating it is the right fix and it belongs to whoever owns that control: it would change the
+ * measured label set `--negative no-poll-wake` declares (3 labels in m4b today), and re-scoping a
+ * shipped control is not something a window milestone should do as a side effect. Recorded rather
+ * than quietly made true: an earlier draft of this comment claimed teardown as a third caller,
+ * which it has never been.
  */
 function pollWakeAll() {
   if (pollWakeEnabled && pollPending()) pollWake(POLL_K);
@@ -1101,6 +1112,21 @@ function openChardev(name, flags) {
 function consoleAttach() {
   if (console1) console1.detach();
   console1 = new Console();
+  /* AND THE HEALTH LEVEL IS POSTED UNCONDITIONALLY, exactly once, here.
+   *
+   * `Console.sample` is EDGE-TRIGGERED and a fresh device starts at level 0, so a re-attach after
+   * a wedged window produced no transition at all — and the page's caption, which only ever moves
+   * on a transition, stayed "(Not Responding)" over a brand-new device with an empty queue. The
+   * state the page is showing would have been a fact about a window that no longer exists.
+   *
+   * Not reachable from `www/m4a.html`, which boots a kernel per session and attaches once. It is
+   * reachable from `console-attach`, which is a page message whose own documentation says a second
+   * attach REPLACES the device — so the state has to be published where the replacement happens
+   * rather than left to a caller to remember. */
+  post({
+    t: "console-health", level: 0, staleMs: 0, queued: 0,
+    notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
+  });
   return console1.report();
 }
 

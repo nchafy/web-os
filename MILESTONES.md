@@ -1124,10 +1124,21 @@ bytes counted by the device. **That is the control's whole point:** a widget tha
 would satisfy this milestone's proof with no pty behind it at all, and nothing else in the suite
 can tell the two apart.
 
+**One critic, then nine fixes.** M4a went build → independent attack → fix, as every milestone
+here has. All nine findings were real and five were the SAME KIND of mistake: a guard present in
+the code being ported, or in a sibling path, dropped by the new one — `term` discarding returns
+`sh` checks, the chardev arm not undoing a count `pipe2` undoes, and two guards missing from the
+ported clamp. The full record is constraints 166–174, each with the failure it produces. **The one
+answered rather than fixed is 174:** teardown's `pollWake` is ungated, so `--negative
+no-poll-wake` under-proves — pre-existing, and re-scoping another milestone's control is not a
+window milestone's business.
+
 **Gates.** `scripts/check.py --only m4a` (26 expectations, 6.4 s),
 `scripts/check.py --negative pty-detach` (6 red, 20 intact),
 `scripts/check.py --only m4a --negative no-isolation` (BROKEN: no SAB, so no kernel and no pty),
-`node bench/m4a-console/probe.mjs` (65 host checks over the device, no browser) and
+`node bench/m4a-console/probe.mjs` (65 host checks over the device, no browser),
+`node bench/m4a-window/probe.mjs` (29 host checks over the clamp; two mutations move 10 and 2
+labels and leave the rest) and
 `node bench/m3-synth/probe.mjs` (98 host checks, 13 of them `/dev/console`'s in the mount table).
 
 **Two defects the build found in ITSELF, by reading rather than by a failing proof, and both are

@@ -32,17 +32,30 @@ const KEY_STEP = 10;
 
 let serial = 0;
 
-/** `box` held inside the desktop. Returns a NEW object; never mutates its argument. */
-function clampBox(box, surface) {
-  const w = Math.min(Math.max(box.w, MIN_W), surface.w);
-  const h = Math.min(Math.max(box.h, MIN_H), surface.h);
+/**
+ * `box` held inside the desktop. Returns a NEW object; never mutates its argument.
+ *
+ * THE TWO `Math.max(…, 0)` GUARDS AND THE `MIN_W`/`MIN_H` FLOOR ARE WEBXP'S AND WERE DROPPED BY
+ * THE PORT. Both are about a surface that is SMALLER than the window's own minimum, which is not a
+ * hypothetical: a `Win` built before its desktop has been laid out, or inside a hidden container,
+ * measures `{w: 0, h: 0}`. Without the floor the window became 0×0; without the outer `Math.max`
+ * the upper bound on `x` went negative and WON, placing it at -72 with none of the title bar on
+ * screen — the exact invariant `MIN_VISIBLE` exists to hold, inverted. It then stayed there until
+ * some gesture happened to re-run `apply()`.
+ *
+ * So a window never shrinks below `MIN_W`×`MIN_H` even on a surface that cannot show it, and the
+ * clamp never pushes it to a negative coordinate that the clamp itself invented.
+ */
+export function clampBox(box, surface) {
+  const w = Math.max(Math.min(Math.max(box.w, MIN_W), surface.w), MIN_W);
+  const h = Math.max(Math.min(Math.max(box.h, MIN_H), surface.h), MIN_H);
   return {
     w,
     h,
     // The LEFT edge may go negative down to a sliver, so a window can be pushed off the left; the
     // RIGHT edge may not pass `surface.w - MIN_VISIBLE`, so the title bar is always grabbable.
-    x: Math.min(Math.max(box.x, MIN_VISIBLE - w), surface.w - MIN_VISIBLE),
-    y: Math.min(Math.max(box.y, 0), Math.max(0, surface.h - MIN_VISIBLE)),
+    x: Math.min(Math.max(box.x, MIN_VISIBLE - w), Math.max(surface.w - MIN_VISIBLE, 0)),
+    y: Math.min(Math.max(box.y, 0), Math.max(surface.h - MIN_VISIBLE, 0)),
   };
 }
 
@@ -175,24 +188,42 @@ export class Win {
   #startDrag(event) {
     if (event.button !== 0) return;
     if (event.target.closest("button")) return;
-    this.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, from: this.placed };
-    this.barEl.setPointerCapture(event.pointerId);
+    // A SECOND POINTER — two fingers, or a mouse and a touch — re-enters here while a gesture is
+    // live. The one in flight is ENDED FIRST, and webxp's `beginGesture` carries the reason the
+    // port had to re-learn: each gesture's listeners only answer to their own pointer id, so
+    // leaving them attached leaks three per re-entry for the window's lifetime. The first
+    // gesture's `up` then sees a different id and returns without removing them, and once the
+    // second gesture clears `drag` it short-circuits for ever.
+    if (this.drag) this.drag.end();
+    // THE GESTURE CARRIES ITS OWN TEARDOWN, so `end` is one function and both callers — the
+    // pointer lifting and a second pointer arriving — detach exactly the listeners they added.
+    const gesture = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      from: this.placed,
+      end: () => {
+        if (this.drag === gesture) this.drag = null;
+        this.barEl.removeEventListener("pointermove", move);
+        this.barEl.removeEventListener("pointerup", up);
+        this.barEl.removeEventListener("pointercancel", up);
+      },
+    };
     const move = (e) => {
-      if (!this.drag || e.pointerId !== this.drag.id) return;
+      if (this.drag !== gesture || e.pointerId !== gesture.id) return;
       this.box = {
-        ...this.drag.from,
-        x: this.drag.from.x + (e.clientX - this.drag.x),
-        y: this.drag.from.y + (e.clientY - this.drag.y),
+        ...gesture.from,
+        x: gesture.from.x + (e.clientX - gesture.x),
+        y: gesture.from.y + (e.clientY - gesture.y),
       };
       this.apply();
     };
     const up = (e) => {
-      if (!this.drag || e.pointerId !== this.drag.id) return;
-      this.drag = null;
-      this.barEl.removeEventListener("pointermove", move);
-      this.barEl.removeEventListener("pointerup", up);
-      this.barEl.removeEventListener("pointercancel", up);
+      if (e.pointerId !== gesture.id) return;
+      gesture.end();
     };
+    this.drag = gesture;
+    this.barEl.setPointerCapture(event.pointerId);
     this.barEl.addEventListener("pointermove", move);
     this.barEl.addEventListener("pointerup", up);
     // A CANCEL ENDS THE DRAG TOO. Without it a pointer the browser took away (a gesture, a lost

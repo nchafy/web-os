@@ -498,7 +498,13 @@ HANDLERS.open = (p, k) => {
   if (decision.chardev) {
     const d = k.chardev(decision.chardev, flags, decision);
     if (typeof d === "number") return d;
-    return p.fds.add(d);
+    const fd = p.fds.add(d);
+    // UNDONE ON FAILURE, or the device counts an open the caller was never told about. `fds.add`
+    // answers -EMFILE once the process holds OPEN_MAX descriptions, and the count only ever comes
+    // back down through a `close` on an fd that does not exist. `pipe2` and `pty_open` both undo
+    // their end counts the same way and say so; this arm is the one that did not.
+    if (fd < 0) KIND_OPS[d.kind].close(d);
+    return fd;
   }
   if (decision.synth) {
     const d = {

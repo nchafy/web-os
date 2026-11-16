@@ -6719,6 +6719,15 @@ def check_m4a(env: Env) -> None:
     # aborted or errored never reaches that phase, so this arm is skipped and the read below
     # reports the refusal.
     phase = env.page.evaluate("globalThis.M4A && globalThis.M4A.phase")
+    state = env.page.evaluate(M4A_DONE)
+    if not phase and not state:
+        # NEITHER WAITING NOR FINISHED. `ready_expr` resolved on one of the two, so arriving here
+        # means the page moved under the check - and the arm below would silently not type, the
+        # page would never finish, and the read would report "never reached a terminal state"
+        # with nothing to say why. Said here instead.
+        env.unmeasurable(
+            "www/m4a.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no keystroke was typed and nothing below was measured")
     if phase == "await-keys":
         focused = env.page.evaluate(
             "(() => { const t = document.querySelector('.terminal');"
@@ -6781,9 +6790,12 @@ def check_m4a(env: Env) -> None:
     # THE CLAUSE THE CONTROL LEAVES STANDING: the keystroke reached the KERNEL. Asserted from the
     # device's own byte counter, so "the window is wired up" and "the pty echoed" are two findings
     # and not one.
+    # THREE FACTS, so a failure says which: the device counted the bytes, it took every byte it was
+    # offered, and it dropped none. A console whose queue overflowed would satisfy the first alone.
     env.expect_that("the window delivered the keystroke to the kernel",
                     e.get("windowDelivered") is True,
-                    {"keyBytesOut": e.get("keyBytesOut"), "console": e.get("console")})
+                    {"keyBytesOut": e.get("keyBytesOut"), "fed": e.get("fed"),
+                     "console": e.get("console")})
     # THE MILESTONE'S OWN PROOF.
     env.expect_that("and the pty echoed the typed line back onto the screen",
                     e.get("echoedTheLine") is True,

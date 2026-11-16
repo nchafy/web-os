@@ -1386,3 +1386,71 @@ Measured 2026-11-16 on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro / 120 
     report a session that stopped. It would have hung in the act of reporting the hang. It now
     hangs up on its shell with SIGHUP first, which is the signal named for the event, unless the
     shell has already gone.
+
+## M4a's adversarial review — nine findings, eight fixed and one answered
+
+One critic, given the diff and the acceptance criteria and not the author's conclusion
+(`~/.claude/rules/adversarial-review.md`). Every finding was verified against the code before it
+was acted on; all nine were real. Recorded because five of them are the same KIND of mistake — a
+guard present in the code being ported or in a sibling path, dropped by the new one.
+
+166. **A shipped program must not discard a return the shell already checks.** `term` discarded
+    `setpgid` and `tcsetpgrp`, and the failure is not local: with `setpgid` refused the shell stays
+    in the relay's group, `tcsetpgrp` then finds no such group, and `fgPgid` points at the RELAY —
+    so Ctrl-C raises SIGINT on the terminal emulator instead of the shell, which is the constraint
+    16 behaviour M4a's proof claims. Worse, teardown then sends SIGHUP to `-pid`, a group that does
+    not exist, gets -ESRCH, and PARKS IN `waitpid` on a shell nothing has hung up: the relay hangs
+    in the one path that exists to report a hang, with no `why` set because `why` is assigned after
+    the wait. `src/bin/sh.mjs` checks this exact pair and says why. **A path with a live caller is
+    not thereby verified** — the handoff's rule covers mechanisms with NO caller, and this one had
+    one and was wrong anyway.
+167. **A count raised before `fds.add` must be undone when `fds.add` fails.** `openChardev` raised
+    the device's open count and `fds.add` answers -EMFILE at `OPEN_MAX`, so the count never came
+    back down — it only falls through a `close` on an fd the caller was never given. `pipe2` and
+    `pty_open` both undo their end counts and carry a comment saying "undo, or the caller leaks an
+    fd it was never told about". The chardev arm was the one that did not.
+168. **Two guards the window port dropped, both about a surface smaller than the window.** webxp's
+    `clampBox` floors the size at `MIN_W`×`MIN_H` and takes `Math.max(surface.w - MIN_VISIBLE, 0)`
+    as the upper bound. Without them a `Win` built before its desktop is laid out — measuring
+    `{w: 0, h: 0}` — came out 0×0 at x = -72: off the left edge with NONE of the title bar on
+    screen, which is the invariant `MIN_VISIBLE` encodes, inverted, and it stayed there until some
+    gesture re-ran `apply()`. `bench/m4a-window/probe.mjs` is the check, and both mutations fire on
+    named subsets: dropping the floor moves 10 labels, dropping the `Math.max` moves 2, and the
+    ordinary-surface and idempotence clauses hold under both.
+169. **A pointer gesture needs a re-entrancy guard, and the port dropped webxp's.** A second
+    pointer — two fingers, or a mouse and a touch — re-entered `#startDrag` while a gesture was
+    live: `drag` was overwritten and a second listener set added, then the first gesture's `up` saw
+    a different pointer id and returned WITHOUT removing its own three listeners, and once the
+    second gesture cleared `drag` it short-circuited for ever. Three leaked listeners per
+    re-entry, for the window's lifetime. The gesture now carries its own `end`.
+170. **An unread receipt is not an account.** `console-fed` carries how many bytes the device TOOK
+    of the bytes it was OFFERED, and the kernel's own comment says it exists because "a terminal
+    that loses input silently is the one failure a user cannot diagnose" — which it was, because
+    the page dispatched the message and nothing consumed it. A counter with no reader makes the
+    claim about it false. `the window delivered the keystroke to the kernel` now asserts three
+    facts: the device counted the bytes, it took every byte offered, and it dropped none.
+171. **An edge-triggered state must be published where the state is REPLACED.** `console-attach`
+    installs a new device at level 0, and `sample()` reports only transitions — so a re-attach
+    after a wedged window produced no transition and the page's caption stayed "(Not Responding)"
+    over a brand-new device with an empty queue. Unreachable from `www/m4a.html`, which boots a
+    kernel per session; reachable from a page message whose own documentation advertises re-attach.
+    The level is now posted unconditionally at attach.
+172. **A check must not re-read the state its readiness gate resolved on.** `check_m4a` re-read
+    `phase` after `ready_expr` had already settled on it, and the page's self-typing fallback could
+    fire in between — the check would type nothing, the page would never finish, and the run would
+    end UNMEASURABLE with nothing to say why. The fallback budget is now 60 s, which cannot elapse
+    between two adjacent evaluates, and the impossible case is reported by name instead of as a
+    confusing absence.
+173. **An argument accepted and ignored is worse than one refused.** `--ceiling` used
+    `Number(x) || default`, which swallows `0` and every non-numeric value, so `term --ceiling 0`
+    ran a thirty-second session and said nothing.
+174. **ANSWERED, NOT FIXED: teardown's `pollWake` is ungated and `--negative no-poll-wake`
+    under-proves because of it.** The control's claim — "a parked `poll` then only ever answers
+    from its own timeout" — holds for the reply path and not for teardown's fd sweep, which calls
+    `pollWake` without testing `pollWakeEnabled`. This predates M4a. It is left alone deliberately:
+    gating it would change the label set that control declares (3 labels in m4b today), and
+    re-scoping a shipped control is not something a window milestone should do as a side effect.
+    The comment on `pollWakeAll` records it where a reader meets it. An earlier draft of that
+    comment claimed teardown as a caller of the gated helper, which it has never been — the critic
+    caught the false comment, and a comment asserting an invariant is still not evidence that the
+    invariant holds.

@@ -92,7 +92,16 @@ export function run(env) {
   const argv = (env.argv || []).map(String);
   let ceiling = CEILING_MS;
   for (let i = 1; i < argv.length; i += 1) {
-    if (argv[i] === "--ceiling" && i + 1 < argv.length) ceiling = Number(argv[i + 1]) || ceiling;
+    if (argv[i] !== "--ceiling") continue;
+    // REFUSED, NOT SILENTLY DEFAULTED. `Number(x) || ceiling` swallowed both `0` and `abc`, so
+    // `term --ceiling 0` ran a thirty-second session and said nothing — an argument accepted and
+    // ignored. Every other error in this file names itself and exits.
+    const raw = argv[i + 1];
+    const ms = Number(raw);
+    if (raw === undefined || !Number.isFinite(ms) || ms <= 0) {
+      return { exit: 1, program: "term", why: `--ceiling wants a positive number, got ${raw}` };
+    }
+    ceiling = ms;
   }
   const t0 = performance.now();
   const account = {
@@ -138,11 +147,37 @@ export function run(env) {
     return { exit: 4, ...account, why: `spawn ${SHELL}: ${env.std.errnoName(pid)}` };
   }
   account.shellPid = pid;
-  // The shell in its own group, and that group made the terminal's foreground — what a session
-  // leader does for the shell it starts, and what makes Ctrl-C reach the shell's pipeline rather
-  // than this relay.
-  env.proc.setpgid(pid, pid);
-  env.tty.setPgrp(master, pid);
+  /* THE SHELL IN ITS OWN GROUP, AND THAT GROUP MADE THE TERMINAL'S FOREGROUND — what a session
+   * leader does for the shell it starts, and what makes Ctrl-C reach the shell's pipeline rather
+   * than this relay.
+   *
+   * BOTH RETURNS ARE CHECKED, and this file discarded them first. The failure is not hypothetical
+   * and it is not local: with `setpgid` refused the shell stays in THIS process's group, so
+   * `setPgrp` then finds no such group and leaves `fgPgid` pointing at the relay. Ctrl-C would
+   * raise SIGINT on the relay instead of the shell — the constraint 16 behaviour this milestone's
+   * proof claims — and worse, the teardown below sends SIGHUP to `-pid`, a group that does not
+   * exist, gets -ESRCH, and then PARKS IN `waitpid` on a shell nothing has hung up. The relay
+   * would hang in the one path that exists to report a hang, with no `why` set because `why` is
+   * assigned after the wait. `src/bin/sh.mjs` checks this exact pair; a shipped program must not
+   * be the one that stops. */
+  const grouped = env.proc.setpgid(pid, pid);
+  const fg = grouped < 0 ? grouped : env.tty.setPgrp(master, pid);
+  if (grouped < 0 || fg < 0) {
+    // The shell exists and is in the wrong group, so it is killed by PID — the only spelling that
+    // is certainly right when the group is the thing in doubt.
+    env.proc.kill(pid, SIGHUP);
+    env.proc.waitpid(pid, 0);
+    env.fs.close(master);
+    env.fs.close(slave);
+    env.fs.close(con);
+    return {
+      exit: 6,
+      ...account,
+      why: grouped < 0
+        ? `setpgid(${pid}): ${env.std.errnoName(grouped)}`
+        : `tcsetpgrp(${pid}): ${env.std.errnoName(fg)}`,
+    };
+  }
   // AND LET GO OF THE SLAVE. While any description of it is open the master never sees EOF, so a
   // read after the shell exits would park for ever with no error anywhere. M4 recorded this twice.
   env.fs.close(slave);
