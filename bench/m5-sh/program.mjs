@@ -19,7 +19,7 @@
 //                  with no execute bit, a program that is not there, and argv in /proc
 //   p_refusals     the three things this shell refuses to guess at
 //   p_tty          the shell interactive on a pty: a typed line, Ctrl-C, Ctrl-D
-//   p_noturl       a process cannot make the kernel fetch a URL (constraint 108)
+//   p_noturl       a process cannot make the kernel fetch a URL (constraint 123)
 
 import {
   E, EACCES, ENOENT, MAX_INLINE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,

@@ -7,7 +7,7 @@
 // not JavaScript's syntax, so `grep 'a\+b'` would silently mean something else — and quietly
 // accepting JS regexes under a name that promises BRE is worse than refusing to pretend.
 // `-E` opts into a JavaScript regular expression and says so where a reader meets it. Recorded as
-// docs/CONSTRAINTS.md 114.
+// docs/CONSTRAINTS.md 138.
 
 import { O_RDONLY } from "/src/abi.mjs";
 

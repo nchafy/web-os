@@ -392,6 +392,68 @@ constraint 42 actually makes.
 
 *Evidence: measured. Constraints 115, 116.*
 
+## D18 — a program is loaded from the filesystem, and the page's loader stays
+
+**M5.** `SYS_spawn` resolves its path through the mount table and reads the bytes from the mount;
+the page's own `t: "spawn"` keeps fetching a URL.
+
+**What it rejected.** One loader for both, which is what existed. It made a process-supplied
+string a request origin — `new URL("https://elsewhere/x.mjs", base)` ignores the base — so any
+process could have the kernel fetch from the browser's network position and evaluate the reply as
+a program. `src/kernel/providers.mjs` is written around the opposite rule for storage ("there is
+no path by which a process-supplied string becomes a request origin") and `SYS_spawn` was the hole
+in it.
+
+**Also rejected: making the page use the filesystem too.** The page would then have to write every
+bench program into a mount before it could run one, which means a filesystem before a kernel. The
+distinction kept instead is PRIVILEGE, not convenience: the page is the supervisor, outside the
+process boundary, already holding the kernel's whole surface. Two functions rather than one with a
+flag, so a reader cannot mistake which side a caller is on.
+
+**What it costs.** A program's only linkable import is an absolute specifier, because a Blob image
+has no base for a relative one (constraint 125). Program text on the durable volume is read into
+one kernel-owned SAB under a lock (constraint 126). A program may not exceed 1 MiB.
+
+*Evidence: measured — the hole was reproduced from an unprivileged process over six spellings,
+and `www/m5.html`'s `no_url` section is that reproduction. Constraints 123, 125, 126, 127.*
+
+## D19 — `cd` is a syscall; `getcwd` is `/proc`
+
+**M5.** `SYS_chdir` is 47. There is no `getcwd`.
+
+**What it rejected.** A `getcwd` call beside it, which would be a second renderer of a fact
+`/proc/<pid>/cwd` already publishes — CLAUDE.md's one-source-of-truth rule applied to the ABI
+rather than to a module. `src/bin/sh.mjs` reads its own directory out of `/proc` after every `cd`,
+which also means the shell cannot disagree with the kernel about where it is: the kernel
+normalizes lexically and the shell asks rather than computing.
+
+**Also rejected: a shell-local cwd with no syscall.** Every path call resolves against `p.cwd` in
+the kernel (constraint 29's credential rule has the same shape), so a shell that tracked its own
+directory would have had to rewrite every relative path before passing it — and `spawn`'s children
+would have inherited the wrong one.
+
+*Evidence: judgement, against a measured absence — `slot.cwd` had existed since M2 with nothing
+able to move it. Constraint 128.*
+
+## D20 — the two-EINTR delivery rule was left alone
+
+**M5.** A signal interrupts the call in flight AND leaves its SIGPEND bit set, so the next call is
+interrupted too. The shell retries past it; the kernel was not changed.
+
+**What it rejected.** Clearing the bit when the kernel interrupts an in-flight call, which is
+arguably the correct fix: for a parked process the interruption IS the delivery, and POSIX
+delivers once. It was rejected for this milestone on cost, not on merit — it moves a delivery rule
+that 332 existing expectations rest on, and `drainSignals`'s `onsignal(bits)` hook would stop
+seeing a signal that reached a parked process, which is M1's own mechanism.
+
+**What that leaves.** A documented ABI property a program must tolerate: any call made immediately
+after a signal may answer -EINTR. The retry is bounded at one because the entry check clears the
+bits it reports. A milestone that changes the kernel instead owes M1's and M4b's signal proofs a
+re-run.
+
+*Evidence: measured — Ctrl-C at a prompt printed no new prompt while the shell was alive and still
+read the next line. Constraint 131.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

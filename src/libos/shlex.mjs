@@ -249,7 +249,7 @@ export function expandTilde(word, home) {
  * POSIX and is said rather than left to be discovered: this shell has no `IFS`, and splitting
  * without one would be a rule nobody could turn off. Quoting a variable therefore changes nothing,
  * which is the whole class of shell bug that convention exists to prevent — recorded as a known
- * limitation rather than a feature (docs/CONSTRAINTS.md 113).
+ * limitation rather than a feature (docs/CONSTRAINTS.md 138).
  */
 export function expandVars(word, lookup) {
   let out = "";

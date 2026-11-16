@@ -6314,7 +6314,7 @@ def check_m4b(env: Env) -> None:
          "rather than inferred from the answer being right.\n"
          "M5 ALSO CLOSED A HOLE IT DID NOT SET OUT TO. `SYS_spawn` used to hand its caller's path "
          "to `fetch`, so a process could name any origin and have the kernel evaluate the reply "
-         "as a program (constraint 108). Programs now come out of the filesystem, and the "
+         "as a program (constraint 123). Programs now come out of the filesystem, and the "
          "`no_url` section asserts every spelling that used to work is refused BY THE MOUNT "
          "TABLE - including `/src/bin/true.mjs`, which is a real file on the server and is not in "
          "this system's filesystem, so a kernel that still reached the network would spawn that "
@@ -6439,14 +6439,14 @@ def check_m5(env: Env) -> None:
                     {"echoed": tt.get("echoed")})
     # A SHELL MUST NOT DIE OF THE KEYSTROKE IT FORWARDS. Both halves: it survived, and it prompted
     # again — the second is what shows the pending-bit interruption of the NEXT call is handled
-    # (constraint 117), and without it the shell was alive and silent.
+    # (constraint 131), and without it the shell was alive and silent.
     env.expect_that("the shell survived Ctrl-C and prompted again",
                     tt.get("survivedCtrlC") is True and tt.get("promptAfterCtrlC") is True,
                     {"afterIntr": tt.get("afterIntr"), "child": tt.get("child")})
     env.expect_that("and ended the session on Ctrl-D", tt.get("exitedOnCtrlD") is True,
                     tt.get("child"))
 
-    # ---- PROOF: a process cannot make the kernel fetch a URL (constraint 108) -------------
+    # ---- PROOF: a process cannot make the kernel fetch a URL (constraint 123) -------------
     nu = ev("no_url")
     env.expect_that("no_url ok", section_ok("no_url"), nu)
     env.expect_that("every URL spelling was refused by the filesystem",

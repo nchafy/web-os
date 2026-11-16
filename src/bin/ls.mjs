@@ -77,7 +77,7 @@ function columnize(names, width) {
 
 /** One `-l` row. The fields are POSIX's, in POSIX's order, minus the timestamp — the VFS keeps
  *  nanosecond times and there is no `strftime` here, so the field is omitted rather than printed
- *  in a format nothing else in this system uses. Named as a gap in docs/CONSTRAINTS.md 115. */
+ *  in a format nothing else in this system uses. Named as a gap in docs/CONSTRAINTS.md 138. */
 function longRow(env, path, name) {
   const st = env.fs.lstat(path);
   if (typeof st === "number") {

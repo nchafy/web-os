@@ -676,7 +676,7 @@ function prompt(sh) {
  *
  * MEASURED, not reasoned: without the retry, Ctrl-C at a prompt printed no new prompt at all —
  * `afterIntr` came back empty in www/m5.html's PROOF 7 while the shell was demonstrably alive and
- * still read the next line. Recorded as docs/CONSTRAINTS.md 117, which also says why the kernel
+ * still read the next line. Recorded as docs/CONSTRAINTS.md 131, which also says why the kernel
  * was not changed instead: clearing the bit when the kernel interrupts an in-flight call is
  * arguably the right fix and it moves a delivery rule that 298 existing expectations rest on.
  *

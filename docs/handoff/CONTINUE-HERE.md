@@ -27,15 +27,16 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, **M4** and **M4b**. Each has a record in `MILESTONES.md` with its actual cost and
-what it changed in the plan. Current gates, all green:
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b and **M5**. Each has a record in `MILESTONES.md` with its actual cost
+and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 7 checks, 298 expectations |
+| `scripts/check.py` | the suite — 8 checks, 332 expectations |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
-| `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
+| `scripts/check.py --negative <control>` | 17 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
+| `node bench/m5-sh/probe.mjs` | M5's host gate, no browser: 91 checks over the shell's pure front end and the programs' pure parts |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 129 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
@@ -63,6 +64,31 @@ BROKEN here is not evidence of a defect in the code under test. Re-run it alone.
 up, the next thing to look at is `www/m4b.html`'s `kernelBoot`: the page never observes the
 kernel's `up` for the stuck proof, so the question is whether `new Worker` is the thing stalling.
 
+## What M5 changed that touches everything after it
+
+**`SYS_spawn` NO LONGER FETCHES.** A program path is resolved through the mount table and the bytes
+come from the mount (`src/kernel/exec.mjs`). Three consequences a later milestone will meet:
+
+- **A program's only linkable import is an absolute specifier** — `/src/abi.mjs`, never
+  `"../x.mjs"`. A Blob image has no base for a relative one. The loader refuses such a program with
+  -ENOEXEC and a note naming the specifier, because the alternative was measured: every stage of
+  M4's pipelines faulted with SIGABRT and `/proc` said `never issued a syscall`, with nothing
+  anywhere naming a specifier. Constraint 125.
+- **Everything a process spawns must be IN a mount.** `/bench` is mounted under `bench: 1` only, so
+  M4's and M4b's orchestrators keep spawning their stages by the same path strings. A new bench
+  program that spawns anything needs a row in `BENCH_ENTRIES`.
+- **The page's own `t: "spawn"` still takes a URL** and still fetches. That is deliberate — the
+  page is the supervisor — and it is why only the process-side half moved. D18.
+
+**Two libos stubs existed with no caller and were wrong-shaped until one arrived.** `sigaction`
+had had none since M1; a shell without it DIES on the Ctrl-C it exists to forward. `nanosleep` had
+every caller open-coding `packI64` and one of them passed (0, 0) — a zero-length sleep. Constraint
+100's rule keeps earning its place.
+
+**One signal costs two `-EINTR`s** (constraint 131). Any call made immediately after a signal may
+answer -EINTR, and a program that cares must retry once. The kernel was NOT changed to deliver
+once, and D20 records why and what a milestone that changes it owes.
+
 ## Next: M4a — the terminal gets a real window
 
 `MILESTONES.md` §M4a is the spec. The pty it points at exists and is verified, so this is the UI
@@ -83,7 +109,10 @@ Three things the docs already settle, so do not re-derive them:
 - **The "not responding" detector lands here**, deliberately deferred from M1 — a kernel-side timer
   plus a UI hook, and there was no UI to hook until now.
 
-Then M5 (the shell and ten programs), M6, then option A (M7–M14).
+Then M6, then option A (M7–M14). **M5 is done**, so M4a now has a real shell to point the pty
+at: `spawn("/usr/bin/sh", ["sh"], actions)` with the slave on fds 0, 1 and 2, the shell in its own
+group, and that group made the terminal's foreground — `bench/m5-sh/program.mjs`'s `p_tty` is a
+working example of exactly that, including the Ctrl-C and Ctrl-D paths.
 
 ### What M4 and M4b leave you
 
@@ -94,7 +123,8 @@ Six host probes run without a browser and are the fast loop: `probe.mjs` under `
 proof, each spawning its own stages. Add a mode rather than a new program.
 
 **`pipe2` and `pty_open` can return fd 0** (constraint 94), because `spawn` leaves fd 0 free and
-`fds.add` hands out the lowest. Both orchestrators call `ensureStdin` first. M5's shell must too.
+`fds.add` hands out the lowest. Both orchestrators call `ensureStdin` first, and M5's shell does — it `fstat`s fd 0 and opens
+`/dev/zero` only when it has to, so a shell started on a terminal pays one syscall.
 
 **A blocking call parks on SEQ, never inside a synchronous call** (constraint 88, measured). An ops
 row returns `null` to mean parked; `null` must be tested before any numeric use, because `null >= 0`

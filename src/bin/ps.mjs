@@ -9,7 +9,7 @@
 // WHAT `ps` WITH NO OPTIONS SHOWS is EVERY process, not "processes with the same controlling
 // terminal" as POSIX specifies. There is one session and one terminal in this system today, so the
 // filter would be a no-op that reads as a feature; `-s` would be the flag to add when a second
-// session exists. Said here rather than left as a silent divergence (docs/CONSTRAINTS.md 116).
+// session exists. Said here rather than left as a silent divergence (docs/CONSTRAINTS.md 138).
 
 const NAME = "ps";
 

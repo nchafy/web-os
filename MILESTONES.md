@@ -28,8 +28,8 @@ checks is a wish.
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 53 expectations, 4 controls |
+| M5 | The shell and ten programs, exec through the filesystem | 6 | 1 | ✅ done — **ACCEPT**, 34 expectations, 1 control, and a closed SSRF hole |
 | **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
-| M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | | ⬜ A |
@@ -1071,24 +1071,45 @@ so in the code or it becomes the architecture by accident.
 
 ---
 
-## M5 — The shell and ten programs · 6 days · ~1200 LoC
+## M5 — The shell and ten programs · done · 1 day · ~3,600 LoC
 
-**Build.** Keep `../webxp/apps/terminal/shell.mjs`'s front end (453 lines: tokenize, parse, expand,
-complete); rewrite the executor against the combined 1,941-line shell+commands pair to use `pipe2`
-+ `spawn` with `posix_spawn`-shaped file actions. Ten programs in `/usr/bin`: `ls`, `cat`, `echo`,
-`wc`, `head`, `grep`, `sleep`, `kill`, `ps`, `true` — **mostly new code**; the predecessor
-contributes ~230 lines across six, and `kill` and `ps` have no equivalent because it had no process
-table.
+**ACCEPT.** `ls /usr/bin | grep c | wc -l` answers 3 through three real processes, against a count
+the check derives for itself by listing `/usr/bin` through syscalls; `/dev/trace` shows four
+distinct pids doing it. Then `sleep 60 &`, `ps`, `kill %1`: the job is announced, `ps` lists the
+sleeper by pid with `sleep 60` as its command from `/proc/<pid>/cmdline`, and the job dies of
+SIGTERM. 34 expectations over nine fresh kernels in 38.1 s.
 
-No `fork` (20). `( subshell )` in-process is fine, and in fact more POSIX-conformant for `$$`,
-`$!` and `PPID`. **The real casualty is `f | g` with both sides shell functions** — one Worker
-cannot run both, and serialising deadlocks when the pipe buffer fills. Budget a second shell
-worker, or accept and document the deadlock (20a).
+**Built.** `src/libos/shlex.mjs` carries the front end ported from
+`../webxp/apps/terminal/shell.mjs` and `glob.mjs` — tokenize, parse, expand, glob, complete —
+PURE, so `bench/m5-sh/probe.mjs` checks 91 properties of it under `node` in milliseconds.
+`src/bin/sh.mjs` is a new executor: `pipe2` + `spawn` with posix_spawn file actions + `setpgid`,
+redirections opened by the shell, background jobs with `%N` specs, and builtins for the commands
+that cannot be programs (`cd`, `pwd`, `exit`, `jobs`, `wait`, `export`, `unset`, `complete`). Ten
+programs in `/usr/bin`: `ls cat echo wc head grep sleep kill ps true`, plus `sh`. `src/libos/std.mjs`
+is the program support library, handed over as `env.std` so a program imports nothing.
 
-**Proof.** `ls /usr/bin | grep c | wc -l` is correct through three real processes; then
-`sleep 60 &`, `ps`, `kill %1`.
-**Negative control.** Make `spawn` return the parent's pid; `ps` must show one process and the
-check must fail.
+**What the milestone did not ask for and could not avoid.** `/usr/bin` meant `spawn` had to load a
+program from the FILESYSTEM, and the call was loading it from the NETWORK: `new URL(path,
+location)` ignores its base for a string carrying a scheme, so any process could name any origin
+and have the kernel evaluate the reply as a program. `src/kernel/exec.mjs` is the fix and
+constraint 123 is the record. `SYS_chdir` is 47, appended, because `cd` was not otherwise
+expressible (constraint 128); `sigaction` and `nanosleep` gained libos stubs, the first of which
+had had no caller anywhere since M1.
+
+**Proof.** `scripts/check.py --only m5` — eight sections: the pipeline, job control, redirection,
+the builtins, the exec path, the refusals, the shell on a real pty (a typed line echoed by the
+discipline, Ctrl-C survived, Ctrl-D ending the session), and six URL spellings refused by the
+mount table.
+**Negative control.** `scripts/check.py --negative spawn-self` — `spawn` answers the caller's own
+pid and creates nothing, for a caller that itself has a parent. 16 expectations red, 18 intact:
+the builtins, the refusals and the URL refusals hold because none of them creates a process.
+
+**What it cost elsewhere.** M4's and M4b's stage programs imported `"../../src/abi.mjs"`, which a
+Blob image cannot resolve — every stage faulted with SIGABRT until the specifier became absolute
+(constraint 125). The loader now refuses such a program by name rather than letting it fault.
+
+**Recorded limitations** are constraint 138, sorted into permitted-by-decision and structural.
+There are no known defects at the close of M5.
 
 ---
 
