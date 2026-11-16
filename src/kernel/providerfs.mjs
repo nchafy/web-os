@@ -78,6 +78,11 @@ export const BENCH_ENTRIES = Object.freeze([
   Object.freeze({ name: "m4-fs/program.mjs", path: "bench/m4-fs/program.mjs" }),
   Object.freeze({ name: "m4b-fs/program.mjs", path: "bench/m4b-fs/program.mjs" }),
   Object.freeze({ name: "m5-sh/program.mjs", path: "bench/m5-sh/program.mjs" }),
+  // M6. Here so the realm can be interrogated FROM A SHELL as well as from the page: typing
+  // `/bench/m6-realm/program.mjs p_show` at the live terminal prints what a process can no longer
+  // reach, and `p_fault` runs the bypass snippet and dies of it. A process (the shell) spawns it,
+  // so it needs a row — `SYS_spawn` loads programs from the filesystem (constraint 123).
+  Object.freeze({ name: "m6-realm/program.mjs", path: "bench/m6-realm/program.mjs" }),
 ]);
 
 /** How much of an object the mount reads. The manifest declares no sizes, so each object is read

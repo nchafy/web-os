@@ -43,6 +43,22 @@ export const TAMPER_BYTES = "TAMPERED-BY-PROCESS\n";
 const BLOB_DIR = "blobs";
 
 /**
+ * A `data:` module, as a specifier NO SCANNER CAN SEE, and built this way for two reasons.
+ *
+ * The honest one: constraint 139's open case is a computed `import(expr)`, and
+ * a half-computed one is only half computed — the kernel's linker extracts every string
+ * literal that follows `import(` and compares it to its allowlist, so it SEES `"da"` and refuses
+ * the file. Measured: typing this program at the shell answered ENOEXEC, because the loader was
+ * doing exactly what constraint 139 says it does. Assembling the URL away from the call site is
+ * what makes the specifier genuinely invisible, which is the thing the policy has to stop.
+ *
+ * The practical one: with the literal gone, this program loads through the filesystem, so it can
+ * be spawned by the shell and not only by the page.
+ */
+const DATA_MODULE = ["da", "ta:text/javascript,export const V = 'data: evaluated in a process'"]
+  .join("");
+
+/**
  * THE REFUSAL'S OWN NAME, from inside the realm that was refused.
  *
  * A thrown `TypeError: Failed to fetch dynamically imported module` reads the same whether a
@@ -207,7 +223,7 @@ async function pAttack(env, path, ino) {
   // even as a literal (constraint 139) — and `import` is not `fetch`, so the strip above does not
   // touch these. The policy does.
   rows.importData = await attempt(async () =>
-    (await import("da" + "ta:text/javascript,export const V = 'data: evaluated in a process'")).V);
+    (await import(DATA_MODULE)).V);
   rows.importBlob = await attempt(async () => {
     const url = URL.createObjectURL(
       new Blob(["export const V = 'blob: evaluated in a process'"], { type: "text/javascript" }));
@@ -279,6 +295,62 @@ function pVerify(env, path, attackerPid) {
     attackerPid,
     unlinked,
   };
+}
+
+/* ----------------------------------- p_show ---------------------------------------------- */
+
+/**
+ * The realm, printed to STDOUT, for a person at a shell.
+ *
+ * Every other mode here reports to the page, which is right for a check and useless at a prompt.
+ * This one writes a table to fd 1, so `/bench/m6-realm/program.mjs p_show` at the live terminal
+ * answers "is this shell actually inside M6's stripped realm?" from inside the realm itself,
+ * rather than from a document that can only assert it.
+ *
+ * No tamper and no inode: this mode takes no arguments and writes nothing, so it is safe to type
+ * anywhere. `p_attack` is the one that goes after the kernel's volume.
+ */
+async function pShow(env) {
+  const rows = [];
+  const add = async (name, fn) => {
+    const r = await attempt(fn);
+    rows.push([name, r.ok ? `REACHED  ${r.value}` : `refused  ${r.why}`]);
+    return r.ok;
+  };
+
+  await add("navigator.storage", async () => {
+    const root = await navigator.storage.getDirectory();
+    const names = [];
+    for await (const n of root.keys()) names.push(n);
+    return `the kernel's own volume: ${names.join(",")}`;
+  });
+  await add("fetch", async () => `${(await fetch("/src/abi.mjs")).status}`);
+  await add("XMLHttpRequest", () => new XMLHttpRequest() && "constructed");
+  await add("indexedDB", () => indexedDB.open("m6-show") && "opened");
+  await add("caches", async () => ((await caches.open("m6-show")) ? "opened" : "none"));
+  await add("WebSocket", () => new WebSocket("ws://127.0.0.1:1/") && "constructed");
+  await add("Worker", () => new Worker("data:,0") && "constructed");
+  await add("URL.createObjectURL", () => URL.createObjectURL(new Blob(["x"])).slice(0, 32));
+  await add("import(data:)", async () =>
+    (await import(DATA_MODULE)).V);
+  await add("eval", () => (0, eval)("1 + 1"));
+
+  const width = rows.reduce((w, r) => Math.max(w, r[0].length), 0);
+  env.std.say(env, "what this process can reach, from inside its own realm:\n");
+  for (const [name, said] of rows) {
+    env.std.say(env, `  ${name.padEnd(width)}  ${said.slice(0, 96)}\n`);
+  }
+  // THE POSITIVE CONTROL, printed with the rest: a realm where everything failed would look
+  // identical to a broken process. The syscall channel is the one thing that must still work.
+  const st = env.fs.stat("/");
+  env.std.say(env, `  ${"syscalls".padEnd(width)}  ${typeof st === "object"
+    ? `REACHED  stat(/) answered mode ${(st.mode & 0o7777).toString(8)} — the channel is the way out`
+    : `refused  ${env.std.errnoName(st)} — THE SYSCALL CHANNEL IS BROKEN, which is not M6`}\n`);
+  const reached = rows.filter(([, said]) => said.startsWith("REACHED")).map(([n]) => n);
+  env.std.say(env, reached.length
+    ? `REACHED ${reached.length}: ${reached.join(", ")} — the realm is NOT stripped\n`
+    : "nothing reached. The realm is stripped and the policy is in force.\n");
+  return { ok: reached.length === 0, reached, exit: reached.length ? 1 : 0 };
 }
 
 /* ----------------------------------- p_procfault ----------------------------------------- */
@@ -358,7 +430,18 @@ async function pFault(env) {
 /* ----------------------------------- entry ----------------------------------------------- */
 
 export async function run(env, go) {
-  const argv = (env.argv && env.argv.length ? env.argv : (go && go.argv) || []);
+  const given = (env.argv && env.argv.length ? env.argv : (go && go.argv) || []);
+  /**
+   * TWO ARGV SHAPES, because this program has two callers and they disagree by convention.
+   *
+   * The page spawns it with `cfg.argv = [mode, …]`, which is every bench orchestrator's own
+   * convention. A SHELL passes POSIX argv, where argv[0] is the program NAME
+   * (`src/bin/true.mjs` states the contract) — so `/bench/m6-realm/program.mjs p_show` arrives as
+   * `["/bench/m6-realm/program.mjs", "p_show"]` and reading argv[0] as the mode would answer
+   * "unknown mode" to a perfectly correct command line. Detected on the shape rather than
+   * configured: argv[0] naming this file is a program name, not a mode.
+   */
+  const argv = /(^\/|\.mjs$)/.test(String(given[0] || "")) ? given.slice(1) : given;
   const mode = String(argv[0] || "noop");
   const path = String(argv[1] || "/m6-victim");
   const t0 = performance.now();
@@ -369,6 +452,7 @@ export async function run(env, go) {
       case "p_attack": out = await pAttack(env, path, Number(argv[2] || -1)); break;
       case "p_verify": out = pVerify(env, path, Number(argv[2] || -1)); break;
       case "p_procfault": out = pProcFault(env, Number(argv[2] || -1)); break;
+      case "p_show": out = await pShow(env); break;
       case "p_fault": out = await pFault(env); break;
       default: out = { ok: false, why: `unknown mode ${mode}` };
     }
