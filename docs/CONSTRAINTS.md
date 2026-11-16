@@ -958,8 +958,10 @@ cancellation design.
     AND "LOAD" MEANS MEMORY. The contention figure was taken with `sysctl vm.swapusage` reading
     10.6 GB of 11.3 GB used and 64 MB of free RAM — the developer's own browsers, not the harness.
     Under that pressure `--only m1` was KILLED mid-run — the shell's own exit line never reached
-    the log — while a stray `--only m2` from the same session was still competing with it. A check
-    that vanishes with no verdict is usually that, and the first two things to read are
-    `vm.swapusage` and whether an earlier run of your own is still alive. No jetsam record named
-    the process, so the kill mechanism is NOT established and must not be asserted. The
-    0.56%-per-boot rate is an upper bound taken under that pressure, not a clean-machine number.
+    the log — while a stray `--only m2` from the same session was still competing with it. No
+    jetsam record named the process, so the kill mechanism is NOT established and must not be
+    asserted. The 0.56%-per-boot rate is an upper bound taken under that pressure, not a
+    clean-machine number.
+    AND A SLOW CHECK IS NOT A DEAD ONE: m2 was reported here as "never finishes" on the strength
+    of an empty unbuffered log and a `pgrep` reading zero, and it then completed in 105.55 s with
+    all 92 expectations passing. Waiting long enough is part of measuring.
