@@ -1559,3 +1559,29 @@ which is the point worth keeping.
     state and the relay's pid, waits for a prompt, and on failure prints what the relay is parked in
     and what the device reports. It is also the only path light enough to debug on a machine where
     the full page's five kernels get the renderer killed.
+
+## M5, after the operator used it
+
+Found by a parallel session working on M5 and merged in here. **These were committed as 155
+and 156 and are renumbered 185 and 186**: on that branch those numbers were free, and on this
+one they are the program-fetch and m4b-flake constraints above. The numbers are cited by
+number in code, so the pair with fewer citations moved. Nothing else about them changed.
+
+185. **A proof that drains a pipe must own every writer on it.** `p_exec` backgrounded `sleep 30 &`
+    through a real shell, then drained the shell's output and read `/proc/<pid>/cmdline` after —
+    which cannot work: the drain waits for EOF, and EOF waits for the LAST writer, which is the
+    backgrounded job holding the stdout it inherited. The proof sat in `read` for the full thirty
+    seconds and then killed the process it had never been waiting for. It PASSED throughout, so no
+    check could see it; what showed it was timestamping the page's own log lines — 30.9 s of a
+    40.3 s page, now 1.0 s of 9.6 s.
+    Two fixes were unavailable and are worth knowing: `sleep 30 > /dev/null &` is -EROFS because
+    `/dev` is MNT_RO, and shortening the sleep does not help because the drain's duration IS what
+    the job has to outlive. The order is the fix — find the job in `/proc` while it lives, kill it,
+    then drain — and it is a better proof besides, because the pid comes from the process table
+    rather than from a parse of the shell's own announcement.
+186. **A progress line must name what is RUNNING, not what finished.** Every `say` in `www/m5.html`
+    came after its `await runProof`, so the last line on screen was always the previous proof:
+    while `p_exec` ran for 31 seconds the page read as though `p_builtins` had hung, and a reader
+    reported it that way. A log that only reports the past cannot distinguish a slow step from a
+    stalled one. The page now prints `… <mode>` before each proof.
+

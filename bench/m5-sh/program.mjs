@@ -383,10 +383,35 @@ function pBuiltins(env) {
 
 /** The shell driven by a SCRIPT on stdin rather than `-c`, for the proofs that need one session. */
 function runShScript(env, script) {
+  const started = startShScript(env, script);
+  if (started.error) return { error: started.error, output: "" };
+  return finishShScript(env, started);
+}
+
+/**
+ * Start a shell on a script and RETURN BEFORE DRAINING ITS OUTPUT.
+ *
+ * SPLIT FROM `runShScript` BECAUSE DRAINING WAITS FOR THE LAST WRITER, and a backgrounded job is
+ * one. `p_exec`'s row needed `sleep 30 &` alive while it read `/proc/<pid>/cmdline`, so it used
+ * `runShScript` and then read — but the drain cannot finish until EOF, and EOF cannot arrive until
+ * the backgrounded `sleep` closes the stdout it inherited. The proof therefore sat in `read` for
+ * the full thirty seconds and then killed a job it had never been waiting for: 30.9 s of a 40.3 s
+ * page, measured by timestamping the page's own log lines.
+ *
+ * THE OBVIOUS FIX IS NOT AVAILABLE: `sleep 30 > /dev/null &` would stop the job holding the pipe,
+ * and `/dev` is mounted MNT_RO, so the `O_CREAT` in a `>` redirection is -EROFS. Shortening the
+ * sleep does not work either — the drain's own duration is what the job has to outlive, so the two
+ * numbers are the same number.
+ *
+ * So the caller gets the shell running and decides when to drain. `p_exec` now finds the job
+ * through `/proc`, reads its cmdline, kills it, and only then drains — which is also a better
+ * proof: the pid comes from the process table rather than from the shell's own announcement.
+ */
+function startShScript(env, script) {
   const inPipe = env.proc.pipe2();
-  if (typeof inPipe === "number") return { error: `pipe2 ${-inPipe}`, output: "" };
+  if (typeof inPipe === "number") return { error: `pipe2 ${-inPipe}` };
   const outPipe = env.proc.pipe2();
-  if (typeof outPipe === "number") return { error: `pipe2 ${-outPipe}`, output: "" };
+  if (typeof outPipe === "number") return { error: `pipe2 ${-outPipe}` };
   const actions = [
     { op: SPAWN_DUP2, a: inPipe.rfd, b: 0 },
     { op: SPAWN_DUP2, a: outPipe.wfd, b: 1 },
@@ -396,18 +421,48 @@ function runShScript(env, script) {
     if (fd > 2) actions.push({ op: SPAWN_CLOSE, a: fd });
   }
   const pid = env.proc.spawn(SH, ["sh"], actions);
-  if (pid < 0) return { error: `spawn ${env.std.errnoName(pid)}`, output: "" };
+  if (pid < 0) return { error: `spawn ${env.std.errnoName(pid)}` };
   env.fs.close(inPipe.rfd);
   env.fs.close(outPipe.wfd);
   env.fs.write(inPipe.wfd, ENC.encode(script));
+  // THE SCRIPT'S END IS THE SHELL'S EOF, so the input end closes here and the shell runs to the
+  // last line and exits on its own.
   env.fs.close(inPipe.wfd);
-  const out = env.std.slurpText(env, outPipe.rfd);
-  env.fs.close(outPipe.rfd);
-  const stat = env.proc.waitpid(pid, 0);
+  return { pid, rfd: outPipe.rfd };
+}
+
+/** Drain a started shell and reap it. Safe only once every writer that inherited its stdout has
+ *  gone — which for a background job means after it has been killed. */
+function finishShScript(env, started) {
+  const out = env.std.slurpText(env, started.rfd);
+  env.fs.close(started.rfd);
+  const stat = env.proc.waitpid(started.pid, 0);
   return {
-    pid, output: typeof out === "string" ? out : "",
+    pid: started.pid,
+    output: typeof out === "string" ? out : "",
     status: typeof stat === "object" ? stat.code : -1,
   };
+}
+
+/**
+ * The pid of a live process whose cmdline matches, found by SCANNING `/proc`.
+ *
+ * The shell announces a background job's pid on its stdout, and that stdout is the pipe this proof
+ * is deliberately not draining yet — so the pid is read out of the process table instead, which is
+ * where it actually lives. Bounded: a process that never appears is reported rather than waited on
+ * forever.
+ */
+function awaitProcByCmdline(env, want, rounds = 400) {
+  for (let i = 0; i < rounds; i += 1) {
+    for (const pid of livePids(env)) {
+      const raw = env.std.readFileText(env, `/proc/${pid}/cmdline`);
+      if (typeof raw !== "string") continue;
+      const argv = raw.split("\0").filter((x) => x !== "");
+      if (argv.join(" ") === want) return { ok: true, pid, cmdline: argv.join(" "), rounds: i };
+    }
+    env.proc.nanosleep(2000000);
+  }
+  return { ok: false, why: `no live process with cmdline ${JSON.stringify(want)}`, rounds };
 }
 
 /**
@@ -454,19 +509,30 @@ function pExec(env) {
   const t = runSh(env, "true");
   add("/usr/bin/true exits 0", t.status === 0, t.status, 0);
 
-  // ARGV REACHES THE PROCESS TABLE. A long-running program is started, its cmdline read, and then
-  // it is killed — which also exercises `kill` reaching a process this program did not spawn
-  // through the shell.
-  const bg = runShScript(env, "sleep 30 &\necho ready\n");
-  const bgPid = Number((/^\[1\] (\d+)/m.exec(bg.output) || [])[1] || 0);
+  /* ARGV REACHES THE PROCESS TABLE. A long-running program is backgrounded by a real shell, found
+   * in `/proc` WHILE IT IS STILL ALIVE, and then killed.
+   *
+   * THE ORDER IS THE POINT. The first version drained the shell's output first and read the
+   * cmdline after — which cannot work, because the drain waits for EOF and the backgrounded job
+   * holds the stdout it inherited: the proof sat in `read` for the whole sleep, 30.9 s of a 40.3 s
+   * page. It passed, so nothing failed; it was just thirty seconds of waiting for a process it
+   * was about to kill. The pid now comes from the process table rather than from the shell's
+   * announcement, which also removes a parse of this shell's own output format. */
+  const bg = startShScript(env, "sleep 30 &\necho ready\n");
   let cmdline = "";
-  if (bgPid) {
-    const raw = env.std.readFileText(env, `/proc/${bgPid}/cmdline`);
-    cmdline = typeof raw === "string" ? raw.split("\0").filter((s) => s).join(" ") : "";
-    env.proc.kill(bgPid, SIGTERM);
-    env.proc.waitpid(bgPid, 0);
+  let found = { ok: false, why: bg.error || "not started" };
+  if (!bg.error) {
+    found = awaitProcByCmdline(env, "sleep 30");
+    if (found.ok) {
+      cmdline = found.cmdline;
+      env.proc.kill(found.pid, SIGTERM);
+      env.proc.waitpid(found.pid, 0);
+    }
+    // ONLY NOW is the pipe drained: its last writer has gone, so EOF is immediate.
+    finishShScript(env, bg);
   }
-  add("argv reaches /proc/<pid>/cmdline", cmdline === "sleep 30", cmdline, "sleep 30");
+  add("argv reaches /proc/<pid>/cmdline", cmdline === "sleep 30",
+    { cmdline, found: found.ok ? found.rounds : found.why }, "sleep 30");
 
   const failed = rows.filter((r) => !r.ok);
   return { ok: failed.length === 0, rows, failed, EACCES, ENOENT };
