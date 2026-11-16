@@ -75,12 +75,19 @@ const RELAY = '/src/bin/term.mjs'
 /** How long to wait for an outside driver to type real keys before the page types them itself.
  *  `scripts/check.py --only m4a` is that driver. Standing alone in a browser the page still
  *  completes, and reports `drivenBy: 'page'` so the difference is never silent. */
-/* 60 s, AND THE SIZE IS THE POINT. The check reads `phase` AFTER `ready_expr` resolved on it, so
- * anything this page does on a timer in between is a race the check loses: the fallback would fire,
- * `phase` would read 'typed', the check would type nothing, and the run would end UNMEASURABLE
- * with nothing to say why. 8 s was enough for a fast machine and not enough to be a guarantee.
- * Nothing waits this long in practice — the driver types within milliseconds — and a browser run
- * with no driver pays it once. */
+/* TWO WAITS, NOT ONE, and the split is what makes both ends honest.
+ *
+ * ONE wait on the DRIVER DECLARING ITSELF (`globalThis.M4A.driver = 'check'`), which
+ * `scripts/check.py` does the moment `ready_expr` resolves — milliseconds. Short, because a page
+ * opened by a person has no driver and must not sit there looking hung: it was 60 s, and a reader
+ * measured the whole page at 66 s, almost all of it this timer.
+ *
+ * THEN a long wait on that driver's keystrokes, which only runs once something has promised to
+ * send them. A single timer could not do both jobs: short enough not to stall a human, it was also
+ * short enough to fire between the check's `settle` and its first `evaluate` — the fallback would
+ * type, `phase` would read 'typed', the check would type nothing, and the run would end
+ * UNMEASURABLE with nothing to say why. */
+const DRIVER_WAIT_MS = 2500
 const REAL_KEY_WAIT_MS = 60000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -291,20 +298,48 @@ async function pEcho (boot) {
     // event the widget receives is `isTrusted`. Standing alone the page types for itself after a
     // bounded wait and SAYS SO.
     globalThis.M4A.phase = 'await-keys'
-    const got = await until(() => s.term.trustedKeys > 0, REAL_KEY_WAIT_MS)
-    ev.drivenBy = got >= 0 ? 'cdp' : 'page'
+    // The declaration first, briefly; then that driver's keys, patiently.
+    const declared = await until(
+      () => globalThis.M4A.driver === 'check' || s.term.trustedKeys > 0, DRIVER_WAIT_MS)
+    const got = declared < 0
+      ? -1
+      : await until(() => s.term.trustedKeys > 0, REAL_KEY_WAIT_MS)
+    /* WHO TYPED, in three distinguishable cases, because the page cannot assert the same things
+     * about all three and reported a FALSE FAILURE when it tried.
+     *
+     *   'check'  scripts/check.py declared itself on globalThis.M4A.driver and typed the
+     *            scripted line, so the strict clauses below mean what they say.
+     *   'hand'   a person opened the page and typed. Their keystrokes are REAL and the echo
+     *            property is still checkable, but `echo typed` was never typed and the clauses
+     *            that look for it are NOT MEASURED. Reporting them as FAIL blames the terminal
+     *            for the operator — measured, from a real session: 62 real keys, "echoed false,
+     *            ran false", verdict FAIL, on a terminal that was working.
+     *   'page'   nobody typed within the budget, so the page typed for itself. Untrusted events,
+     *            which exercise the widget's handler and nothing in front of it.
+     */
+    ev.drivenBy = got < 0 ? 'page' : (globalThis.M4A.driver === 'check' ? 'check' : 'hand')
     if (got < 0) typeSynthetic(s.term, 'echo typed\n')
     globalThis.M4A.phase = 'typed'
+    const scripted = ev.drivenBy !== 'hand'
 
     // THE ECHO. The characters on screen were not put there by the widget — see
     // src/wm/terminal.mjs. They came back through the pty.
-    const echoMs = await until(() => /echo typed/.test(s.term.screen()), 10000)
+    const wanted = scripted
+      ? () => /echo typed/.test(s.term.screen())
+      // A HAND-DRIVEN RUN ASSERTS THE DERIVED PROPERTY: the printable characters that were
+      // actually typed came back on screen. That IS the milestone's claim — the pty echoed what
+      // was typed — and it needs no agreement about what the operator chose to type.
+      : () => s.term.printableSent.length > 0
+        && s.term.screen().includes(s.term.printableSent.slice(0, 3))
+    const echoMs = await until(wanted, 10000)
     ev.echoedTheLine = echoMs >= 0
     ev.echoMs = Math.round(echoMs)
+    ev.printableSent = s.term.printableSent
     // AND THE SHELL RAN IT. `echo typed` prints `typed` on a line of its own, which is the proof
-    // that the bytes reached a program and not merely the discipline.
-    const ranMs = await until(() => /^typed$/m.test(s.term.screen()), 10000)
-    ev.ranTheLine = ranMs >= 0
+    // that the bytes reached a program and not merely the discipline. UNKNOWABLE for a line this
+    // page did not choose, so a hand-driven run reports it as not measured rather than as false.
+    const ranMs = scripted ? await until(() => /^typed$/m.test(s.term.screen()), 10000) : -1
+    ev.ranTheLine = scripted ? ranMs >= 0 : null
     ev.afterTyping = s.term.screen()
     ev.trustedKeys = s.term.trustedKeys
     ev.synthKeys = s.term.synthKeys
@@ -350,13 +385,33 @@ async function pEcho (boot) {
     ev.relayExited = !!(relayRow && relayRow.exit === 0)
     ev.relayWhy = relayRow ? relayRow.why : ''
 
-    globalThis.M4A.proofs.echo = {
-      ok: !!(ev.sawPrompt && ev.echoedTheLine && ev.ranTheLine && ev.drivenBy === 'cdp'
-        && ev.windowDelivered && ev.promptAfterCtrlC && ev.relayExited),
-      evidence: ev,
+    /* THE SECTION NAMES THE CLAUSE THAT FAILED, and a conjunction cannot.
+     *
+     * `ok: a && b && c` reports one bit, so a FAIL in the page log says only "echo FAIL" — and
+     * diagnosing a real browser's failure then meant guessing which of six conjuncts it was,
+     * which is exactly what happened. Each clause is now a named row, the section fails if any
+     * REQUIRED row is false, and the log prints the names. A row that is `null` was not measured
+     * and is not counted — that is the hand-driven case, not a failure. */
+    const clauses = {
+      'the shell painted a prompt': ev.sawPrompt,
+      'the pty echoed what was typed': ev.echoedTheLine,
+      'the window delivered the keystrokes to the kernel': ev.windowDelivered,
+      'the shell ran the line': scripted ? ev.ranTheLine : null,
+      'the shell survived Ctrl-C and prompted again': scripted ? ev.promptAfterCtrlC : null,
+      'Ctrl-D ended the session and the relay exited': scripted ? ev.relayExited : null,
     }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    ev.notMeasured = Object.keys(clauses).filter((k) => clauses[k] === null)
+    globalThis.M4A.proofs.echo = { ok: ev.failed.length === 0, evidence: ev }
     return s
   } finally {
+    /* THE FRAME GOES WITH THE KERNEL. Terminating the worker leaves a window that still takes
+     * keystrokes, still looks live, and has nothing behind it — which is how a reader came to
+     * report "I am unable to type into the terminals": every proof killed its own kernel and left
+     * its frame on the desktop. A dead terminal must not be indistinguishable from a working one,
+     * which is constraint 40's rule applied to the thing itself rather than to a check of it. */
+    s.win.destroy()
     s.k.worker.terminate()
   }
 }
@@ -378,10 +433,33 @@ function typeSynthetic (term, text) {
    PROOF 3: the window is a window. Real input moves it; the geometry reads back.
    -------------------------------------------------------------------------------------------- */
 
+/** The geometry fixture's own surface, in CSS px. Big enough that a 300x200 window has room to
+ *  move on both axes with the clamp still reachable at both extremes. */
+const GEOM_SURFACE = { w: 700, h: 420 }
+
 function pGeometry () {
-  // A SEPARATE WINDOW AND NO KERNEL. This proof is about the frame, and giving it its own window
-  // means a geometry failure cannot be mistaken for a terminal failure.
-  const win = new Win({ title: 'Geometry', into: desktop, x: 120, y: 60, w: 300, h: 200 })
+  /* A SURFACE THIS PROOF OWNS, AT A SIZE IT CHOOSES — and that is a defect this page had, reported
+   * from a real browser as `keyboard {"x":0,"y":10}` with `clamped x -148/119`.
+   *
+   * It used the page's `#desktop`, whose WIDTH is whatever the browser window gives it. In a
+   * 191 px-wide desktop a 300 px window is wider than its own surface, so the clamp pins x at
+   * `surface.w - MIN_VISIBLE` and the window CANNOT move horizontally — arrow right then clamps
+   * straight back. The proof asserted an exact delta of 20 and got 0, correctly, about a window
+   * that was behaving exactly as the clamp requires. A geometry assertion that depends on the
+   * operator's window size is not a measurement.
+   *
+   * So the fixture is fixed-size and `overflow:hidden`, independent of the viewport. The narrow
+   * case is not thereby untested — it moved to `bench/m4a-window/probe.mjs`, which drives the
+   * clamp over zero-width and smaller-than-minimum surfaces directly. */
+  const surfaceEl = document.createElement('div')
+  surfaceEl.id = 'geom-surface'
+  // `box-sizing:border-box`, because `surface()` measures `getBoundingClientRect` and that
+  // INCLUDES the border: a 1 px border on each side made a 700 px fixture measure 702 and the
+  // size assertion correctly refused it. The clause named itself, which is what it is for.
+  surfaceEl.style.cssText = `position:relative;overflow:hidden;box-sizing:border-box;` +
+    `width:${GEOM_SURFACE.w}px;height:${GEOM_SURFACE.h}px;border:1px solid #445`
+  desktop.append(surfaceEl)
+  const win = new Win({ title: 'Geometry', into: surfaceEl, x: 120, y: 60, w: 300, h: 200 })
   try {
     const read = () => ({
       x: Number(win.el.dataset.x), y: Number(win.el.dataset.y),
@@ -402,6 +480,11 @@ function pGeometry () {
     }))
     const r0 = win.barEl.getBoundingClientRect()
     drag('pointerdown', r0.left + 20, r0.top + 5)
+    /* WHAT `setPointerCapture` REFUSED, IF IT REFUSED. A drag that moves nothing used to be
+     * indistinguishable from a window that will not move; this was reported from a real browser
+     * as exactly that. The gesture records the error and the evidence carries it, so the next
+     * run names the cause instead of leaving it to be guessed. */
+    const captureError = (win.drag && win.drag.captureError) || ''
     drag('pointermove', r0.left + 60, r0.top + 35)
     drag('pointerup', r0.left + 60, r0.top + 35)
     const dragged = read()
@@ -412,18 +495,36 @@ function pGeometry () {
     win.moveBy(10000, 0)
     const clampedRight = read()
     const surface = win.surface()
+    // THE FIXTURE MUST BE THE SIZE IT ASKED FOR. If a stylesheet or a zoom level shrinks it, every
+    // delta below becomes a statement about the clamp instead of about the gesture — which is the
+    // failure this fixture exists to prevent, so it is asserted rather than assumed.
+    const surfaceAsAsked = surface.w === GEOM_SURFACE.w && surface.h === GEOM_SURFACE.h
+    // NAMED CLAUSES, for the reason the echo section gives: `ok: a && b && c` reports one bit,
+    // and a geometry FAIL then cannot say whether the keyboard, the pointer or the clamp was the
+    // one that moved nothing.
+    const clauses = {
+      'the fixture is the size it asked for': surfaceAsAsked,
+      'arrow keys move the window': moved.x === start.x + 20 && moved.y === start.y + 10,
+      'a pointer drag moves the window':
+        dragged.x === moved.x + 40 && dragged.y === moved.y + 30,
+      'the clamp keeps the title bar reachable at both extremes':
+        clampedLeft.x > -clampedLeft.w && clampedRight.x < surface.w,
+      'and the clamp does not resize the window':
+        clampedLeft.w === start.w && clampedRight.w === start.w,
+    }
+    const failed = Object.keys(clauses).filter((k) => !clauses[k])
     return {
-      ok: moved.x === start.x + 20 && moved.y === start.y + 10
-        && dragged.x === moved.x + 40 && dragged.y === moved.y + 30
-        && clampedLeft.x > -clampedLeft.w && clampedRight.x < surface.w
-        && clampedLeft.w === start.w && clampedRight.w === start.w,
+      ok: failed.length === 0,
       evidence: { start, moved, dragged, clampedLeft, clampedRight, surface,
+        surfaceAsAsked, wanted: GEOM_SURFACE, clauses, failed,
         // Published so a failure says WHICH gesture moved nothing, rather than "geometry failed".
         keyboardDelta: { x: moved.x - start.x, y: moved.y - start.y },
-        pointerDelta: { x: dragged.x - moved.x, y: dragged.y - moved.y } },
+        pointerDelta: { x: dragged.x - moved.x, y: dragged.y - moved.y },
+        captureError },
     }
   } finally {
     win.destroy()
+    surfaceEl.remove()
   }
 }
 
@@ -436,7 +537,7 @@ async function pHealth (boot) {
   // condition the detector is about: the window has work waiting and is not collecting it. A
   // terminal whose process has died is the realistic form of this, and it needs no scaffolding
   // inside a shipped program to reproduce.
-  const s = await session(boot, { startRelay: false, title: 'Wedged' })
+  const s = await session(boot, { startRelay: false, title: 'Terminal (no process)' })
   try {
     typeSynthetic(s.term, 'x')
     const greyMs = await until(() => s.win.health >= 1, 4000)
@@ -473,6 +574,7 @@ async function pHealth (boot) {
       },
     }
   } finally {
+    s.win.destroy()
     s.k.worker.terminate()
   }
 }
@@ -492,30 +594,69 @@ async function main () {
     ' (' + e.trustedKeys + ' real / ' + e.synthKeys + ' synthetic keys), echoed ' +
     e.echoedTheLine + ', ran ' + e.ranTheLine + ', relay exit ' +
     (e.relay && e.relay.exit) + ' ' + JSON.stringify(e.relayWhy))
+  if (e.failed.length) say('  echo FAILED: ' + e.failed.join('; '))
+  if (e.notMeasured.length) say('  echo not measured: ' + e.notMeasured.join('; '))
   say('parked: relay inflight ' + JSON.stringify(e.relayInflight) +
     ' holding kinds ' + JSON.stringify(P.parked.evidence.kinds))
 
   P.geometry = pGeometry()
   say('geometry: keyboard ' + JSON.stringify(P.geometry.evidence.keyboardDelta) +
     ', pointer ' + JSON.stringify(P.geometry.evidence.pointerDelta) +
+    (P.geometry.evidence.captureError
+      ? ' [setPointerCapture: ' + P.geometry.evidence.captureError + ']' : '') +
     ', clamped x ' + P.geometry.evidence.clampedLeft.x + '/' +
-    P.geometry.evidence.clampedRight.x)
+    P.geometry.evidence.clampedRight.x +
+    ', surface ' + P.geometry.evidence.surface.w + 'x' + P.geometry.evidence.surface.h)
+  if (P.geometry.evidence.failed.length) {
+    say('  geometry FAILED: ' + P.geometry.evidence.failed.join('; '))
+  }
 
   P.health = await pHealth(boot)
-  say('health: grey at ' + P.health.evidence.greyMs + ' ms, End Process at ' +
-    P.health.evidence.endMs + ' ms, cleared in ' + P.health.evidence.clearedMs + ' ms')
+  say('health: a window with NO process reading it — grey at ' + P.health.evidence.greyMs +
+    ' ms, End Process at ' + P.health.evidence.endMs + ' ms, cleared ' +
+    P.health.evidence.clearedMs + ' ms after a relay drained the queue')
 
-  globalThis.M4A.config = { ptyDetach: CFG.ptyDetach, SIGINT, POLLIN }
+  const drivenBy = (P.echo && P.echo.evidence && P.echo.evidence.drivenBy) || 'page'
+  globalThis.M4A.config = { ptyDetach: CFG.ptyDetach, drivenBy, SIGINT, POLLIN }
+  globalThis.M4A.drivenBy = drivenBy
   const sections = Object.entries(P)
   const ran = sections.filter(([, v]) => v !== null)
-  globalThis.M4A.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
-    ? 'ok' : 'FAIL'
+  const allOk = ran.length === sections.length && ran.every(([, v]) => v.ok)
+  /* 'hand-driven' IS ITS OWN VERDICT AND NOT A PASS.
+   *
+   * A person who opens this page types their own line, so the clauses that look for `echo typed`
+   * were never measured — and calling that FAIL blames the terminal for the operator, which is
+   * what it did: 62 real keystrokes, "echoed false, ran false", FAIL, on a working terminal.
+   * Calling it 'ok' would be worse, because the milestone's own proof did not run. The third
+   * answer is the honest one, and `scripts/check.py` requires 'ok' — it declares itself as the
+   * driver and types the scripted line, so a hand-driven verdict can never satisfy the gate. */
+  globalThis.M4A.verdict = allOk ? (drivenBy === 'hand' ? 'hand-driven' : 'ok') : 'FAIL'
   globalThis.M4A.ms = performance.now() - t0
   for (const [name, v] of sections) {
     say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
   }
   say('verdict ' + globalThis.M4A.verdict + ' in ' + Math.round(globalThis.M4A.ms) + ' ms')
-  out.className = globalThis.M4A.verdict === 'ok' ? 'ok' : 'bad'
+  /* AND THEN A TERMINAL YOU CAN ACTUALLY USE.
+   *
+   * `MILESTONES.md` M4a: "Exists so there is something on screen before day 30." Every proof above
+   * is a FIXTURE — it builds a kernel, measures one property and tears both down — so when they
+   * had all finished the page showed two dead frames and nothing to type into. This session is not
+   * a fixture: it is left running, with its own kernel and a shell on a pty, and it is what the
+   * milestone is for. It is started AFTER the verdict so a hand that types into it cannot perturb
+   * a measurement. */
+  const live = await session(boot, { title: 'Terminal' })
+  globalThis.M4A.live = live
+  live.term.focus()
+  say('')
+  say('A LIVE terminal is open above: click it and type. `ls /usr/bin`, `echo hi`, `ps`.')
+  say('It has its own kernel and a real shell on a real pty; the proofs above used throwaway ones.')
+
+  if (drivenBy === 'hand') {
+    say('DRIVEN BY HAND: you typed, so the clauses that look for `echo typed` were not measured. ' +
+      'What WAS checked is that the pty echoed what you typed. Run ' +
+      '`scripts/check.py --only m4a` for the milestone\'s own proof.')
+  }
+  out.className = globalThis.M4A.verdict === 'FAIL' ? 'bad' : 'ok'
   globalThis.M4A.state = 'done'
 }
 </script>

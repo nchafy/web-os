@@ -204,10 +204,14 @@ export class Win {
       from: this.placed,
       end: () => {
         if (this.drag === gesture) this.drag = null;
-        this.barEl.removeEventListener("pointermove", move);
-        this.barEl.removeEventListener("pointerup", up);
-        this.barEl.removeEventListener("pointercancel", up);
+        const target = this.el.ownerDocument;
+        target.removeEventListener("pointermove", move);
+        target.removeEventListener("pointerup", up);
+        target.removeEventListener("pointercancel", up);
       },
+      //: Whatever `setPointerCapture` refused with, or "". Published so a drag that does nothing
+      //: says why instead of looking like a window that will not move.
+      captureError: "",
     };
     const move = (e) => {
       if (this.drag !== gesture || e.pointerId !== gesture.id) return;
@@ -223,12 +227,41 @@ export class Win {
       gesture.end();
     };
     this.drag = gesture;
-    this.barEl.setPointerCapture(event.pointerId);
-    this.barEl.addEventListener("pointermove", move);
-    this.barEl.addEventListener("pointerup", up);
+    /* THE LISTENERS GO ON THE DOCUMENT, AND THEY GO ON BEFORE THE CAPTURE.
+     *
+     * Both halves are a defect this file had, and the second one was REPORTED FROM A REAL BROWSER
+     * as a title bar that would not drag while the keyboard move worked.
+     *
+     * On the document, because that is what tracking a pointer outside the element actually
+     * requires. `setPointerCapture` was doing that job, and a pointer that leaves the title bar —
+     * which every drag of more than a few pixels does — delivers its `pointermove` and its
+     * `pointerup` elsewhere without it. Listening on the document needs no capture to be correct.
+     *
+     * Before the capture, because the capture MAY THROW and must not be load-bearing. It is an
+     * optimisation over the document listener, not a requirement of it; `NotFoundError` for a
+     * pointerId no live pointer owns is the documented behaviour
+     * (https://w3c.github.io/pointerevents/#dom-element-setpointercapture), and a throw here
+     * aborted this method before a single listener was attached, so the window went dead to the
+     * mouse and said nothing.
+     *
+     * BOTH BEHAVIOURS ARE MEASURED, which is the whole lesson. Chrome 157 does NOT throw for a
+     * synthetic pointerId 1 — so the geometry proof was green here. Firefox DOES:
+     * `DOMException: Element.setPointerCapture: Invalid pointer id`, reported from a real browser
+     * as a title bar that would not drag while the keyboard move worked, with the throw at this
+     * line in the stack. A green check on one engine is not evidence about another, and this was
+     * a finding a critic raised and the author dismissed on exactly that bad evidence. The error
+     * is now recorded on the gesture instead of being thrown away. */
+    const doc = this.el.ownerDocument;
+    doc.addEventListener("pointermove", move);
+    doc.addEventListener("pointerup", up);
     // A CANCEL ENDS THE DRAG TOO. Without it a pointer the browser took away (a gesture, a lost
     // capture) left `drag` set, and the next unrelated pointermove teleported the window.
-    this.barEl.addEventListener("pointercancel", up);
+    doc.addEventListener("pointercancel", up);
+    try {
+      this.barEl.setPointerCapture(event.pointerId);
+    } catch (error) {
+      gesture.captureError = `${error.name}: ${error.message}`;
+    }
   }
 
   #barKey(event) {

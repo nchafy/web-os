@@ -1149,6 +1149,25 @@ that stopped — would have hung in the act of reporting it. The first is two la
 `bench/m4a-console/probe.mjs`, shown capable of failing by removing the one line that fixes it; the
 second is why `term` hangs up on its shell before waiting for it.
 
+**Then the operator ran it in a real browser and found six more.** All six were in the HARNESS or
+in a browser assumption, none was reachable from `scripts/check.py` as written, and the suite was
+green at 26 expectations throughout. Constraints 175–180. The two that matter most:
+
+- **`setPointerCapture` throws on an untrusted pointerId in Firefox and it was load-bearing**, so
+  the title bar was dead to the mouse there while green here. A critic had raised that exact call
+  and the author dismissed it because the label was green — a green check on one engine is not
+  evidence about another (175).
+- **The page left dead windows on screen.** Every proof terminated its own kernel and kept its
+  frame, so the page finished showing terminals that took keystrokes and had nothing behind them —
+  reported as "I am unable to type into the terminals". A dead terminal must not be
+  indistinguishable from a working one, which is constraint 40 applied to the product. The page now
+  ends by opening ONE live session, which is what this milestone exists for and had stopped doing
+  (179).
+
+The rest were a fixture that depended on the operator's window width (176), a fixture only one
+driver could satisfy (177), a conjunction that could not name which clause failed (178), and a
+timer that made the page look hung for a minute (180).
+
 **Cost.** ~1,250 lines against the plan's ~200. The estimate assumed the window was the work. The
 window is 240 lines; the device, the relay process, the widget, the detector and the check are the
 other thousand — and three of those five are things `MILESTONES.md` and the handoff asked for in

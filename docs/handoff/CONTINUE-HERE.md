@@ -185,6 +185,33 @@ Two found defects worth knowing about: the CR one above, and `bench/m3-provider/
 eleven rows). **The host probes are NOT in `scripts/check.py`'s registry and are run by hand, so a
 red one can sit there for a whole milestone.** Run all of them, every time.
 
+### THE SUITE DRIVES ONE ENGINE, AND THAT IS NOW A MEASURED GAP
+
+`scripts/cdp.py` launches Chrome. Every figure in `docs/CONSTRAINTS.md` is a Chrome figure, which
+the docs say — but the suite being green had been read as "it works", and M4a is where that bill
+arrived: `setPointerCapture` on an untrusted pointerId throws in Firefox and does not in Chrome, so
+the window was undraggable in one browser while 26 expectations passed in the other (constraint
+175). A critic had raised the call and it was dismissed because the check was green.
+
+Nothing here needs a cross-browser harness yet, and building one is not the next milestone's job.
+What IS owed, cheaply:
+
+- **Open the page in a second browser by hand after any `src/wm/` change.** It cost two reports to
+  find this and about a minute to confirm each time.
+- **Treat "the check is green" as evidence about the engine the check ran on.** Where a DOM call
+  can refuse — pointer capture, clipboard, OPFS, `requestFullscreen` — assume one engine refuses it
+  and write the code so the refusal is not load-bearing.
+- M7 to M14 are the window half and will multiply this surface. A second engine in the harness is
+  worth pricing THERE, not before.
+
+### The page leaves a live terminal, deliberately
+
+`www/m4a.html` ends by opening one session it does not tear down — that is what `MILESTONES.md` M4a
+means by "something on screen before day 30", and it had stopped doing it: every proof terminated
+its own kernel and left its frame, so the page finished showing dead windows that still accepted
+keystrokes (constraint 179). A proof window is destroyed with its kernel now. If you add a proof,
+destroy its window in the same `finally`.
+
 ### Known duplication, not yet paid off
 
 `kernelBoot` is copied into each of the eight `www/m*.html` pages. `www/m4a.html` makes nine. It

@@ -6738,6 +6738,11 @@ def check_m4a(env: Env) -> None:
             # A FOCUS THAT DID NOT TAKE MUST STOP THE CHECK. Keys would go to the body, the page
             # would time out waiting for an echo, and the report would blame the pty.
             env.unmeasurable("www/m4a.html: %s, so no keystroke could reach it" % focused)
+        # DECLARED BEFORE THE FIRST KEY. The page cannot otherwise tell this check's keystrokes
+        # from a person's — both are `isTrusted` — and it reported a hand-driven session as a
+        # FAILED one because of it. With the flag set the page claims the strict clauses; without
+        # it, it reports `hand-driven` and says which clauses it could not measure.
+        env.page.evaluate("globalThis.M4A.driver = 'check'")
         env.page.type_keys("echo typed\n")
         env.settle(M4A_DONE, timeout=120.0,
                    what="globalThis.M4A.state reaching done after the keys were typed")
@@ -6783,8 +6788,12 @@ def check_m4a(env: Env) -> None:
     # REAL KEYS, NOT SYNTHESISED ONES. `drivenBy` is the page's own account of which happened and
     # `trustedKeys` is the browser's; both are asserted, because the page's account could be wrong
     # and the count alone would not say the page had stopped to be driven.
+    # `check` AND NOT MERELY "SOMETHING TRUSTED TYPED". The value distinguishes this check from a
+    # person at the keyboard, which matters because only the scripted line makes the two clauses
+    # below mean what they say — and `verdict is ok` refuses a `hand-driven` verdict, so a human
+    # typing into the page while the gate runs cannot be mistaken for a pass.
     env.expect_that("the keys were real browser keystrokes",
-                    e.get("drivenBy") == "cdp" and (e.get("trustedKeys") or 0) > 0,
+                    e.get("drivenBy") == "check" and (e.get("trustedKeys") or 0) > 0,
                     {"drivenBy": e.get("drivenBy"), "trusted": e.get("trustedKeys"),
                      "synthetic": e.get("synthKeys")})
     # THE CLAUSE THE CONTROL LEAVES STANDING: the keystroke reached the KERNEL. Asserted from the
@@ -6840,9 +6849,15 @@ def check_m4a(env: Env) -> None:
                     g.get("keyboardDelta") == {"x": 20, "y": 10},
                     {"delta": g.get("keyboardDelta"), "start": g.get("start"),
                      "moved": g.get("moved")})
+    # THE CAPTURE ERROR TRAVELS WITH THE FAILURE. A drag that moved nothing used to be
+    # indistinguishable from a window that will not move, and the real cause was a
+    # `setPointerCapture` throw on an untrusted pointerId — which Chrome does not raise and
+    # Firefox does, so this check passed on the engine it runs on while the window was dead to the
+    # mouse on another.
     env.expect_that("a pointer drag moves the window",
                     g.get("pointerDelta") == {"x": 40, "y": 30},
-                    {"delta": g.get("pointerDelta"), "dragged": g.get("dragged")})
+                    {"delta": g.get("pointerDelta"), "dragged": g.get("dragged"),
+                     "setPointerCapture": g.get("captureError")})
     # BOTH EXTREMES, not one: the window must still be grabbable pushed hard left AND hard right,
     # and the clamp must not have resized it on the way.
     left = g.get("clampedLeft") or {}

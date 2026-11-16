@@ -92,6 +92,16 @@ export class Terminal {
      */
     this.trustedKeys = 0;
     this.synthKeys = 0;
+    /**
+     * The PRINTABLE characters this widget has sent, in order.
+     *
+     * So a checker can derive what the echo should contain instead of agreeing a string with the
+     * thing being checked. Printable only: a control byte has no glyph, and the erase sequence
+     * takes characters back off the screen, so neither belongs in an expectation about what is
+     * visible. `src/wm/terminal.mjs` draws none of this — it is an account of what left, not of
+     * what arrived.
+     */
+    this.printableSent = "";
     this.decoder = new TextDecoder("utf-8", { fatal: false });
 
     const pre = document.createElement("pre");
@@ -122,6 +132,9 @@ export class Terminal {
     event.preventDefault();
     if (event.isTrusted) this.trustedKeys += 1; else this.synthKeys += 1;
     this.keyBytesOut += bytes.length;
+    for (const b of bytes) {
+      if (b >= 0x20 && b < 0x7f) this.printableSent += String.fromCharCode(b);
+    }
     // AND NOTHING IS DRAWN. See the header.
     this.onKeys(bytes);
   }

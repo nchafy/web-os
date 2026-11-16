@@ -1454,3 +1454,66 @@ guard present in the code being ported or in a sibling path, dropped by the new 
     comment claimed teardown as a caller of the gated helper, which it has never been — the critic
     caught the false comment, and a comment asserting an invariant is still not evidence that the
     invariant holds.
+
+## What two real-browser runs found that nine green checks did not
+
+Reported by the operator from Firefox and from Chrome, against a milestone whose own suite was
+green on Chrome 157 at 26 expectations with a working negative control. Every one of these is a
+HARNESS defect or a browser assumption, and none was reachable from `scripts/check.py` as written —
+which is the point worth keeping.
+
+175. **`setPointerCapture` throws on an untrusted pointerId in Firefox, and it was load-bearing.**
+    `DOMException: Element.setPointerCapture: Invalid pointer id`, with the throw at
+    `src/wm/window.mjs`'s own line in the reported stack. It ran BEFORE the gesture's listeners
+    were attached, so the throw aborted `#startDrag` and the title bar went dead to the mouse while
+    the keyboard move kept working. **Chrome 157 does not throw for a synthetic pointerId 1** —
+    measured both ways — so the geometry proof was green on the engine it runs on and the window
+    was undraggable on another.
+    THE FIX IS NOT THE TRY/CATCH. The listeners now go on the OWNER DOCUMENT, which is what
+    tracking a pointer outside the element actually requires: a drag of more than a few pixels
+    leaves the title bar and delivers its `pointermove` and `pointerup` elsewhere. `setPointerCapture`
+    was standing in for that, so the correct structure needs no capture to be right — the capture
+    is an optimisation, is attempted last, and its error is recorded on the gesture.
+    **A CRITIC RAISED THIS CALL AND THE AUTHOR DISMISSED IT** on the grounds that the label was
+    green. A green check on one engine is not evidence about another, and "the check passes" is not
+    an answer to "this call can throw".
+176. **A geometry assertion must not depend on the operator's window size.** The proof used the
+    page's `#desktop`, whose width is whatever the browser gives it. Reported from a 191 px-wide
+    desktop: a 300 px window is then wider than its own surface, the clamp pins x at
+    `surface.w - MIN_VISIBLE`, and the window CANNOT move horizontally — arrow-right clamps
+    straight back. The proof asserted an exact delta of 20, got 0, and was correct about a window
+    behaving exactly as the clamp requires. It now builds its own fixed-size `box-sizing:border-box`
+    surface and ASSERTS the fixture is the size it asked for; the narrow case moved to
+    `bench/m4a-window/probe.mjs`, which drives the clamp over degenerate surfaces directly.
+177. **A fixture that can only be satisfied by one driver reports every other run as a product
+    failure.** The echo section required `drivenBy === 'cdp'`, so a page that typed for itself —
+    which is what happens when nobody drives it — failed BY CONSTRUCTION with `echoed true, ran
+    true` in the same line. And a person who types their own line can never produce `echo typed`,
+    so a hand-driven session reported FAIL on a working terminal: measured, 62 real keystrokes,
+    "echoed false, ran false", verdict FAIL.
+    THREE DRIVERS ARE NOW DISTINGUISHED — `check` (declared itself on `globalThis.M4A.driver`),
+    `hand`, `page` — and `hand-driven` is its own VERDICT, neither ok nor FAIL: the milestone's
+    proof did not run, which is not the same as failing. `scripts/check.py` requires `ok`, so the
+    third value cannot weaken the gate.
+178. **A conjunction cannot name what failed.** `ok: a && b && c` publishes one bit, so the page
+    log said only `FAIL echo` and diagnosing a real browser's failure meant guessing which of six
+    conjuncts it was — which is exactly what happened, twice. Each section now scores NAMED
+    clauses, prints the failing names, and reports an unmeasured clause as `null` rather than as
+    false. The very next run of the geometry proof named its own failure as `the fixture is the
+    size it asked for`, at 702x420 against a 700x420 request: `getBoundingClientRect` includes the
+    border.
+179. **A fixture must not leave a dead window on screen.** Every proof terminated its own kernel
+    and left its frame on the desktop, so the page finished showing two windows that still took
+    keystrokes and had nothing behind them. Reported as "I am unable to type into the terminals",
+    and it is constraint 40's rule applied to the product rather than to a check of it: a dead
+    terminal must not be indistinguishable from a working one. Proof windows are destroyed with
+    their kernels, and the page now ends by opening ONE live session — which is what
+    `MILESTONES.md` M4a means by "exists so there is something on screen before day 30", and the
+    page had stopped doing it. Verified by driving real keys into that session after the run:
+    32 trusted keystrokes, `echo hello-from-a-real-keyboard` echoed by the pty and run by the
+    shell.
+180. **One timer could not serve both a driver and a person.** The wait for real keystrokes was
+    60 s so that it could not elapse between the check's `settle` and its first `evaluate`; a
+    person opening the page then sat in front of an apparently hung terminal for a minute, measured
+    at 66 s for the whole run. It is now two waits: a short one on the DRIVER DECLARING ITSELF,
+    then a long one on that driver's keys. The page completes in 8.6 s unattended.
