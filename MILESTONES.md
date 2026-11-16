@@ -27,7 +27,7 @@ checks is a wish.
 | M2 | VFS core on OPFS | 8 | 3 | ✅ done — 10k files intact, 8 verification rounds |
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
-| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 53 expectations, 4 controls |
+| M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 54 expectations, 4 controls |
 | **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
 | M5 | The shell and ten programs | 6 | | ⬜ |
 | M6 | Neuter the process realm | 2 | | ⬜ |
@@ -914,8 +914,9 @@ page's timeout carry the kernel's park and refcount dump: one run then read
 ## M4b — the pty, the line discipline, `poll` · ✅ done · est 2 d, actual 1 · **ACCEPT**
 
 ```
-scripts/check.py                     7 checks, 298 expectations (m4b: 53)
+scripts/check.py                     7 checks, 299 expectations (m4b: 54) — 7/7, exit 0
 scripts/check.py --prove-failure both  exit 0 — every expectation inverts and fires
+bench/kernel-churn/probe.py          900 kernel boots; --stall proves the fetch deadline
 scripts/check.py --negative no-isig           m4b fail: 8 red, 45 intact
 scripts/check.py --negative no-poll-wake      m4b fail: 3 red, 50 intact
 scripts/check.py --negative no-finish-guard   m4b fail: 4 red, 49 intact
@@ -925,10 +926,22 @@ bench/m4b-pty/controls.py            5 controls, each scored on which labels mov
 scripts/fsfuzz.py                    129 host tests, 10k torn journals, no browser
 ```
 
-**One open flake, measured and not root-caused:** this check reports BROKEN about 1 run in 12 on a
-page-level `timed out waiting for spawned`. Four hypotheses are ruled out by measurement in
-`docs/handoff/CONTINUE-HERE.md`, including the proof count and worker orphaning. It fails closed —
-a run it could not measure, never a pass.
+**The flake that was open here is root-caused, and it found a real defect.** This check reported
+BROKEN about 1 run in 12 on a page-level `timed out waiting for spawned`, and it is the only check
+that boots one kernel per proof — thirteen per run against every other check's one.
+
+`bench/kernel-churn/probe.py` boots N kernels and does nothing else: no pty, no pipes, no signals,
+one trivial process each. It reproduces the identical stall at the identical step — **0 stalls in
+360 boots idle, 3 in 540 under threefold contention, 0.56% per boot**. At that rate a
+thirteen-kernel page fails about 1 run in 14, against the 1 in 12 observed. The arithmetic closing
+is why this explanation is believed where five earlier ones were not.
+
+THE DEFECT: `programImage` awaited `fetch` with no timeout, and both the page-driven batch and
+`SYS_spawn` await that load — so a stalled program fetch made `spawn` HANG rather than fail, with
+no errno and nothing in the trace. Bounded now at 5 s through `AbortController`, retried once
+(constraint 123, `docs/DECISIONS.md` D21), and demonstrated both ways by
+`bench/kernel-churn/probe.py --stall`. The residual `up` stall is Chrome's worker startup under
+load, it is not ours, and it fails closed — a run the harness could not measure, never a pass.
 
 Thirteen sections over thirteen fresh kernels, **3.5–6.0 s** across the runs that measured it. Every byte and every signal crosses a real
 syscall from inside a real process worker.

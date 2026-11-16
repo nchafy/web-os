@@ -19,7 +19,7 @@ tell you. Everything the repo settles, the repo settles.
 ## Read these first, in this order
 
 `CLAUDE.md` has an onboarding table — follow it. Short version: `CONTEXT.md`, then
-`docs/CONSTRAINTS.md` (120 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
+`docs/CONSTRAINTS.md` (124 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
 `MILESTONES.md`. Then `docs/DECISIONS.md` before arguing with any decision.
 
 Do not re-derive anything those files settle. They are the product of adversarial review, and
@@ -35,33 +35,69 @@ what it changed in the plan. Current gates, all green:
 | `scripts/check.py` | the suite — 7 checks, 298 expectations |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
-| `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
+| `bench/kernel-churn/probe.py` | how reliable is one kernel boot? `--n 60 --runs 6`; `--stall` proves the program-fetch deadline fires |
+| `bench/kernel-churn/rangetest.py` | the byte-range server is byte-exact and refuses what it cannot serve |
+| `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs**, and do not run two phases at once. `pkill` returns before Chrome is gone. Load is the mechanism behind every intermittent result in this suite — see the m4b section above, where contention took kernel-boot stalls from 0 in 360 to 3 in 540. `--negative kernel-stall` is the most load-sensitive control (2 ms busy-wait per syscall across 16 processes); it went red twice in 13 runs, both inside a back-to-back sweep, and 11 times clean when spaced. Treat a single red as unmeasured and re-run it alone |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 129 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
 **Run all of them before and after anything you change.** `scripts/check.py --controls` lists what
 each control proves.
 
-## One open flake, measured and not root-caused
+## The m4b flake: root-caused, and the one real defect it exposed
 
-`scripts/check.py --only m4b` reports **BROKEN** about **1 run in 12**, with
-`www/m4b.html reported state 'error': Error: timed out waiting for spawned`. The page boots a
-fresh kernel per proof and one of them does not answer `spawned` inside its 20 s deadline.
+**It was exposure, not a defect in what m4b tests** — and it did expose one defect of our own.
 
-What has been ruled out, each measured in a loop of 12 with Chrome killed and 1 s to exit between
-runs:
+`scripts/check.py --only m4b` reported BROKEN about 1 run in 12 on a page-level
+`timed out waiting for spawned`. m4b is the only check that boots one kernel per proof — thirteen
+per run, where every other check boots one.
 
-| hypothesis | measurement |
-|---|---|
-| the thirteen proofs added in this round | 11/12 on the committed tree at **eleven** proofs too |
-| orphaned process workers from `worker.terminate()` | 11/12 with the new `shutdown` sweep, 11/12 without |
-| the `ttyspin` wall-clock ceiling burning CPU | 4/5 at 1500 ms, same rate as at 10000 ms |
-| a single-threaded test server | `scripts/check.py` already uses `ThreadingHTTPServer` |
+`bench/kernel-churn/probe.py` boots N kernels and does nothing else: no pty, no pipes, no signals,
+one trivial process each. It reproduces the identical stall, at the identical step:
 
-**It fails closed.** The harness reports a run it could not measure, never a pass — so a single
-BROKEN here is not evidence of a defect in the code under test. Re-run it alone. If you pick this
-up, the next thing to look at is `www/m4b.html`'s `kernelBoot`: the page never observes the
-kernel's `up` for the stuck proof, so the question is whether `new Worker` is the thing stalling.
+| condition | boots | stalls | per boot |
+|---|---|---|---|
+| idle | 360 | 0 | 0% |
+| three probes contending | 540 | 3 (`spawned` ×2, `up` ×1) | **0.56%** |
+
+At 0.56% per boot a thirteen-kernel page fails ≈1 run in 14. m4b was failing at 1 in 12. That
+arithmetic closing is why this explanation is believed and the five below were not.
+
+**The defect:** `programImage` awaited `fetch` with no timeout, and both the page-driven batch and
+`SYS_spawn` await that load — so a stalled program fetch made `spawn` HANG rather than fail, with
+no errno and nothing in the trace. Now bounded at 5 s through `AbortController` and retried once
+(constraint 123, `docs/DECISIONS.md` D21). Demonstrated both ways with
+`bench/kernel-churn/probe.py --stall`, which serves headers and never a body: with the deadline the
+kernel refuses by name, and with it raised the kernel hangs.
+
+**Not ours:** the `up` stall is Chrome's worker startup under load. It fails closed — the harness
+reports a run it could not measure, never a pass — so treat a lone BROKEN here as unmeasured and
+re-run it alone.
+
+**Verified with the bounded fetch:** the whole suite — boot 30, syscall 31, m1 14, m2 92, m3 55,
+m4 23, m4b 54 = **299 expectations, all passing** — plus `check_links` over 208 references and the
+fetch deadline demonstrated in both directions.
+
+**"Load" means MEMORY, and this machine was the proof.** While the contention measurement above
+was taken, `sysctl vm.swapusage` read 10.6 GB of 11.3 GB used with 64 MB of free RAM — the
+developer's own Chrome, Firefox and an Ava agent, not the harness. Under that pressure `--only m1`
+was killed outright mid-run, with the shell's own `echo exit=$?` never reaching the log, while a
+stray `--only m2` of the same session was still competing with it. Read `vm.swapusage` before
+believing any intermittent result, do not run two phases at once, and check that an earlier run of
+your own is not still alive. The 0.56%-per-boot figure above was measured under that pressure and
+is an upper bound, not a clean-machine number.
+
+**A SLOW CHECK IS NOT A DEAD ONE,** and this was got wrong here first: m2 was written up as "never
+finishes" on the strength of an empty unbuffered log and a `pgrep` that read zero, and it then
+completed in **105.55 s** with all 92 expectations passing. Give it two minutes before concluding
+anything. Waiting long enough is part of measuring.
+
+Ruled out by measurement first, recorded so nobody repeats them: the proof count (11 vs 13,
+unchanged), orphaned process workers (added a kernel `shutdown` sweep — right on its own terms,
+changed nothing), the spin stage's CPU burn (1.5 s vs 10 s, unchanged), the server's threading
+(already `ThreadingHTTPServer`), the listen backlog (1 vs 5 vs 128 unchanged, and zero
+listen-queue overflows in `netstat -s -p tcp`), and truncated modules from the byte-range server
+(`bench/kernel-churn/rangetest.py` — eight range forms byte-exact, four malformed forms refused).
 
 ## Next: M4a — the terminal gets a real window
 

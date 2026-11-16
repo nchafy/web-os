@@ -121,14 +121,39 @@ function kernelBoot (cfg) {
  * the previous one finished.
  */
 async function runProof (mode, boot, timeoutMs = 60000) {
+  const startedAt = performance.now()
   const k = kernelBoot(boot)
+  /* EVERY HANDSHAKE STEP CARRIES ITS OWN STATE ON FAILURE, and that is not symmetry for its own
+   * sake: this check reported BROKEN with a bare `timed out waiting for spawned` about 1 run in
+   * 12, and the message named neither the proof nor how far the kernel had got. The kernel posts
+   * `up` before it loads anything and `spawned` only after `await programImage` resolves, so
+   * WHICH of these steps timed out localises the stall to either the worker coming up, the
+   * program fetch, or the child reporting ready. `events` is every message this kernel did send.
+   */
+  const step = async (what, ms) => {
+    try {
+      return await k.expect(what, ms)
+    } catch (e) {
+      globalThis.M4B.stuck = {
+        mode,
+        step: what,
+        afterMs: Math.round(performance.now() - startedAt),
+        // The messages that DID arrive, by type, so an absent `up` reads differently from an
+        // absent `spawned`.
+        events: k.events.map((m) => m && m.t),
+        why: String(e && e.message),
+      }
+      throw new Error(mode + ' timed out waiting for ' + what + ' — kernel sent [' +
+        k.events.map((m) => m && m.t).join(',') + ']')
+    }
+  }
   try {
-    await k.expect('up', 30000)
+    await step('up', 30000)
     k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
       cfg: { argv: [mode], uid: 0, gid: 0 }, readyTimeoutMs: 20000 })
-    const spawned = await k.expect('spawned', 20000)
+    const spawned = await step('spawned', 20000)
     if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
-    await k.expect('ready', 20000)
+    await step('ready', 20000)
     const pid = spawned.pids[0]
     k.post({ t: 'go', go: { mode: 'park', pid } })
     let results
@@ -280,6 +305,11 @@ async function main () {
       // next call then reads an answer it never asked for. This is that, from the program's side.
       channelIntact: sw.channelIntact, nextCall: sw.nextCall,
       answeredDuringCall: sw.kernel && sw.kernel.answeredDuringCall,
+      // THE PROGRAM LOADER'S DEADLINE MUST NOT BE THE NORMAL PATH. It bounds a fetch so a stalled
+      // one fails `spawn` instead of hanging it (constraint 123); a non-zero count here means a
+      // healthy run is now relying on the bound, which is a different system.
+      programFetchTimeouts: sw.kernel && sw.kernel.programFetchTimeouts,
+      programFetchRetries: sw.kernel && sw.kernel.programFetchRetries,
       EINTR: sw.EINTR,
     },
   }

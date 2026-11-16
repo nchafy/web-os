@@ -930,3 +930,38 @@ cancellation design.
     way to assert the thing (teardown's wake, which a finite timeout's own rescan would answer),
     the ORCHESTRATOR owns the deadline: it waits a bounded number of rounds, kills the stage, and
     reports `wokenByTeardown: false`. A check has to be able to fail, not wedge.
+123. **A program fetch MUST be bounded, because `spawn` cannot answer until it resolves.** The
+    kernel loads a program over HTTP (constraint 41: a process never fetches its own), and both
+    the page-driven batch and `SYS_spawn` await that load. An unbounded `fetch` therefore makes
+    process creation HANG rather than fail: the calling process is parked on a reply that never
+    comes, with no errno, nothing in the trace, and no way to tell a slow origin from a dead one.
+    `programImage` now fetches under a 5 s deadline through `AbortController` — not a racing
+    timer, which would leave the original request outstanding — and retries once, because the
+    stall it was written for is transient. `programFetchTimeouts` and `programFetchRetries` are
+    published so the bound cannot quietly become the normal path.
+    MEASURED, and this is the number that made it a defect rather than a theory:
+    `bench/kernel-churn/probe.py` boots kernels and does nothing else — no pty, no pipes, no
+    signals, one trivial process each. **0 stalls in 360 boots idle; 3 in 540 under threefold
+    contention, 0.56% per boot**, two of them on exactly this await. At that rate a page booting
+    thirteen kernels fails about 1 run in 14, which is what `www/m4b.html` was doing at 1 in 12.
+124. **`www/m4b.html`'s intermittent BROKEN is exposure, not a defect in what it tests.** It is
+    the only check that boots one kernel per proof — thirteen per run, where every other check
+    boots one — so it meets constraint 123's per-boot risk thirteen times. The stall is in the
+    page-to-kernel bootstrap, before any behaviour under test, and it fails CLOSED: the harness
+    reports a run it could not measure, never a pass. Ruled out by measurement before this was
+    found, each recorded so nobody re-runs them: the proof count (11 vs 13, unchanged), orphaned
+    process workers (a `shutdown` sweep, unchanged), the spin stage's CPU burn (1.5 s vs 10 s,
+    unchanged), the server's threading (already threaded), the listen backlog (1 vs 5 vs 128
+    unchanged, and zero listen-queue overflows in `netstat -s -p tcp`), and truncated modules from
+    the byte-range server (`bench/kernel-churn/rangetest.py`: eight range forms byte-exact, four
+    malformed forms refused).
+    AND "LOAD" MEANS MEMORY. The contention figure was taken with `sysctl vm.swapusage` reading
+    10.6 GB of 11.3 GB used and 64 MB of free RAM — the developer's own browsers, not the harness.
+    Under that pressure `--only m1` was KILLED mid-run — the shell's own exit line never reached
+    the log — while a stray `--only m2` from the same session was still competing with it. No
+    jetsam record named the process, so the kill mechanism is NOT established and must not be
+    asserted. The 0.56%-per-boot rate is an upper bound taken under that pressure, not a
+    clean-machine number.
+    AND A SLOW CHECK IS NOT A DEAD ONE: m2 was reported here as "never finishes" on the strength
+    of an empty unbuffered log and a `pgrep` reading zero, and it then completed in 105.55 s with
+    all 92 expectations passing. Waiting long enough is part of measuring.

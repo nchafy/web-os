@@ -1,0 +1,133 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>kernel churn</title>
+<pre id="log"></pre>
+<script>
+  globalThis.CHURN = { state: 'starting', isolated: self.crossOriginIsolated === true, rows: [] }
+</script>
+<script type="module">
+/**
+ * HOW RELIABLE IS ONE KERNEL BOOT? Nothing else.
+ *
+ * `www/m4b.html` reports BROKEN about 1 run in 12 on a page-level `timed out waiting for spawned`,
+ * and it is the only check that does — it boots one kernel per proof, thirteen per run, where
+ * every other check boots one. Either a kernel boot has a small per-boot failure probability and
+ * m4b simply rolls the dice thirteen times, or something about m4b's own proofs is responsible.
+ * Comparing m4b at eleven proofs with m4b at thirteen could not separate those: a 15% change in
+ * the number of rolls is invisible in a dozen samples.
+ *
+ * So this boots N kernels and does NOTHING ELSE — no pty, no pipes, no signals, one trivial
+ * process each — with N as the lever. If the failure rate tracks N, the per-boot model holds and
+ * m4b is a victim rather than a cause. If it does not, the cause is in m4b's proofs.
+ *
+ * EVERY STEP IS TIMED AND NAMED. The kernel posts `up` before it loads anything, and `spawned`
+ * only after `await programImage` has resolved its fetch, so WHICH step stalls separates a worker
+ * that never started from a fetch that never settled from a child that never reported ready.
+ * Only the last of those three would be a defect in the system rather than in this harness.
+ */
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+const N = Math.max(1, Math.min(200, Number(params.get('n') || 10)))
+/* THE PROGRAM IS A LEVER, because the stall sits exactly on the fetch of it: the kernel posts
+ * `up` before it loads anything and `spawned` only after `await programImage` resolves. m4b's
+ * program is 40,557 bytes against m1's 8,071, and it is fetched with `cache: no-store` once per
+ * kernel — so if size or the no-store refetch matters, pointing this at the larger one shows it. */
+const PROGRAM = params.get('program') || '/bench/m1-lifecycle/program.mjs'
+/* The mode the program is given. m4b's program needs one it recognises or it reports an unknown
+ * mode — which is fine here, because this measures the BOOT, not the proof. */
+const MODE = params.get('mode') || 'nap'
+
+/** One kernel, booted and shut down. Resolves to a row: every step's duration, or the stall. */
+async function oneKernel (index) {
+  const t0 = performance.now()
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map()
+  const seen = []
+  /* THE KERNEL'S REFUSAL IS ITS OWN OBSERVABLE, and this is what separates a bounded program
+   * fetch from an unbounded one. Both leave the page's `expect('spawned')` to time out, so the
+   * page's own deadline says nothing about which happened. A kernel whose fetch deadline fired
+   * REFUSES — it posts `panic` (page-driven batch) or answers -ENOEXEC (a process calling
+   * `spawn`) — and a kernel without the deadline posts nothing at all and holds the request for
+   * as long as the server holds the connection. */
+  let refusal = null
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    seen.push(m && m.t)
+    if (m && (m.t === 'panic' || m.t === 'error')) refusal = String(m.why || m.t)
+    const cb = waiters.get(m && m.t)
+    if (cb) { waiters.delete(m.t); cb(m) }
+  }
+  // A worker that throws on load never posts anything, so its error has to be its own channel.
+  let loadError = null
+  worker.onerror = (e) => { loadError = String((e && e.message) || e) }
+
+  const marks = {}
+  const expect = (what, ms) => new Promise((resolve, reject) => {
+    const started = performance.now()
+    const timer = setTimeout(() => {
+      waiters.delete(what)
+      reject(new Error(what))
+    }, ms)
+    waiters.set(what, (m) => {
+      clearTimeout(timer)
+      marks[what] = Math.round(performance.now() - started)
+      resolve(m)
+    })
+  })
+
+  const row = { index, seen, marks }
+  try {
+    worker.postMessage({ t: 'boot', cfg: { bench: 1 } })
+    await expect('up', 20000)
+    worker.postMessage({ t: 'spawn', count: 1, programUrl: PROGRAM,
+      cfg: { argv: [MODE], uid: 0, gid: 0 }, readyTimeoutMs: 15000 })
+    const spawned = await expect('spawned', 15000)
+    row.fetches = spawned.program && spawned.program.fetches
+    await expect('ready', 15000)
+    row.ok = true
+  } catch (e) {
+    // THE STALLED STEP, by name, plus every message that did arrive before it.
+    row.ok = false
+    row.stalledAt = String(e && e.message)
+    row.loadError = loadError
+    // Set only when the kernel said so itself, which is the deadline having fired rather than
+    // the page having given up.
+    row.kernelRefused = refusal
+  } finally {
+    row.ms = Math.round(performance.now() - t0)
+    try {
+      worker.postMessage({ t: 'shutdown' })
+      await expect('shutdown', 3000)
+    } catch (e) { row.shutdownAck = false }
+    worker.terminate()
+  }
+  return row
+}
+
+try {
+  if (!self.crossOriginIsolated) {
+    globalThis.CHURN.state = 'aborted'
+    globalThis.CHURN.why = 'crossOriginIsolated === false; SharedArrayBuffer is undefined'
+    say(globalThis.CHURN.why)
+  } else {
+    say('booting ' + N + ' kernels, one process each, program ' + PROGRAM)
+    for (let i = 0; i < N; i += 1) {
+      const row = await oneKernel(i)
+      globalThis.CHURN.rows.push(row)
+      if (!row.ok) say('kernel ' + i + ' STALLED at ' + row.stalledAt + ' after ' + row.ms +
+        ' ms; saw [' + row.seen.join(',') + ']')
+    }
+    const bad = globalThis.CHURN.rows.filter((r) => !r.ok)
+    globalThis.CHURN.n = N
+    globalThis.CHURN.failures = bad.length
+    globalThis.CHURN.state = 'done'
+    say('done: ' + bad.length + ' of ' + N + ' kernels stalled')
+  }
+} catch (e) {
+  globalThis.CHURN.state = 'error'
+  globalThis.CHURN.why = String((e && e.stack) || e)
+  say('error: ' + globalThis.CHURN.why)
+}
+</script>
