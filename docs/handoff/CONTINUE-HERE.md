@@ -74,22 +74,23 @@ kernel refuses by name, and with it raised the kernel hangs.
 reports a run it could not measure, never a pass — so treat a lone BROKEN here as unmeasured and
 re-run it alone.
 
-**What is verified with the bounded fetch, and what is not.** boot 30, syscall 31, m1 14, m3 55,
-m4 23, m4b 54 — 207 of the suite's 299 expectations — plus `check_links` over 208 references and
-the fetch deadline demonstrated in both directions. **m2 (92) is NOT verified**: on this machine
-`--only m2` reaches its page and then never completes, and the shell's own `echo exit=$?` never
-reaches the log, so the process group is going away under it. No jetsam record names it, so do not
-repeat the claim that it is a memory kill — what is known is that it does not finish here. Run it
-on a machine with free memory before trusting any m2 result, and note that the program loader this
-commit changed is exercised by every one of the six checks that do pass.
+**Verified with the bounded fetch:** the whole suite — boot 30, syscall 31, m1 14, m2 92, m3 55,
+m4 23, m4b 54 = **299 expectations, all passing** — plus `check_links` over 208 references and the
+fetch deadline demonstrated in both directions.
 
-**"Load" means MEMORY, and this machine is the proof.** While the contention measurement above was
-taken, `sysctl vm.swapusage` read 10.6 GB of 11.3 GB used with 64 MB of free RAM — the user's own
-Chrome, Firefox and an Ava agent, not the harness. Under that pressure `--only m2` never finished
-and `--only m1` was killed outright mid-run, with the shell's own `echo exit=$?` never reaching the
-log. **A check that vanishes without a verdict is this, not a defect.** Read `vm.swapusage` before
-believing any intermittent result, and do not run two phases at once. The 0.56%-per-boot figure
-above was measured under that pressure and is an upper bound, not a clean-machine number.
+**"Load" means MEMORY, and this machine was the proof.** While the contention measurement above
+was taken, `sysctl vm.swapusage` read 10.6 GB of 11.3 GB used with 64 MB of free RAM — the
+developer's own Chrome, Firefox and an Ava agent, not the harness. Under that pressure `--only m1`
+was killed outright mid-run, with the shell's own `echo exit=$?` never reaching the log, while a
+stray `--only m2` of the same session was still competing with it. Read `vm.swapusage` before
+believing any intermittent result, do not run two phases at once, and check that an earlier run of
+your own is not still alive. The 0.56%-per-boot figure above was measured under that pressure and
+is an upper bound, not a clean-machine number.
+
+**A SLOW CHECK IS NOT A DEAD ONE,** and this was got wrong here first: m2 was written up as "never
+finishes" on the strength of an empty unbuffered log and a `pgrep` that read zero, and it then
+completed in **105.55 s** with all 92 expectations passing. Give it two minutes before concluding
+anything. Waiting long enough is part of measuring.
 
 Ruled out by measurement first, recorded so nobody repeats them: the proof count (11 vs 13,
 unchanged), orphaned process workers (added a kernel `shutdown` sweep — right on its own terms,
