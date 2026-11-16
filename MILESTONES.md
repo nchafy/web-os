@@ -1127,7 +1127,16 @@ can tell the two apart.
 **Gates.** `scripts/check.py --only m4a` (26 expectations, 6.4 s),
 `scripts/check.py --negative pty-detach` (6 red, 20 intact),
 `scripts/check.py --only m4a --negative no-isolation` (BROKEN: no SAB, so no kernel and no pty),
-and `node bench/m3-synth/probe.mjs` (98 host checks, 13 of them the new device's).
+`node bench/m4a-console/probe.mjs` (65 host checks over the device, no browser) and
+`node bench/m3-synth/probe.mjs` (98 host checks, 13 of them `/dev/console`'s in the mount table).
+
+**Two defects the build found in ITSELF, by reading rather than by a failing proof, and both are
+checks now.** `detach` cleared the keystroke queue and left the stale clock running, so a
+DESTROYED window reported "(Not Responding)" — a caption on a frame that is gone. And `waitpid`
+came after the loop unconditionally, so the CEILING path — the one that exists to report a session
+that stopped — would have hung in the act of reporting it. The first is two labels in
+`bench/m4a-console/probe.mjs`, shown capable of failing by removing the one line that fixes it; the
+second is why `term` hangs up on its shell before waiting for it.
 
 **Cost.** ~1,250 lines against the plan's ~200. The estimate assumed the window was the work. The
 window is 240 lines; the device, the relay process, the widget, the detector and the check are the

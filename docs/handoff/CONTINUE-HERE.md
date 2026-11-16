@@ -34,7 +34,8 @@ Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5 and **M4a**. Each has a reco
 |---|---|
 | `scripts/check.py` | the suite — 9 checks, 363 expectations. Measured 2026-11-16: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 26 |
 | `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |
-| `node bench/m3-synth/probe.mjs` | 98 host checks over `/proc` and `/dev`, 13 of them `/dev/console`'s |
+| `node bench/m4a-console/probe.mjs` | 65 host checks over `/dev/console`: the queue, the parks, detach, and the detector's two edges. No browser |
+| `node bench/m3-synth/probe.mjs` | 98 host checks over `/proc` and `/dev`, 13 of them `/dev/console`'s in the mount table |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `bench/kernel-churn/probe.py` | how reliable is one kernel boot? `--n 60 --runs 6`; `--stall` proves the program-fetch deadline fires |

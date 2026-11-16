@@ -35,7 +35,14 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 EXEC = ROOT / "src" / "kernel" / "exec.mjs"
-PYTHON = ROOT / ".venv" / "bin" / "python"
+#: The interpreter `check.py` is re-run under: the repo's `.venv` where it exists, otherwise THIS
+#: one. A hardcoded `.venv/bin/python` made the control unrunnable from a worktree that had no
+#: venv of its own — it died with FileNotFoundError before mutating anything, which is a gate that
+#: cannot report rather than a gate that passed, but is still a gate nobody can run.
+#: `sys.executable` is a safe fallback precisely because this file is already running under it and
+#: `check.py` needs the same one dependency (`websocket-client`) this process has.
+_VENV = ROOT / ".venv" / "bin" / "python"
+PYTHON = _VENV if _VENV.exists() else pathlib.Path(sys.executable)
 CHECK = ROOT / "scripts" / "check.py"
 
 #: Every label `check_m5` records. Derived from the check at run time, never copied here.

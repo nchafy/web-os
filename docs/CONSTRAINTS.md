@@ -1372,3 +1372,17 @@ Measured 2026-11-16 on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro / 120 
     `bin/*` rows to `USR_ENTRIES`. Nobody saw it go red because the host probes are not in
     `scripts/check.py`'s registry and are run by hand. Now derived from the manifest. A list that
     is a copy of a table is a list that drifts from it, and this one drifted for a whole milestone.
+165. **Two M4a defects were found by reading the code and both became checks.** Recorded because
+    the handoff's own rule — "treat any mechanism with no live caller as unverified" — did not
+    cover either: both paths HAD a caller and were wrong anyway.
+    `Console.detach` cleared the keystroke queue and left `unreadSince` set, so `staleMs` kept
+    growing against a window that no longer existed and the detector reported a DESTROYED window as
+    not responding — a caption on a frame that is gone. Now two labels in
+    `bench/m4a-console/probe.mjs`, shown capable of failing by removing the single line that fixes
+    it: exactly `after detach nothing is stale` and `and the level drops rather than latching at 2`
+    move, and the other 63 hold.
+    `term` called `waitpid` after its loop unconditionally, so every exit that left a live child
+    parked it for ever — and the exit that matters is the CEILING, which is the path that exists to
+    report a session that stopped. It would have hung in the act of reporting the hang. It now
+    hangs up on its shell with SIGHUP first, which is the signal named for the event, unless the
+    shell has already gone.
