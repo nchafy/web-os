@@ -6,12 +6,12 @@ tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
 
-- **Worktree:** `/Users/chafyni/claude/web-os/.claude/worktrees/webos-impl` — work here, not in
-  the parent checkout.
-- **Branch:** `worktree-webos-impl`, pushed to `origin`. `main` is still at the scaffold `c3d826f`
-  and fast-forwards cleanly. Git refuses to move `main` from inside a worktree,
-  so if the user wants it merged:
-  `cd /Users/chafyni/claude/web-os && git merge --ff-only worktree-webos-impl`
+- **Worktree:** `/Users/chafyni/claude/web-os/.claude/worktrees/m4a-window` — M4a's work is here.
+  M0–M5 are on `.claude/worktrees/m4b-flake`; `webos-impl` is one commit behind it.
+- **Branch:** `m4a-terminal-window`, branched from `f59dc60` (M5 + the program-fetch fix). `main` is
+  still at the scaffold `c3d826f`. Git refuses to move `main` from inside a worktree, so if the
+  user wants it merged:
+  `cd /Users/chafyni/claude/web-os && git merge --ff-only m4a-terminal-window`
 - **Python:** `.venv/bin/python` (3.8, has `websocket-client`). **Node:** 18.20.2 on PATH.
   **Chrome:** 157.0.8103.52 — `docs/CONSTRAINTS.md`'s older figures were taken on 157.0.8103.38,
   so name the build beside any new number.
@@ -27,12 +27,16 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b and **M5**. Each has a record in `MILESTONES.md` with its actual cost
-and what it changed in the plan. Current gates, all green:
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5 and **M4a**. Each has a record in
+`MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 8 checks, 336 expectations |
+| `scripts/check.py` | the suite — 9 checks, 363 expectations. Measured 2026-11-16: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 26 |
+| `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |
+| `node bench/m4a-console/probe.mjs` | 65 host checks over `/dev/console`: the queue, the parks, detach, and the detector's two edges. No browser |
+| `node bench/m4a-window/probe.mjs` | 29 host checks over the window's clamp — the one part of `src/wm/` whose failure is invisible on screen |
+| `node bench/m3-synth/probe.mjs` | 98 host checks over `/proc` and `/dev`, 13 of them `/dev/console`'s in the mount table |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `bench/kernel-churn/probe.py` | how reliable is one kernel boot? `--n 60 --runs 6`; `--stall` proves the program-fetch deadline fires |
@@ -140,30 +144,93 @@ four-byte program.
 answer -EINTR, and a program that cares must retry once. The kernel was NOT changed to deliver
 once, and D20 records why and what a milestone that changes it owes.
 
-## Next: M4a — the terminal gets a real window
+## What M4a built, and the four things it leaves you
 
-`MILESTONES.md` §M4a is the spec. The pty it points at exists and is verified, so this is the UI
-half: drop in `../webxp/src/window.mjs` unstyled and point it at the pty.
+`MILESTONES.md` §M4a has the record and the measurements. The shape, because it is the thing a
+later milestone will reason about:
 
-Three things the docs already settle, so do not re-derive them:
+```
+  window.mjs + terminal.mjs   (page, DOM)        draws; never echoes; never syscalls
+        |  postMessage on the KERNEL's own port
+  /dev/console  = F_WIN        (kernel)          a queue in, a post out, a row in pollOne
+        |  open/read/write/poll/close — NO NEW SYSCALL
+  term.mjs                     (a PROCESS)       polls the console AND the pty master
+        |  write(master)
+  pty + line discipline        (kernel)          echo, ICANON, Ctrl-C  ← the character comes
+        |  read(slave)                              back from HERE, not from the widget
+  /usr/bin/sh                  (a PROCESS)
+```
 
-- **That window is a special case with an expiry date.** `MILESTONES.md`: "This window is
-  special-cased, not an ABI. M7 generalises it and deletes the special case. Say so in the code or
-  it becomes the architecture by accident."
-- **It cannot be checked by screenshot** (constraint 40). An inert frame and a working one are the
-  same picture. The proof is "type into the window, assert the pty echoed it"; the control is
-  "detach the pty, the keystroke must not appear."
-- **`poll` is already there and M4a is the reason it exists.** `docs/designs/REVIEW-FINDINGS.md`
-  finding 1's *corrected* scenario is the case this will hit: parked in `read(master)` at idle with
-  no output, keys dead indefinitely. Use `poll` over the window fd and the pty rather than
-  blocking on either.
-- **The "not responding" detector lands here**, deliberately deferred from M1 — a kernel-side timer
-  plus a UI hook, and there was no UI to hook until now.
+- **THE WINDOW IS A FILE DESCRIPTION, and that part is not the special case.** Keep it. A `winid`
+  that is not an fd needs a busy-poll loop to be serviced alongside a pty, which is
+  `docs/designs/REVIEW-FINDINGS.md` finding 1 and constraint 42. What M7 replaces is the one
+  PRODUCER of the description — `open("/dev/console")` becomes `win_create` — and the ops row in
+  `src/kernel/files.mjs` plus the row in `pollOne` survive unchanged. `src/kernel/console.mjs`'s
+  header is where the special case is declared; delete the file, not the kind.
+- **`src/wm/terminal.mjs` DOES NOT ECHO, and the whole milestone rests on that.** A widget that
+  echoed locally would pass M4a's proof with no pty behind it. `--negative pty-detach` is the only
+  thing in the suite that can tell the two apart, which is why it cuts at `Pty.writeInput` —
+  accepting the bytes and discarding them — rather than anywhere closer to the window. If you add
+  rendering, re-run that control and check it still takes six labels and not twenty.
+- **A keystroke is readiness with no reply behind it.** `pollWake` is hooked on `reply`
+  (constraint 109) and a keystroke arrives by `postMessage`, so `Console.feed` calls
+  `pollWakeAll()` itself. Any future host-driven event source owes the same call. One spelling,
+  because a second copy is a second place `--negative no-poll-wake` gets forgotten.
+- **ENTER IS BYTE 10.** The discipline commits a line on LF and implements no `ICRNL`. A terminal
+  sending CR types a line the shell never receives and the symptom is a prompt that accepts typing
+  and never answers. Constraint 162.
 
-Then M6, then option A (M7–M14). **M5 is done**, so M4a now has a real shell to point the pty
-at: `spawn("/usr/bin/sh", ["sh"], actions)` with the slave on fds 0, 1 and 2, the shell in its own
-group, and that group made the terminal's foreground — `bench/m5-sh/program.mjs`'s `p_tty` is a
-working example of exactly that, including the Ctrl-C and Ctrl-D paths.
+Two found defects worth knowing about: the CR one above, and `bench/m3-provider/probe.mjs`'s
+`implied directories exist` had been RED since M5 (a literal list against a manifest that grew
+eleven rows). **The host probes are NOT in `scripts/check.py`'s registry and are run by hand, so a
+red one can sit there for a whole milestone.** Run all of them, every time.
+
+### THE SUITE DRIVES ONE ENGINE, AND THAT IS NOW A MEASURED GAP
+
+`scripts/cdp.py` launches Chrome. Every figure in `docs/CONSTRAINTS.md` is a Chrome figure, which
+the docs say — but the suite being green had been read as "it works", and M4a is where that bill
+arrived: `setPointerCapture` on an untrusted pointerId throws in Firefox and does not in Chrome, so
+the window was undraggable in one browser while 26 expectations passed in the other (constraint
+175). A critic had raised the call and it was dismissed because the check was green.
+
+Nothing here needs a cross-browser harness yet, and building one is not the next milestone's job.
+What IS owed, cheaply:
+
+- **Open the page in a second browser by hand after any `src/wm/` change.** It cost two reports to
+  find this and about a minute to confirm each time.
+- **Treat "the check is green" as evidence about the engine the check ran on.** Where a DOM call
+  can refuse — pointer capture, clipboard, OPFS, `requestFullscreen` — assume one engine refuses it
+  and write the code so the refusal is not load-bearing.
+- M7 to M14 are the window half and will multiply this surface. A second engine in the harness is
+  worth pricing THERE, not before.
+
+### The page leaves a live terminal, deliberately
+
+`www/m4a.html` ends by opening one session it does not tear down — that is what `MILESTONES.md` M4a
+means by "something on screen before day 30", and it had stopped doing it: every proof terminated
+its own kernel and left its frame, so the page finished showing dead windows that still accepted
+keystrokes (constraint 179). A proof window is destroyed with its kernel now. If you add a proof,
+destroy its window in the same `finally`.
+
+### Known duplication, not yet paid off
+
+`kernelBoot` is copied into each of the eight `www/m*.html` pages. `www/m4a.html` makes nine. It
+was left copied rather than extracted because every page is a shipped milestone whose bytes
+`served_matches_disk` asserts, and a half-done extraction is worse than a whole duplication. The
+next page is the ninth copy; extract it then, and re-run every check.
+
+## Next: M6 — neuter the process realm
+
+`MILESTONES.md` §M6 is the spec and constraint 41 is the list. **The one thing M5 left open is
+M6's and it is the hard half:** a program's static imports are an allowlist of exact literals now,
+but a DYNAMIC `import(expr)` with a computed argument cannot be caught by reading the text, and
+deleting `fetch` does not close it because `import` IS the module loader. A
+Content-Security-Policy on the document is the answer (constraint 139).
+
+M4a adds one thing to M6's list that was not there before: **`src/wm/` runs in the PAGE, not in a
+process**, so the realm stripping does not touch it — but `www/m4a.html` holds the kernel's own
+message port, and a CSP that forbids what the page needs would break the one supervisor every
+bench boots through. Check the page before the policy.
 
 ### What M4 and M4b leave you
 

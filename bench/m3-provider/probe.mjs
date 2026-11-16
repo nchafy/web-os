@@ -156,7 +156,14 @@ check("the mount reports its provider", report.provider, "local");
 check("and how many entries it read", report.entries, USR_ENTRIES.length);
 checkThat("and how many bytes", report.bytes > 0, report.bytes);
 check("the mount root is a directory", fs.stat({}, "/").type, DIR);
-check("implied directories exist", fs.listRel("/").map(e=>e.name).sort(), ["include","lib"]);
+// DERIVED FROM THE MANIFEST, not written down. This read `["include","lib"]` as a literal and had
+// been FAILING since M5 put eleven `bin/*` rows in USR_ENTRIES — a stale expectation nobody saw go
+// red because the probe is not in `scripts/check.py`'s registry and is run by hand. A list that is
+// a copy of a table is a list that drifts from it; the table is the one source.
+const impliedDirs = [...new Set(USR_ENTRIES
+  .filter((e) => e.name.includes("/"))
+  .map((e) => e.name.split("/")[0]))].sort();
+check("implied directories exist", fs.listRel("/").map(e=>e.name).sort(), impliedDirs);
 check("lib lists its files", fs.listRel("/lib").map(e=>e.name).sort(), ["process.mjs","syscall.mjs"]);
 check("a file is a file", fs.stat({}, "/lib/syscall.mjs").type, FILE);
 checkThat("a file has bytes", fs.bytesAt("/lib/syscall.mjs").length > 0, "empty");

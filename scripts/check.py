@@ -509,6 +509,11 @@ class Control:
     #: spawned by a process, so the page's orchestrator still starts the shell and the shell's own
     #: stages are the only thing that goes missing.
     SPAWN_SELF = "spawn-self"
+    #: M4a's own control, in MILESTONES.md's words: "Detach the pty; the keystroke must not
+    #: appear." A write to the pty master accepts its bytes and discards them, so the window, the
+    #: device and the relay all keep working and the pty alone stops being the pty. It is what
+    #: tells a real echo from a terminal widget echoing locally.
+    PTY_DETACH = "pty-detach"
     ONCE = "once"
 
 
@@ -534,6 +539,7 @@ CONTROL_RUNS = {
     Control.NO_POLL_WAKE: ("no-poll-wake",),
     Control.NO_FINISH_GUARD: ("no-finish-guard",),
     Control.NO_WINCH: ("no-winch",),
+    Control.PTY_DETACH: ("pty-detach",),
 }
 
 
@@ -2624,6 +2630,119 @@ _SPAWN_SELF_FAILS = (
 )
 
 
+# ======================================================================================
+# M4a - the terminal gets a real window
+# ======================================================================================
+
+#: Clause-level, as every section here is. The HELD set under `pty-detach` is everything that is
+#: not the echo: the window still delivers the keystroke to the kernel, the relay is still parked
+#: in `poll` over both sources, the frame still moves, and the detector still fires both ways.
+M4A_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # THE HEADLINE. MILESTONES.md M4a: "Type into the window; assert the pty echoed it."
+    "echo ok",
+    "the shell painted a prompt on the terminal",
+    "the keys were real browser keystrokes",
+    "the window delivered the keystroke to the kernel",
+    "and the pty echoed the typed line back onto the screen",
+    "and the shell ran it",
+    "the shell survived Ctrl-C and prompted again",
+    "Ctrl-D ended the session and the relay exited cleanly",
+    # REVIEW-FINDINGS finding 1's corrected scenario: idle, nothing flowing, two sources.
+    "parked ok",
+    "the relay was parked in poll, holding both a window fd and a pty master",
+    # The frame. Constraint 40: an inert window and a working one are the same picture.
+    "geometry ok",
+    "arrow keys on the title bar move the window",
+    "a pointer drag moves the window",
+    "and the clamp keeps the title bar reachable at both extremes",
+    # The not-responding detector, deferred from M1 because there was no UI to hook.
+    "health ok",
+    "the caption greys when keystrokes go uncollected",
+    "End Process appears only at the second threshold",
+    "and the caption clears when the queue drains",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m4a.html",
+)
+
+M4A_DOCUMENT = "/www/m4a.html"
+
+#: TWO TERMINAL STATES, AND `await-keys` IS ONE OF THEM.
+#:
+#: The page sets up the session, announces that it is waiting to be typed at, and stops. The check
+#: then focuses the terminal and presses REAL keys through `Input.dispatchKeyEvent`, which is the
+#: only way the widget receives an `isTrusted` event — `CLAUDE.md`: "Drive real input, read the
+#: geometry back." A page that typed for itself would be asserting on its own `dispatchEvent`, and
+#: `src/wm/terminal.mjs` counts the two separately so the difference cannot be hidden.
+M4A_READY = ("(() => { const M = globalThis.M4A || {}; const s = M.state; "
+             "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
+             "return M.phase === 'await-keys' ? 'await-keys' : '' })()")
+
+M4A_DONE = ("(() => { const s = globalThis.M4A && globalThis.M4A.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M4A = """(() => {
+  const M = globalThis.M4A || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    echo: one(P.echo),
+    parked: one(P.parked),
+    geometry: one(P.geometry),
+    health: one(P.health),
+  }
+})()"""
+
+M4A_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "echo": (dict, type(None)),
+    "parked": (dict, type(None)),
+    "geometry": (dict, type(None)),
+    "health": (dict, type(None)),
+}
+
+#: What a DETACHED PTY must break, and only this.
+#:
+#: Measured under the control on Chrome 157.0.8103.52: exactly these six red, the other twenty
+#: intact. The window still delivers the keystroke (the device's own byte counter moves), the relay
+#: is still parked in `poll` over both sources, the frame still moves and clamps, and the detector
+#: still greys and clears. Only the characters stop arriving.
+#:
+#: THAT IS THE DEFECT NOTHING ELSE IN THE SUITE CAN CATCH: a terminal widget that echoed its own
+#: keystrokes locally would satisfy "the pty echoed the typed line" with no pty behind it at all.
+#: With the master's input side discarding, a locally-echoing widget still paints the character and
+#: this control goes GREEN — which is why it is scored on labels and why `src/wm/terminal.mjs`
+#: carries the no-local-echo notice at the top of the file.
+_PTY_DETACH_FAILS = (
+    "echo ok",
+    "and the pty echoed the typed line back onto the screen",
+    "and the shell ran it",
+    # The discipline is what turns 0x03 into SIGINT, so a detached master raises no signal and the
+    # shell never prints a second prompt. A consequence of the one removal, not collateral.
+    "the shell survived Ctrl-C and prompted again",
+    # And Ctrl-D never reaches VEOF, so the session does not end and the relay runs to its ceiling.
+    "Ctrl-D ended the session and the relay exited cleanly",
+    "verdict is ok",
+)
+
+
 #: A pty with no ISIG recognises no signal characters. Both Ctrl-C clauses go, and so does the
 #: "a fresh pty is signal-generating" clause — the control changes the DEFAULT termios, and that
 #: section asserts the default. Declared rather than excused: it is a consequence of the control's
@@ -2711,6 +2830,14 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "boots, no process exists and there is nothing to load a shell into. UNMEASURABLE "
                 "rather than FAIL, because a FAIL would claim a pipeline of three processes was "
                 "built and found wrong.",
+        ), "m4a": Expect(
+            UNMEASURABLE,
+            why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
+                "boots, no console is attached and there is no process to hold a pty. The window "
+                "could still be DRAWN — it is plain DOM — which is exactly why the page refuses "
+                "before it builds one: a frame with nothing behind it is the picture constraint "
+                "40 says cannot be distinguished from a working terminal. UNMEASURABLE rather "
+                "than FAIL, because a FAIL would claim a keystroke was typed and not echoed.",
         ), "m4": Expect(
             UNMEASURABLE,
             why="the same mechanism again: without COOP/COEP there is no SAB, so no kernel boots, "
@@ -3082,6 +3209,35 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "happens",
             failed=_NO_WINCH_FAILS,
             held=held_rest(M4B_LABELS, _NO_WINCH_FAILS),
+        )},
+    ),
+    "pty-detach": NegativeControl(
+        name="pty-detach",
+        why="pty_detach=1: a write to the pty MASTER accepts its bytes and discards them (the "
+            "cfg.ptyDetach hook, read by `Pty.writeInput`). MILESTONES.md M4a's own control: "
+            "\"Detach the pty; the keystroke must not appear.\"\n"
+            "WHY THE CUT IS THERE AND NOT ELSEWHERE: every other link is left working. The key "
+            "event reaches the widget, the widget writes /dev/console, the device wakes the relay "
+            "out of `poll`, the relay writes the master and is told it succeeded. Only the pty "
+            "stops being the pty, so what disappears is the ECHO and nothing else.\n"
+            "WHAT IT IS ABOUT: a terminal widget that echoed its own keystrokes locally would "
+            "satisfy `the pty echoed the typed line` with no pty behind it at all, and no other "
+            "control in this suite can tell the two apart. Under this one a locally-echoing "
+            "widget still paints the character and the control comes out GREEN - which is the "
+            "whole reason src/wm/terminal.mjs draws nothing on a keypress.\n"
+            "WHAT MUST HOLD: that the WINDOW still delivered the keystroke to the kernel (the "
+            "device's own byte counter), that the relay is still parked in `poll` over a window "
+            "fd and a pty master, the frame's geometry and clamp, and both edges of the "
+            "not-responding detector. Twenty of twenty-six labels.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("pty_detach", "1"),),
+        expects={"m4a": Expect(
+            Outcome.FAIL,
+            why="the typed characters must stop appearing on the screen while everything that "
+                "carried them to the pty keeps working",
+            failed=_PTY_DETACH_FAILS,
+            held=held_rest(M4A_LABELS, _PTY_DETACH_FAILS),
         )},
     ),
     "no-poll-wake": NegativeControl(
@@ -6514,6 +6670,234 @@ def check_m5(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m5.html", env.served_matches_disk(env.document),
                     "the m5.html served does not match www/m5.html on disk")
+
+@check(
+    name="m4a",
+    milestone="m4a",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.PTY_DETACH),
+    labels=M4A_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M4A_DOCUMENT,
+    ready_expr=M4A_READY,
+    ready_what="globalThis.M4A reaching done/aborted/error, or phase 'await-keys' (www/m4a.html)",
+    # 60 s measured for a run whose longest wait is the not-responding detector's own second
+    # threshold at 5 s, plus two fresh kernels each mounting /usr (15 objects) and /bench (3). The
+    # bound is generous and is still a BOUND, for the reason M5's is: a stopped terminal raises no
+    # error anywhere - a parked `poll` is a legitimate state - so a relay that wedged must end as
+    # a BROKEN check carrying the kernel's park and console state, which www/m4a.html attaches to
+    # its own timeouts, rather than as a suite that never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M4A && globalThis.M4A.state",
+    refusal_want="aborted",
+    note="THE KEYS ARE REAL. The page builds the session, announces `phase: await-keys` and "
+         "stops; this check focuses the terminal and presses them through "
+         "`Input.dispatchKeyEvent`, so the widget receives `isTrusted` events that went through "
+         "Chrome's own focus and key translation. `src/wm/terminal.mjs` counts trusted and "
+         "synthesised keys separately and the check asserts on the trusted count, because a page "
+         "that typed for itself would be asserting on its own `dispatchEvent` - CLAUDE.md: 'A "
+         "window manager cannot be checked by screenshot. Drive real input, read the geometry "
+         "back.'\n"
+         "THE ECHO IS THE MILESTONE. Nothing in `src/wm/terminal.mjs` draws on a keypress: the "
+         "character on the screen travelled widget -> /dev/console -> `term` -> write(master) -> "
+         "the kernel's line discipline -> back. The geometry is read out of the DOM dataset "
+         "`apply()` wrote, never off the Win object, because an inert frame and a working one are "
+         "the same picture (constraint 40).\n"
+         "THE DETECTOR, BOTH EDGES. The second session attaches a window with NO relay, so "
+         "keystrokes queue uncollected: the caption greys at 1,000 ms, End Process appears at "
+         "5,000 ms, and starting the relay drains the queue and clears the caption. A threshold "
+         "with no tested lower edge is a threshold that latches.\n"
+         "negative control: --negative pty-detach makes a write to the master discard its bytes. "
+         "Six labels red - the echo, the line being run, Ctrl-C, Ctrl-D and the verdict - and "
+         "twenty intact, including `the window delivered the keystroke to the kernel`. "
+         "--negative no-isolation must come out BROKEN: no SAB, so no kernel and no pty.",
+)
+def check_m4a(env: Env) -> None:
+    # ---- drive the keys, then wait for the page to finish ---------------------------------
+    #
+    # `ready_expr` admits `await-keys` as a terminal state precisely so this runs. A page that is
+    # aborted or errored never reaches that phase, so this arm is skipped and the read below
+    # reports the refusal.
+    phase = env.page.evaluate("globalThis.M4A && globalThis.M4A.phase")
+    state = env.page.evaluate(M4A_DONE)
+    if not phase and not state:
+        # NEITHER WAITING NOR FINISHED. `ready_expr` resolved on one of the two, so arriving here
+        # means the page moved under the check - and the arm below would silently not type, the
+        # page would never finish, and the read would report "never reached a terminal state"
+        # with nothing to say why. Said here instead.
+        env.unmeasurable(
+            "www/m4a.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no keystroke was typed and nothing below was measured")
+    if phase == "await-keys":
+        focused = env.page.evaluate(
+            "(() => { const t = document.querySelector('.terminal');"
+            " if (!t) return 'no terminal element';"
+            " t.focus();"
+            " return document.activeElement === t ? '' : 'the terminal refused focus' })()")
+        if focused:
+            # A FOCUS THAT DID NOT TAKE MUST STOP THE CHECK. Keys would go to the body, the page
+            # would time out waiting for an echo, and the report would blame the pty.
+            env.unmeasurable("www/m4a.html: %s, so no keystroke could reach it" % focused)
+        # DECLARED BEFORE THE FIRST KEY. The page cannot otherwise tell this check's keystrokes
+        # from a person's — both are `isTrusted` — and it reported a hand-driven session as a
+        # FAILED one because of it. With the flag set the page claims the strict clauses; without
+        # it, it reports `hand-driven` and says which clauses it could not measure.
+        env.page.evaluate("globalThis.M4A.driver = 'check'")
+        env.page.type_keys("echo typed\n")
+        env.settle(M4A_DONE, timeout=120.0,
+                   what="globalThis.M4A.state reaching done after the keys were typed")
+
+    got = env.read(READ_M4A, M4A_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m4a.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m4a.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no console is attached and no process holds a pty."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m4a.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("echo", "parked", "geometry", "health")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF: typed into the window, the pty echoed it ---------------------------------
+    e = ev("echo")
+    env.expect_that("echo ok", section_ok("echo"), e)
+    env.expect_that("the shell painted a prompt on the terminal",
+                    e.get("sawPrompt") is True,
+                    {"promptMs": e.get("promptMs"), "banner": e.get("banner")})
+    # REAL KEYS, NOT SYNTHESISED ONES. `drivenBy` is the page's own account of which happened and
+    # `trustedKeys` is the browser's; both are asserted, because the page's account could be wrong
+    # and the count alone would not say the page had stopped to be driven.
+    # `check` AND NOT MERELY "SOMETHING TRUSTED TYPED". The value distinguishes this check from a
+    # person at the keyboard, which matters because only the scripted line makes the two clauses
+    # below mean what they say — and `verdict is ok` refuses a `hand-driven` verdict, so a human
+    # typing into the page while the gate runs cannot be mistaken for a pass.
+    env.expect_that("the keys were real browser keystrokes",
+                    e.get("drivenBy") == "check" and (e.get("trustedKeys") or 0) > 0,
+                    {"drivenBy": e.get("drivenBy"), "trusted": e.get("trustedKeys"),
+                     "synthetic": e.get("synthKeys")})
+    # THE CLAUSE THE CONTROL LEAVES STANDING: the keystroke reached the KERNEL. Asserted from the
+    # device's own byte counter, so "the window is wired up" and "the pty echoed" are two findings
+    # and not one.
+    # THREE FACTS, so a failure says which: the device counted the bytes, it took every byte it was
+    # offered, and it dropped none. A console whose queue overflowed would satisfy the first alone.
+    env.expect_that("the window delivered the keystroke to the kernel",
+                    e.get("windowDelivered") is True,
+                    {"keyBytesOut": e.get("keyBytesOut"), "fed": e.get("fed"),
+                     "console": e.get("console")})
+    # THE MILESTONE'S OWN PROOF.
+    env.expect_that("and the pty echoed the typed line back onto the screen",
+                    e.get("echoedTheLine") is True,
+                    {"echoMs": e.get("echoMs"), "screen": e.get("afterTyping")})
+    # The second half: the bytes reached a PROGRAM, not just the discipline. `echo typed` prints
+    # `typed` on a line of its own, which the echo of the typed line does not.
+    env.expect_that("and the shell ran it", e.get("ranTheLine") is True,
+                    {"screen": e.get("afterTyping")})
+    # A SHELL MUST NOT DIE OF THE KEYSTROKE IT FORWARDS, and it must prompt again — the second
+    # half is what shows the interruption of the NEXT call is handled (constraint 131).
+    env.expect_that("the shell survived Ctrl-C and prompted again",
+                    e.get("promptAfterCtrlC") is True and e.get("shellAliveAfterIntr") is True,
+                    {"screen": e.get("afterTyping")})
+    env.expect_that("Ctrl-D ended the session and the relay exited cleanly",
+                    e.get("relayExited") is True,
+                    {"why": e.get("relayWhy"), "relay": e.get("relay")})
+
+    # ---- PROOF: the relay was waiting on BOTH sources ------------------------------------
+    #
+    # REVIEW-FINDINGS finding 1's corrected scenario, which is the one its critic did not name:
+    # idle, with no output flowing, a process holding a window and a pty master has to be parked
+    # in `poll` or it is deaf to one of them. Read from the kernel's own park state, not inferred
+    # from the keystroke having worked.
+    p = ev("parked")
+    env.expect_that("parked ok", section_ok("parked"), p)
+    kinds = p.get("kinds") or []
+    # THE KIND NUMBERS COME FROM THE PAGE, which imported them from `src/abi.mjs`. Writing 5 and 8
+    # here would be a second place the ABI's fd kinds are recorded, in a language that cannot
+    # import the first - the same reason every other check reads its errnos and signals off the
+    # evidence. `p.get("F_WIN") is None` therefore fails the clause rather than passing vacuously.
+    want_win, want_pty = p.get("F_WIN"), p.get("F_PTY_M")
+    env.expect_that("the relay was parked in poll, holding both a window fd and a pty master",
+                    p.get("inflight") == "poll" and want_win is not None and want_pty is not None
+                    and want_win in kinds and want_pty in kinds,
+                    {"inflight": p.get("inflight"), "kinds": kinds, "fds": p.get("fds"),
+                     "F_WIN": want_win, "F_PTY_M": want_pty})
+
+    # ---- PROOF: the window is a window ---------------------------------------------------
+    g = ev("geometry")
+    env.expect_that("geometry ok", section_ok("geometry"), g)
+    env.expect_that("arrow keys on the title bar move the window",
+                    g.get("keyboardDelta") == {"x": 20, "y": 10},
+                    {"delta": g.get("keyboardDelta"), "start": g.get("start"),
+                     "moved": g.get("moved")})
+    # THE CAPTURE ERROR TRAVELS WITH THE FAILURE. A drag that moved nothing used to be
+    # indistinguishable from a window that will not move, and the real cause was a
+    # `setPointerCapture` throw on an untrusted pointerId — which Chrome does not raise and
+    # Firefox does, so this check passed on the engine it runs on while the window was dead to the
+    # mouse on another.
+    env.expect_that("a pointer drag moves the window",
+                    g.get("pointerDelta") == {"x": 40, "y": 30},
+                    {"delta": g.get("pointerDelta"), "dragged": g.get("dragged"),
+                     "setPointerCapture": g.get("captureError")})
+    # BOTH EXTREMES, not one: the window must still be grabbable pushed hard left AND hard right,
+    # and the clamp must not have resized it on the way.
+    left = g.get("clampedLeft") or {}
+    right = g.get("clampedRight") or {}
+    surface = g.get("surface") or {}
+    env.expect_that("and the clamp keeps the title bar reachable at both extremes",
+                    bool(left) and bool(right) and bool(surface)
+                    and left.get("x", 0) > -left.get("w", 0)
+                    and right.get("x", 0) < surface.get("w", 0)
+                    and left.get("w") == right.get("w") == (g.get("start") or {}).get("w"),
+                    {"left": left, "right": right, "surface": surface})
+
+    # ---- PROOF: the not-responding detector, both edges ----------------------------------
+    h = ev("health")
+    env.expect_that("health ok", section_ok("health"), h)
+    env.expect_that("the caption greys when keystrokes go uncollected",
+                    h.get("greyMs", -1) >= 0 and " (Not Responding)" in (h.get("caption1") or ""),
+                    {"greyMs": h.get("greyMs"), "caption": h.get("caption1"),
+                     "transitions": h.get("transitions")})
+    # HYSTERESIS, as a clause: the affordance must be ABSENT at the first threshold and present at
+    # the second. One threshold doing both jobs would pass a check that only asked "is it there".
+    env.expect_that("End Process appears only at the second threshold",
+                    h.get("endHiddenAtGrey") is True and h.get("endShown") is True
+                    and h.get("endMs", -1) >= 0,
+                    {"hiddenAtGrey": h.get("endHiddenAtGrey"), "shown": h.get("endShown"),
+                     "endMs": h.get("endMs"), "staleMs": h.get("staleMs")})
+    env.expect_that("and the caption clears when the queue drains",
+                    h.get("clearedMs", -1) >= 0
+                    and " (Not Responding)" not in (h.get("caption3") or "x (Not Responding)"),
+                    {"clearedMs": h.get("clearedMs"), "caption": h.get("caption3"),
+                     "transitions": h.get("transitions")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m4a.html", env.served_matches_disk(env.document),
+                    "the m4a.html served does not match www/m4a.html on disk")
+
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
                       labels=("-",), min_expectations=1,

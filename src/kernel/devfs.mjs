@@ -70,10 +70,37 @@ export function makeDevFS(ctx) {
     zero: () => ZERO_BYTES,
   };
 
+  /**
+   * CHARACTER DEVICES: a name that resolves to a kernel OBJECT rather than to bytes.
+   *
+   * The three rows above are generated FILES — content computed at `open` and read out of a
+   * snapshot. `/dev/console` cannot be one: it is a queue in both directions and a thing `poll`
+   * waits on, so what `open` has to produce is a file description of a kind the ops table knows
+   * (`F_WIN` in `src/kernel/files.mjs`), not a Uint8Array.
+   *
+   * A SEPARATE TABLE AND NOT A FLAG ON `FILES`, because the two have different shapes: a row here
+   * is a name and a mode, and the device behind it is resolved at open time by the kernel — which
+   * is also what lets `/dev/console` exist as a NAME on a kernel that has no window attached, and
+   * answer -ENXIO rather than ENOENT. A device file with no device behind it is a real state and
+   * the honest errno for it is the one Linux uses.
+   *
+   * M4a adds exactly one row and M7 deletes it. See `src/kernel/console.mjs`.
+   */
+  const CHARDEVS = {
+    console: 0o666,
+  };
+
   const lookup = (rel) => {
     const parts = relParts(rel);
     if (parts.length === 0) return { type: DIR };
     if (parts.length !== 1) return null;
+    if (Object.prototype.hasOwnProperty.call(CHARDEVS, parts[0])) {
+      // `size: 0` and not a content length: a device has no length, and publishing one would make
+      // `stat` disagree with every read. `volatile` is false because the SIZE is stable at zero —
+      // the flag is about whether the published size is trustworthy, not about whether the device
+      // has new bytes.
+      return { type: FILE, chardev: parts[0], mode: CHARDEVS[parts[0]], size: 0 };
+    }
     // AN OWN-PROPERTY TEST, not a truthiness test on a lookup.
     //
     // `FILES` is an object literal, so it inherits Object.prototype: `FILES["toString"]` is a
@@ -96,7 +123,13 @@ export function makeDevFS(ctx) {
     return { type: FILE, content: make(), mode, volatile: parts[0] === "trace" };
   };
 
-  const list = (rel) => (relParts(rel).length === 0 ? Object.keys(FILES) : null);
+  const list = (rel) => (relParts(rel).length === 0
+    ? [...Object.keys(FILES), ...Object.keys(CHARDEVS)]
+    : null);
 
-  return new SynthFS({ name: "dev", lookup, list, mutErrno: "EROFS" });
+  // `chardevs` comes from the SAME table the node lookup reads, so the two cannot drift. See
+  // `SynthFS.chardevAt` for why `open` needs the names without calling a generator.
+  return new SynthFS({
+    name: "dev", lookup, list, mutErrno: "EROFS", chardevs: Object.keys(CHARDEVS),
+  });
 }

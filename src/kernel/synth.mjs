@@ -53,6 +53,9 @@ function node(raw) {
     content: raw.content,
     target: raw.target,
     size: raw.size,
+    // A character device's name: the kernel object `open` must resolve this to, instead of bytes.
+    // `src/kernel/devfs.mjs` CHARDEVS is the only producer and `openDecision` the only consumer.
+    chardev: raw.chardev,
     // Whether this file's content changes between one read and the next. See `#info`.
     volatile: raw.volatile === true,
   };
@@ -85,18 +88,38 @@ export class SynthFS {
    * @param {Function} spec.lookup    (rel) => node | null
    * @param {Function} spec.list      (rel) => string[] | null
    * @param {string} [spec.mutErrno]  the code every mutation is refused with
+   * @param {string[]} [spec.chardevs] single-component names that are character devices
    */
-  constructor({ name, lookup, list, mutErrno = "EROFS" }) {
+  constructor({ name, lookup, list, mutErrno = "EROFS", chardevs = [] }) {
     this.name = name;
     this.dev = 0;
     this.#lookup = lookup;
     this.#list = list;
     this.#mutErrno = mutErrno;
+    this.#chardevs = new Set(chardevs);
   }
 
   #lookup;
   #list;
   #mutErrno;
+  #chardevs;
+
+  /**
+   * The character device at `rel`, or null. A SET LOOKUP AND NEVER A GENERATOR CALL.
+   *
+   * `open` has to ask this BEFORE it decides a write is refused by the mount, and it asks on every
+   * open of every generated mount — so it cannot be `#lookup(rel).chardev`. `/dev/trace`'s
+   * generator renders the whole trace, and routing this question through it would run that for
+   * every `open("/proc/<pid>/status")`. The names are declared once in `src/kernel/devfs.mjs`'s
+   * CHARDEVS table and handed to the constructor from the same object the node lookup reads.
+   *
+   * `/proc`'s set is empty, so its answer is a constant false.
+   */
+  chardevAt(rel) {
+    if (this.#chardevs.size === 0) return null;
+    const parts = splitPath(rel);
+    return parts.length === 1 && this.#chardevs.has(parts[0]) ? parts[0] : null;
+  }
 
   /** Set once by the kernel when the filesystem is mounted, so `stat` can report the device. */
   setDev(dev) {
@@ -216,8 +239,37 @@ export class SynthFS {
    * one process and the second half of another. POSIX's `/proc` does the same thing.
    */
   openDecision(cred, rel, opts = {}) {
-    if (opts.create || opts.wantW) throw new FsError(this.#mutErrno, rel);
+    // M4a. A CHARACTER DEVICE IS THE ONE THING HERE THAT MAY BE OPENED FOR WRITING.
+    //
+    // A generated FILE must refuse a write — one that accepted a write and forgot it would be
+    // worse than one that refuses, which is this class's stated invariant. A device is not a
+    // generated file: it is a kernel object with two directions, and `/dev/console` opened O_RDWR
+    // is its normal case.
+    //
+    // THE REFUSAL KEEPS ITS PLACE AND THE EXCEPTION IS CARVED OUT OF IT with `chardevAt`, which
+    // answers from a declared set of names and never runs a generator. Looking the NODE up first
+    // instead would have changed what a write to a path that does not exist answers:
+    // `open("/proc/nope", O_WRONLY)` is refused before the lookup and would have become ENOENT
+    // after it. Measured — it moved `/proc refuses open with O_CREAT with EROFS` in
+    // `bench/m3-synth/probe.mjs`, which is the check that exists so a reorder here is not silent.
+    //
+    // `create` is refused for a device too: `open("/dev/console", O_CREAT)` must not claim to have
+    // made one, and a mount with no `mknod` has no way to.
+    const device = this.chardevAt(rel);
+    if (opts.create || (opts.wantW && !device)) throw new FsError(this.#mutErrno, rel);
     const n = this.#need(rel);
+    if (n.chardev) {
+      if (opts.dirOk) throw new FsError("ENOTDIR", rel);
+      if (opts.wantX && (n.mode & 0o111) === 0) throw new FsError("EACCES", rel);
+      return {
+        chardev: n.chardev,
+        rel,
+        type: n.type,
+        ino: synthIno(this.dev, rel),
+        dev: this.dev,
+        info: this.#info(rel, n),
+      };
+    }
     // THE SAME RULE THE VFS APPLIES, so this system has one answer to "can I open a directory".
     //
     // `src/fs/vfs.mjs`'s `openDecision` refuses a directory without `O_DIRECTORY` with EISDIR, and

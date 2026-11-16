@@ -1285,3 +1285,277 @@ could not explain, which is answered in 153 above.
     AND A SLOW CHECK IS NOT A DEAD ONE: m2 was reported here as "never finishes" on the strength
     of an empty unbuffered log and a `pgrep` reading zero, and it then completed in 105.55 s with
     all 92 expectations passing. Waiting long enough is part of measuring.
+
+## M4a — the terminal gets a real window
+
+Measured 2026-11-16 on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro / 120 Hz / dpr 2, by
+`scripts/check.py --only m4a` (26 expectations, 6.38 s), `scripts/check.py --negative pty-detach`
+(6 red, 20 intact) and `node bench/m3-synth/probe.mjs` (98 host checks).
+
+157. **A window is a FILE DESCRIPTION, and `poll` is how a process waits on it.** M4a's
+    `/dev/console` is an `F_WIN` description with a row in `src/kernel/files.mjs`'s ops table and a
+    row in `pollOne`, so a terminal process waits on its window and its pty master in ONE call.
+    This is constraint 42 and `docs/designs/REVIEW-FINDINGS.md` finding 1 made real, and finding
+    1's *corrected* scenario is what it costs to get wrong: parked in `read(master)` at idle with
+    nothing flowing, the keystrokes queue unread and the keys are dead indefinitely. MEASURED, as
+    the state the kernel reports rather than as a property inferred from the keystroke working:
+    with the shell at a prompt and no output moving, `/proc`-equivalent park state reads
+    `inflight: "poll"` for the relay, holding fd 3 kind 5 (`F_WIN`) and fd 4 kind 8 (`F_PTY_M`).
+    M7 replaces the one producer of that description — `open("/dev/console")` — with `win_create`,
+    and the ops row and the poll row survive unchanged. That is the part of M4a that is not a
+    special case.
+158. **A character device is not a generated file, and `/dev`'s read-only mount is about its
+    TREE.** `/dev` is mounted `MNT_RO` because no file can be created, renamed or unlinked there.
+    Writing to `/dev/console` changes no tree: it puts bytes in a kernel object. So `open` carves
+    one exception out of the mount's write refusal, asked of `SynthFS.chardevAt` — a lookup over
+    names DECLARED in `src/kernel/devfs.mjs`'s CHARDEVS table, never a generator call, because
+    `/dev/trace`'s generator renders the whole trace and `open` asks this question on every open of
+    every generated mount. `O_CREAT` is still refused: a mount with no `mknod` cannot make a
+    device.
+    THE ORDER OF THE TWO TESTS IS LOAD-BEARING AND WAS WRONG FIRST. Taking the node before the
+    refusal changed what a write to a path that does not exist answers — `open("/proc/nope",
+    O_WRONLY)` went from EROFS to ENOENT — and `bench/m3-synth/probe.mjs`'s `/proc refuses open
+    with O_CREAT with EROFS` is the check that caught it. A reorder inside a permission test is
+    not a refactor.
+159. **A device file with no device is ENXIO; a window that existed and was destroyed is
+    EHOSTGONE.** The mount table is static at boot (constraint 78) and a window is not, so
+    `/dev/console` is a name on every kernel and an object on only some. The two states are
+    different events and a relay must be able to tell "there is no terminal here" from "my
+    terminal closed" — the first is a configuration, the second is a hangup that must raise SIGHUP
+    on the foreground group. `docs/ABI.md` reserved EHOSTGONE for exactly the second
+    ("the DOM object behind a host fd was destroyed", errno 100) and M4a is its first caller.
+160. **A keystroke is the one readiness in this system that arrives with no syscall reply behind
+    it, so the console wakes `poll` itself.** `pollWake` is hooked on `reply`, "the one funnel every
+    state change that could make an fd ready passes through" (constraint 109) — and a keystroke
+    passes through no funnel: it is a `postMessage` from the page. Without the explicit wake a
+    relay parked in `poll` sleeps until its timeout, which is the lost wake teardown's fd sweep
+    produced once already. The `pollWakeEnabled` flag governs this wake too, through one
+    `pollWakeAll` spelling, because a second copy of the pair is a second place `--negative
+    no-poll-wake` can be forgotten.
+161. **A terminal widget MUST NOT echo.** The character a user sees is the pty's echo, which
+    travelled widget → `/dev/console` → `term` → `write(master)` → the line discipline → back.
+    A widget that echoed locally would look identical AND WOULD SATISFY M4a's PROOF WITH NO PTY
+    BEHIND IT — which is what `--negative pty-detach` exists to catch and the only thing in the
+    suite that can. It is also wrong in substance: `ECHO` is a termios flag the program owns, and
+    a password prompt clears it.
+    THE CONTROL CUTS AT `Pty.writeInput`, which accepts its bytes and discards them, so every
+    other link keeps working — the key event reaches the widget, the widget reaches the device, the
+    device wakes the relay, the relay writes the master and is told it succeeded. Measured: exactly
+    `echo ok`, the echo clause, the shell-ran-it clause, the Ctrl-C clause, the Ctrl-D clause and
+    the verdict go red; the other twenty hold, INCLUDING `the window delivered the keystroke to the
+    kernel` at 11 of 11 bytes counted by the device itself.
+162. **Enter is LINE FEED, not carriage return.** `src/kernel/pty.mjs` commits a canonical line on
+    byte 10 and implements no `ICRNL`, so a terminal sending 13 types a line the shell never
+    receives: the discipline echoes the bare CR, the cursor returns to column 0, and `read(slave)`
+    stays parked for ever. MEASURED — it was the first defect in `src/wm/terminal.mjs`, and the
+    symptom was a prompt that accepted typing and never answered. `bench/m5-sh/program.mjs` writes
+    `"\n"` to the master, which was the existing statement of this contract and is now written
+    where a terminal author meets it.
+163. **"Not responding" is the AGE OF THE OLDEST UNCOLLECTED KEYSTROKE, not the absence of a
+    syscall.** Deferred from M1 for want of a UI to hook. A process in `sleep 60` makes no syscall
+    and is perfectly well; a window with input waiting that nobody is taking is the condition a
+    user means. The kernel's existing heartbeat samples it — O(1), edge-triggered, so the page is
+    told about a transition and never once per tick. Thresholds are
+    `docs/designs/fidelity-first.md`'s: caption at 1,000 ms, End Process affordance at 5,000 ms.
+    MEASURED: 1,020 ms and 4,006 ms after the first transition, from a kernel reporting
+    `staleMs: 5026` at level 2.
+    HYSTERESIS IS THE DRAIN, NOT A SECOND TIME. Entering needs a stale queue; LEAVING NEEDS AN
+    EMPTY ONE, so a process that reads one byte of a thousand it has been sitting on has not
+    recovered. Both edges are checked, and they are checked on the DOM caption — what a reader
+    would actually hit — rather than on a class or a flag. Measured clearing: 26 ms after a relay
+    opened the device.
+    THE WEDGE NEEDS NO SCAFFOLDING. The proof attaches a window with NO relay, which is the
+    realistic form of the condition (a terminal whose process died) and keeps test-only behaviour
+    out of a shipped program.
+164. **`bench/m3-provider/probe.mjs`'s `implied directories exist` had been red since M5.** It
+    compared the mount's top level against the literal `["include","lib"]`, and M5 added eleven
+    `bin/*` rows to `USR_ENTRIES`. Nobody saw it go red because the host probes are not in
+    `scripts/check.py`'s registry and are run by hand. Now derived from the manifest. A list that
+    is a copy of a table is a list that drifts from it, and this one drifted for a whole milestone.
+165. **Two M4a defects were found by reading the code and both became checks.** Recorded because
+    the handoff's own rule — "treat any mechanism with no live caller as unverified" — did not
+    cover either: both paths HAD a caller and were wrong anyway.
+    `Console.detach` cleared the keystroke queue and left `unreadSince` set, so `staleMs` kept
+    growing against a window that no longer existed and the detector reported a DESTROYED window as
+    not responding — a caption on a frame that is gone. Now two labels in
+    `bench/m4a-console/probe.mjs`, shown capable of failing by removing the single line that fixes
+    it: exactly `after detach nothing is stale` and `and the level drops rather than latching at 2`
+    move, and the other 63 hold.
+    `term` called `waitpid` after its loop unconditionally, so every exit that left a live child
+    parked it for ever — and the exit that matters is the CEILING, which is the path that exists to
+    report a session that stopped. It would have hung in the act of reporting the hang. It now
+    hangs up on its shell with SIGHUP first, which is the signal named for the event, unless the
+    shell has already gone.
+
+## M4a's adversarial review — nine findings, eight fixed and one answered
+
+One critic, given the diff and the acceptance criteria and not the author's conclusion
+(`~/.claude/rules/adversarial-review.md`). Every finding was verified against the code before it
+was acted on; all nine were real. Recorded because five of them are the same KIND of mistake — a
+guard present in the code being ported or in a sibling path, dropped by the new one.
+
+166. **A shipped program must not discard a return the shell already checks.** `term` discarded
+    `setpgid` and `tcsetpgrp`, and the failure is not local: with `setpgid` refused the shell stays
+    in the relay's group, `tcsetpgrp` then finds no such group, and `fgPgid` points at the RELAY —
+    so Ctrl-C raises SIGINT on the terminal emulator instead of the shell, which is the constraint
+    16 behaviour M4a's proof claims. Worse, teardown then sends SIGHUP to `-pid`, a group that does
+    not exist, gets -ESRCH, and PARKS IN `waitpid` on a shell nothing has hung up: the relay hangs
+    in the one path that exists to report a hang, with no `why` set because `why` is assigned after
+    the wait. `src/bin/sh.mjs` checks this exact pair and says why. **A path with a live caller is
+    not thereby verified** — the handoff's rule covers mechanisms with NO caller, and this one had
+    one and was wrong anyway.
+167. **A count raised before `fds.add` must be undone when `fds.add` fails.** `openChardev` raised
+    the device's open count and `fds.add` answers -EMFILE at `OPEN_MAX`, so the count never came
+    back down — it only falls through a `close` on an fd the caller was never given. `pipe2` and
+    `pty_open` both undo their end counts and carry a comment saying "undo, or the caller leaks an
+    fd it was never told about". The chardev arm was the one that did not.
+168. **Two guards the window port dropped, both about a surface smaller than the window.** webxp's
+    `clampBox` floors the size at `MIN_W`×`MIN_H` and takes `Math.max(surface.w - MIN_VISIBLE, 0)`
+    as the upper bound. Without them a `Win` built before its desktop is laid out — measuring
+    `{w: 0, h: 0}` — came out 0×0 at x = -72: off the left edge with NONE of the title bar on
+    screen, which is the invariant `MIN_VISIBLE` encodes, inverted, and it stayed there until some
+    gesture re-ran `apply()`. `bench/m4a-window/probe.mjs` is the check, and both mutations fire on
+    named subsets: dropping the floor moves 10 labels, dropping the `Math.max` moves 2, and the
+    ordinary-surface and idempotence clauses hold under both.
+169. **A pointer gesture needs a re-entrancy guard, and the port dropped webxp's.** A second
+    pointer — two fingers, or a mouse and a touch — re-entered `#startDrag` while a gesture was
+    live: `drag` was overwritten and a second listener set added, then the first gesture's `up` saw
+    a different pointer id and returned WITHOUT removing its own three listeners, and once the
+    second gesture cleared `drag` it short-circuited for ever. Three leaked listeners per
+    re-entry, for the window's lifetime. The gesture now carries its own `end`.
+170. **An unread receipt is not an account.** `console-fed` carries how many bytes the device TOOK
+    of the bytes it was OFFERED, and the kernel's own comment says it exists because "a terminal
+    that loses input silently is the one failure a user cannot diagnose" — which it was, because
+    the page dispatched the message and nothing consumed it. A counter with no reader makes the
+    claim about it false. `the window delivered the keystroke to the kernel` now asserts three
+    facts: the device counted the bytes, it took every byte offered, and it dropped none.
+171. **An edge-triggered state must be published where the state is REPLACED.** `console-attach`
+    installs a new device at level 0, and `sample()` reports only transitions — so a re-attach
+    after a wedged window produced no transition and the page's caption stayed "(Not Responding)"
+    over a brand-new device with an empty queue. Unreachable from `www/m4a.html`, which boots a
+    kernel per session; reachable from a page message whose own documentation advertises re-attach.
+    The level is now posted unconditionally at attach.
+172. **A check must not re-read the state its readiness gate resolved on.** `check_m4a` re-read
+    `phase` after `ready_expr` had already settled on it, and the page's self-typing fallback could
+    fire in between — the check would type nothing, the page would never finish, and the run would
+    end UNMEASURABLE with nothing to say why. The fallback budget is now 60 s, which cannot elapse
+    between two adjacent evaluates, and the impossible case is reported by name instead of as a
+    confusing absence.
+173. **An argument accepted and ignored is worse than one refused.** `--ceiling` used
+    `Number(x) || default`, which swallows `0` and every non-numeric value, so `term --ceiling 0`
+    ran a thirty-second session and said nothing.
+174. **ANSWERED, NOT FIXED: teardown's `pollWake` is ungated and `--negative no-poll-wake`
+    under-proves because of it.** The control's claim — "a parked `poll` then only ever answers
+    from its own timeout" — holds for the reply path and not for teardown's fd sweep, which calls
+    `pollWake` without testing `pollWakeEnabled`. This predates M4a. It is left alone deliberately:
+    gating it would change the label set that control declares (3 labels in m4b today), and
+    re-scoping a shipped control is not something a window milestone should do as a side effect.
+    The comment on `pollWakeAll` records it where a reader meets it. An earlier draft of that
+    comment claimed teardown as a caller of the gated helper, which it has never been — the critic
+    caught the false comment, and a comment asserting an invariant is still not evidence that the
+    invariant holds.
+
+## What two real-browser runs found that nine green checks did not
+
+Reported by the operator from Firefox and from Chrome, against a milestone whose own suite was
+green on Chrome 157 at 26 expectations with a working negative control. Every one of these is a
+HARNESS defect or a browser assumption, and none was reachable from `scripts/check.py` as written —
+which is the point worth keeping.
+
+175. **`setPointerCapture` throws on an untrusted pointerId in Firefox, and it was load-bearing.**
+    `DOMException: Element.setPointerCapture: Invalid pointer id`, with the throw at
+    `src/wm/window.mjs`'s own line in the reported stack. It ran BEFORE the gesture's listeners
+    were attached, so the throw aborted `#startDrag` and the title bar went dead to the mouse while
+    the keyboard move kept working. **Chrome 157 does not throw for a synthetic pointerId 1** —
+    measured both ways — so the geometry proof was green on the engine it runs on and the window
+    was undraggable on another.
+    THE FIX IS NOT THE TRY/CATCH. The listeners now go on the OWNER DOCUMENT, which is what
+    tracking a pointer outside the element actually requires: a drag of more than a few pixels
+    leaves the title bar and delivers its `pointermove` and `pointerup` elsewhere. `setPointerCapture`
+    was standing in for that, so the correct structure needs no capture to be right — the capture
+    is an optimisation, is attempted last, and its error is recorded on the gesture.
+    **A CRITIC RAISED THIS CALL AND THE AUTHOR DISMISSED IT** on the grounds that the label was
+    green. A green check on one engine is not evidence about another, and "the check passes" is not
+    an answer to "this call can throw".
+176. **A geometry assertion must not depend on the operator's window size.** The proof used the
+    page's `#desktop`, whose width is whatever the browser gives it. Reported from a 191 px-wide
+    desktop: a 300 px window is then wider than its own surface, the clamp pins x at
+    `surface.w - MIN_VISIBLE`, and the window CANNOT move horizontally — arrow-right clamps
+    straight back. The proof asserted an exact delta of 20, got 0, and was correct about a window
+    behaving exactly as the clamp requires. It now builds its own fixed-size `box-sizing:border-box`
+    surface and ASSERTS the fixture is the size it asked for; the narrow case moved to
+    `bench/m4a-window/probe.mjs`, which drives the clamp over degenerate surfaces directly.
+177. **A fixture that can only be satisfied by one driver reports every other run as a product
+    failure.** The echo section required `drivenBy === 'cdp'`, so a page that typed for itself —
+    which is what happens when nobody drives it — failed BY CONSTRUCTION with `echoed true, ran
+    true` in the same line. And a person who types their own line can never produce `echo typed`,
+    so a hand-driven session reported FAIL on a working terminal: measured, 62 real keystrokes,
+    "echoed false, ran false", verdict FAIL.
+    THREE DRIVERS ARE NOW DISTINGUISHED — `check` (declared itself on `globalThis.M4A.driver`),
+    `hand`, `page` — and `hand-driven` is its own VERDICT, neither ok nor FAIL: the milestone's
+    proof did not run, which is not the same as failing. `scripts/check.py` requires `ok`, so the
+    third value cannot weaken the gate.
+178. **A conjunction cannot name what failed.** `ok: a && b && c` publishes one bit, so the page
+    log said only `FAIL echo` and diagnosing a real browser's failure meant guessing which of six
+    conjuncts it was — which is exactly what happened, twice. Each section now scores NAMED
+    clauses, prints the failing names, and reports an unmeasured clause as `null` rather than as
+    false. The very next run of the geometry proof named its own failure as `the fixture is the
+    size it asked for`, at 702x420 against a 700x420 request: `getBoundingClientRect` includes the
+    border.
+179. **A fixture must not leave a dead window on screen.** Every proof terminated its own kernel
+    and left its frame on the desktop, so the page finished showing two windows that still took
+    keystrokes and had nothing behind them. Reported as "I am unable to type into the terminals",
+    and it is constraint 40's rule applied to the product rather than to a check of it: a dead
+    terminal must not be indistinguishable from a working one. Proof windows are destroyed with
+    their kernels, and the page now ends by opening ONE live session — which is what
+    `MILESTONES.md` M4a means by "exists so there is something on screen before day 30", and the
+    page had stopped doing it. Verified by driving real keys into that session after the run:
+    32 trusted keystrokes, `echo hello-from-a-real-keyboard` echoed by the pty and run by the
+    shell.
+180. **One timer could not serve both a driver and a person.** The wait for real keystrokes was
+    60 s so that it could not elapse between the check's `settle` and its first `evaluate`; a
+    person opening the page then sat in front of an apparently hung terminal for a minute, measured
+    at 66 s for the whole run. It is now two waits: a short one on the DRIVER DECLARING ITSELF,
+    then a long one on that driver's keys. The page completes in 8.6 s unattended.
+
+## M4a, after the operator used it
+
+181. **"Not responding" requires somebody who was supposed to respond.** The detector measured the
+    age of the oldest uncollected keystroke and nothing else, so a relay that had not opened
+    `/dev/console` YET — spawn, program load, open, all of which take a moment — was
+    indistinguishable from one that had died. Reported from a real browser: a terminal that said
+    "(Not Responding)" while it was still coming up. That is the WRONG DIAGNOSIS, not a late one:
+    nothing was ignoring the input, nothing had claimed it.
+    `Console.openedEver` is the gate. Until a process has opened the device the level stays 0 and
+    the device reports `starting`, which the window renders as "(Starting…)" — a different thing to
+    say, and the only honest one. Once set it STAYS set, so the real case is still caught: a relay
+    that opened the device and then died has `openedEver` true and `opens` back at 0, the clock
+    governs, and the caption greys.
+    BOTH AXES ARE EDGE-REPORTED. Acquiring a first opener does not change the LEVEL, so a page told
+    only about levels left "(Starting…)" on a working terminal for ever.
+    The control moves exactly two labels in `bench/m4a-console/probe.mjs` — `and never reports
+    not-responding, however long the queue waits` and `its level stays 0` — and leaves the other 75.
+182. **The detector's own proof was testing the wrong fixture, and the fix exposed it.** `pHealth`
+    attached a window with NO relay at all, which constraint 181 now classifies as starting rather
+    than wedged — so the proof would have passed against nothing. It is re-based on the honest
+    condition: build a WORKING terminal, prove it works, kill its emulator through the kernel's own
+    `end-process` path, and only then type. That needs no test-only behaviour in a shipped program
+    and it exercises the very button the second threshold reveals.
+    THE DOCUMENTED CLAIM WAS ALREADY THIS. The earlier record called the no-relay fixture "the
+    realistic form of this (a terminal whose process died)" — it was not: a process that died is
+    exactly what `openedEver` distinguishes from one that never came, and the fixture was the
+    second case while the prose claimed the first.
+183. **`until(async () => …)` passed vacuously, because a Promise is truthy.** The page's poll
+    helper tested `what()` rather than `await what()`, so the first asynchronous predicate given to
+    it — a check that a killed relay had released the device — returned true IMMEDIATELY and its
+    clause measured nothing. Awaiting is correct for a synchronous predicate too, so there is one
+    spelling and not two. Found by reading the helper while adding the caller, which is the only
+    reason it is not in the suite as a green clause that proves nothing.
+184. **`www/m4a.html?live=1` exists because "the terminal is not responding" had four possible
+    causes and the page distinguished none of them.** The kernel may not have come up; `/usr` — where
+    `sh` and `term` live — may have been refused; the relay may never have been spawned; or the
+    relay may be running and not reading. Only the last is a defect in this milestone, and a bare
+    greyed caption cannot tell a reader which it is. Live mode boots ONE kernel, reports the mount
+    state and the relay's pid, waits for a prompt, and on failure prints what the relay is parked in
+    and what the device reports. It is also the only path light enough to debug on a machine where
+    the full page's five kernels get the renderer killed.
