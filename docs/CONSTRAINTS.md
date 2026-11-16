@@ -1808,3 +1808,38 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     a slow subresource is what makes the capture land after the page has finished. That is how
     206's table was taken.
 
+## M6 from a prompt, which is where two more things surfaced
+
+208. **THE EXEC LOADER REFUSES A HALF-COMPUTED SPECIFIER, AND THAT IS WORTH KNOWING BEFORE IT
+    LOOKS LIKE A BUG.** `bench/m6-realm/program.mjs` would not run from the shell at all — the
+    shell answered `ENOEXEC` — because `linkProgram` extracts EVERY string literal following
+    `import(` and compares it to the allowlist, so `import("da" + "ta:…")` is seen as the
+    specifier `"da"` and the whole file is refused (constraint 139 says the scanner is
+    deliberately broad, and this is that breadth working). The program now assembles the URL away
+    from the call site, which is both why it loads and the more faithful form of the case the
+    policy exists for: a specifier no scanner can see. **The loader is therefore a third layer the
+    page's own spawn does not have** — the page keeps its URL-based loader (D18), so a program
+    that loads from the page may still be refused from the filesystem, and the two paths are not
+    interchangeable for a program containing a literal-looking dynamic import.
+209. **M6 IS OBSERVABLE FROM THE SHELL, and that is now the fastest way to see it.**
+    `/bench/m6-realm/program.mjs p_show` prints, from inside a process the SHELL spawned, every
+    binding it cannot reach and the one channel it can:
+
+        navigator.storage    refused  TypeError: Cannot read properties of undefined …
+        fetch                refused  ReferenceError: fetch is not defined
+        indexedDB            refused  ReferenceError: indexedDB is not defined
+        URL.createObjectURL  refused  TypeError: URL.createObjectURL is not a function
+        import(data:)        refused  TypeError: Failed to fetch dynamically imported module …
+        eval                 refused  EvalError: … violates the following Content Security Policy
+        syscalls             REACHED  stat(/) answered mode 755 — the channel is the way out
+        nothing reached. The realm is stripped and the policy is in force.
+
+    `p_fault` does the same from the other side: the process dies of SIGABRT and the page logs
+    `FAULT pid 4: TypeError: … (reading 'getDirectory')` with a stack through
+    `src/libos/process.mjs`. **A program a SHELL started is in the same stripped realm as one the
+    page started** — that was the question an operator asked, and the only honest way to answer it
+    was from inside the realm rather than from the document.
+    Two conventions had to meet for this to work: a shell passes POSIX argv where argv[0] is the
+    program NAME, while every bench orchestrator uses argv[0] as a mode. The program detects the
+    shape instead of taking a flag.
+
