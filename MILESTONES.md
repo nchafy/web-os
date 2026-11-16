@@ -1250,7 +1250,7 @@ it changed the build.
   each naming what it reaches, removed by walking the prototype chain — `delete self.fetch` removes
   nothing, because nothing here is an own property.
 - `scripts/serve.py` sends a Content-Security-Policy over `src/libos/`:
-  `default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'`. That is
+  `default-src 'none'; script-src 'self' blob:; connect-src 'none'`. That is
   constraint 139's open half — a computed `import(expr)` is the module loader, not `fetch`, so no
   scanner over program text and no deletion can reach it.
 
@@ -1306,6 +1306,18 @@ and not of a leading one. Fixed by asking the resolved FILE rather than the spel
 `%2f` form is now asserted on the wire before Chrome starts. Also fixed: the `/proc` read racing
 the 2.2 s quarantine, an abandoned waiter's timer retiring a later waiter, the serialization the
 async `run` removed, and two documentation defects. Constraints 201–205.
+
+**AND THEN AN OPERATOR OPENED IT IN FIREFOX, where no process would start at all.** The policy
+carried `worker-src 'none'`, and Firefox applies a worker script's own `worker-src` to that
+worker's own creation — so it refused to start the very worker the policy describes. The symptom
+was `FAULT pid 1: process 1 runtime: error`, because a worker that will not start fires an error
+event with an empty message, no filename and line 0: a swallowed failure in the one path this
+repository's rules say must name what failed. 394 green expectations could not see it; a human
+opening the page saw it immediately (constraints 206, 207).
+The directive is out and nothing is lost — the strip deletes `Worker`, `SharedWorker` and
+`URL.createObjectURL`, which is the mechanism constraint 53 asked for. **M6 now passes end to end
+in Firefox 156 as well as Chrome 157:** verdict ok in 530 ms, same refusals, same intact volume,
+same `state: zombie, exitkind: 1, exitvalue: 6`.
 
 **Label honestly, and the docs do:** hardening, not a security boundary. Same-origin is not a
 security boundary and the threat model is first-party only for v1. What remains open is written

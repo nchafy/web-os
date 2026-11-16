@@ -7405,8 +7405,6 @@ def check_m6(env: Env) -> None:
              "fetch, XHR and WebSocket exist again; connect-src 'none' refuses each request"),
             ("Refused to connect because it violates",
              "the same refusal, in Chrome's other wording for it"),
-            ("""directive: "worker-src 'none'\"""",
-             "Worker and createObjectURL exist again; worker-src 'none' refuses the nested worker"),
         ):
             env.claim_console(needle, why)
 
