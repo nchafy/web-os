@@ -19,11 +19,14 @@ WHAT A STALL MEANS, which is the half that decides whether anything needs fixing
 `up` before it loads anything and `spawned` only after `await programImage` resolves its fetch,
 so the step that stalls localises it:
 
-    stalled at `up`       the kernel worker never started         — harness/Chrome churn
-    stalled at `spawned`  the program fetch never settled         — harness/Chrome churn
-    stalled at `ready`    the child process worker never reported — A DEFECT IN `spawn`
+    stalled at `up`       the kernel worker never started         — Chrome's own startup
+    stalled at `spawned`  the program fetch never settled         — OURS: `spawn` awaits it
+    stalled at `ready`    the child process worker never reported — OURS: the ready handshake
 
-Only the third is a defect in the system under test, and it would mean `spawn` can hang.
+A `spawned` stall is where the defect this probe found actually lived. `spawn` cannot answer until
+the program is loaded, so an unbounded `fetch` there makes process creation HANG rather than fail —
+no errno, nothing in the trace. `programImage` is bounded and retried for that reason
+(constraint 123), and `--stall` is the demonstration. Only a stall at `up` belongs to Chrome.
 """
 
 import argparse
