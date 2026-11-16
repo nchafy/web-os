@@ -503,6 +503,12 @@ class Control:
     #: M4b. A resize still resizes but raises no SIGWINCH. Exists because the clause asserting the
     #: signal could not fail until the stage reported its own -EINTR.
     NO_WINCH = "no-winch"
+    #: M5's own control, in MILESTONES.md's words: "make `spawn` return the parent's pid; `ps`
+    #: must show one process and the check must fail." Nothing is created and the CALLER'S pid is
+    #: the answer, through the cfg.spawnSelf hook. It subverts only a caller that was itself
+    #: spawned by a process, so the page's orchestrator still starts the shell and the shell's own
+    #: stages are the only thing that goes missing.
+    SPAWN_SELF = "spawn-self"
     ONCE = "once"
 
 
@@ -2479,6 +2485,128 @@ M4B_SHAPE = {
     "fg_pgrp": (dict, type(None)),
 }
 
+
+# ======================================================================================
+# M5 - the shell and ten programs
+# ======================================================================================
+
+#: Clause-level, so the control is scored on the labels it is about. The builtins, the refusals and
+#: the URL refusals are the HELD set under `spawn-self`: none of them creates a process.
+M5_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "the mounts the programs live on are there",
+    "no program crossed the wire for a process",
+    # THE HEADLINE PROOF.
+    "pipeline ok",
+    "`ls /usr/bin | grep c | wc -l` printed the count this check worked out for itself",
+    "and the trace shows four or more distinct pids doing it",
+    "a two-stage pipeline counts every name",
+    # `sleep 60 &`, `ps`, `kill %1`.
+    "jobs ok",
+    "ps listed the backgrounded sleep by pid",
+    "and listed the shell that started it",
+    "ps printed the argv the job was given",
+    "kill %1 resolved a job spec and the job died of SIGTERM",
+    # Redirection.
+    "redirect ok",
+    "every redirection row held",
+    # The builtins, which spawn nothing.
+    "builtins ok",
+    "every builtin row held",
+    # The exec path.
+    "exec ok",
+    "every exec row held",
+    # The refusals.
+    "refusals ok",
+    "every refusal row held",
+    # The shell on a terminal.
+    "tty ok",
+    "the shell painted a prompt on the terminal",
+    "a typed line was echoed by the discipline and run by the shell",
+    "the shell survived Ctrl-C and prompted again",
+    "and ended the session on Ctrl-D",
+    # Constraint 108.
+    "no_url ok",
+    "every URL spelling was refused by the filesystem",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m5.html",
+)
+
+M5_DOCUMENT = "/www/m5.html"
+
+M5_READY = ("(() => { const s = globalThis.M5 && globalThis.M5.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M5 = """(() => {
+  const M = globalThis.M5 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    mounts: M.mounts || {},
+    pipeline: one(P.pipeline),
+    jobs: one(P.jobs),
+    redirect: one(P.redirect),
+    builtins: one(P.builtins),
+    exec: one(P.exec),
+    refusals: one(P.refusals),
+    tty: one(P.tty),
+    no_url: one(P.no_url),
+  }
+})()"""
+
+M5_SHAPE = {
+    "state": str, "why": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list, "mounts": dict,
+    "pipeline": (dict, type(None)),
+    "jobs": (dict, type(None)),
+    "redirect": (dict, type(None)),
+    "builtins": (dict, type(None)),
+    "exec": (dict, type(None)),
+    "refusals": (dict, type(None)),
+    "tty": (dict, type(None)),
+    "no_url": (dict, type(None)),
+}
+
+#: What a `spawn` that creates nothing must break, and ONLY this. Measured under the control on
+#: Chrome 157.0.8103.52: exactly these 17 red, the other 14 intact - the builtins, the refusals and
+#: the URL refusals all hold, because none of them creates a process. `exec` moves because two of
+#: its six rows need a child; its four REFUSAL rows hold, which is what shows the control subverts
+#: creation and not the error paths.
+_SPAWN_SELF_FAILS = (
+    "pipeline ok",
+    "`ls /usr/bin | grep c | wc -l` printed the count this check worked out for itself",
+    "and the trace shows four or more distinct pids doing it",
+    "a two-stage pipeline counts every name",
+    "jobs ok",
+    "ps listed the backgrounded sleep by pid",
+    "and listed the shell that started it",
+    "ps printed the argv the job was given",
+    "kill %1 resolved a job spec and the job died of SIGTERM",
+    "redirect ok",
+    "every redirection row held",
+    "exec ok",
+    "every exec row held",
+    "tty ok",
+    "a typed line was echoed by the discipline and run by the shell",
+    "verdict is ok",
+)
+
+
 #: A pty with no ISIG recognises no signal characters. Both Ctrl-C clauses go, and so does the
 #: "a fresh pty is signal-generating" clause — the control changes the DEFAULT termios, and that
 #: section asserts the default. Declared rather than excused: it is a consequence of the control's
@@ -2560,6 +2688,12 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
                 "boots and there is no process to give a terminal to. UNMEASURABLE rather than "
                 "FAIL, because a FAIL would claim a line discipline ran and behaved wrongly.",
+        ), "m5": Expect(
+            UNMEASURABLE,
+            why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
+                "boots, no process exists and there is nothing to load a shell into. UNMEASURABLE "
+                "rather than FAIL, because a FAIL would claim a pipeline of three processes was "
+                "built and found wrong.",
         ), "m4": Expect(
             UNMEASURABLE,
             why="the same mechanism again: without COOP/COEP there is no SAB, so no kernel boots, "
@@ -2814,6 +2948,40 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "process-group signal still hold",
             failed=_NO_SIGPIPE_FAILS,
             held=held_rest(M4_LABELS, _NO_SIGPIPE_FAILS),
+        )},
+    ),
+    "spawn-self": NegativeControl(
+        name="spawn-self",
+        why="spawn_self=1: `SYS_spawn` creates nothing and answers the CALLER'S OWN pid, through "
+            "the cfg.spawnSelf hook the kernel refuses without a bench boot. MILESTONES.md M5's "
+            "own control, in its words: 'make `spawn` return the parent's pid; `ps` must show one "
+            "process and the check must fail.'\n"
+            "IT SUBVERTS ONLY A CALLER THAT HAS A PARENT, and that narrowing is what makes it a "
+            "control rather than a kernel with spawn removed. The page's orchestrator has no "
+            "parent and still starts the shell; the shell has one, so none of its stages exist. "
+            "Without the test every section went red together - measured, 7 of 8 - and a control "
+            "satisfied by any failure verifies nothing about pipelines.\n"
+            "IT IS PLACED AFTER THE PROGRAM LOADER, so every refusal still refuses: a program "
+            "that is not there is still 127 and a file with no execute bit is still 126. Only the "
+            "successful creation is subverted, which is why `exec`'s four refusal rows are in the "
+            "HELD set while its two rows that need a child are not.\n"
+            "WHAT MUST BREAK: the three-process pipeline (the count comes back empty and the "
+            "trace shows two pids where four are needed), the job-control proof, redirection "
+            "(nothing writes the file), the terminal's typed line, and the two exec rows above.\n"
+            "WHAT MUST HOLD: every builtin - `pwd`, `cd`, `$$` via /proc, `$?` via the exit "
+            "status, `complete` - every refusal, and every URL spelling refused by the "
+            "filesystem. Those sections were written program-free FOR this control: a `$$` proved "
+            "by `echo $$` would have gone red with the pipelines and taken the control's "
+            "specificity with it.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("spawn_self", "1"),),
+        expects={"m5": Expect(
+            Outcome.FAIL,
+            why="a shell whose stages do not exist must fail every proof about a process and no "
+                "proof about itself",
+            failed=_SPAWN_SELF_FAILS,
+            held=held_rest(M5_LABELS, _SPAWN_SELF_FAILS),
         )},
     ),
     "no-isig": NegativeControl(
@@ -6116,6 +6284,182 @@ def check_m4b(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m4b.html", env.served_matches_disk(env.document),
                     "the m4b.html served does not match www/m4b.html on disk")
+
+
+@check(
+    name="m5",
+    milestone="m5",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.SPAWN_SELF),
+    labels=M5_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M5_DOCUMENT,
+    ready_expr=M5_READY,
+    ready_what="globalThis.M5.state reaching done, aborted or error (www/m5.html)",
+    # 38 s measured for the headline run over nine fresh kernels, each of which mounts /usr (14
+    # objects) and /bench (3) over the local provider before a process exists. The bound is
+    # generous and is still a BOUND: a deadlocked pipeline raises no error anywhere - a parked
+    # reader and a parked writer are both legitimate states - so a shell that stopped must end as
+    # a BROKEN check carrying the kernel's park and refcount state, which www/m5.html attaches to
+    # its own timeout, rather than as a suite that never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M5 && globalThis.M5.state",
+    refusal_want="aborted",
+    note="eight sections over nine fresh kernels. The headline is MILESTONES.md M5's own proof - "
+         "`ls /usr/bin | grep c | wc -l` correct through three real processes, then `sleep 60 &`, "
+         "`ps`, `kill %1`. THE EXPECTED COUNT IS NOT WRITTEN DOWN: the orchestrator lists "
+         "/usr/bin through syscalls and works it out, so the two routes to the same number are an "
+         "independent listing and three processes talking over two pipes. 'Three real processes' "
+         "is read out of /dev/trace, the kernel's own record of which pid issued which syscall, "
+         "rather than inferred from the answer being right.\n"
+         "M5 ALSO CLOSED A HOLE IT DID NOT SET OUT TO. `SYS_spawn` used to hand its caller's path "
+         "to `fetch`, so a process could name any origin and have the kernel evaluate the reply "
+         "as a program (constraint 108). Programs now come out of the filesystem, and the "
+         "`no_url` section asserts every spelling that used to work is refused BY THE MOUNT "
+         "TABLE - including `/src/bin/true.mjs`, which is a real file on the server and is not in "
+         "this system's filesystem, so a kernel that still reached the network would spawn that "
+         "one and nothing else.\n"
+         "negative control: --negative spawn-self makes `spawn` answer the caller's own pid and "
+         "create nothing. The pipeline, the job control, the redirection and the terminal's typed "
+         "line must fail; the builtins, the refusals and the URL refusals must HOLD, which is why "
+         "those sections are written to spawn nothing at all. --negative no-isolation must come "
+         "out BROKEN: no SAB, so no kernel and nothing to load a shell into.",
+)
+def check_m5(env: Env) -> None:
+    got = env.read(READ_M5, M5_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m5.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m5.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process exists and there is nothing to load a shell into."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m5.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("pipeline", "jobs", "redirect", "builtins", "exec", "refusals", "tty", "no_url")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- the mounts the ten programs live on ---------------------------------------------
+    mounts = got["mounts"] or {}
+    usr = mounts.get("usr") or {}
+    bench = mounts.get("bench") or {}
+    env.expect_that(
+        "the mounts the programs live on are there",
+        bool(usr.get("ok")) and (usr.get("entries") or 0) >= 11
+        and bool(bench.get("ok")) and "/usr" in (mounts.get("rows") or []),
+        {"rows": mounts.get("rows"), "usr": usr, "bench": bench})
+    # THE EXEC LOADER HAS NO `fetches` FIELD because src/kernel/exec.mjs contains no fetch to
+    # count. What is asserted here is the state the counters are in on a kernel that has just
+    # booted and run nothing: a loader that had been to the network for a process would have to
+    # have loaded an image to do it.
+    exec_stats = mounts.get("exec") or {}
+    env.expect_that(
+        "no program crossed the wire for a process",
+        exec_stats.get("loads") == 0 and exec_stats.get("images") == 0
+        and "fetches" not in exec_stats,
+        exec_stats)
+
+    # ---- PROOF: `ls /usr/bin | grep c | wc -l` through three real processes ---------------
+    pl = ev("pipeline")
+    env.expect_that("pipeline ok", section_ok("pipeline"), pl)
+    # THE TWO NUMBERS MUST AGREE AND NEITHER MAY BE ABSENT. `pl.get(a) == pl.get(b)` is True when
+    # both are missing, which is a clause that passes against a page that published neither.
+    env.expect_that(
+        "`ls /usr/bin | grep c | wc -l` printed the count this check worked out for itself",
+        pl.get("printed") is not None and pl.get("expected") is not None
+        and pl["printed"] == pl["expected"] and pl["expected"] > 0,
+        {"printed": pl.get("printed"), "expected": pl.get("expected"), "raw": pl.get("raw")})
+    # THE CLAUSE THE CONTROL MOVES: the kernel's own record of how many processes did it.
+    env.expect_that("and the trace shows four or more distinct pids doing it",
+                    pl.get("sawAtLeastFourPids") is True,
+                    {"distinct": pl.get("distinctPidsInTrace")})
+    env.expect_that("a two-stage pipeline counts every name",
+                    pl.get("twoStageMatchesAll") is True,
+                    {"twoStage": pl.get("twoStage"), "allNames": pl.get("allNames"),
+                     "unpipedLines": pl.get("unpipedLines")})
+
+    # ---- PROOF: `sleep 60 &`, `ps`, `kill %1` --------------------------------------------
+    jb = ev("jobs")
+    env.expect_that("jobs ok", section_ok("jobs"), jb)
+    env.expect_that("ps listed the backgrounded sleep by pid",
+                    jb.get("psSawSleeper") is True and (jb.get("sleeperPid") or 0) > 0,
+                    {"sleeperPid": jb.get("sleeperPid"), "output": jb.get("output")})
+    env.expect_that("and listed the shell that started it", jb.get("psSawShell") is True,
+                    {"shellPid": jb.get("shellPid"), "output": jb.get("output")})
+    # The argv came out of /proc/<pid>/cmdline, so this is also a proof that argv reached the
+    # process table rather than that `ps` printed its own operand back.
+    env.expect_that("ps printed the argv the job was given",
+                    jb.get("psCommand") == "sleep 60", jb.get("psCommand"))
+    env.expect_that("kill %1 resolved a job spec and the job died of SIGTERM",
+                    jb.get("jobsReportedKilled") is True,
+                    {"SIGTERM": jb.get("SIGTERM"), "output": jb.get("output")})
+
+    # ---- the row-wise sections ------------------------------------------------------------
+    # Each is a table of rows the orchestrator scored, and the clause names the failures rather
+    # than reporting "the section failed": a redirection bug and a builtin bug must not read the
+    # same in the report.
+    for name, label in (
+        ("redirect", "every redirection row held"),
+        ("builtins", "every builtin row held"),
+        ("exec", "every exec row held"),
+        ("refusals", "every refusal row held"),
+    ):
+        row = ev(name)
+        env.expect_that("%s ok" % name, section_ok(name), row)
+        env.expect_that(label, not (row.get("failed") or []),
+                        {"failed": row.get("failed"), "rows": len(row.get("rows") or [])})
+
+    # ---- PROOF: the shell interactive on a real pty --------------------------------------
+    tt = ev("tty")
+    env.expect_that("tty ok", section_ok("tty"), tt)
+    env.expect_that("the shell painted a prompt on the terminal",
+                    tt.get("sawPrompt") is True and tt.get("parkedInRead") is True,
+                    {"banner": tt.get("banner"), "parkedWhy": tt.get("parkedWhy")})
+    env.expect_that("a typed line was echoed by the discipline and run by the shell",
+                    tt.get("echoedTheLine") is True and tt.get("ranTheLine") is True,
+                    {"echoed": tt.get("echoed")})
+    # A SHELL MUST NOT DIE OF THE KEYSTROKE IT FORWARDS. Both halves: it survived, and it prompted
+    # again — the second is what shows the pending-bit interruption of the NEXT call is handled
+    # (constraint 117), and without it the shell was alive and silent.
+    env.expect_that("the shell survived Ctrl-C and prompted again",
+                    tt.get("survivedCtrlC") is True and tt.get("promptAfterCtrlC") is True,
+                    {"afterIntr": tt.get("afterIntr"), "child": tt.get("child")})
+    env.expect_that("and ended the session on Ctrl-D", tt.get("exitedOnCtrlD") is True,
+                    tt.get("child"))
+
+    # ---- PROOF: a process cannot make the kernel fetch a URL (constraint 108) -------------
+    nu = ev("no_url")
+    env.expect_that("no_url ok", section_ok("no_url"), nu)
+    env.expect_that("every URL spelling was refused by the filesystem",
+                    nu.get("allLookupFailures") is True and not (nu.get("spawned") or []),
+                    {"spawned": nu.get("spawned"), "rows": nu.get("rows")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m5.html", env.served_matches_disk(env.document),
+                    "the m5.html served does not match www/m5.html on disk")
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),
                       labels=("-",), min_expectations=1,

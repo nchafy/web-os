@@ -231,6 +231,13 @@ export class SynthFS {
     // the next reader to rediscover it.
     if (n.type === DIR && !opts.dirOk) throw new FsError("EISDIR", rel);
     if (opts.dirOk && n.type !== DIR) throw new FsError("ENOTDIR", rel);
+    // M5's exec check. ANY execute bit, not the one belonging to `cred`'s shift, and that is a
+    // deliberate difference from `src/fs/vfs.mjs` rather than an omission: the nodes here are
+    // GENERATED and own no uid or gid worth consulting — `node()` above defaults both to 0 for
+    // every file a generator returns. Checking a shift against ownership nothing maintains would
+    // be a permission model that reads as enforcement and is not. Read and write are not checked
+    // at all here, which long predates this line.
+    if (opts.wantX && (n.mode & 0o111) === 0) throw new FsError("EACCES", rel);
     const info = this.#info(rel, n);
     return {
       synth: true,

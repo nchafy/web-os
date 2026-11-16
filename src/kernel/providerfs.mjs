@@ -31,6 +31,42 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "lib/syscall.mjs", path: "src/libos/syscall.mjs" }),
   Object.freeze({ name: "lib/process.mjs", path: "src/libos/process.mjs" }),
   Object.freeze({ name: "include/abi.mjs", path: "src/abi.mjs" }),
+  // M5's ten programs and the shell. THE MOUNT NAME HAS NO EXTENSION and the provider path does:
+  // `/usr/bin/ls` is a program and `src/bin/ls.mjs` is the file this repository keeps it in. A
+  // reader typing `ls` must not have to know the implementation language, which is the whole
+  // reason the two halves of a row are allowed to differ.
+  //
+  // Mode comes from the mount, which serves every file 0o555 — readable and executable, not
+  // writable. That is what makes `SYS_spawn`'s execute check (src/kernel/exec.mjs) pass here and
+  // fail on an ordinary data file.
+  Object.freeze({ name: "bin/sh", path: "src/bin/sh.mjs" }),
+  Object.freeze({ name: "bin/ls", path: "src/bin/ls.mjs" }),
+  Object.freeze({ name: "bin/cat", path: "src/bin/cat.mjs" }),
+  Object.freeze({ name: "bin/echo", path: "src/bin/echo.mjs" }),
+  Object.freeze({ name: "bin/wc", path: "src/bin/wc.mjs" }),
+  Object.freeze({ name: "bin/head", path: "src/bin/head.mjs" }),
+  Object.freeze({ name: "bin/grep", path: "src/bin/grep.mjs" }),
+  Object.freeze({ name: "bin/sleep", path: "src/bin/sleep.mjs" }),
+  Object.freeze({ name: "bin/kill", path: "src/bin/kill.mjs" }),
+  Object.freeze({ name: "bin/ps", path: "src/bin/ps.mjs" }),
+  Object.freeze({ name: "bin/true", path: "src/bin/true.mjs" }),
+]);
+
+/**
+ * `/bench`, mounted ONLY under a bench boot (src/kernel/kernel.mjs).
+ *
+ * It exists because M5 made `SYS_spawn` load from the filesystem, and M4's and M4b's orchestrators
+ * spawn their own stages BY PATH: `/bench/m4-fs/program.mjs`. Mounting the bench tree keeps those
+ * path strings resolving, so two already-proved milestones keep their proofs unedited — a proof
+ * rewritten to keep passing is not the same proof.
+ *
+ * A row, not a driver, and the same manifest shape `/usr` uses. These are the only two bench
+ * programs that call `SYS_spawn`; the rest are spawned by the page, which has its own loader.
+ */
+export const BENCH_ENTRIES = Object.freeze([
+  Object.freeze({ name: "m4-fs/program.mjs", path: "bench/m4-fs/program.mjs" }),
+  Object.freeze({ name: "m4b-fs/program.mjs", path: "bench/m4b-fs/program.mjs" }),
+  Object.freeze({ name: "m5-sh/program.mjs", path: "bench/m5-sh/program.mjs" }),
 ]);
 
 /** How much of an object the mount reads. The manifest declares no sizes, so each object is read

@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M5 — the shell and ten programs</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
+</head>
+<body>
+<pre id="log">M5 starting…</pre>
+<script>
+  globalThis.M5 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M5's page harness: the shell, the ten programs, and the exec path they are loaded through.
+ *
+ *   PROOF 1  `ls /usr/bin | grep c | wc -l` is correct through three real processes
+ *   PROOF 2  `sleep 60 &`, `ps`, `kill %1`
+ *   PROOF 3  redirection, including `echo a > f1 > f2` leaving f1 there and empty
+ *   PROOF 4  the builtins, which run in the shell and spawn nothing
+ *   PROOF 5  what `spawn` will and will not load, and argv in /proc
+ *   PROOF 6  the three things this shell refuses rather than guesses at
+ *   PROOF 7  the shell interactive on a real pty: a typed line, Ctrl-C, Ctrl-D
+ *   PROOF 8  a process cannot make the kernel fetch a URL (constraint 108)
+ *
+ * CONTROL ?spawn_self=1 — `spawn` answers the CALLER'S pid and creates nothing. MILESTONES.md
+ * M5's own control: "make `spawn` return the parent's pid; `ps` must show one process and the
+ * check must fail." Everything that needs a child must go red; the builtins, the refusals and the
+ * URL refusals must hold, because none of them creates a process.
+ */
+import { SIGTERM, E } from '/src/abi.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = { spawnSelf: params.get('spawn_self') === '1' }
+
+Object.assign(globalThis.M5, { isolated: self.crossOriginIsolated === true })
+
+globalThis.M5.proofs = {
+  pipeline: null, jobs: null, redirect: null, builtins: null,
+  exec: null, refusals: null, tty: null, no_url: null,
+}
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M5.state = 'aborted'
+  globalThis.M5.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures.'
+  out.className = 'bad'
+  say(globalThis.M5.why)
+} else {
+  main().catch((e) => {
+    globalThis.M5.state = 'error'
+    globalThis.M5.why = String((e && e.stack) || e)
+    say(globalThis.M5.why)
+  })
+}
+
+/* THE ORCHESTRATOR IS SPAWNED BY THE PAGE AND IS NOT ONE OF THE TEN PROGRAMS. The page cannot
+ * make syscalls, so something inside a process has to open the pty, build the pipes and read the
+ * output back. It is mounted at /bench under a bench boot (src/kernel/providerfs.mjs) because
+ * SYS_spawn loads from the filesystem now; the page's own spawn still takes a URL. */
+const PROGRAM = '/bench/m5-sh/program.mjs'
+class KernelFail extends Error {}
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    events.push(m)
+    if (m.t === 'up') {
+      globalThis.M5.kernelIsolated = m.isolated === true
+      globalThis.M5.kernelFingerprint = m.abiFingerprint
+    }
+    if (m.t === 'fault') {
+      globalThis.M5.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M5.errors.push('kernel: ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M5.notes.push(m.why)
+    if (m.t === 'teardown-leak') globalThis.M5.errors.push('teardown-leak pid ' + m.pid)
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M5.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => { waiters.delete(t); rej(new Error('timed out waiting for ' + t)) }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return { worker, expect, post: (m) => worker.postMessage(m), events }
+}
+
+/**
+ * Run ONE orchestrator to completion and return its row.
+ *
+ * A FRESH KERNEL PER PROOF. Each proof spawns a shell and several programs and leaves zombies in
+ * a ~2.2 s terminate quarantine (constraint 14), so sharing one kernel would make each proof's
+ * process table depend on how fast the previous one finished — and PROOF 1 counts distinct pids in
+ * the trace ring, which a previous proof's processes would inflate.
+ */
+async function runProof (mode, boot, timeoutMs = 90000) {
+  const k = kernelBoot(boot)
+  globalThis.M5.events = k.events
+  try {
+    await k.expect('up', 30000)
+    k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+      cfg: { argv: [mode], uid: 0, gid: 0 }, readyTimeoutMs: 20000 })
+    const spawned = await k.expect('spawned', 20000)
+    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+    await k.expect('ready', 20000)
+    const pid = spawned.pids[0]
+    k.post({ t: 'go', go: { mode: 'park', pid } })
+    let results
+    try {
+      results = await k.expect('results', timeoutMs)
+    } catch (e) {
+      /* A TIMEOUT MUST CARRY THE STATE. A stopped pipeline raises no error anywhere — a parked
+       * reader and a parked writer are both legitimate — so the only way to tell a working shell
+       * from a deadlocked one is to read the kernel's own park and refcount state. */
+      k.post({ t: 'm4-state' })
+      let state = null
+      try { state = await k.expect('m4-state', 5000) } catch (e2) { state = { why: String(e2) } }
+      k.post({ t: 'm3-state' })
+      let mounts = null
+      try { mounts = (await k.expect('m3-state', 5000)).m3 } catch (e2) { mounts = { why: String(e2) } }
+      globalThis.M5.stuck = { mode, state, mounts }
+      throw new Error(mode + ': ' + (e && e.message) + ' — kernel state: ' +
+        JSON.stringify(state && { procs: state.procs, pipes: state.pipes, ptys: state.ptys }))
+    }
+    const row = results.results.find((r) => r.pid === pid)
+    if (!row) {
+      throw new Error(mode + ': no row for pid ' + pid + '; got ' +
+        JSON.stringify(results.results.map((r) => r.pid)))
+    }
+    return row
+  } finally {
+    k.worker.terminate()
+  }
+}
+
+/** The mount table and the exec loader's counters, from a kernel booted the same way. Read once,
+ *  because "no program crossed the wire for a process" is a property of the kernel and not of a
+ *  proof. */
+async function readState (boot) {
+  const k = kernelBoot(boot)
+  try {
+    await k.expect('up', 30000)
+    k.post({ t: 'm3-state' })
+    // The payload is on `.m3`, not at the top level — src/kernel/kernel.mjs posts
+    // `{t: 'm3-state', m3: m3State()}`. Reading the envelope instead gave an empty mount list on
+    // a kernel whose mounts were fine.
+    const reply = await k.expect('m3-state', 10000)
+    return reply.m3 || {}
+  } finally {
+    k.worker.terminate()
+  }
+}
+
+async function main () {
+  const t0 = performance.now()
+  say('M5: the shell and ten programs' + (CFG.spawnSelf ? '  [CONTROL: spawn_self]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.spawnSelf) boot.spawnSelf = true
+  const P = globalThis.M5.proofs
+
+  /* ---- the mounts the programs live on -------------------------------------------------- */
+  const st = await readState(boot)
+  globalThis.M5.mounts = {
+    rows: (st.rows || []).map((r) => r.path),
+    usr: st.usr, bench: st.bench, exec: st.exec,
+  }
+  say('mounts: ' + globalThis.M5.mounts.rows.join(' ') +
+    '; /usr ' + (st.usr && st.usr.ok ? st.usr.entries + ' entries' : 'FAILED'))
+
+  /* ---- PROOF 1 -------------------------------------------------------------------------- */
+  const pl = await runProof('p_pipeline', boot)
+  say('p_pipeline: printed ' + JSON.stringify(pl.printed) + ' expected ' + pl.expected +
+    ', ' + pl.distinctPidsInTrace + ' distinct pids in the trace')
+  P.pipeline = {
+    ok: !!(pl.ok && pl.sawAtLeastFourPids && pl.twoStageMatchesAll),
+    evidence: {
+      expected: pl.expected, printed: pl.printed, raw: pl.raw, status: pl.status,
+      allNames: pl.allNames, unpipedLines: pl.unpipedLines,
+      twoStage: pl.twoStage, twoStageMatchesAll: pl.twoStageMatchesAll,
+      distinctPidsInTrace: pl.distinctPidsInTrace,
+      sawAtLeastFourPids: pl.sawAtLeastFourPids,
+      why: pl.why,
+    },
+  }
+
+  /* ---- PROOF 2 -------------------------------------------------------------------------- */
+  const jb = await runProof('p_jobs', boot)
+  say('p_jobs: job pid ' + jb.sleeperPid + ', ps row ' + JSON.stringify(jb.psCommand) +
+    ', killed ' + jb.jobsReportedKilled)
+  P.jobs = {
+    ok: !!(jb.ok && jb.psSawSleeper && jb.psSawShell && jb.jobsReportedKilled && jb.shellExited),
+    evidence: {
+      sleeperPid: jb.sleeperPid, shellPid: jb.shellPid,
+      psSawSleeper: jb.psSawSleeper, psSawShell: jb.psSawShell,
+      psCommand: jb.psCommand,
+      jobsReportedKilled: jb.jobsReportedKilled,
+      shellExited: jb.shellExited, shellStatus: jb.shellStatus,
+      SIGTERM: jb.SIGTERM, output: jb.output, why: jb.why,
+    },
+  }
+
+  /* ---- PROOF 3 -------------------------------------------------------------------------- */
+  const rd = await runProof('p_redirect', boot)
+  say('p_redirect: ' + (rd.failed || []).length + ' of ' + (rd.rows || []).length + ' failed')
+  P.redirect = {
+    ok: !!rd.ok,
+    evidence: { rows: rd.rows, failed: rd.failed, why: rd.why },
+  }
+
+  /* ---- PROOF 4 -------------------------------------------------------------------------- */
+  const bi = await runProof('p_builtins', boot)
+  say('p_builtins: ' + (bi.failed || []).length + ' of ' + (bi.rows || []).length + ' failed')
+  P.builtins = {
+    ok: !!bi.ok,
+    evidence: { rows: bi.rows, failed: bi.failed, why: bi.why },
+  }
+
+  /* ---- PROOF 5 -------------------------------------------------------------------------- */
+  const ex = await runProof('p_exec', boot)
+  say('p_exec: ' + (ex.failed || []).length + ' of ' + (ex.rows || []).length + ' failed')
+  P.exec = {
+    ok: !!ex.ok,
+    evidence: { rows: ex.rows, failed: ex.failed, why: ex.why },
+  }
+
+  /* ---- PROOF 6 -------------------------------------------------------------------------- */
+  const rf = await runProof('p_refusals', boot)
+  say('p_refusals: ' + (rf.failed || []).length + ' of ' + (rf.rows || []).length + ' failed')
+  P.refusals = {
+    ok: !!rf.ok,
+    evidence: { rows: rf.rows, failed: rf.failed, why: rf.why },
+  }
+
+  /* ---- PROOF 7 -------------------------------------------------------------------------- */
+  const tt = await runProof('p_tty', boot)
+  say('p_tty: prompt ' + tt.sawPrompt + ', echoed ' + tt.echoedTheLine +
+    ', ran ' + tt.ranTheLine + ', survived ^C ' + tt.survivedCtrlC +
+    ', exited on ^D ' + tt.exitedOnCtrlD)
+  P.tty = {
+    ok: !!(tt.ok && tt.sawPrompt && tt.echoedTheLine && tt.ranTheLine
+      && tt.survivedCtrlC && tt.promptAfterCtrlC && tt.exitedOnCtrlD),
+    evidence: {
+      pid: tt.pid, started: tt.started, parkedInRead: tt.parkedInRead, parkedWhy: tt.parkedWhy,
+      sawPrompt: tt.sawPrompt, echoedTheLine: tt.echoedTheLine, ranTheLine: tt.ranTheLine,
+      survivedCtrlC: tt.survivedCtrlC, promptAfterCtrlC: tt.promptAfterCtrlC,
+      exitedOnCtrlD: tt.exitedOnCtrlD, child: tt.child,
+      banner: tt.banner, echoed: tt.echoed, afterIntr: tt.afterIntr, why: tt.why,
+    },
+  }
+
+  /* ---- PROOF 8 -------------------------------------------------------------------------- */
+  const nu = await runProof('p_noturl', boot)
+  say('p_noturl: ' + nu.refused + ' of ' + (nu.rows || []).length + ' refused' +
+    (nu.spawned && nu.spawned.length ? '; SPAWNED ' + nu.spawned.join(', ') : ''))
+  P.no_url = {
+    ok: !!(nu.ok && nu.allLookupFailures),
+    evidence: {
+      rows: nu.rows, refused: nu.refused, spawned: nu.spawned,
+      allLookupFailures: nu.allLookupFailures, ENOENT: E.ENOENT, why: nu.why,
+    },
+  }
+
+  globalThis.M5.config = { spawnSelf: CFG.spawnSelf, SIGTERM }
+  const sections = Object.entries(globalThis.M5.proofs)
+  const ran = sections.filter(([, v]) => v !== null)
+  globalThis.M5.verdict = ran.length === sections.length && ran.every(([, v]) => v.ok)
+    ? 'ok' : 'FAIL'
+  globalThis.M5.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  say('verdict ' + globalThis.M5.verdict + ' in ' + Math.round(globalThis.M5.ms) + ' ms')
+  out.className = globalThis.M5.verdict === 'ok' ? 'ok' : 'bad'
+  globalThis.M5.state = 'done'
+}
+</script>
+</body>
+</html>

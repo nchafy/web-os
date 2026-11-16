@@ -578,7 +578,7 @@ export class VFS {
    * @returns {{ino, type, created: op|null, needR: boolean, needW: boolean, gen, size}}
    */
   openDecision(cred, path, { cwd = "/", create = false, excl = false, wantR = false,
-    wantW = false, dirOk = false, followFinal = true, mode = 0o644 } = {}) {
+    wantW = false, wantX = false, dirOk = false, followFinal = true, mode = 0o644 } = {}) {
     const hit = this.#resolve(cred, path, { cwd, followFinal });
     if (hit.ino !== null) {
       if (create && excl) throw new FsError("EEXIST", path);
@@ -587,6 +587,11 @@ export class VFS {
       if (inode.type === DIR && wantW) throw new FsError("EISDIR", path);
       if (wantR) this.#need(cred, inode, R, path);
       if (wantW) this.#need(cred, inode, W, path);
+      // M5. `wantX` IS THE EXEC CHECK, and it is here rather than in the loader so that the mode
+      // bits have one interpreter (`#may`, which is the only thing that knows root ignores read
+      // and write but still needs an execute bit). `wantX` never creates: a caller asking to
+      // execute a file that is not there wants ENOENT, not an empty file it then cannot run.
+      if (wantX) this.#need(cred, inode, X, path);
       return {
         ino: inode.ino, type: inode.type, created: null,
         gen: inode.type === FILE ? inode.gen : 0, size: inode.type === FILE ? inode.size : 0,
