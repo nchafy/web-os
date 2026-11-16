@@ -35,7 +35,7 @@ repository, and it is pushed.
 ## Read these first, in this order
 
 `CLAUDE.md` has an onboarding table — follow it. Short version: `CONTEXT.md`, then
-`docs/CONSTRAINTS.md` (200 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
+`docs/CONSTRAINTS.md` (205 numbered constraints, **normative**, cite by number), `docs/ABI.md`,
 `MILESTONES.md`. Then `docs/DECISIONS.md` before arguing with any decision.
 
 Do not re-derive anything those files settle. They are the product of adversarial review, and
@@ -298,6 +298,26 @@ That is what located constraints 92 and 103, each in one run.
 unreachable — and two of them were wrong the moment they became reachable (90, 91). Teardown's fd
 refcount was wrong for every dup'd description and had no symptom until a pty slave sat on two fds
 (103). However finished a path looks, if nothing calls it, nothing has checked it.
+
+## What M6's review found, because it is the generalisable one
+
+**A GUARD WRITTEN AGAINST A LIST OF SPELLINGS IS A GUARD AGAINST THAT LIST.** M6's policy decided
+whether to bound a realm by testing the request path's prefix. It was hardened once — normalized,
+seven spellings checked, committed with a message saying so — and the critic then served the same
+file with no policy using an eighth: `GET /%2fsrc/libos/process.mjs`, 200, byte-identical, no
+header, module loader unbounded. The fix was not a longer list. It was to ask the question of the
+RESOLVED FILE, through the same `translate_path` that decides which bytes are sent, so the policy
+follows the bytes and no spelling can disagree with it.
+
+Two smaller ones worth carrying forward:
+
+- **An untaken measurement is not a failed proof.** M6's `/proc` read can expire with the ~2.2 s
+  terminate quarantine, which says nothing about whether the process faulted. It reports `expired`
+  and the check raises UNMEASURABLE. A harness that scores correct kernel behaviour as a defect is
+  worse than one that says it could not measure.
+- **An `await` added to a message handler removes a serialization nobody wrote down.** The
+  synchronous `run` held "one program at a time" by construction; the async one does not, so it is
+  now a guard that faults on re-entry (204).
 
 ## The method that worked
 

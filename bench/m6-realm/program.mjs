@@ -11,7 +11,11 @@
 //              RETURNS its rows rather than throwing, because a faulted process has no result and
 //              the detail is the point of this mode.
 //   p_verify   uid 0: read the victim back THROUGH THE SYSCALL CHANNEL. Are the kernel's bytes
-//              still the kernel's? Plus: is the faulted attacker gone from /proc?
+//              still the kernel's? Then unlink it, so a second run does not meet the first's
+//              tampered file.
+//   p_procfault uid 0: what /proc says about a pid that faulted — `state`, `exitkind`,
+//              `exitvalue`. Run on an already-live process, because the answer expires with the
+//              terminate quarantine (constraint 14).
 //   p_fault    uid 1000: MILESTONES.md's own shape — the bypass snippet with no try/catch. It
 //              must FAULT with the lockdown and must SUCCEED without it.
 //
@@ -263,11 +267,6 @@ function pVerify(env, path, attackerPid) {
   if (fd < 0) return { ok: false, why: `open(${path}) is ${env.std.errnoName(fd)}` };
   const got = env.std.slurpText(env, fd);
   env.fs.close(fd);
-  // `/proc/<pid>` for the faulted attacker. M3's own proof shape: kill a process and its
-  // directory vanishes — a fault is reaped the same way (constraint 140), so this is "/proc shows
-  // it faulted" in the form /proc can actually express.
-  const procStat = env.fs.stat(`/proc/${attackerPid}`);
-  const procGone = procStat === -E.ENOENT;
   // Removed, so a second run of this check does not meet the previous run's tampered file. The
   // unlink takes the blob with it, which is what makes the control repeatable.
   const unlinked = env.fs.unlink(path);
@@ -278,8 +277,6 @@ function pVerify(env, path, attackerPid) {
     want: VICTIM_BYTES,
     tampered: got === TAMPER_BYTES,
     attackerPid,
-    procGone,
-    procStat: typeof procStat === "object" ? "present" : env.std.errnoName(procStat),
     unlinked,
   };
 }
@@ -302,7 +299,24 @@ function pVerify(env, path, attackerPid) {
 function pProcFault(env, pid) {
   const text = env.std.readFileText(env, `/proc/${pid}/status`);
   if (typeof text !== "string") {
-    return { ok: false, pid, why: `/proc/${pid}/status is ${env.std.errnoName(text)}` };
+    /**
+     * ENOENT IS NOT A FAILED PROOF, IT IS AN UNTAKEN MEASUREMENT, and the two must not be
+     * reported as one thing. A reaped process leaves the table when the ~2.2 s quarantine expires
+     * (constraint 14), so a read that arrives late finds nothing — which says nothing at all
+     * about whether the process faulted. `expired` is what the page turns into an unmeasurable
+     * check rather than a red one; any other errno is a real failure and keeps `ok: false`.
+     */
+    const errno = env.std.errnoName(text);
+    return {
+      ok: false,
+      pid,
+      expired: errno === "ENOENT",
+      why: `/proc/${pid}/status is ${errno}`
+        + (errno === "ENOENT"
+          ? " — the pid had already left the table, so the fault could not be read. The "
+            + "terminate quarantine is ~2.2 s and this read has to land inside it."
+          : ""),
+    };
   }
   const field = (name) => {
     const m = new RegExp(`^${name}:\\t(.*)$`, "m").exec(text);

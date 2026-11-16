@@ -1702,3 +1702,63 @@ gate is `scripts/check.py --only m6`, with `--negative no-lockdown` and `--negat
     bytes against disk — so a nonce cannot be injected and a document policy would have to carry
     `'unsafe-inline'`. A page-hardening policy is a separate change with its own risk and its own
     control.
+
+## M6's adversarial review — six findings, all six fixed
+
+The critic was given the artifact and the acceptance criteria and not the author's conclusion. It
+verified rather than read: it ran the host probe, the mutation harness, `--list`, `--controls` and
+`check_links`, scored both new controls' failed/held partitions clause by clause against the page,
+and grepped the tree for any in-tree use of the eleven stripped bindings. Five findings were small;
+one was the milestone's own subject, in the commit that was supposed to have closed it.
+
+201. **A PERCENT-ENCODED LEADING SLASH SERVED THE PROCESS REALM WITH NO POLICY.** `GET
+    /%2fsrc/libos/process.mjs` returned `process.mjs` byte-for-byte — 13,675 bytes, status 200 —
+    and NO `Content-Security-Policy`, because `unquote` runs after `urlparse`, `posixpath.normpath`
+    preserves the two leading slashes `%2f` produces, and `translate_path` collapses them and
+    serves the file anyway. A process worker created from that URL had an unbounded module loader:
+    `eval`, `new Function` and a computed `import(expr)` all work. The hole M6 exists to close,
+    reachable by one spelling.
+    **The commit before it had made this worse by claiming otherwise** — "seven spellings checked,
+    including percent-encoded" was true of an encoded slash in the MIDDLE of the path and not of a
+    leading one, which is the one that matters.
+    **Fixed by asking the resolved FILE, never the spelling**: `_in_process_realm` defers to
+    `translate_path`, the same resolution that decides which bytes are sent, so two spellings of
+    one file cannot get two policies in either direction. Verified over thirteen spellings either
+    side of the boundary, and `_assert_policy` in `scripts/check.py` now asserts the `%2f` form on
+    the wire before Chrome starts — with the bug restored, that gate refuses at exit 3 and names
+    the two spellings.
+    **The lesson is the one this repo keeps relearning:** a guard written against a list of
+    spellings is a guard against that list. The question has to be asked of the thing the
+    behaviour depends on, which here is the file.
+202. **THE `/proc` READ RACED THE TERMINATE QUARANTINE.** The clause proving the bypass program
+    faulted reads `/proc/<pid>/status`, and a reaped pid leaves the table when
+    `TERM_QUARANTINE_MS = 2,200` expires (constraint 14). The read was being done by a FRESHLY
+    SPAWNED process — a worker start, the libos module graph re-fetched because every response is
+    `no-store`, and `measureClock(200000)` — with nothing bounding that below 2.2 s on a loaded
+    machine. It would have scored correct kernel behaviour as a defect, which is constraint 195's
+    mistake in the other direction.
+    **Fixed twice over:** the read now runs on an ALREADY-LIVE process through a second `go` with
+    new argv (one `postMessage`, no spawn), and an ENOENT answer is reported as `expired` and
+    raised as UNMEASURABLE rather than red — an untaken measurement is not a failed proof.
+203. **An abandoned waiter's timer deleted a later waiter for the same message.** `www/m6.html`'s
+    `expect` keys waiters by message type, so a second `expect('results')` replaces the first —
+    and the first's timer still fired and deleted the SECOND one, after which the message landed
+    in a pending queue `expect` only reads on entry. The step would then sit out its own timeout
+    and report a timeout with nothing wrong. Reachable only here, because the fault race abandons
+    a `results` waiter by design. Fixed by having the timer retire only its own entry.
+204. **Making a program's `run` awaitable removed a serialization the synchronous version held by
+    construction.** A second `go` arriving while an async `run` is suspended would start a
+    concurrent run in the same realm and post a second result — and the kernel satisfies
+    `results.length >= goCount` at the first, so the page reads one batch and the extra is
+    orphaned. Nothing in the suite issues two, which is why the fix is a GUARD and not a queue:
+    the invariant is unchanged, and a caller that breaks it now faults naming the invariant
+    instead of silently overtaking a result. Constraint 197's twin.
+205. **Two documentation defects of the kind this repo treats as defects.** A comment in
+    `src/libos/lockdown.mjs` said a failed removal was "recorded by its absence from `where`"
+    directly above the line that pushes it INTO `where` — so a reader debugging a refusal would
+    have misread an error entry as a successful deletion. And `p_verify` still computed and
+    returned a `procGone` field that nothing read and that was always false, with two comments
+    describing the abandoned design constraint 195 records. Both removed. A comment asserting an
+    invariant is not evidence that the invariant holds, and a field nothing reads is a claim
+    nothing checks.
+

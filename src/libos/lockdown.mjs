@@ -115,8 +115,10 @@ function removeDeep(target, name) {
     try {
       if (delete obj[name]) where.push(label);
     } catch (error) {
-      // A non-configurable property. Recorded by its absence from `where`, and the caller's
-      // verification is what turns that into a refusal to run the program.
+      // A non-configurable property, in strict mode. RECORDED IN `where` WITH ITS MESSAGE, so a
+      // reader debugging a refusal sees why this one could not be removed — `where` is therefore
+      // a log of attempts and not a list of successes. What turns the failure into a refusal to
+      // run the program is the caller's verification, never this entry.
       where.push(`${label}: ${(error && error.message) || error}`);
     }
   }

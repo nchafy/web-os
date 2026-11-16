@@ -114,17 +114,32 @@ class Handler(SimpleHTTPRequestHandler):
     def _in_process_realm(self) -> bool:
         """Does this response create, or sit inside, the process realm?
 
-        NORMALIZED FIRST, and both directions matter. `/src/libos/../kernel/kernel.mjs` is a
-        request for the KERNEL that starts with the prefix as written — and the kernel fetches
-        providers and mints program images, so handing it `connect-src 'none'` would break the
-        system in a way whose cause is invisible. The reverse spelling,
-        `/src/kernel/../libos/process.mjs`, is a process realm that a raw prefix test would leave
-        unbounded. `posixpath.normpath` collapses both before the question is asked.
+        ASKED OF THE RESOLVED FILE, never of the request's spelling, and that is the whole point
+        of this function. Two spellings of one file must not get two different policies, in either
+        direction: `/src/libos/../kernel/kernel.mjs` is the KERNEL, which fetches providers and
+        mints program images, so handing it `connect-src 'none'` would break the system with no
+        visible cause — and anything that resolves to `src/libos/` is a process realm and must
+        carry the policy however it was asked for.
+
+        A NORMALIZED PREFIX TEST WAS NOT ENOUGH, and an adversarial review measured it:
+        `GET /%2fsrc/libos/process.mjs` served the real `process.mjs` — byte-identical, 13,675
+        bytes — with NO policy, because `unquote` runs after `urlparse` and `normpath` keeps the
+        two leading slashes that `%2f` produces, while `translate_path` collapses them and serves
+        the file anyway. A process worker created from that URL would have had an unbounded module
+        loader: `eval` and a computed `import(expr)` both work. Deferring to `translate_path` —
+        the same resolution that decides which bytes are sent — closes the whole class rather than
+        the spelling that was found.
         """
-        from posixpath import normpath
-        from urllib.parse import unquote, urlparse
-        path = normpath(unquote(urlparse(self.path).path))
-        return path.startswith(PROCESS_REALM_PREFIX)
+        try:
+            resolved = os.path.realpath(self.translate_path(self.path))
+            realm = os.path.realpath(os.path.join(
+                getattr(self, "directory", os.getcwd()),
+                *PROCESS_REALM_PREFIX.strip("/").split("/")))
+        except (OSError, ValueError):
+            # A path the resolver cannot make sense of is not a response this server will serve
+            # from the process realm either. Fail closed in the direction that matters: no claim.
+            return False
+        return resolved == realm or resolved.startswith(realm + os.sep)
 
     def send_head(self):
         # The default root is the repository root, which contains .git and .claude. Nothing

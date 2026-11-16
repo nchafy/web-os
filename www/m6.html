@@ -108,8 +108,18 @@ function kernelBoot (cfg) {
     if (abort) return rej(abort)
     const i = pending.findIndex((m) => m.t === t)
     if (i >= 0) return res(pending.splice(i, 1)[0])
-    const timer = setTimeout(() => { waiters.delete(t); rej(new Error('timed out waiting for ' + t)) }, ms)
-    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+    /* THE TIMER MUST ONLY RETIRE ITS OWN WAITER. `waiters` is keyed by message type, so a second
+     * `expect('results')` replaces the first — and the first's timer used to fire later and
+     * delete the SECOND one, after which the message landed in `pending`, which `expect` reads
+     * only on entry. The step then sat out its whole timeout and reported a timeout with nothing
+     * wrong. Reachable here and nowhere else in the suite, because the fault race below abandons
+     * a `results` waiter by design. Found by an adversarial review. */
+    const entry = (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) }
+    const timer = setTimeout(() => {
+      if (waiters.get(t) === entry) waiters.delete(t)
+      rej(new Error('timed out waiting for ' + t))
+    }, ms)
+    waiters.set(t, entry)
   })
   worker.postMessage({ t: 'boot', cfg })
   return { worker, expect, post: (m) => worker.postMessage(m), events }
@@ -165,6 +175,32 @@ async function step (k, mode, { uid = 0, args = [], faultOk = false, timeoutMs =
     return { pid, faulted: false, ...(row || {}) }
   }
   return { pid, faulted: false, why: mode + ': neither a result nor a fault within the deadline' }
+}
+
+/**
+ * Run another mode on a process that is ALREADY LIVE, with new argv.
+ *
+ * THIS EXISTS TO WIN A RACE AGAINST THE TERMINATE QUARANTINE. A reaped process keeps its pid for
+ * TERM_QUARANTINE_MS = 2,200 ms (constraint 14) and then leaves the table, after which
+ * `/proc/<pid>/status` answers ENOENT — so the read that proves the bypass program faulted has to
+ * happen inside that window. Spawning a fresh process to do it costs a worker start, the libos
+ * module graph (every response is `no-store`) and `measureClock`, none of which is bounded below
+ * 2.2 s on a loaded machine; an adversarial review priced that as a flake waiting to happen, and
+ * correct kernel behaviour scored as a defect is exactly the mistake constraint 195 records in
+ * the other direction. A `go` to a live process is one `postMessage`.
+ *
+ * `go.argv` wins over the process's spawn argv in `src/libos/process.mjs`, which is what lets one
+ * process run a second mode at all.
+ */
+async function goOn (k, pid, mode, args = [], timeoutMs = 30000) {
+  k.post({ t: 'go', go: { mode: 'park', pid, argv: [mode, VICTIM, ...args.map(String)] } })
+  const results = await k.expect('results', timeoutMs)
+  const row = results.results.find((r) => r.pid === pid)
+  if (!row) {
+    throw new Error(mode + ': no row for live pid ' + pid + '; got ' +
+      JSON.stringify(results.results.map((r) => r.pid)))
+  }
+  return { pid, ...row }
 }
 
 async function main () {
@@ -281,7 +317,10 @@ async function main () {
     say('p_fault: ' + (fault.faulted
       ? 'FAULTED — ' + String(fault.faultWhy).slice(0, 120)
       : 'returned ' + JSON.stringify(fault.bypassed === true ? fault.names : fault.why)))
-    const afterFault = await step(k, 'p_procfault', { uid: 0, args: [fault.pid] })
+    /* ON THE VICTIM'S PROCESS, which is uid 0 and still live, for the quarantine reason goOn
+     * carries. It has already returned one result; a second `go` with new argv runs another mode
+     * in the same worker. */
+    const afterFault = await goOn(k, victim.pid, 'p_procfault', [fault.pid])
     say('/proc/' + fault.pid + ': state ' + afterFault.state + ', exitkind ' +
       afterFault.exitKind + ', exitvalue ' + afterFault.exitValue)
     P.fault = {
@@ -295,6 +334,11 @@ async function main () {
         state: afterFault.state, exitKind: afterFault.exitKind, exitValue: afterFault.exitValue,
         wantKind: afterFault.wantKind, wantValue: afterFault.wantValue,
         status: afterFault.status, why: afterFault.why || '',
+        /* THE READ CAN EXPIRE, AND THAT IS NOT A FAILED PROOF. A reaped pid leaves the table when
+         * the ~2.2 s quarantine ends (constraint 14), so a late read finds ENOENT and knows
+         * nothing about whether the process faulted. The check turns this into an unmeasurable
+         * run rather than a red one. `goOn` exists to make it rare; this makes it honest. */
+        expired: afterFault.expired === true,
       },
     }
 

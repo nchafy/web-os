@@ -179,6 +179,8 @@ self.onunhandledrejection = (e) => {
 };
 
 let exiting = false;
+/** True while a `go` is in flight. One program at a time per process; see `onCommand`. */
+let running = false;
 
 /** M0's signal hook: count, and honour the SIGKILL bit by stopping. M1 replaces the body with
  *  handler dispatch; the seam is here so M1's negative control has something to remove. */
@@ -264,6 +266,24 @@ self.onmessage = async (ev) => {
  */
 async function onCommand(m) {
   if (!m || m.t !== "go") return;
+  /**
+   * ONE `go` AT A TIME, AND A SECOND ONE IS A FAULT.
+   *
+   * The synchronous version held this by construction: `run` returned before the next message
+   * task could be delivered. An async `run` suspends, so a second `go` arriving meanwhile would
+   * start a CONCURRENT run in the same realm and post a second result — and the kernel satisfies
+   * `results.length >= goCount` at the first, so the page reads one batch and the extra result is
+   * orphaned in its pending queue. Nothing in the suite issues two, which is exactly why this is
+   * a guard and not a queue: the invariant is unchanged, and a caller that breaks it now gets a
+   * fault naming the invariant instead of a second result nobody reads. Found by an adversarial
+   * review of the async change (constraint 197).
+   */
+  if (running) {
+    panic(`process ${pid}: a second go arrived while a program was still running. One go per `
+      + "process at a time; the result of the first would have been overtaken");
+    return;
+  }
+  running = true;
   try {
     // What the program receives, and nothing else. No SAB, no port, no handle.
     const env = {
@@ -303,5 +323,10 @@ async function onCommand(m) {
     });
   } catch (error) {
     panic(error && error.stack);
+  } finally {
+    // CLEARED EVEN WHEN THE PROGRAM FAULTED, so a worker that survives a caught throw can be
+    // given another program — which `www/m6.html` relies on: it runs a second mode on a live
+    // process to read `/proc` inside the terminate quarantine.
+    running = false;
   }
 }

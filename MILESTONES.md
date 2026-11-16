@@ -30,7 +30,7 @@ checks is a wish.
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 54 expectations, 4 controls |
 | M5 | The shell, eleven programs, exec through the filesystem | 6 | 1.5 | ✅ done — **ACCEPT**, 38 expectations, 6 controls, 14 review findings fixed |
 | M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 26 expectations, 1 control |
-| M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, and constraint 139's prescription corrected |
+| M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | **M7** | **A window is a file description** | 4 | | ⬜ **next (option A)** |
 | M8 | The window surface | 3 | | ⬜ A |
@@ -1295,6 +1295,17 @@ passed over a report that was never produced.
 `{ ...promise }` spreads to `{}`, so the unawaited version would have posted an EMPTY result with
 nothing saying why. Every capability M6 removes is promise-shaped, so the program that
 demonstrates the hole cannot be synchronous (197).
+
+**Six findings from an independent critic, all six fixed, and one was the milestone's own
+subject.** `GET /%2fsrc/libos/process.mjs` served `process.mjs` byte-for-byte with NO policy —
+`unquote` runs after `urlparse`, `normpath` keeps the two leading slashes, and `translate_path`
+collapses them and serves the file anyway — so a process worker created from that URL had an
+unbounded module loader. The commit that was supposed to have closed the spelling question had
+claimed "including percent-encoded", which was true of an encoded slash in the middle of the path
+and not of a leading one. Fixed by asking the resolved FILE rather than the spelling, and the
+`%2f` form is now asserted on the wire before Chrome starts. Also fixed: the `/proc` read racing
+the 2.2 s quarantine, an abandoned waiter's timer retiring a later waiter, the serialization the
+async `run` removed, and two documentation defects. Constraints 201–205.
 
 **Label honestly, and the docs do:** hardening, not a security boundary. Same-origin is not a
 security boundary and the threat model is first-party only for v1. What remains open is written
