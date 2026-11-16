@@ -123,6 +123,13 @@ function kernelBoot (cfg) {
  * the trace ring, which a previous proof's processes would inflate.
  */
 async function runProof (mode, boot, timeoutMs = 90000) {
+  /* THE LINE NAMES THE PROOF THAT IS RUNNING, not the one that finished.
+   *
+   * Every `say` below this used to come AFTER its `await runProof`, so the last line on screen was
+   * always the previous proof — and while `p_exec` ran for 31 seconds the page read as though
+   * `p_builtins` had hung. A reader watching a page cannot tell a slow proof from a stalled one if
+   * the log only reports the past, and that misreading cost a real round of diagnosis. */
+  say('  … ' + mode)
   const k = kernelBoot(boot)
   globalThis.M5.events = k.events
   try {
