@@ -24,7 +24,13 @@ export function nanosecondsOf(spec) {
   const seconds = Number(spec);
   if (!Number.isFinite(seconds)) return null;
   const ns = Math.round(seconds * NS_PER_S);
-  return Number.isSafeInteger(ns) ? ns : null;
+  if (!Number.isSafeInteger(ns)) return null;
+  // A NON-ZERO REQUEST THAT ROUNDS TO ZERO IS REFUSED. `sleep 0.0000000001` returned immediately
+  // with exit 0, and a zero-nanosecond sleep is the exact value src/libos/syscall.mjs records as
+  // having cost two proofs: it is answered on the next macrotask, so a caller that meant to park
+  // never does. `sleep 0` is still a legitimate no-op.
+  if (ns === 0 && seconds > 0) return null;
+  return ns;
 }
 
 export function run(env) {

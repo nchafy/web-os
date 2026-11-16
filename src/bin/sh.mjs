@@ -64,6 +64,9 @@ function makeSession(env) {
     nextJob: 1,
     cwd: "/",
     home: envp.HOME || DEFAULT_HOME,
+    // `$HOME` AND `~` MUST AGREE. With no HOME in the environment `~` fell back to DEFAULT_HOME
+    // while `$HOME` expanded to the empty string, so `cd ~` and `cd $HOME` went to different
+    // places. The fallback is written into `vars` below, once, by `run`.
     path: envp.PATH || DEFAULT_PATH,
     // The terminal this shell controls, or -1. fd 0 when it is a tty, because that is the fd a
     // shell reads its lines from and therefore the one whose foreground group matters.
@@ -106,20 +109,23 @@ function lookupVar(sh, name) {
  * AN UNKNOWN JOB IS AN ERROR, not an empty string. `kill %9` with no job 9 must say so rather than
  * run `kill` with no arguments.
  */
-function expandJobs(sh, word) {
-  let out = "";
-  for (let i = 0; i < word.length; i += 1) {
-    if (word[i] !== "%") { out += word[i]; continue; }
-    const rest = word.slice(i + 1);
-    const current = /^[%+]/.test(rest);
-    const digits = /^\d+/.exec(rest);
-    if (!current && !digits) { out += "%"; continue; }
-    const job = current ? currentJob(sh) : sh.jobs.find((j) => j.id === Number(digits[0]));
-    if (!job) throw new ShellError(`${word}: no such job`);
-    out += String(job.pgid);
-    i += current ? 1 : digits[0].length;
-  }
-  return out;
+function jobPgid(sh, spec) {
+  const job = (spec === "%" || spec === "+")
+    ? currentJob(sh)
+    : sh.jobs.find((j) => j.id === Number(spec));
+  if (!job) throw new ShellError(`%${spec}: no such job`);
+  /* THE JOB'S PROCESS GROUP, positive. The caller negates it and prefixes `--`, which is the only
+   * spelling `kill` cannot misread — see `expandWords`.
+   *
+   * The first version expanded to the positive leader pid, which signalled one stage: for
+   * `sleep 60 | sleep 60 &` the second stage survived, `jobs` printed `Running` for its full
+   * minute, and no job spec could reach it. `src/bin/kill.mjs` takes a negative number as a
+   * process group — POSIX's own spelling — reached through `--`, so `kill -9 123` still means
+   * signal 9 and nothing had to be guessed.
+   *
+   * The whole group matters: the positive leader pid was the first version and it left the second
+   * stage of `sleep 60 | sleep 60 &` running for its full minute with nothing able to reach it. */
+  return job.pgid;
 }
 
 /** The most recent job that has not been reaped — `%%` and `%+`. */
@@ -147,24 +153,56 @@ function globOps(sh) {
 }
 
 /**
- * One stage's words, expanded: tilde, then variables, then job specs, then globs.
+ * One stage's words, expanded: tilde, variables and job specs SPAN BY SPAN, then globs.
  *
- * THE ORDER IS NOT ARBITRARY. Globbing goes LAST because `$DIR/*` has to see the directory the
- * variable named; tilde goes first because `~/x` is a path before anything else happens to it. A
- * QUOTED word is never globbed — `ls '*'` looks for a file called `*` — which is the flag
- * `tokenize` carries per word for exactly this test.
+ * THE EXPANSION RULES ARE `src/libos/shlex.mjs`'s and are pure; this function supplies the three
+ * things only a running shell knows — the variables, the home directory and the job table — and
+ * then does the one step that needs the filesystem.
+ *
+ * WHAT THIS USED TO GET WRONG, measured: it tested a per-WORD `quoted` flag and skipped every
+ * expansion when any part of the word had been quoted, so `echo "$HOME"` printed the literal
+ * `$HOME` and `ls "no"*` did not glob. Spans fixed it — see `tokenize`.
+ *
+ * GLOBBING IS LAST and is gated on `magic`, which `tokenize` computed from the BARE spans as
+ * typed. So `ls '*'` looks for a file called `*`, and a `*` that arrived out of a variable's value
+ * is not re-read as a pattern.
  */
 function expandWords(sh, words) {
   const out = [];
   const shlex = sh.env.shlex;
   for (const word of words) {
-    const tilded = word.quoted ? word.text : shlex.expandTilde(word.text, sh.home);
-    const varred = word.quoted ? tilded : shlex.expandVars(tilded, (n) => lookupVar(sh, n));
-    const jobbed = word.quoted ? varred : expandJobs(sh, varred);
-    if (!word.quoted && word.magic) out.push(...shlex.expandGlob(jobbed, globOps(sh)));
-    else out.push(jobbed);
+    /* A JOB SPEC EXPANDS TO TWO WORDS: `--` and the NEGATIVE process group.
+     *
+     * TWO, because one is ambiguous and this system makes the ambiguity the common case rather
+     * than a corner. `kill` reads a leading `-<digits>` as a signal — POSIX's obsolescent form —
+     * so `%1` expanding to `-3` had `kill %1` answer `kill: usage:` with signal 3 consumed and no
+     * target left. Pids here start at 1, so a job's group is routinely a number that is also a
+     * signal; `kill -TERM -3` and `kill -- -3` are the only spellings that cannot be misread, and
+     * the shell writes the second one. A reader never sees the `--`, and `kill` needed nothing
+     * added for it: POSIX's end-of-options was already the answer.
+     *
+     * The NEGATIVE group, so one signal reaches every stage. The positive leader pid was the first
+     * version and it left the second stage of `sleep 60 | sleep 60 &` running for its full minute
+     * with no job spec able to reach it. */
+    const spec = shlex.jobSpecOf(word);
+    if (spec !== null) {
+      out.push("--", String(-jobPgid(sh, spec)));
+      continue;
+    }
+    const text = expandOneWord(sh, word);
+    if (word.magic) out.push(...shlex.expandGlob(text, globOps(sh)));
+    else out.push(text);
   }
   return out;
+}
+
+/** One token, expanded. The two callbacks are the whole of what this shell adds to the pure
+ *  rules: its variables and its home directory. */
+function expandOneWord(sh, word) {
+  return sh.env.shlex.expandWord(word, {
+    lookup: (n) => lookupVar(sh, n),
+    home: sh.home,
+  });
 }
 
 /* ------------------------------------------------------------------ PATH ---------------- */
@@ -268,8 +306,12 @@ const BUILTINS = {
       ? args.map((a) => Number(a)).filter((n) => Number.isInteger(n))
       : sh.jobs.filter((j) => !j.done).map((j) => j.pgid);
     let status = 0;
-    for (const pgid of targets) {
-      const job = sh.jobs.find((j) => j.pgid === pgid);
+    for (const target of targets) {
+      /* A PID **OR** A PGID, and the first version took only a pgid — which made `wait $!` a
+       * silent no-op for every multi-stage background pipeline. `$!` is POSIX's LAST stage's pid
+       * and `job.pgid` is the FIRST stage's, so for `sleep 1 | cat &` they are different numbers:
+       * the lookup missed, `wait` returned 0 immediately, and the pipeline was still running. */
+      const job = sh.jobs.find((j) => j.pgid === target || j.pids.includes(target));
       if (!job) continue;
       status = waitJob(sh, job);
     }
@@ -391,40 +433,72 @@ function statusOf(stat) {
  * there and empty, which is what a shell does and what writing only the last one got wrong in the
  * predecessor — it created neither the file nor a word about it.
  */
-function openRedirections(sh, stage, words) {
+function openRedirections(sh, stage) {
   const env = sh.env;
   const opened = [];
   let stdin = -1;
   let stdout = -1;
-  const fail = (path, r) => {
+  const closeAll = () => {
     for (const fd of opened) env.fs.close(fd);
+  };
+  const fail = (path, r) => {
+    closeAll();
     return { error: `${path}: ${env.std.errnoName(r)}` };
   };
-  if (stage.in !== null) {
-    const path = expandOne(sh, stage.in);
-    const fd = env.fs.open(path, O_RDONLY);
-    if (fd < 0) return fail(path, fd);
-    opened.push(fd);
-    stdin = fd;
-  }
-  for (let i = 0; i < stage.outs.length; i += 1) {
-    const { path, append } = stage.outs[i];
-    const target = expandOne(sh, path);
-    const flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-    const fd = env.fs.open(target, flags, 0o644);
-    if (fd < 0) return fail(target, fd);
-    opened.push(fd);
-    if (i === stage.outs.length - 1) stdout = fd;
+  /* EVERY THROW BECOMES AN ERROR RETURN, and the fds already opened go with it.
+   *
+   * `expandOne` throws — an ambiguous redirect, an unknown job spec, a bad substitution — and the
+   * throw used to escape with `opened` as a dead local: measured, `cat < notes.txt > '*'` leaked
+   * the fd for `notes.txt` on every occurrence, and 1,021 of them exhaust OPEN_MAX. Worse, the
+   * throw escaped `runPipeline` too, so a multi-stage line skipped BOTH the pipe-close loop and
+   * `waitJob`: `cat big | cat > '*'` left the first stage parked in `write` on a pipe whose reader
+   * the shell still held open, forever, with no job spec to kill it by. One try/catch here and one
+   * try/finally in `runPipeline` close both halves.
+   */
+  try {
+    if (stage.in !== null) {
+      const path = expandOne(sh, stage.in);
+      const fd = env.fs.open(path, O_RDONLY);
+      if (fd < 0) return fail(path, fd);
+      opened.push(fd);
+      stdin = fd;
+    }
+    for (let i = 0; i < stage.outs.length; i += 1) {
+      const { word, append } = stage.outs[i];
+      const target = expandOne(sh, word);
+      const flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+      const fd = env.fs.open(target, flags, 0o644);
+      if (fd < 0) return fail(target, fd);
+      opened.push(fd);
+      if (i === stage.outs.length - 1) stdout = fd;
+    }
+  } catch (error) {
+    closeAll();
+    // A ShellError or a UsageError from expansion is a message for the user, not a defect; it is
+    // returned as this function's own error so the caller's cleanup runs on the normal path.
+    if (error instanceof ShellError || error.name === "UsageError"
+        || error.constructor.name === "UsageError") {
+      return { error: error.message };
+    }
+    throw error;
   }
   return { stdin, stdout, opened };
 }
 
-/** A redirection target, expanded. One word, and a glob that matches several is an error — which
- *  is what a shell does for `> *`, because a redirection has one destination. */
-function expandOne(sh, raw) {
-  const words = expandWords(sh, [{ text: raw, magic: sh.env.shlex.hasMagic(raw), quoted: false }]);
-  if (words.length !== 1) throw new ShellError(`${raw}: ambiguous redirect`);
-  return words[0];
+/**
+ * A redirection target, expanded. ONE word.
+ *
+ * It takes the TOKEN, so the quoting the user wrote is honoured: `> '*'` is a file called `*`, and
+ * a glob that matches several files is an error — which is what a shell does for `> *`, because a
+ * redirection has one destination. Rebuilding the target from its text and calling it unquoted was
+ * the data-loss defect: `echo hi > '*'` globbed and truncated an unrelated file.
+ */
+function expandOne(sh, word) {
+  const text = expandOneWord(sh, word);
+  if (!word.magic) return text;
+  const matches = sh.env.shlex.expandGlob(text, globOps(sh));
+  if (matches.length !== 1) throw new ShellError(`${word.text}: ambiguous redirect`);
+  return matches[0];
 }
 
 /* ------------------------------------------------------------------ the executor -------- */
@@ -477,26 +551,78 @@ function runPipeline(sh, stages, background, line) {
 
   // A SINGLE BUILTIN RUNS IN THIS PROCESS, redirections and all. `cd` in a child would change a
   // directory and then exit, which is the oldest shell bug there is.
-  if (stages.length === 1 && Object.hasOwn(BUILTINS, expanded[0][0]) && !background) {
-    return runBuiltinStage(sh, stages[0], expanded[0]);
+  if (stages.length === 1 && Object.hasOwn(BUILTINS, expanded[0][0])) {
+    if (!background) return runBuiltinStage(sh, stages[0], expanded[0]);
+    /* A BACKGROUNDED BUILTIN IS REFUSED WITH A REASON. It used to fall through to the PATH search
+     * and come back `cd: command not found`, exit 127 — which says "there is no such command"
+     * about a command this shell has and is simply declining to background. With no fork there is
+     * nothing to put in the background, so this is constraint 20a's refusal in its second
+     * spelling. */
+    return std.complain(env, NAME, expanded[0][0],
+      "a builtin cannot be backgrounded — there is no fork (constraint 20a)", 2);
   }
 
   const pipes = [];
   const children = [];
   const myOpened = [];
   let failed = null;
+  let cleaned = false;
 
+  /* THE CLEANUP IS A FUNCTION AND IT RUNS ON EVERY PATH, including a throw.
+   *
+   * While the shell holds a pipe's write end the pipe has a writer and no reader ever sees EOF;
+   * while it holds the read end a writer never sees EPIPE. A throw out of the loop below used to
+   * skip this entirely, which left a stage parked in `write` forever — `cat big | cat > '*'`,
+   * measured. `cleaned` makes it idempotent so the normal path can run it early, before the wait.
+   */
+  const closeMine = () => {
+    if (cleaned) return;
+    cleaned = true;
+    for (const p of pipes) {
+      env.fs.close(p.rfd);
+      env.fs.close(p.wfd);
+    }
+    for (const fd of myOpened) env.fs.close(fd);
+  };
+
+  try {
+    spawnStages(sh, stages, expanded, pipes, children, myOpened, (code) => { failed = code; });
+  } finally {
+    closeMine();
+    /* A CHILD THIS SHELL STARTED IS ALWAYS REAPED. On the throw path there is no job row, so
+     * `reapJobs` would never see it either: the pid and its SAB would sit in the quarantine with
+     * nobody holding them, which is a leak constraint 14 bounds in time and not in count. */
+    if (children.length && failed !== null) {
+      for (const pid of children) env.proc.waitpid(pid, 0);
+    }
+  }
+
+  if (!children.length) return failed === null ? 1 : failed;
+  if (failed !== null) return failed;
+
+  const job = buildJob(sh, children, line);
+  if (background) return startBackground(sh, job, children, line);
+  return runForeground(sh, job, children, line);
+}
+
+/** The spawn loop. Extracted so `runPipeline`'s cleanup can be a `finally` over the whole of it
+ *  rather than a sequence a `break` or a throw can step past. */
+function spawnStages(sh, stages, expanded, pipes, children, myOpened, fail) {
+  const env = sh.env;
+  const std = env.std;
   for (let i = 0; i < stages.length; i += 1) {
     const words = expanded[i];
     const program = resolveCommand(sh, words[0]);
     if (program === null) {
-      failed = std.complain(env, NAME, words[0], "command not found", 127);
-      break;
+      // THE NAME IS PRINTED EVEN WHEN IT IS EMPTY. `sh -c "''"` and a command name that expanded
+      // to nothing used to say `sh: command not found` with no subject at all.
+      fail(std.complain(env, NAME, words[0] === "" ? "''" : words[0], "command not found", 127));
+      return;
     }
-    const red = openRedirections(sh, stages[i], words);
+    const red = openRedirections(sh, stages[i]);
     if (red.error) {
-      failed = std.complain(env, NAME, null, red.error, 1);
-      break;
+      fail(std.complain(env, NAME, null, red.error, 1));
+      return;
     }
     myOpened.push(...red.opened);
 
@@ -506,8 +632,8 @@ function runPipeline(sh, stages, background, line) {
     if (i + 1 < stages.length) {
       toNext = env.proc.pipe2();
       if (typeof toNext === "number") {
-        failed = std.complainErrno(env, NAME, "pipe2", toNext);
-        break;
+        fail(std.complainErrno(env, NAME, "pipe2", toNext));
+        return;
       }
       pipes.push(toNext);
     }
@@ -536,27 +662,25 @@ function runPipeline(sh, stages, background, line) {
       // which is the convention every shell follows and the pair a script actually branches on.
       // Written as `-ENOENT` and not as a literal: the errno space here is WASI's, where ENOENT is
       // 44 — a hardcoded `-2` would have silently classified every failure as 126.
-      failed = std.complainErrno(env, words[0], null, pid, pid === -ENOENT ? 127 : 126);
-      break;
+      fail(std.complainErrno(env, words[0], null, pid, pid === -ENOENT ? 127 : 126));
+      return;
     }
     children.push(pid);
     // THE GROUP IS THE FIRST CHILD'S PID. Set from the shell AND not from the child, because the
     // child may already be running — the race is why POSIX has both ends do it, and the shell's
     // call is the one that must not be skipped.
-    env.proc.setpgid(pid, children[0]);
+    // THE RETURN IS CHECKED. `setpgid` can answer -ESRCH or -EPERM, and a child left in the
+    // shell's own group would then be made the terminal's foreground group below — which makes the
+    // SHELL a background process reading from its own terminal. Reported rather than discarded.
+    const grouped = env.proc.setpgid(pid, children[0]);
+    if (grouped < 0) {
+      std.warn(env, `${NAME}: setpgid ${pid}: ${std.errnoName(grouped)}`);
+    }
   }
+}
 
-  // The shell's own copies go, always: pipe ends first, then redirection fds. While the shell
-  // holds a write end the pipe has a writer and no reader will ever see EOF.
-  for (const p of pipes) {
-    env.fs.close(p.rfd);
-    env.fs.close(p.wfd);
-  }
-  for (const fd of myOpened) env.fs.close(fd);
-
-  if (!children.length) return failed === null ? 1 : failed;
-
-  const job = {
+function buildJob(sh, children, line) {
+  return {
     id: sh.nextJob,
     pgid: children[0],
     pids: children,
@@ -566,27 +690,37 @@ function runPipeline(sh, stages, background, line) {
     reported: false,
     how: "Running",
   };
+}
 
-  if (background) {
-    sh.nextJob += 1;
-    sh.jobs.push(job);
-    sh.lastBg = children[children.length - 1];
-    std.say(env, `[${job.id}] ${sh.lastBg}\n`);
-    sh.trace.push({ line, pids: children, pgid: job.pgid, background: true });
-    return 0;
-  }
+/** A backgrounded pipeline: recorded, announced, and NOT waited for. `$!` is the last stage's pid,
+ *  which is POSIX; `%N` resolves to the job's process GROUP, so the two are deliberately different
+ *  numbers for a multi-stage job and `wait` has to accept either. */
+function startBackground(sh, job, children, line) {
+  sh.nextJob += 1;
+  sh.jobs.push(job);
+  sh.lastBg = children[children.length - 1];
+  sh.env.std.say(sh.env, `[${job.id}] ${sh.lastBg}\n`);
+  sh.trace.push({ line, pids: children, pgid: job.pgid, background: true });
+  return 0;
+}
 
-  // THE PIPELINE BECOMES THE TERMINAL'S FOREGROUND GROUP, which is what makes a keystroke reach it
-  // and not the shell. Skipped when there is no terminal — a shell driven by `-c` has a pipe or a
-  // file on fd 0 and `tcsetpgrp` there is ENOTTY.
+/**
+ * A foreground pipeline: the terminal's foreground group, the wait, and the terminal back.
+ *
+ * A shell that read its next line while a background group held the terminal would be a background
+ * process reading from the terminal, which is what SIGTTIN is for — so the group goes back before
+ * anything else happens, on every path.
+ */
+function runForeground(sh, job, children, line) {
+  const env = sh.env;
   if (sh.tty >= 0) env.tty.setPgrp(sh.tty, job.pgid);
-  const status = waitJob(sh, job);
-  // AND THE SHELL TAKES IT BACK BEFORE READING AGAIN. A shell that read its next line while a
-  // background group held the terminal would be a background process reading from the terminal,
-  // which is what SIGTTIN is for.
-  if (sh.tty >= 0) env.tty.setPgrp(sh.tty, sh.pgid);
-  sh.trace.push({ line, pids: children, pgid: job.pgid, status, background: false });
-  return failed === null ? status : failed;
+  try {
+    const status = waitJob(sh, job);
+    sh.trace.push({ line, pids: children, pgid: job.pgid, status, background: false });
+    return status;
+  } finally {
+    if (sh.tty >= 0) env.tty.setPgrp(sh.tty, sh.pgid);
+  }
 }
 
 /**
@@ -598,30 +732,40 @@ function runPipeline(sh, stages, background, line) {
  */
 function runBuiltinStage(sh, stage, words) {
   const env = sh.env;
-  const red = openRedirections(sh, stage, words);
+  const red = openRedirections(sh, stage);
   if (red.error) return env.std.complain(env, NAME, null, red.error, 1);
   const saved = [];
+  /**
+   * Point `fd` at `to`, remembering what was there. Returns false if the SAVE failed.
+   *
+   * THE SAVE IS CHECKED, and that is the fix. The first version pushed `dup`'s return unchecked and
+   * the restore branch read a negative copy as "the fd was not open before" and CLOSED it — so a
+   * `dup` answering -EMFILE turned `pwd > out.txt` into a shell with no stdout at all: every later
+   * `say` returned -EBADF and the next `pipe2` handed out fd 1 as a pipe end (constraint 94). The
+   * branch's premise was never true either: `ensureStdin` guarantees fd 0 and `spawn` guarantees
+   * 1 and 2, so a negative `dup` was the ONLY way to reach it.
+   */
+  const point = (fd, to) => {
+    const copy = env.fs.dup(fd);
+    if (copy < 0) return false;
+    saved.push([fd, copy]);
+    env.fs.dup2(to, fd);
+    return true;
+  };
   try {
-    if (red.stdin >= 0) {
-      saved.push([0, env.fs.dup(0)]);
-      env.fs.dup2(red.stdin, 0);
+    if (red.stdin >= 0 && !point(0, red.stdin)) {
+      return env.std.complain(env, NAME, words[0], "cannot save fd 0 for a redirection", 1);
     }
-    if (red.stdout >= 0) {
-      saved.push([1, env.fs.dup(1)]);
-      env.fs.dup2(red.stdout, 1);
+    if (red.stdout >= 0 && !point(1, red.stdout)) {
+      return env.std.complain(env, NAME, words[0], "cannot save fd 1 for a redirection", 1);
     }
     return BUILTINS[words[0]](sh, words.slice(1));
   } finally {
+    // Every saved fd is a real one, so every restore is a dup2 back. There is no "it was closed"
+    // case any more — see `point`.
     for (const [fd, copy] of saved) {
-      if (copy >= 0) {
-        env.fs.dup2(copy, fd);
-        env.fs.close(copy);
-      } else {
-        // THE FD WAS NOT OPEN BEFORE, so restoring it means closing it. Leaving the redirection
-        // installed would point every later prompt at the file: a shell whose stdout silently
-        // became `out.txt` after one `pwd > out.txt`.
-        env.fs.close(fd);
-      }
+      env.fs.dup2(copy, fd);
+      env.fs.close(copy);
     }
     for (const fd of red.opened) env.fs.close(fd);
   }
@@ -646,6 +790,16 @@ export function runLine(sh, line) {
     if (error instanceof ShellError) {
       env.std.warn(env, `${NAME}: ${error.message}`);
       sh.status = 1;
+    } else if (error && (error.name === "UsageError"
+        || error.constructor.name === "UsageError")) {
+      /* A UsageError RAISED DURING EXPANSION, not during parsing. `parse` is wrapped separately
+       * above, so `echo ${}` reached the branch below and was reported as a DEFECT IN THIS SHELL,
+       * with a stack trace and exit 70, for four characters a user can type. `instanceof` is not
+       * usable across the module boundary here — the shell receives `shlex` through `env`, so a
+       * future second instance of the module would make the check silently false — hence the name
+       * test, which is also why `ShellError` above is this module's own class. */
+      env.std.warn(env, `${NAME}: ${error.message}`);
+      sh.status = 2;
     } else {
       // A throw that is not a ShellError is a DEFECT IN THIS PROGRAM, and it is reported as one
       // rather than as a command that failed. Swallowing it would make a shell bug look like a
@@ -690,16 +844,28 @@ function writePrompt(sh) {
 }
 
 /**
- * The interactive loop: a prompt, a line, a pipeline.
+ * The read loop: a prompt, a line, a pipeline.
  *
- * ONE READ PER LINE, because the terminal is in canonical mode and the kernel's line discipline
- * only answers a read when a line is complete (M4b). So this does not buffer lines itself — a
- * second buffer here would be a second line discipline, and the two would disagree about what a
- * backspace does.
+ * IT BUFFERS A PARTIAL LINE, and it has to. The first version read 4096 bytes and split them on
+ * newlines, justified by the terminal's canonical mode — but this loop is also how a SCRIPT is
+ * read, and `cat script | sh` has a pipe on fd 0 where there is no line discipline at all.
+ * Measured with a 4090-byte first line: `echo hello` on the next line became `echo h` plus
+ * `sh: ello: command not found`, and with a multi-byte character at the seam the word `echo`
+ * itself was torn in half and both halves ran. Silent wrong execution, not a diagnostic.
+ *
+ * `rest` carries the incomplete tail between reads and the decoder is per-loop with
+ * `{stream: true}`, so a character split across two reads decodes once and correctly. At end of
+ * input an unterminated tail is still run — a script with no final newline has a last command.
+ *
+ * `maxLine` is a bound on `rest` rather than on the file: input with no newline in it would
+ * otherwise let a pipe make this process allocate without limit.
  */
 function interactive(sh) {
   const env = sh.env;
   const buf = new Uint8Array(4096);
+  const dec = new TextDecoder();
+  let rest = "";
+  const MAX_LINE = 1024 * 1024;
   for (let i = 0; i < MAX_LINES && !sh.exiting; i += 1) {
     reapJobs(sh);
     // Finished jobs are announced BEFORE the prompt, which is where a shell reports them: after
@@ -720,17 +886,35 @@ function interactive(sh) {
     // 0 IS END OF INPUT — the terminal closed or Ctrl-D was typed — and it is NOT an error. A
     // negative is: -EINTR means a signal arrived with a handler, and the loop continues, which is
     // what makes Ctrl-C at a prompt print a new prompt rather than ending the session.
-    if (n === 0) break;
+    if (n === 0) {
+      rest += dec.decode();
+      // THE LAST LINE WITHOUT ITS NEWLINE. A script that does not end in one still has a final
+      // command, and dropping it would lose the line a user typed before Ctrl-D.
+      if (rest.trim() && !sh.exiting) runLine(sh, rest);
+      break;
+    }
     if (n < 0) {
-      if (n === -EINTR) continue;
+      if (n === -EINTR) {
+        // A SIGNAL DISCARDS THE HALF-TYPED LINE, which is what Ctrl-C at a prompt means
+        // everywhere: the next prompt starts empty.
+        rest = "";
+        continue;
+      }
       env.std.warn(env, `${NAME}: read: ${env.std.errnoName(n)}`);
       break;
     }
-    const text = env.std.text(buf.subarray(0, n));
-    // A read can carry several lines if the discipline delivered them together.
-    for (const line of text.split("\n")) {
-      if (sh.exiting) break;
+    rest += dec.decode(buf.subarray(0, n), { stream: true });
+    if (rest.length > MAX_LINE) {
+      env.std.warn(env, `${NAME}: a line longer than ${MAX_LINE} bytes was discarded`);
+      rest = "";
+      continue;
+    }
+    let cut = rest.indexOf("\n");
+    while (cut >= 0 && !sh.exiting) {
+      const line = rest.slice(0, cut);
+      rest = rest.slice(cut + 1);
       runLine(sh, line);
+      cut = rest.indexOf("\n");
     }
   }
   return sh.status;
@@ -752,7 +936,11 @@ function interactive(sh) {
 function ensureStdin(env) {
   const probe = env.fs.fstat(0);
   if (typeof probe === "object") return 0;
-  const fd = env.fs.open("/dev/zero", O_RDONLY);
+  /* `/dev/null`, NOT `/dev/zero`. Both hold fd 0, which is all this function is for, and only one
+   * of them means "no stdin": `/dev/zero` is an honest finite 256-byte file here
+   * (src/kernel/devfs.mjs), so a `-c` shell with no stdin fed 256 NUL bytes to every reader —
+   * `sh -c "wc -c"` printed 256 where it must print 0. */
+  const fd = env.fs.open("/dev/null", O_RDONLY);
   // A FAILURE IS FATAL TO THE SHELL and is not ignored: with fd 0 free, the first pipeline this
   // shell builds is wired backwards and the failure appears as a hang somewhere else entirely.
   if (fd < 0) return fd;
@@ -765,12 +953,13 @@ export function run(env) {
   const stdin = ensureStdin(env);
   if (stdin < 0) {
     return {
-      exit: env.std.complain(env, NAME, "/dev/zero",
+      exit: env.std.complain(env, NAME, "/dev/null",
         `cannot hold fd 0: ${env.std.errnoName(stdin)}`, 1),
     };
   }
   sh.cwd = readCwd(sh);
   sh.vars.PWD = sh.cwd;
+  if (sh.vars.HOME === undefined) sh.vars.HOME = sh.home;
   sh.pgid = env.proc.getpgid(0);
 
   /* A SHELL MUST NOT DIE OF THE KEYSTROKE IT EXISTS TO FORWARD.
@@ -802,6 +991,10 @@ export function run(env) {
 
   const args = (env.argv || []).slice(1);
   if (args[0] === "-c") {
+    if (args.length < 2) {
+      // `sh -c` with no operand exited 0 in silence. A missing operand is a usage error, named.
+      return { exit: env.std.complain(env, NAME, "-c", "needs a line to run", 2) };
+    }
     const line = args.slice(1).join(" ");
     const status = runLine(sh, line);
     return { exit: status & 0xff, status, trace: sh.trace, cwd: sh.cwd };

@@ -28,7 +28,7 @@ checks is a wish.
 | M3 | `/proc`, `/dev`, mounts, provider iface, /dev/trace | 4 | 1 | ✅ done — **ACCEPT**, 55 expectations, 3 controls, 9 review findings fixed |
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 53 expectations, 4 controls |
-| M5 | The shell and ten programs, exec through the filesystem | 6 | 1 | ✅ done — **ACCEPT**, 34 expectations, 1 control, and a closed SSRF hole |
+| M5 | The shell, eleven programs, exec through the filesystem | 6 | 1.5 | ✅ done — **ACCEPT**, 38 expectations, 6 controls, 14 review findings fixed |
 | **M4a** | **The terminal gets a real window** | 2 | | ⬜ **next** |
 | M6 | Neuter the process realm | 2 | | ⬜ |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
@@ -1085,7 +1085,9 @@ PURE, so `bench/m5-sh/probe.mjs` checks 91 properties of it under `node` in mill
 `src/bin/sh.mjs` is a new executor: `pipe2` + `spawn` with posix_spawn file actions + `setpgid`,
 redirections opened by the shell, background jobs with `%N` specs, and builtins for the commands
 that cannot be programs (`cd`, `pwd`, `exit`, `jobs`, `wait`, `export`, `unset`, `complete`). Ten
-programs in `/usr/bin`: `ls cat echo wc head grep sleep kill ps true`, plus `sh`. `src/libos/std.mjs`
+programs in `/usr/bin`: `ls cat echo wc head grep sleep kill ps true`, plus `sh` — and `yes`, an
+eleventh the review required: without an endless source, the no-hang property `cat`, `head`, `grep`
+and `eachLine` are all written around had no spelling in this system (constraint 152). `src/libos/std.mjs`
 is the program support library, handed over as `env.std` so a program imports nothing.
 
 **What the milestone did not ask for and could not avoid.** `/usr/bin` meant `spawn` had to load a
@@ -1108,8 +1110,24 @@ the builtins, the refusals and the URL refusals hold because none of them create
 Blob image cannot resolve — every stage faulted with SIGABRT until the specifier became absolute
 (constraint 125). The loader now refuses such a program by name rather than letting it fault.
 
-**Recorded limitations** are constraint 138, sorted into permitted-by-decision and structural.
-There are no known defects at the close of M5.
+**Two critics, then eleven fixes.** M5 went build → independent attack → fix → re-attack, as every
+milestone here has. The two worst findings defeated M5's own central claim and are worth reading
+before trusting any similar fix: the loader had MOVED the network hole rather than closing it (a
+program's own `import "//host/x.mjs"` had the CHILD fetch and evaluate remote code while the
+kernel's accounting stayed at zero loads, constraint 139), and a four-line program could panic the
+whole kernel (constraint 140). The full record is constraints 139–152, each with the measurement
+that produced it.
+
+**Recorded limitations** are constraint 138, sorted into permitted-by-decision and structural; the
+one thing left open is a dynamic `import(expr)` with a computed argument, which no scanner can
+catch and which a Content-Security-Policy answers — M6 owns it (constraint 139).
+
+**Gates.** `scripts/check.py --only m5` (38 expectations, 39 s),
+`scripts/check.py --negative spawn-self` (18 red, 20 intact),
+`node bench/m5-sh/probe.mjs` (111 host checks, no browser), and
+`python3 bench/m5-exec/controls.py` (5 mutations of the loader, each scored on which labels move —
+including a two-stage pair where collapsing the image cache key must move NOTHING and collapsing it
+*plus* removing the byte comparison must move 17).
 
 ---
 

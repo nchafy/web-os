@@ -12,7 +12,8 @@ import {
   G_STALL_US, G_READY, G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN,
   W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
   ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
-  SIGPIPE, SIGABRT, SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
+  SIGPIPE, SIGABRT, SIGQUIT, SIGILL, SIGSEGV,
+  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
   ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
@@ -62,7 +63,17 @@ let table = null;
  * without it a writer whose reader has gone only gets the SIGPEND bit, which `drainSignals`
  * discards at the next syscall entry, and it loops forever on a write that keeps failing.
  */
-const FATAL_DEFAULT = new Set([SIGTERM, SIGINT, SIGHUP, SIGPIPE]);
+const FATAL_DEFAULT = new Set([
+  SIGTERM, SIGINT, SIGHUP, SIGPIPE,
+  // M5 ADDED THESE FOUR, because the table a process can name was wider than the set that acts.
+  // `kill -ABRT <pid>` returned 0, the target's blocked `read` answered -EINTR, `drainSignals`
+  // discarded the bit and the process KEPT RUNNING — where POSIX's default for every one of these
+  // is to terminate. `src/bin/kill.mjs -l` prints the whole signal table, so the gap became a
+  // public surface the moment a `kill` program existed. SIGSEGV and SIGILL are in the set for the
+  // same reason even though nothing in this kernel raises them: a signal a process may SEND must
+  // behave, and the alternative is a name that is accepted and ignored.
+  SIGQUIT, SIGABRT, SIGILL, SIGSEGV,
+]);
 
 let trace = null;
 let mounts = null;
@@ -682,7 +693,30 @@ function spawn(image, programCfg, index = 0, parent = null) {
   };
 
   slot.worker = new Worker(RUNTIME_URL, { type: "module", name: `pid${slot.pid}` });
-  slot.worker.onerror = (e) => panic(`process ${slot.pid} runtime: ${e.message}`);
+  /**
+   * A PROCESS WORKER'S ERROR IS THAT PROCESS'S FAULT, NOT THE KERNEL'S PANIC.
+   *
+   * This called `panic`, which stores K_PANIC and tells every live process through its own SAB
+   * that the kernel is dead. An uncaught error in one unprivileged process therefore stopped the
+   * whole system — and once M5 let a process choose its own program text, a four-line program
+   * containing `setTimeout(() => { throw 0 })` was enough, with no cooperation from the page.
+   *
+   * It is reported through the SAME path a program's caught throw already takes — `faults`, plus a
+   * reap — so a reader sees one kind of event for one kind of failure, and `/proc` shows the
+   * process gone rather than the kernel gone. The libos cancels the error event as well, so in a
+   * tree with both halves present this is now only reached for an error the process itself could
+   * not catch: a module that fails to load (which is where a bad import lands) or a worker that
+   * could not start.
+   */
+  slot.worker.onerror = (e) => {
+    const why = `process ${slot.pid} runtime: ${e.message || e.type || "worker error"}`;
+    faults.push({ pid: slot.pid, why });
+    post({ t: "fault", pid: slot.pid, why });
+    // Through `reap`, never by assigning ZOMBIE: that path leaves `exitKind` at -1, so a parent's
+    // `waitpid` gets a status meaning neither exited nor killed, and teardown never runs — the
+    // process keeps its fds open. The same reason the `fault` message arm below gives.
+    if (table.get(slot.pid)) reap(slot, STAT_KILLED, SIGABRT);
+  };
   slot.worker.postMessage(
     {
       t: "init",

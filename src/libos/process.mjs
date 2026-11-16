@@ -145,8 +145,29 @@ function panic(why) {
   port.postMessage({ t: "fault", pid, why: String(why) });
 }
 
-self.onerror = (e) => panic(`process onerror: ${e.message ?? e}`);
-self.onunhandledrejection = (e) => panic(`process rejection: ${e.reason}`);
+/**
+ * A FAULT IS REPORTED AND THE EVENT IS CANCELLED. Both halves, and the second one is the fix.
+ *
+ * An `onerror` handler that does not cancel the event leaves the runtime to "report the exception",
+ * which for a dedicated worker RE-FIRES it at the `Worker` object in the parent — and the parent
+ * here is the kernel, whose `worker.onerror` used to call `panic`. So a program containing
+ * `setTimeout(() => { throw new Error("x") })` took the WHOLE SYSTEM down: `G_KSTATE` went
+ * K_PANIC and every live process was told through its own SAB that the kernel was dead.
+ *
+ * That wiring predates M5. What M5 changed is that a process now chooses its own program text, so
+ * it needed no cooperation from the page. Returning true is how an `onerror` handler cancels;
+ * `preventDefault` is the same thing for the rejection event, which has no return-value form.
+ * The kernel's side is the other half (src/kernel/kernel.mjs): a process worker's error is that
+ * PROCESS's fault and is reaped as one.
+ */
+self.onerror = (e) => {
+  panic(`process onerror: ${e.message ?? e}`);
+  return true;
+};
+self.onunhandledrejection = (e) => {
+  panic(`process rejection: ${e.reason}`);
+  if (e.preventDefault) e.preventDefault();
+};
 
 let exiting = false;
 

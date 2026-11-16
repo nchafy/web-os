@@ -60,7 +60,11 @@ export function warn(env, s) {
  * preference of each program — and a reader greps for `grep:` across every program's output.
  */
 export function complain(env, name, subject, reason, code = 1) {
-  warn(env, subject ? `${name}: ${subject}: ${reason}` : `${name}: ${reason}`);
+  // `null` MEANS "NO SUBJECT"; an empty string is a subject that happens to be empty, and the two
+  // are different. A truthiness test treated `""` as absent, so a command name that expanded to
+  // nothing produced `sh: command not found` naming nothing at all.
+  const has = subject !== null && subject !== undefined;
+  warn(env, has ? `${name}: ${subject}: ${reason}` : `${name}: ${reason}`);
   return code;
 }
 
@@ -221,7 +225,11 @@ export function listDir(env, path) {
  *
  * @param {string[]} args  argv WITHOUT the program name.
  * @param {string} spec    letters that are flags; a letter followed by `:` takes an argument.
- * @returns {{flags: object, operands: string[], bad: string|null}}
+ * @returns {{flags: object, operands: string[], bad: string|null, why: string}}
+ *
+ * `why` IS "unknown" OR "missing-argument", because a program cannot write a useful message
+ * without knowing which: `head -n` with no operand answered `unknown option -n (use -n n)`,
+ * telling the reader to type what they had just typed.
  *
  * `--` ends option parsing, `-` is an operand (POSIX's "read standard input"), and an unknown
  * letter is REPORTED rather than ignored: a program that silently accepted `-Q` would run with
@@ -246,19 +254,21 @@ export function getopt(args, spec) {
     if (arg.length < 2 || arg[0] !== "-") { operands.push(arg); continue; }
     for (let c = 1; c < arg.length; c += 1) {
       const letter = arg[c];
-      if (!known.has(letter)) return { flags, operands, bad: `-${letter}` };
+      if (!known.has(letter)) return { flags, operands, bad: `-${letter}`, why: "unknown" };
       if (!takesArg.has(letter)) { flags[letter] = true; continue; }
       // The rest of this word, or the next word. `-n3` and `-n 3` are the same option.
       const inline = arg.slice(c + 1);
       if (inline) { flags[letter] = inline; c = arg.length; continue; }
       i += 1;
-      if (i >= args.length) return { flags, operands, bad: `-${letter}` };
+      if (i >= args.length) {
+        return { flags, operands, bad: `-${letter}`, why: "missing-argument" };
+      }
       flags[letter] = args[i];
       c = arg.length;
     }
   }
   for (; i < args.length; i += 1) operands.push(args[i]);
-  return { flags, operands, bad: null };
+  return { flags, operands, bad: null, why: "" };
 }
 
 /**

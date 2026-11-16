@@ -25,7 +25,9 @@ pre{white-space:pre-wrap}.ok{color:#8f8}.bad{color:#f88}</style>
  *   PROOF 5  what `spawn` will and will not load, and argv in /proc
  *   PROOF 6  the three things this shell refuses rather than guesses at
  *   PROOF 7  the shell interactive on a real pty: a typed line, Ctrl-C, Ctrl-D
- *   PROOF 8  a process cannot make the kernel fetch a URL (constraint 123)
+ *   PROOF 8  a process cannot reach the network — not by path, and not by what its own program
+ *            text imports (constraint 123)
+ *   PROOF 9  `yes | head -1` terminates through a real shell
  *
  * CONTROL ?spawn_self=1 — `spawn` answers the CALLER'S pid and creates nothing. MILESTONES.md
  * M5's own control: "make `spawn` return the parent's pid; `ps` must show one process and the
@@ -44,7 +46,7 @@ Object.assign(globalThis.M5, { isolated: self.crossOriginIsolated === true })
 
 globalThis.M5.proofs = {
   pipeline: null, jobs: null, redirect: null, builtins: null,
-  exec: null, refusals: null, tty: null, no_url: null,
+  exec: null, refusals: null, tty: null, no_url: null, endless: null,
 }
 
 if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
@@ -277,13 +279,32 @@ async function main () {
 
   /* ---- PROOF 8 -------------------------------------------------------------------------- */
   const nu = await runProof('p_noturl', boot)
-  say('p_noturl: ' + nu.refused + ' of ' + (nu.rows || []).length + ' refused' +
+  say('p_noturl: ' + nu.refused + ' of ' + (nu.rows || []).length + ' paths refused, ' +
+    ((nu.imports || []).length - (nu.importFailures || []).length) + ' of ' +
+    (nu.imports || []).length + ' import rows as declared' +
     (nu.spawned && nu.spawned.length ? '; SPAWNED ' + nu.spawned.join(', ') : ''))
   P.no_url = {
-    ok: !!(nu.ok && nu.allLookupFailures),
+    ok: !!(nu.ok && nu.allLookupFailures && nu.allowedStillRuns
+      && !(nu.importFailures || []).length),
     evidence: {
       rows: nu.rows, refused: nu.refused, spawned: nu.spawned,
       allLookupFailures: nu.allLookupFailures, ENOENT: E.ENOENT, why: nu.why,
+      // The import half: every specifier naming a host refused by the LINKER, and the one
+      // allowlisted specifier still loading.
+      imports: nu.imports, importFailures: nu.importFailures,
+      allowedStillRuns: nu.allowedStillRuns, ENOEXEC: nu.ENOEXEC,
+    },
+  }
+
+  /* ---- PROOF 9 -------------------------------------------------------------------------- */
+  const en = await runProof('p_endless', boot)
+  say('p_endless: `yes | head -1` -> ' + JSON.stringify(en.oneLine) +
+    ', `yes | head -5 | wc -l` -> ' + JSON.stringify(en.counted))
+  P.endless = {
+    ok: !!en.ok,
+    evidence: {
+      oneLine: en.oneLine, oneStatus: en.oneStatus, threeLines: en.threeLines,
+      counted: en.counted, terminated: en.terminated, why: en.why,
     },
   }
 

@@ -1426,9 +1426,20 @@ HANDLERS.chdir = (p, k) => {
   if (typeof path === "number") return path;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
+  /* THE TYPE FIRST, THEN THE PERMISSION, and the order is a fix. Asking for `wantX` in one call
+   * made the VFS check the execute bit on whatever was there — so `chdir("/tmp/notes.txt")` on a
+   * 0o644 file answered EACCES ("Permission denied") and the `-ENOTDIR` below was DEAD for every
+   * non-executable file, while the same call on `/proc/1/status` answered ENOTDIR because the
+   * generated filesystem tests the type itself. One operation, two answers, chosen by mount — the
+   * family constraint 82 records. A shell printing "Permission denied" for `cd somefile` sends a
+   * reader looking at mode bits. */
   try {
-    const decision = at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true, wantX: true });
-    if (decision.type !== DIR) return -ENOTDIR;
+    const typed = at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true });
+    if (typed.type !== DIR) return -ENOTDIR;
+    // The SEARCH permission, POSIX's name for the execute bit on a directory, through the
+    // filesystem that owns the mode bits. Second call, same path, and it is the only way to keep
+    // one interpreter of those bits while answering ENOTDIR first.
+    at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true, wantX: true });
   } catch (error) {
     return errnoOfFsError(error);
   }

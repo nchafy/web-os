@@ -32,11 +32,12 @@ and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 8 checks, 332 expectations |
+| `scripts/check.py` | the suite — 8 checks, 336 expectations |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `scripts/check.py --negative <control>` | 17 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs** — `pkill` returns before Chrome is gone, and a control run that overlaps a dying one reports a false failure. Measured: `--negative kernel-stall` turned `no error or lost-reply path` red twice in 13 runs, both times back-to-back inside a sweep, and 11 times clean when the runs were spaced. The control busy-waits 2 ms per syscall across 16 processes, so it is the most load-sensitive thing in the suite. Not caused by any code change — treat a single red here as unmeasured and re-run it alone |
-| `node bench/m5-sh/probe.mjs` | M5's host gate, no browser: 91 checks over the shell's pure front end and the programs' pure parts |
+| `node bench/m5-sh/probe.mjs` | M5's host gate, no browser: 111 checks over the shell's pure front end and the programs' pure parts |
+| `python3 bench/m5-exec/controls.py` | 5 mutations of the exec loader, each scored on WHICH labels move. Two are narrow (the execute bit, the network refusal); one proves the import allowlist is what refuses an off-origin specifier; and two are a PAIR — collapsing the image cache key must move NOTHING, collapsing it *and* removing the byte comparison must move 17 |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 129 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
@@ -84,6 +85,20 @@ come from the mount (`src/kernel/exec.mjs`). Three consequences a later mileston
 had had none since M1; a shell without it DIES on the Ctrl-C it exists to forward. `nanosleep` had
 every caller open-coding `packI64` and one of them passed (0, 0) — a zero-length sleep. Constraint
 100's rule keeps earning its place.
+
+**THE ONE THING M5 LEFT OPEN, and it is M6's.** A program's static imports are an ALLOWLIST of
+exact literals now (`PROGRAM_IMPORTS`), because a pattern leaked: `new URL("//host/x.mjs", base)`
+resolves OFF-ORIGIN, so a program could have the CHILD's module loader fetch and evaluate remote
+code while the kernel's own accounting stayed at zero loads (constraint 139). A DYNAMIC
+`import(expr)` with a computed argument cannot be caught by reading the text and no scanner can.
+Deleting `fetch` does not close it either — `import` is the module loader. **A
+Content-Security-Policy on the document is the answer**, and it belongs with constraint 41's realm
+stripping in M6.
+
+**A process worker's error is now that PROCESS's fault, not a kernel panic** (constraint 140). If
+you add a second caller of `EXEC.load`, note that `linkProgram` can still throw for a specifier
+`new URL` refuses; `spawnChild` wraps it, and an unwrapped caller would be a kernel panic on a
+four-byte program.
 
 **One signal costs two `-EINTR`s** (constraint 131). Any call made immediately after a signal may
 answer -EINTR, and a program that cares must retry once. The kernel was NOT changed to deliver

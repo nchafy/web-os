@@ -70,7 +70,10 @@ function columnize(names, width) {
       const isLast = i + rows >= names.length;
       line += isLast ? names[i] : names[i].padEnd(cell);
     }
-    out += `${line.replace(/\s+$/, "")}\n`;
+    // NO TRAILING-WHITESPACE STRIP. It was lossy and redundant: `isLast` above already leaves the
+    // last cell unpadded, and the strip ate the name itself when a filename WAS whitespace — a
+    // file called "  " printed as a blank line and `ls` output stopped round-tripping.
+    out += `${line}\n`;
   }
   return out;
 }

@@ -36,9 +36,19 @@ export function run(env) {
       .map(([n, v]) => `${v} ${n}`);
     std.say(env, `${names.join("\n")}\n`);
     return { exit: 0 };
+  } else if (args[i] === "--") {
+    // POSIX's end-of-options, and the unambiguous way to say "the next word is a target even
+    // though it starts with a minus".
+    i += 1;
   } else if (typeof args[i] === "string" && args[i].length > 1 && args[i][0] === "-") {
     const named = signalOf(args[i].slice(1));
     if (named === null) {
+      /* A LEADING `-<digits>` THAT IS NOT A SIGNAL IS STILL AN ERROR, and that is POSIX's own
+       * behaviour: `kill -9` with no pids is a usage error everywhere, not "SIGTERM to group 9".
+       * Reading it as a target was tried and the hole was worse than the convenience — it made a
+       * plausible typo signal a process group silently. A group is written `kill -TERM -3` or
+       * `kill -- -3`, and `src/bin/sh.mjs` writes the second for every job spec precisely so the
+       * ambiguity never arises. */
       return {
         exit: std.complain(env, NAME, args[i].slice(1), "not a signal", std.EXIT_USAGE),
       };

@@ -32,6 +32,9 @@ function rowOf(env, pid) {
   if (typeof status === "number") return null;
   const f = fields(status);
   const cmdline = env.std.readFileText(env, `/proc/${pid}/cmdline`);
+  // THE RACE IS HANDLED ON BOTH READS. A pid that exited between the two left a row whose command
+  // was `?`, which reads as a live process with an unknown command rather than as one that went.
+  if (typeof cmdline === "number") return null;
   // CMDLINE IS NUL-SEPARATED AND NUL-TERMINATED (Linux's own shape), so the trailing empty field
   // is dropped and the rest joined with spaces. Splitting without dropping it printed every
   // command with a trailing space.
@@ -64,9 +67,16 @@ function format(row) {
 
 export function run(env) {
   const std = env.std;
-  const { flags, bad } = std.getopt((env.argv || []).slice(1), "l");
+  const { flags, operands, bad } = std.getopt((env.argv || []).slice(1), "l");
   if (bad) {
     return { exit: std.complain(env, NAME, null, `unknown option ${bad}`, std.EXIT_USAGE) };
+  }
+  // AN OPERAND IS REFUSED, not discarded. `ps 123` used to list every process and exit 0, which
+  // reads as "pid 123 is one of these" — this program takes no operands and says so.
+  if (operands.length) {
+    return {
+      exit: std.complain(env, NAME, operands[0], "ps takes no operands", std.EXIT_USAGE),
+    };
   }
   const entries = std.listDir(env, "/proc");
   if (typeof entries === "number") {

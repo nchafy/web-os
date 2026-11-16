@@ -42,16 +42,32 @@ function headFd(env, fd, want) {
 
 export function run(env) {
   const std = env.std;
-  const { flags, operands, bad } = std.getopt((env.argv || []).slice(1), "n:");
-  if (bad) {
-    // `head -5` IS REFUSED rather than guessed at. It is a real idiom this program does not
-    // support, and treating `5` as a filename would print "5: no such file" for a line that reads
-    // perfectly well — a message about the wrong thing entirely.
-    return {
-      exit: std.complain(env, NAME, null,
-        `unknown option ${bad} (use -n ${bad.slice(1)})`, std.EXIT_USAGE),
-    };
+  const args = (env.argv || []).slice(1);
+  /* `head -1` IS A LINE COUNT, not an unknown option.
+   *
+   * It was refused on the grounds that this program does not support the obsolescent form — and
+   * MILESTONES.md M5's own headline proof is written `yes | head -1`, so the first thing anybody
+   * typed hit the refusal. It is also what every `head` in existence accepts. Consumed here,
+   * before `getopt`, because `-1` is not an option letter and a general parser can only read it
+   * as one.
+   */
+  let obsolescent = null;
+  if (args.length && /^-\d+$/.test(args[0])) {
+    obsolescent = args[0].slice(1);
+    args.shift();
   }
+  const { flags, operands, bad, why } = std.getopt(args, "n:");
+  if (bad) {
+    // `head -n` with nothing after it is a MISSING OPERAND, and saying "use -n n" to that reader
+    // told them to type what they had just typed.
+    const message = why === "missing-argument"
+      ? `option ${bad} needs a line count`
+      : `unknown option ${bad}`;
+    return { exit: std.complain(env, NAME, null, message, std.EXIT_USAGE) };
+  }
+  // `-n` WINS OVER `-5` when both are written, which is what GNU head does: the last count given
+  // is the one that applies and `-n` is the current spelling.
+  if (obsolescent !== null && flags.n === undefined) flags.n = obsolescent;
   let want = DEFAULT_LINES;
   if (flags.n !== undefined) {
     const n = std.wholeNumber(flags.n);

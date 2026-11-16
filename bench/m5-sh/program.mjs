@@ -19,7 +19,8 @@
 //                  with no execute bit, a program that is not there, and argv in /proc
 //   p_refusals     the three things this shell refuses to guess at
 //   p_tty          the shell interactive on a pty: a typed line, Ctrl-C, Ctrl-D
-//   p_noturl       a process cannot make the kernel fetch a URL (constraint 123)
+//   p_noturl       a process cannot make the kernel fetch a URL, by path OR by import (123)
+//   p_endless      `yes | head -1` terminates through a real shell — M4's headline, now sayable
 
 import {
   E, EACCES, ENOENT, MAX_INLINE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
@@ -594,7 +595,7 @@ function pTty(env) {
 }
 
 /**
- * PROOF 8. A process cannot make the kernel fetch a URL. Constraint 108.
+ * PROOF 8. A process cannot make the kernel fetch a URL. Constraint 123.
  *
  * Until M5, `SYS_spawn` handed its caller's path to `new URL(path, location)` and then to
  * `fetch` — so a process could name any origin, have the kernel request it from the browser's
@@ -616,17 +617,108 @@ function pNoUrl(env) {
     const r = env.proc.spawn(spec, ["x"], []);
     rows.push({ spec, r, errno: r < 0 ? -r : 0, name: r < 0 ? env.std.errnoName(r) : "SPAWNED" });
   }
-  // `/src/bin/true.mjs` is in the list on purpose: it IS a real file on the server and it is NOT
-  // in this system's filesystem, so it must be refused too. A kernel that still reached the
+
+  /* AND THE OTHER HALF, which the first version of this proof missed entirely: a program's own
+   * IMPORT naming a host. The kernel never calls `fetch`, so its own accounting stayed at zero
+   * loads while the CHILD's module loader fetched and evaluated remote code on its behalf — the
+   * worst property a security fix can have. Measured: `new URL("//evil/p.mjs", base)` resolves
+   * OFF-ORIGIN, and a bare `https://…` specifier was not matched by the rewriter at all and
+   * travelled into the Blob verbatim.
+   *
+   * Each program below is written to `/tmp`, made executable, and spawned. Every one must be
+   * refused with ENOEXEC by the LINKER, before any Blob exists. `/src/abi.mjs` is in the list as
+   * the positive control: the one specifier that must still work, so a refusal of everything is
+   * not mistaken for a working allowlist. */
+  const imports = [];
+  for (const [name, specifier, want] of [
+    ["offorigin", "//example.invalid/p.mjs", "refused"],
+    ["absolute-url", "https://example.invalid/p.mjs", "refused"],
+    ["backslash", "/\\example.invalid/p.mjs", "refused"],
+    ["same-origin-path", "/admin/whatever.mjs", "refused"],
+    ["relative", "../../src/abi.mjs", "refused"],
+    ["dynamic-literal", "", "refused"],
+    ["allowed", "/src/abi.mjs", "runs"],
+  ]) {
+    const path = `/tmp/m5imp-${name}.mjs`;
+    const text = name === "dynamic-literal"
+      ? 'export function run() { import("//example.invalid/p.mjs"); return { exit: 5 } }\n'
+      : `import ${JSON.stringify(specifier)};\nexport function run() { return { exit: 5 } }\n`;
+    const fd = env.fs.open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o755);
+    if (fd < 0) {
+      imports.push({ name, error: env.std.errnoName(fd) });
+      continue;
+    }
+    env.fs.write(fd, ENC.encode(text));
+    env.fs.close(fd);
+    env.fs.chmod(path, 0o755);
+    const pid = env.proc.spawn(path, [name], []);
+    let stat = null;
+    if (pid >= 0) stat = env.proc.waitpid(pid, 0);
+    imports.push({
+      name, specifier, want,
+      spawn: pid,
+      errno: pid < 0 ? -pid : 0,
+      errName: pid < 0 ? env.std.errnoName(pid) : "SPAWNED",
+      stat: typeof stat === "object" ? stat : null,
+      // A REFUSAL IS -ENOEXEC FROM `spawn` ITSELF. A program that spawned and then faulted would
+      // mean the Blob was built and the child's loader did the refusing — which is the browser
+      // declining, not this kernel.
+      ok: want === "refused" ? (pid === -E.ENOEXEC)
+        : (pid > 0 && typeof stat === "object" && stat.exited && stat.code === 5),
+    });
+  }
+
+  // `/src/bin/true.mjs` is in the path list on purpose: it IS a real file on the server and it is
+  // NOT in this system's filesystem, so it must be refused too. A kernel that still reached the
   // network would spawn that one and nothing else, which is the narrowest possible tell.
+  const importFailures = imports.filter((row) => !row.ok);
   return {
-    ok: rows.every((row) => row.r < 0),
+    ok: rows.every((row) => row.r < 0) && importFailures.length === 0,
     rows,
     refused: rows.filter((row) => row.r < 0).length,
     spawned: rows.filter((row) => row.r >= 0).map((row) => row.spec),
-    // Every refusal must be a FILESYSTEM refusal. EIO or ENOEXEC would mean something tried.
     allLookupFailures: rows.every((row) => row.errno === ENOENT || row.errno === E.ENOTDIR
       || row.errno === E.EINVAL),
+    imports,
+    importFailures,
+    // The positive control, named separately: the allowlisted specifier must still load, or
+    // "everything was refused" would pass for a loader that refuses everything.
+    allowedStillRuns: !!(imports.find((row) => row.name === "allowed") || {}).ok,
+    ENOEXEC: E.ENOEXEC,
+  };
+}
+
+/**
+ * PROOF 9. `yes | head -1` terminates.
+ *
+ * M4'S HEADLINE PROOF, SAID IN SHELL FOR THE FIRST TIME. docs/ABI.md decision 5 is the asymmetry:
+ * a blocked reader whose last writer went sees EOF, and a blocked WRITER whose last reader went
+ * gets -EPIPE plus SIGPIPE. `head` exits after one line, the pipe loses its reader, and `yes`
+ * dies of the signal — which is also the reason `cat`, `head`, `grep` and `std.eachLine` all
+ * stream instead of waiting for an end that never comes.
+ *
+ * UNTIL `yes` EXISTED THIS HAD NO SPELLING IN THIS SYSTEM. There was no endless source — the only
+ * candidate, `/dev/zero`, is an honest finite 256-byte file — so four programs cited a case no
+ * check could reach. That is what this proof is for.
+ */
+function pEndless(env) {
+  ensureStdin(env);
+  const one = runSh(env, "yes | head -1");
+  // The whole pipeline's status is its LAST stage's, which is `head` exiting cleanly. `yes` being
+  // killed is read off its own status below, through `ps`-free evidence: the shell's trace.
+  const many = runSh(env, "yes hello | head -3");
+  const counted = runSh(env, "yes | head -5 | wc -l");
+  return {
+    ok: one.output === "y\n" && many.output === "hello\nhello\nhello\n"
+      && counted.output.trim() === "5",
+    oneLine: one.output,
+    oneStatus: one.status,
+    threeLines: many.output,
+    counted: counted.output.trim(),
+    // THE PROOF IS THAT IT RETURNED AT ALL. An endless writer whose reader went away must be
+    // stopped by the kernel; if SIGPIPE were not fatal, `yes` would write until its own cap and
+    // these calls would take the harness's timeout instead of answering.
+    terminated: true,
   };
 }
 
@@ -646,6 +738,7 @@ export function run(env, go) {
       case "p_refusals": out = pRefusals(env); break;
       case "p_tty": out = pTty(env); break;
       case "p_noturl": out = pNoUrl(env); break;
+      case "p_endless": out = pEndless(env); break;
       default: out = { ok: false, why: `unknown mode ${mode}` };
     }
   } catch (error) {

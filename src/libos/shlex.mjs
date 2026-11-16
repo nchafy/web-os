@@ -36,45 +36,65 @@ export function hasMagic(word) {
 }
 
 /**
- * Split a line into words and operators, reporting which words still carry a glob and which were
- * quoted.
+ * Split a line into words and operators.
  *
- * Quoting is tracked PER CHARACTER SPAN, not per word, which is what makes both halves of the rule
- * work: `ls '*'` looks for a file called `*`, and `ls "no"*` still expands. A word-wide flag made
- * one quoted character suppress globbing across the whole word.
+ * A WORD IS A LIST OF SPANS, not a string with a flag. Each span records how it was written —
+ * `bare`, `single` or `double` — and that is what makes every expansion rule expressible:
  *
- * `quoted` is separate from `magic` and is M5's addition: a quoted word must not be variable-
- * expanded by `$`-splitting rules either, and the executor needs to know `''` was a real empty
- * argument rather than a word that vanished.
+ *   bare    variables expand, globs are live
+ *   double  variables expand, globs are NOT
+ *   single  nothing expands
  *
- * @returns {{text: string, magic: boolean, quoted: boolean, operator?: boolean}[]}
+ * THE FLAG WAS WRONG AND THE SPANS ARE THE FIX. A per-word `quoted` boolean made ONE quoted
+ * character suppress expansion across the whole word, so `echo "$HOME"` printed the literal text
+ * `$HOME` and `ls "no"*` did not glob — while this file's own header claimed the opposite. It also
+ * lost the distinction a redirection needs: `> '*'` must mean a file called `*`, and with the flag
+ * discarded by `parse` it globbed and TRUNCATED an unrelated file.
+ *
+ * `magic` is computed from the BARE spans only, as typed, before any expansion. That is POSIX: a
+ * `*` that arrived from a variable's value is not a glob, so `f='*'; echo $f` prints a star.
+ *
+ * @returns {{spans: {text: string, kind: string}[], text: string, magic: boolean,
+ *            quoted: boolean, operator?: boolean}[]}
  */
 export function tokenize(line) {
   const tokens = [];
-  let text = "";
-  let magic = false;
-  let quoted = false;
+  /** @type {{text: string, kind: string}[]} */
+  let spans = [];
+  let bare = "";
   let started = false;
 
+  const flushBare = () => {
+    if (bare !== "") spans.push({ text: bare, kind: "bare" });
+    bare = "";
+  };
+  const quotedSpan = (text, kind) => {
+    flushBare();
+    spans.push({ text, kind });
+    started = true;
+  };
   const push = () => {
-    if (started) tokens.push({ text, magic, quoted });
-    text = "";
-    magic = false;
-    quoted = false;
+    flushBare();
+    if (started) tokens.push(wordOf(spans));
+    spans = [];
     started = false;
+  };
+  const operator = (text) => {
+    tokens.push({ spans: [{ text, kind: "bare" }], text, magic: false, quoted: false,
+      operator: true });
   };
 
   for (let i = 0; i < line.length; i += 1) {
     const char = line[i];
 
-    if (char === "#" && !started) break;
+    if (char === "#" && !started && bare === "") break;
 
     if (char === "\\") {
       const next = line[i + 1];
       if (next === undefined) throw new UsageError("unexpected end of line after \\");
-      text += next;
-      quoted = true;
-      started = true;
+      // An escaped character is a SINGLE-quoted span of one: it is literal, and it must not be
+      // re-read as a glob or a dollar.
+      quotedSpan(next, "single");
       i += 1;
       continue;
     }
@@ -82,18 +102,14 @@ export function tokenize(line) {
     if (char === "'") {
       const close = line.indexOf("'", i + 1);
       if (close < 0) throw new UsageError("unterminated single quote");
-      text += line.slice(i + 1, close);
-      quoted = true;
-      started = true;
+      quotedSpan(line.slice(i + 1, close), "single");
       i = close;
       continue;
     }
 
     if (char === '"') {
       const span = doubleQuoted(line, i);
-      text += span.text;
-      quoted = true;
-      started = true;
+      quotedSpan(span.text, "double");
       i = span.end;
       continue;
     }
@@ -116,24 +132,98 @@ export function tokenize(line) {
 
     if (char === "&") {
       push();
-      tokens.push({ text: "&", magic: false, quoted: false, operator: true });
+      operator("&");
       continue;
     }
 
     if (char === "|" || char === "<" || char === ">") {
+      /* `2> f` IS REFUSED, not silently read as the word `2` plus a redirection.
+       *
+       * This shell has no fd-qualified redirection. With no check, `echo a 2> err` ran
+       * `echo a 2` with STDOUT redirected — measured — and `grep -c x f 2> err` ran grep over a
+       * file called `2`, which made it prefix every count with a filename and exit 2. A form that
+       * means something specific everywhere else must be an error here rather than quietly
+       * something else. */
+      if (/^\d+$/.test(bare) && spans.length === 0) {
+        // The WHOLE operator in the message, so `2>>` does not report itself as `2>`.
+        const op = char === ">" && line[i + 1] === ">" ? ">>" : char;
+        throw new UsageError(`${bare}${op} is not supported — this shell has no `
+          + "fd-qualified redirection");
+      }
       push();
       const double = char === ">" && line[i + 1] === ">";
-      tokens.push({ text: double ? ">>" : char, magic: false, quoted: false, operator: true });
+      operator(double ? ">>" : char);
       if (double) i += 1;
       continue;
     }
 
-    text += char;
-    if (hasMagic(char)) magic = true;
+    bare += char;
     started = true;
   }
   push();
   return tokens;
+}
+
+/** A token from its spans: the raw text, whether any bare span carries a glob, and whether any
+ *  span was quoted. `text` is the word AS TYPED with the quotes removed — what a reader sees in a
+ *  diagnostic — and is never what gets executed; `expandWord` produces that. */
+function wordOf(spans) {
+  return {
+    spans,
+    text: spans.map((s) => s.text).join(""),
+    magic: spans.some((s) => s.kind === "bare" && MAGIC.test(s.text)),
+    quoted: spans.some((s) => s.kind !== "bare"),
+  };
+}
+
+/**
+ * One word, expanded: tilde, then variables, then job specs — SPAN BY SPAN.
+ *
+ * PURE. Every input it needs arrives as a callback, so this is the whole of the shell's expansion
+ * rules with no filesystem and no job table in sight, and `bench/m5-sh/probe.mjs` checks it under
+ * `node`.
+ *
+ * ORDER AND SCOPE, both of which the span model is what makes expressible:
+ *   - the TILDE is only a tilde at the very start of a BARE first span, so `echo a~b` and
+ *     `echo "~"` are literal, which is POSIX.
+ *   - VARIABLES expand in bare and double spans and not in single ones.
+ *   - A JOB SPEC is not expanded here at all: it is a whole word or it is literal, and the caller
+ *     turns it into TWO words because that is the only unambiguous spelling — see `jobSpecOf`.
+ *   - GLOBS are not expanded here. They need the filesystem, so the caller does it, gated on the
+ *     `magic` flag this module computed from the bare spans as typed.
+ *
+ * @param {object} word a token from `tokenize`
+ * @param {object} ops
+ * @param {(name: string) => string} [ops.lookup] a variable's value, or ""
+ * @param {string} [ops.home] what `~` means
+ */
+export function expandWord(word, { lookup = null, home = null } = {}) {
+  let out = "";
+  for (let i = 0; i < word.spans.length; i += 1) {
+    const span = word.spans[i];
+    let text = span.text;
+    if (span.kind === "bare" && home !== null && i === 0) text = expandTilde(text, home);
+    if (span.kind !== "single" && lookup) text = expandVars(text, lookup);
+    out += text;
+  }
+  return out;
+}
+
+/**
+ * The job this word names — `%1`, `%%`, `%+` — or null.
+ *
+ * A JOB SPEC IS A WHOLE UNQUOTED WORD OR IT IS LITERAL. That is bash's rule and it is the one that
+ * stops ordinary text being rewritten: expanding `%` anywhere in a word made `cat /tmp/a%20b`
+ * answer "no such job" and `echo 100%1` silently become `echo 100<pgid>`. Quoted, `'%1'` is a
+ * filename, which is what quoting is for.
+ *
+ * A PREDICATE AND NOT AN EXPANSION, because the caller does something a string cannot express: a
+ * job spec expands to TWO words, `--` and the negative process group (see `src/bin/sh.mjs`).
+ */
+export function jobSpecOf(word) {
+  if (word.quoted || word.spans.length !== 1 || word.spans[0].kind !== "bare") return null;
+  const m = /^%([%+]|\d+)$/.exec(word.spans[0].text);
+  return m ? m[1] : null;
 }
 
 /**
@@ -213,8 +303,12 @@ export function parse(line) {
       throw new UsageError(`syntax error: ${token.text} needs a file`);
     }
     i += 1;
-    if (token.text === "<") stage.in = target.text;
-    else stage.outs.push({ path: target.text, append: token.text === ">>" });
+    /* THE WHOLE TOKEN, not its text. Keeping only the string threw away `quoted` and `magic`, and
+     * the shell then rebuilt the target as an unquoted word: `echo hi > '*'` globbed and
+     * TRUNCATED whatever `*` matched, which is a file the user never named. `> '$x'` and `> '%1'`
+     * were the same mistake in two other spellings. */
+    if (token.text === "<") stage.in = target;
+    else stage.outs.push({ word: target, path: target.text, append: token.text === ">>" });
   }
 
   if (stage.words.length || stage.outs.length || stage.in) {
@@ -234,7 +328,9 @@ export function parse(line) {
 /** `~` and `~/...` only, which is the whole of this shell's tilde handling. */
 export function expandTilde(word, home) {
   if (word === "~") return home;
-  if (word.startsWith("~/")) return home + word.slice(1);
+  // A TRAILING SLASH ON `home` IS NOT DOUBLED. With `home` of "/", `~/usr` came out as `//usr` —
+  // which the VFS tolerates and every printed path then carried.
+  if (word.startsWith("~/")) return home.replace(/\/+$/, "") + word.slice(1);
   return word;
 }
 
@@ -402,7 +498,11 @@ export function expandGlob(pattern, fsops) {
  *          caller can replace exactly that much of the line.
  */
 export function complete(line, ctx) {
-  const word = line.split(/\s+/).pop();
+  // SPLIT ON WHITESPACE **AND** ON THE OPERATORS, so `ls |c` offers `cat`. Splitting on
+  // whitespace alone left `word` as `"|c"`, which matched no command and no path, while
+  // `ls | c` worked — this function's own doc promised the word after a `|` is a command
+  // position.
+  const word = line.split(/[\s|<>]+/).pop();
   const before = line.slice(0, line.length - word.length);
 
   if (/(^|\|)\s*$/.test(before)) {

@@ -17,8 +17,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import {
-  tokenize, parse, expandTilde, expandVars, expandGlob, componentRegex, hasMagic, complete,
-  UsageError,
+  tokenize, parse, expandTilde, expandVars, expandWord, expandGlob, componentRegex, hasMagic,
+  complete, jobSpecOf, UsageError,
 } from "../../src/libos/shlex.mjs";
 import { signalOf, SIGNALS, SIGNAL_NAME } from "../../src/abi.mjs";
 
@@ -99,9 +99,17 @@ check("& in the middle is refused", threw(() => parse("sleep 60 & ls")),
   "syntax error: & must end the line");
 
 const redir = parse("sort < in > out >> log");
-check("input redirection", redir.stages[0].in, "in");
+check("input redirection", redir.stages[0].in.text, "in");
 check("every output target is recorded, in order",
-  redir.stages[0].outs, [{ path: "out", append: false }, { path: "log", append: true }]);
+  redir.stages[0].outs.map((o) => [o.path, o.append]), [["out", false], ["log", true]]);
+// THE TOKEN SURVIVES, which is what stops a quoted target being globbed. `parse` keeping only the
+// string is the data-loss defect: `echo hi > '*'` truncated whatever `*` matched.
+const quotedTarget = parse("echo hi > '*'");
+check("a quoted redirection target keeps its quoting",
+  [quotedTarget.stages[0].outs[0].word.quoted, quotedTarget.stages[0].outs[0].word.magic],
+  [true, false]);
+check("and an unquoted one stays globbable",
+  parse("echo hi > *").stages[0].outs[0].word.magic, true);
 
 check("an empty stage is refused", threw(() => parse("ls |")), "syntax error near |");
 check("a leading pipe is refused", threw(() => parse("| ls")), "syntax error near |");
@@ -110,6 +118,13 @@ check("a redirection with no command is refused", threw(() => parse("> out")),
 check("a redirection with no file is refused", threw(() => parse("ls >")),
   "syntax error: > needs a file");
 check("an empty line parses to nothing", parse("   ").stages.length, 0);
+// `2> f` IS REFUSED, not read as the word `2` plus a redirection: it ran `echo a 2` with stdout
+// redirected, which is a different command silently.
+check("an fd-qualified redirection is refused", threw(() => parse("echo a 2> err")),
+  "2> is not supported — this shell has no fd-qualified redirection");
+check("and so is 2>>", threw(() => parse("echo a 2>> err")),
+  "2>> is not supported — this shell has no fd-qualified redirection");
+check("a bare > still works", parse("echo a > err").stages[0].outs.length, 1);
 
 /* ---------------------------------------------------------------- expansion ------------- */
 
@@ -128,6 +143,37 @@ check("$$ is the pid", expandVars("$$", look), "11");
 check("$! is the last background pid", expandVars("$!", look), "13");
 check("a dollar before nothing is a dollar", expandVars("5$", look), "5$");
 check("a dollar before a non-name is a dollar", expandVars("$-", look), "$-");
+
+/* PER-SPAN EXPANSION, which is the fix for the single most common shell idiom. A per-word
+   `quoted` flag made one quoted character suppress every expansion across the whole word, so
+   `echo "$HOME"` printed the literal text. */
+const W = (line) => tokenize(line)[1];
+const XOPS = { lookup: look, home: "/home/u" };
+check('a double-quoted variable EXPANDS', expandWord(W('echo "$FOO"'), XOPS), "bar");
+check("a single-quoted variable does not", expandWord(W("echo '$FOO'"), XOPS), "$FOO");
+check("a bare variable expands", expandWord(W("echo $FOO"), XOPS), "bar");
+check("an escaped dollar is literal", expandWord(W("echo \\$FOO"), XOPS), "$FOO");
+check("a partly quoted word expands its bare part",
+  expandWord(W('echo "x"$FOO'), XOPS), "xbar");
+check("and still globs, because magic comes from the bare span",
+  W('ls "no"*').magic, true);
+check("a quoted star is not magic", W("ls '*'").magic, false);
+check("a tilde expands only at the start of a bare first span",
+  [expandWord(W("echo ~"), XOPS), expandWord(W("echo a~b"), XOPS), expandWord(W("echo '~'"), XOPS)],
+  ["/home/u", "a~b", "~"]);
+check("~/x does not double a trailing slash on home",
+  expandWord(W("echo ~/x"), { ...XOPS, home: "/" }), "/x");
+// A JOB SPEC IS A WHOLE UNQUOTED WORD OR IT IS LITERAL. `jobSpecOf` is a predicate, not an
+// expansion, because the caller turns it into TWO words — see src/bin/sh.mjs `expandWords`.
+check("a whole word is a job spec",
+  [jobSpecOf(W("kill %1")), jobSpecOf(W("kill %%")), jobSpecOf(W("kill %+"))],
+  ["1", "%", "+"]);
+check("a percent mid-word is NOT a job spec",
+  [jobSpecOf(W("cat /tmp/a%20b")), jobSpecOf(W("echo 100%1"))], [null, null]);
+check("a quoted job spec is a filename", jobSpecOf(W("cat '%1'")), null);
+check("and the word still expands as text",
+  [expandWord(W("cat /tmp/a%20b"), XOPS), expandWord(W("echo 100%1"), XOPS)],
+  ["/tmp/a%20b", "100%1"]);
 check("an unterminated brace is refused", threw(() => expandVars("${FOO", look)),
   "unterminated ${");
 check("a bad name in braces is refused", threw(() => expandVars("${1x}", look)),
@@ -250,7 +296,12 @@ check("lines does not invent a last empty line", std.lines("a\nb\n"), ["a", "b"]
 check("lines keeps an unterminated last line", std.lines("a\nb"), ["a", "b"]);
 check("lines of nothing is nothing", std.lines(""), []);
 check("getopt separates flags from operands",
-  std.getopt(["-l", "-a", "x", "y"], "la"), { flags: { l: true, a: true }, operands: ["x", "y"], bad: null });
+  std.getopt(["-l", "-a", "x", "y"], "la"),
+  { flags: { l: true, a: true }, operands: ["x", "y"], bad: null, why: "" });
+// WHICH refusal it was, because a program cannot write a useful message without knowing: `head -n`
+// with no operand used to answer "unknown option -n (use -n n)".
+check("getopt says an unknown flag is unknown", std.getopt(["-Q"], "la").why, "unknown");
+check("and a missing argument is missing", std.getopt(["-n"], "n:").why, "missing-argument");
 check("getopt bundles flags", std.getopt(["-la"], "la").flags, { l: true, a: true });
 check("getopt takes an inline argument", std.getopt(["-n3"], "n:").flags, { n: "3" });
 check("getopt takes a separate argument", std.getopt(["-n", "3"], "n:").flags, { n: "3" });

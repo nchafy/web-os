@@ -598,6 +598,12 @@ export class VFS {
       };
     }
     if (!create) throw new FsError("ENOENT", path);
+    // M5. `wantX` NEVER CREATES, which the comment above promised and the code did not enforce:
+    // the create arm tests the directory for W and never looked at `wantX`, so a caller passing
+    // both got a fresh 0o644 file back with no execute check where ENOENT was documented. No live
+    // caller passes both — the trap is the point, and it is the one place this file's own stated
+    // invariant was not code.
+    if (wantX) throw new FsError("ENOENT", path);
     const dir = this.#inode(hit.dirIno);
     if (dir.type !== DIR) throw new FsError("ENOTDIR", path);
     if (hit.name.length > NAME_MAX) throw new FsError("ENAMETOOLONG", path);

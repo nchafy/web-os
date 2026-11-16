@@ -2528,9 +2528,14 @@ M5_LABELS = (
     "a typed line was echoed by the discipline and run by the shell",
     "the shell survived Ctrl-C and prompted again",
     "and ended the session on Ctrl-D",
-    # Constraint 108.
+    # Constraint 123, both halves.
     "no_url ok",
     "every URL spelling was refused by the filesystem",
+    "and every import naming a host was refused by the linker",
+    "while the one allowlisted specifier still loads",
+    # M4's headline proof, said in shell for the first time.
+    "endless ok",
+    "`yes | head -1` terminated and printed one line",
     "verdict is ok",
     "document COOP",
     "document COEP",
@@ -2565,6 +2570,7 @@ READ_M5 = """(() => {
     refusals: one(P.refusals),
     tty: one(P.tty),
     no_url: one(P.no_url),
+    endless: one(P.endless),
   }
 })()"""
 
@@ -2580,6 +2586,7 @@ M5_SHAPE = {
     "refusals": (dict, type(None)),
     "tty": (dict, type(None)),
     "no_url": (dict, type(None)),
+    "endless": (dict, type(None)),
 }
 
 #: What a `spawn` that creates nothing must break, and ONLY this. Measured under the control on
@@ -2603,6 +2610,10 @@ _SPAWN_SELF_FAILS = (
     "every exec row held",
     "tty ok",
     "a typed line was echoed by the discipline and run by the shell",
+    # `yes | head -1` needs two children, so it goes with the pipelines. The import rows do NOT:
+    # a refusal happens in the linker, before anything is created.
+    "endless ok",
+    "`yes | head -1` terminated and printed one line",
     "verdict is ok",
 )
 
@@ -6340,7 +6351,8 @@ def check_m5(env: Env) -> None:
     if got["state"] != "done":
         env.unmeasurable("www/m5.html never reached a terminal state (state=%r)" % got["state"])
 
-    sections = ("pipeline", "jobs", "redirect", "builtins", "exec", "refusals", "tty", "no_url")
+    sections = ("pipeline", "jobs", "redirect", "builtins", "exec", "refusals", "tty", "no_url",
+                "endless")
     env.expect_that(
         "cell reported",
         all(got[name] is not None for name in sections),
@@ -6452,6 +6464,28 @@ def check_m5(env: Env) -> None:
     env.expect_that("every URL spelling was refused by the filesystem",
                     nu.get("allLookupFailures") is True and not (nu.get("spawned") or []),
                     {"spawned": nu.get("spawned"), "rows": nu.get("rows")})
+    # THE OTHER HALF OF CONSTRAINT 123. The first version of this section only checked the PATH
+    # given to `spawn`; a program's own `import` naming a host had the child's module loader fetch
+    # and evaluate remote code while the kernel's own accounting stayed at zero loads.
+    env.expect_that("and every import naming a host was refused by the linker",
+                    not (nu.get("importFailures") or []),
+                    {"failed": nu.get("importFailures"), "rows": nu.get("imports")})
+    # THE POSITIVE CONTROL, named separately: a loader that refused everything would satisfy the
+    # clause above and run no programs at all.
+    env.expect_that("while the one allowlisted specifier still loads",
+                    nu.get("allowedStillRuns") is True,
+                    {"imports": nu.get("imports")})
+
+    # ---- PROOF: `yes | head -1` terminates -----------------------------------------------
+    en = ev("endless")
+    env.expect_that("endless ok", section_ok("endless"), en)
+    # THE PROOF IS THAT IT ANSWERED AT ALL. `head` exits after one line, the pipe loses its
+    # reader, and `yes` must die of SIGPIPE — if it did not, these calls would take the harness's
+    # timeout instead of a value. The count through three stages is the second half.
+    env.expect_that("`yes | head -1` terminated and printed one line",
+                    en.get("oneLine") == "y\n" and en.get("counted") == "5",
+                    {"oneLine": en.get("oneLine"), "counted": en.get("counted"),
+                     "threeLines": en.get("threeLines")})
 
     env.expect("verdict is ok", got["verdict"], "ok")
 

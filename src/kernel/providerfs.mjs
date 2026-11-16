@@ -50,6 +50,11 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "bin/kill", path: "src/bin/kill.mjs" }),
   Object.freeze({ name: "bin/ps", path: "src/bin/ps.mjs" }),
   Object.freeze({ name: "bin/true", path: "src/bin/true.mjs" }),
+  // THE ELEVENTH ROW, and MILESTONES.md M5 asks for ten. `yes` is what makes
+  // `yes | head -1 ` expressible through the shell — M4's headline proof, and the property `cat`,
+  // `head`, `grep` and `std.eachLine` are all written around. Without it that property was
+  // asserted by comment only, because this system had no endless source.
+  Object.freeze({ name: "bin/yes", path: "src/bin/yes.mjs" }),
 ]);
 
 /**
