@@ -914,7 +914,7 @@ page's timeout carry the kernel's park and refcount dump: one run then read
 ## M4b — the pty, the line discipline, `poll` · ✅ done · est 2 d, actual 1 · **ACCEPT**
 
 ```
-scripts/check.py                     7 checks, 299 expectations (m4b: 54) — all pass
+scripts/check.py                     7 checks, 299 expectations (m4b: 54) — 7/7, exit 0
 scripts/check.py --prove-failure both  exit 0 — every expectation inverts and fires
 bench/kernel-churn/probe.py          900 kernel boots; --stall proves the fetch deadline
 scripts/check.py --negative no-isig           m4b fail: 8 red, 45 intact
