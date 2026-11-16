@@ -1585,3 +1585,120 @@ number in code, so the pair with fewer citations moved. Nothing else about them 
     reported it that way. A log that only reports the past cannot distinguish a slow step from a
     stalled one. The page now prints `… <mode>` before each proof.
 
+## M6 — neuter the process realm
+
+Measured on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro unless a row says otherwise. The
+two harnesses are `bench/m6-realm/csp-probe.py` (four policy deliveries against a stand-in module
+worker, with its own second origin) and `bench/m6-realm/probe.mjs` plus
+`bench/m6-realm/controls.py` (the lockdown under Node, and three mutations of it). The product
+gate is `scripts/check.py --only m6`, with `--negative no-lockdown` and `--negative no-csp`.
+
+187. **A CONTENT-SECURITY-POLICY ON THE DOCUMENT DOES NOTHING FOR A DEDICATED MODULE WORKER'S
+    LOADER.** Four deliveries measured, one page load each, `bench/m6-realm/csp-probe.py`; the
+    `document` column is behaviour-identical to `none` and reports ZERO violations.
+
+    | attempted from the worker | none | document | worker | both |
+    |---|---|---|---|---|
+    | `navigator.storage` → write an OPFS file | reached | reached | **reached** | **reached** |
+    | `fetch`, `XMLHttpRequest` | reached | reached | refused (`connect-src`) | refused |
+    | `indexedDB`, `caches` | reached | reached | **reached** | **reached** |
+    | `new Worker(blob)` | reached | reached | refused (`worker-src`) | refused |
+    | `URL.createObjectURL` | reached | reached | **reached** | **reached** |
+    | `eval`, `new Function` | reached | reached | refused (no `'unsafe-eval'`) | refused |
+    | computed `import("da"+"ta:…")` | reached | reached | refused (`script-src-elem`) | refused |
+    | computed `import("<other origin>/x.mjs")` | reached | reached | refused (`script-src-elem`) | refused |
+    | `import("blob:…")` | reached | reached | reached | reached |
+    | `import("/src/abi.mjs")` static | reached | reached | reached | reached |
+    | violation events in-realm | 0 | 0 | 10 | 10 |
+
+    So the policy is served on the response that CREATES the realm. `scripts/serve.py` sends it
+    for every path under `src/libos/` — a prefix and not a filename, because that directory IS the
+    process realm in file form and the worker's entry path belongs to
+    `src/kernel/kernel.mjs`'s `RUNTIME_URL`.
+    The off-origin row needs a cooperating second origin: a module script is fetched in CORS mode,
+    so the probe starts a second loopback server sending `Access-Control-Allow-Origin: *`.
+    Without it that row would read "refused" for a reason the policy had nothing to do with.
+188. **Constraint 139 named the wrong delivery point, and this corrects it.** It says "the answer
+    is a Content-Security-Policy on the document". The policy is the answer; the document is not
+    the place. 139 is otherwise unchanged and its measurement stands — the correction is where the
+    header goes. Recorded here rather than by editing 139, which is the standing rule for a
+    finding that turns out wrong.
+189. **The policy and the realm strip are DISJOINT, and both are required.** The policy leaves
+    ambient OPFS, `indexedDB`, `caches` and `URL.createObjectURL` completely untouched (187), so
+    only the strip closes them; `import(expr)` is the module loader and not `fetch`, so only the
+    policy closes that. The two negative controls assert the disjointness rather than asserting
+    it twice: `--negative no-lockdown` must break every realm clause while every loader clause
+    HOLDS, and `--negative no-csp` the reverse. Measured: 14 red / 17 intact and 8 red / 23
+    intact.
+190. **`blob:` MUST stay in `script-src`, so `URL.createObjectURL` MUST leave the realm.** A
+    program image IS a blob URL (`src/kernel/exec.mjs`), so a policy that refused the scheme would
+    refuse every program. With the scheme allowed, a process that can mint a blob URL can
+    evaluate text no linker ever saw — measured, `import blob` reached under every delivery. The
+    deletion of `createObjectURL` is therefore load-bearing and not hygiene, and
+    `revokeObjectURL` goes with it so nobody puts half the pair back.
+191. **`script-src` without `'unsafe-eval'` refuses `eval` and `new Function`, inside the program
+    as well as in the worker.** Measured both ways — `EvalError: … because 'unsafe-eval' is not an
+    allowed source of script` from the worker's own code AND from inside a blob module. No
+    program in `src/bin/` evaluates text, so this costs the system nothing; a program that needed
+    `eval` would make the policy unshippable, which is why it is written down.
+192. **A policy delivered on the worker script DOES reach a module imported from `blob:`.** The
+    load-bearing case, because a program is never the worker's own script. Measured from inside
+    the blob: the computed `data:` import, the off-origin import and `eval` were all refused there
+    under the `worker` delivery and all three reached under `none`. CSP is per-realm and a blob
+    module shares the worker's realm; this is the measurement rather than the inference.
+193. **`SharedWorker` and `importScripts` are not in a Chrome 157 dedicated module worker at
+    all**, so the lockdown reports them ABSENT rather than stripped. They stay on the target list
+    anyway: "the platform happens not to expose it here" is not a boundary, and an engine that did
+    expose them would otherwise look identical in the report. The `credit-absent` mutation in
+    `bench/m6-realm/controls.py` is what keeps the distinction honest.
+194. **The `WebSocket` constructor does NOT throw under `connect-src 'none'`.** It returns, the
+    violation fires, and the connection is refused asynchronously — measured as
+    `webSocket REACHED constructed` with a `connect-src ws://…` violation beside it. A check
+    asserting "the constructor failed" would therefore pass only because of the realm strip, and
+    a reader could not tell which half had done it. The strip is what makes the binding absent;
+    the policy is what makes the connection impossible.
+195. **A faulted process is a ZOMBIE in `/proc`, not an absence**, so MILESTONES.md M6's "`/proc`
+    shows it faulted" is asserted as `state: zombie`, `exitkind: 1` (STAT_KILLED),
+    `exitvalue: 6` (SIGABRT) — read out of `/proc/<pid>/status`. The first version of the clause
+    asserted the directory was GONE and failed: a reaped process keeps its pid for the ~2 s
+    terminate quarantine (constraint 14), so that clause was racing the quarantine and calling
+    correct kernel behaviour a defect.
+196. **The lockdown MUST fail closed, and nothing in a browser can reach that path.** Every target
+    on Chrome 157 is configurable, so `lockdown()` never has to refuse there — and a mechanism
+    with no live caller is unverified. It is reached with a double under Node
+    (`bench/m6-realm/probe.mjs`, 25 checks) and its coupling is proved by three mutations
+    (`bench/m6-realm/controls.py`): a SHALLOW delete, which is the realistic mistake because
+    nothing in a worker realm is an own property and `delete obj[name]` therefore returns true and
+    removes nothing; REMOVING THE VERIFICATION, which would report "everything stripped" over an
+    open realm; and crediting an absent binding as stripped. The mutation harness earned its place
+    immediately: it caught a clause in the probe that passed over a report that was never produced
+    (`remaining.length === 0` is true of the caught default when `lockdown` throws) and a section
+    that moved under a mutation it was not about.
+197. **A program's `run` may be async, and `{ ...promise }` spreads to `{}`.** Every capability
+    constraint 41 removes is promise-shaped, so the program that demonstrates the hole cannot
+    finish in one synchronous turn — and the libos used to post `data: { ...program.run(env, m) }`
+    unawaited, which would have sent an EMPTY result with nothing anywhere saying why. The libos
+    awaits it (`src/libos/process.mjs`), a rejected promise faults the process exactly as a throw
+    does, and every program in `src/bin/` stays synchronous because a syscall blocks in
+    `Atomics.wait` and needs no await.
+198. **A dynamic root-relative specifier does not resolve inside a program.** `import("/x.mjs")`
+    from a blob module answers `Failed to resolve module specifier` before any policy is
+    consulted, because a blob URL has an opaque path (constraint 125, now with its dynamic twin).
+    The kernel's linker rewrites literal specifiers it can see; a computed one it cannot. M6's
+    positive control therefore imports `self.location.origin + "/src/abi.mjs"` — which is also the
+    honest statement of what the policy still permits (199).
+199. **WHAT M6 DOES NOT CLOSE, recorded rather than implied.** `script-src 'self'` means a program
+    can still dynamically import ANY same-origin module, so the loader is bounded by what the
+    server serves rather than by what the kernel allows. CSP source expressions cannot name a
+    path without an origin, and the origin is a runtime port, so narrowing this further is not
+    expressible in the header. It is also why M6 is **hardening and not a security boundary**:
+    same-origin is not a security boundary, the threat model for v1 is first-party only, and
+    nothing here stops the author of a program from doing what the page can already do. Say so
+    wherever M6 is described — `MILESTONES.md`, `src/libos/lockdown.mjs` and the check's own note
+    all do.
+200. **M6 ships no document policy, deliberately.** It would buy nothing for the subject (187) and
+    the document is the supervisor every bench boots through: `www/m4a.html` holds the kernel's own
+    `MessagePort`, every page carries inline script, and `scripts/check.py` byte-compares served
+    bytes against disk — so a nonce cannot be injected and a document policy would have to carry
+    `'unsafe-inline'`. A page-hardening policy is a separate change with its own risk and its own
+    control.

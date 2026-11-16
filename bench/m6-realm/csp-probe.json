@@ -1,0 +1,440 @@
+{
+  "none": {
+    "started": true,
+    "rows": {
+      "dep": {
+        "ok": true,
+        "value": "csp-dep loaded"
+      },
+      "isolated": {
+        "ok": true,
+        "value": "true"
+      },
+      "storage": {
+        "ok": true,
+        "value": "wrote ambient; root holds m6-csp-probe"
+      },
+      "fetch": {
+        "ok": true,
+        "value": "200 305 bytes"
+      },
+      "xhr": {
+        "ok": true,
+        "value": "200 305 bytes"
+      },
+      "importScripts": {
+        "ok": false,
+        "why": "TypeError: Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts()."
+      },
+      "indexedDB": {
+        "ok": true,
+        "value": "opened"
+      },
+      "caches": {
+        "ok": true,
+        "value": "opened"
+      },
+      "webSocket": {
+        "ok": true,
+        "value": "constructed"
+      },
+      "sharedWorker": {
+        "ok": false,
+        "why": "ReferenceError: SharedWorker is not defined"
+      },
+      "createObjectURL": {
+        "ok": true,
+        "value": "blob:http://127.0.0.1:65533/ec1892be-56d"
+      },
+      "nestedWorker": {
+        "ok": true,
+        "value": "nested alive"
+      },
+      "eval": {
+        "ok": true,
+        "value": "2"
+      },
+      "newFunction": {
+        "ok": true,
+        "value": "4"
+      },
+      "imports": {
+        "data": {
+          "ok": true,
+          "value": "data: evaluated"
+        },
+        "blob": {
+          "ok": true,
+          "value": "blob: evaluated"
+        },
+        "remote": {
+          "ok": true,
+          "value": "off-origin module evaluated"
+        },
+        "sameOrigin": {
+          "ok": true,
+          "value": "2111583449"
+        }
+      },
+      "insideBlob": {
+        "ok": true,
+        "value": "{\"data\":{\"ok\":true,\"value\":\"data: from inside a program\"},\"remote\":{\"ok\":true,\"value\":\"off-origin module evaluated\"},\"evalInProgram\":{\"ok\":true,\"value\":\"2\"}}"
+      }
+    },
+    "violations": []
+  },
+  "worker": {
+    "started": true,
+    "rows": {
+      "dep": {
+        "ok": true,
+        "value": "csp-dep loaded"
+      },
+      "isolated": {
+        "ok": true,
+        "value": "true"
+      },
+      "storage": {
+        "ok": true,
+        "value": "wrote ambient; root holds m6-csp-probe"
+      },
+      "fetch": {
+        "ok": false,
+        "why": "TypeError: Failed to fetch"
+      },
+      "xhr": {
+        "ok": false,
+        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs'."
+      },
+      "importScripts": {
+        "ok": false,
+        "why": "TypeError: Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts()."
+      },
+      "indexedDB": {
+        "ok": true,
+        "value": "opened"
+      },
+      "caches": {
+        "ok": true,
+        "value": "opened"
+      },
+      "webSocket": {
+        "ok": true,
+        "value": "constructed"
+      },
+      "sharedWorker": {
+        "ok": false,
+        "why": "ReferenceError: SharedWorker is not defined"
+      },
+      "createObjectURL": {
+        "ok": true,
+        "value": "blob:http://127.0.0.1:65533/c817f1fe-c3a"
+      },
+      "nestedWorker": {
+        "ok": false,
+        "why": "Error: nested onerror"
+      },
+      "eval": {
+        "ok": false,
+        "why": "EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n"
+      },
+      "newFunction": {
+        "ok": false,
+        "why": "EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n"
+      },
+      "imports": {
+        "data": {
+          "ok": false,
+          "why": "TypeError: Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: evaluated'"
+        },
+        "blob": {
+          "ok": true,
+          "value": "blob: evaluated"
+        },
+        "remote": {
+          "ok": false,
+          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:65534/remote.mjs"
+        },
+        "sameOrigin": {
+          "ok": true,
+          "value": "2111583449"
+        }
+      },
+      "insideBlob": {
+        "ok": true,
+        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:65534/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
+      }
+    },
+    "violations": [
+      {
+        "blockedURI": "http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "ws://127.0.0.1:1/",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "blob",
+        "directive": "worker-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "eval",
+        "directive": "script-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "eval",
+        "directive": "script-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "data",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65534/remote.mjs",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "data",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65534/remote.mjs",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      }
+    ]
+  },
+  "document": {
+    "started": true,
+    "rows": {
+      "dep": {
+        "ok": true,
+        "value": "csp-dep loaded"
+      },
+      "isolated": {
+        "ok": true,
+        "value": "true"
+      },
+      "storage": {
+        "ok": true,
+        "value": "wrote ambient; root holds m6-csp-probe"
+      },
+      "fetch": {
+        "ok": true,
+        "value": "200 305 bytes"
+      },
+      "xhr": {
+        "ok": true,
+        "value": "200 305 bytes"
+      },
+      "importScripts": {
+        "ok": false,
+        "why": "TypeError: Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts()."
+      },
+      "indexedDB": {
+        "ok": true,
+        "value": "opened"
+      },
+      "caches": {
+        "ok": true,
+        "value": "opened"
+      },
+      "webSocket": {
+        "ok": true,
+        "value": "constructed"
+      },
+      "sharedWorker": {
+        "ok": false,
+        "why": "ReferenceError: SharedWorker is not defined"
+      },
+      "createObjectURL": {
+        "ok": true,
+        "value": "blob:http://127.0.0.1:65533/4b432594-282"
+      },
+      "nestedWorker": {
+        "ok": true,
+        "value": "nested alive"
+      },
+      "eval": {
+        "ok": true,
+        "value": "2"
+      },
+      "newFunction": {
+        "ok": true,
+        "value": "4"
+      },
+      "imports": {
+        "data": {
+          "ok": true,
+          "value": "data: evaluated"
+        },
+        "blob": {
+          "ok": true,
+          "value": "blob: evaluated"
+        },
+        "remote": {
+          "ok": true,
+          "value": "off-origin module evaluated"
+        },
+        "sameOrigin": {
+          "ok": true,
+          "value": "2111583449"
+        }
+      },
+      "insideBlob": {
+        "ok": true,
+        "value": "{\"data\":{\"ok\":true,\"value\":\"data: from inside a program\"},\"remote\":{\"ok\":true,\"value\":\"off-origin module evaluated\"},\"evalInProgram\":{\"ok\":true,\"value\":\"2\"}}"
+      }
+    },
+    "violations": []
+  },
+  "both": {
+    "started": true,
+    "rows": {
+      "dep": {
+        "ok": true,
+        "value": "csp-dep loaded"
+      },
+      "isolated": {
+        "ok": true,
+        "value": "true"
+      },
+      "storage": {
+        "ok": true,
+        "value": "wrote ambient; root holds m6-csp-probe"
+      },
+      "fetch": {
+        "ok": false,
+        "why": "TypeError: Failed to fetch"
+      },
+      "xhr": {
+        "ok": false,
+        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs'."
+      },
+      "importScripts": {
+        "ok": false,
+        "why": "TypeError: Failed to execute 'importScripts' on 'WorkerGlobalScope': Module scripts don't support importScripts()."
+      },
+      "indexedDB": {
+        "ok": true,
+        "value": "opened"
+      },
+      "caches": {
+        "ok": true,
+        "value": "opened"
+      },
+      "webSocket": {
+        "ok": true,
+        "value": "constructed"
+      },
+      "sharedWorker": {
+        "ok": false,
+        "why": "ReferenceError: SharedWorker is not defined"
+      },
+      "createObjectURL": {
+        "ok": true,
+        "value": "blob:http://127.0.0.1:65533/08428291-f40"
+      },
+      "nestedWorker": {
+        "ok": false,
+        "why": "Error: nested onerror"
+      },
+      "eval": {
+        "ok": false,
+        "why": "EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n"
+      },
+      "newFunction": {
+        "ok": false,
+        "why": "EvalError: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n"
+      },
+      "imports": {
+        "data": {
+          "ok": false,
+          "why": "TypeError: Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: evaluated'"
+        },
+        "blob": {
+          "ok": true,
+          "value": "blob: evaluated"
+        },
+        "remote": {
+          "ok": false,
+          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:65534/remote.mjs"
+        },
+        "sameOrigin": {
+          "ok": true,
+          "value": "2111583449"
+        }
+      },
+      "insideBlob": {
+        "ok": true,
+        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:65534/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
+      }
+    },
+    "violations": [
+      {
+        "blockedURI": "http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65533/bench/m6-realm/csp-dep.mjs",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "ws://127.0.0.1:1/",
+        "directive": "connect-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "blob",
+        "directive": "worker-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "eval",
+        "directive": "script-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "eval",
+        "directive": "script-src",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "data",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65534/remote.mjs",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "data",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      },
+      {
+        "blockedURI": "http://127.0.0.1:65534/remote.mjs",
+        "directive": "script-src-elem",
+        "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'; worker-src 'none'"
+      }
+    ]
+  }
+}
