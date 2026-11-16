@@ -306,7 +306,7 @@ async function main () {
       channelIntact: sw.channelIntact, nextCall: sw.nextCall,
       answeredDuringCall: sw.kernel && sw.kernel.answeredDuringCall,
       // THE PROGRAM LOADER'S DEADLINE MUST NOT BE THE NORMAL PATH. It bounds a fetch so a stalled
-      // one fails `spawn` instead of hanging it (constraint 123); a non-zero count here means a
+      // one fails `spawn` instead of hanging it (constraint 155); a non-zero count here means a
       // healthy run is now relying on the bound, which is a different system.
       programFetchTimeouts: sw.kernel && sw.kernel.programFetchTimeouts,
       programFetchRetries: sw.kernel && sw.kernel.programFetchRetries,

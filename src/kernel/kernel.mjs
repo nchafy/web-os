@@ -12,7 +12,8 @@ import {
   G_STALL_US, G_READY, G_WINDOW, G_BARRIER, G_DEADLINE_LO, G_DEADLINE_HI, W_PRE, W_OPEN,
   W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
   ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
-  SIGPIPE, SIGABRT, SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
+  SIGPIPE, SIGABRT, SIGQUIT, SIGILL, SIGSEGV,
+  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
   ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
@@ -26,7 +27,8 @@ import { TraceRing, TR_ENTER, TR_EXIT, TRACE_DEFAULT_BYTES } from "./trace.mjs";
 import {
   MountTable, MNT_RO, FS_OPFS, FS_PROC, FS_DEV, FS_PROVIDER, FS_TMPFS,
 } from "../fs/mounts.mjs";
-import { mountProvider, USR_ENTRIES } from "./providerfs.mjs";
+import { mountProvider, USR_ENTRIES, BENCH_ENTRIES } from "./providerfs.mjs";
+import { makeExec, EXEC_VIEW_ID, EXEC_CHUNK } from "./exec.mjs";
 import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
@@ -61,14 +63,39 @@ let table = null;
  * without it a writer whose reader has gone only gets the SIGPEND bit, which `drainSignals`
  * discards at the next syscall entry, and it loops forever on a write that keeps failing.
  */
-const FATAL_DEFAULT = new Set([SIGTERM, SIGINT, SIGHUP, SIGPIPE]);
+const FATAL_DEFAULT = new Set([
+  SIGTERM, SIGINT, SIGHUP, SIGPIPE,
+  // M5 ADDED THESE FOUR, because the table a process can name was wider than the set that acts.
+  // `kill -ABRT <pid>` returned 0, the target's blocked `read` answered -EINTR, `drainSignals`
+  // discarded the bit and the process KEPT RUNNING — where POSIX's default for every one of these
+  // is to terminate. `src/bin/kill.mjs -l` prints the whole signal table, so the gap became a
+  // public surface the moment a `kill` program existed. SIGSEGV and SIGILL are in the set for the
+  // same reason even though nothing in this kernel raises them: a signal a process may SEND must
+  // behave, and the alternative is a name that is accepted and ignored.
+  SIGQUIT, SIGABRT, SIGILL, SIGSEGV,
+]);
 
 let trace = null;
 let mounts = null;
+/**
+ * M5. The exec loader, and the buffer a durable-volume program is read into.
+ *
+ * The SAB is the kernel's OWN byte region, registered with the I/O worker under a NEGATIVE id so
+ * it can never collide with a process's (src/kernel/exec.mjs EXEC_VIEW_ID). ONE buffer for the
+ * kernel, and the loader takes a lock around the reads that use it — two processes calling
+ * `SYS_spawn` at the same moment are two `later()` bodies interleaving at every await, so a
+ * shared buffer with no lock would have each load reading the other's chunks.
+ */
+let EXEC = null;
+let execSab = null;
+let execView = null;
 /** What happened to the /usr provider mount. Reported, never swallowed: a /usr that
  *  failed its capability probe must be visible as a refusal rather than as an empty
  *  directory. */
 let usrReport = null;
+/** M5. The same for `/bench`, which exists only under a bench boot. Null in a real boot, which is
+ *  the state "there is no such mount" should read as. */
+let benchReport = null;
 let hb = 0;
 let kServiceMs = 0;
 let kCalls = 0;
@@ -515,7 +542,16 @@ let dispatch = onSyscall;
 // ---------------------------------------------------------------------- the program loader
 
 /**
- * THE KERNEL LOADS A PROGRAM. A PROCESS NEVER FETCHES ONE.
+ * THE SUPERVISOR'S PROGRAM LOADER. A PROCESS NEVER REACHES THIS.
+ *
+ * M5 MOVED THE PROCESS'S HALF OUT. `SYS_spawn` used to come through here, which made a
+ * process-supplied string a request origin — see src/kernel/exec.mjs, which now resolves a
+ * program path through the mount table instead and never touches the network. What is left here
+ * serves the PAGE's own `t: "spawn"`: the page is the supervisor, outside the process boundary,
+ * and a supervisor that could not load a program from the repository could not boot a bench.
+ *
+ * Everything below still holds for that path, and the herd measurement is why it is the kernel
+ * doing the fetching rather than each process:
  *
  * Constraint 41 deletes `fetch` and `importScripts` from the process realm, so a design where
  * each process pulls its own program text over HTTP is already dead at M6 — and it does not
@@ -545,8 +581,10 @@ let programFetchRetries = 0;
  * HOW LONG A PROGRAM FETCH MAY TAKE, and why it is bounded at all.
  *
  * `spawn` cannot answer until the program is loaded, so an unbounded fetch makes process creation
- * HANG rather than fail: the calling process is parked on a reply that never comes, with no errno
- * and nothing in the trace. Measured: `bench/kernel-churn/probe.py` boots kernels and does nothing
+ * HANG rather than fail: the caller waits on a reply that never comes, with no errno and nothing
+ * in the trace. Since M5 that caller is the PAGE and never a process — see the note above — and
+ * the page is what every bench boots through, which is where the stall was measured.
+ * Measured: `bench/kernel-churn/probe.py` boots kernels and does nothing
  * else — 0 stalls in 360 boots idle, 3 in 540 under threefold contention (0.56% per boot), two of
  * them on exactly this await. A real deployment loading over a flaky origin has the same exposure
  * with none of the contention.
@@ -676,8 +714,13 @@ function spawn(image, programCfg, index = 0, parent = null) {
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
   // M3. What `/proc/<pid>/cmdline` reports. The image carries the URL it was loaded from, and
-  // this is the only point at which the kernel still has it.
-  slot.cmdline = (image && image.url) || "";
+  // this is the only point at which the kernel still has it. M5 lets the CALLER name it instead,
+  // because an exec'd program's cmdline is its argv (Linux's own content for that file) and only
+  // `spawnChild` has the argv — a page-spawned process has no argv worth printing and keeps the
+  // image URL.
+  slot.cmdline = programCfg.cmdline !== undefined
+    ? String(programCfg.cmdline)
+    : ((image && image.url) || "");
   // THE PROCESS'S IDENTITY, set at spawn and read per call by every path syscall (constraint 29).
   // A spawn that did not take one would make every process root, and then the mode bits a check
   // asserts are bits nothing ever consults.
@@ -711,7 +754,30 @@ function spawn(image, programCfg, index = 0, parent = null) {
   };
 
   slot.worker = new Worker(RUNTIME_URL, { type: "module", name: `pid${slot.pid}` });
-  slot.worker.onerror = (e) => panic(`process ${slot.pid} runtime: ${e.message}`);
+  /**
+   * A PROCESS WORKER'S ERROR IS THAT PROCESS'S FAULT, NOT THE KERNEL'S PANIC.
+   *
+   * This called `panic`, which stores K_PANIC and tells every live process through its own SAB
+   * that the kernel is dead. An uncaught error in one unprivileged process therefore stopped the
+   * whole system — and once M5 let a process choose its own program text, a four-line program
+   * containing `setTimeout(() => { throw 0 })` was enough, with no cooperation from the page.
+   *
+   * It is reported through the SAME path a program's caught throw already takes — `faults`, plus a
+   * reap — so a reader sees one kind of event for one kind of failure, and `/proc` shows the
+   * process gone rather than the kernel gone. The libos cancels the error event as well, so in a
+   * tree with both halves present this is now only reached for an error the process itself could
+   * not catch: a module that fails to load (which is where a bad import lands) or a worker that
+   * could not start.
+   */
+  slot.worker.onerror = (e) => {
+    const why = `process ${slot.pid} runtime: ${e.message || e.type || "worker error"}`;
+    faults.push({ pid: slot.pid, why });
+    post({ t: "fault", pid: slot.pid, why });
+    // Through `reap`, never by assigning ZOMBIE: that path leaves `exitKind` at -1, so a parent's
+    // `waitpid` gets a status meaning neither exited nor killed, and teardown never runs — the
+    // process keeps its fds open. The same reason the `fault` message arm below gives.
+    if (table.get(slot.pid)) reap(slot, STAT_KILLED, SIGABRT);
+  };
   slot.worker.postMessage(
     {
       t: "init",
@@ -1017,6 +1083,11 @@ function m3State() {
       }))
       : [],
     usr: usrReport,
+    bench: benchReport,
+    // M5. The exec loader's own counters, so "no program crossed the wire for a process" is a
+    // measurement: `loads` counts images built from filesystem bytes and there is no `fetches`
+    // field here because src/kernel/exec.mjs contains no fetch to count.
+    exec: EXEC ? EXEC.stats() : null,
     trace: trace ? trace.stats() : null,
     tmp: mounts && mounts.at("/tmp")
       ? { bytes: mounts.at("/tmp").fs.bytes, limit: mounts.at("/tmp").fs.limit }
@@ -1443,21 +1514,66 @@ function spawnChild(caller) {
     if (act.op === SPAWN_DUP2 && !caller.fds.get(act.a)) return -EBADF;
   }
 
-  // The image load is a fetch, so the call cannot answer on the dispatch thread. `later` carries
+  // The image load reads a file, so the call cannot answer on the dispatch thread. `later` carries
   // the seq guard, which DROPS an answer whose caller has moved on — so the child it created must
   // be reaped here rather than left running with nobody holding its pid.
   const seqAtSpawn = caller.seq;
   later(caller, async () => {
+    // M5. THE PROGRAM COMES OUT OF THE FILESYSTEM, resolved against the caller's cwd and checked
+    // against the caller's credential. Until M5 this handed `req.path` to `fetch`, which made a
+    // process-supplied string a request origin — see src/kernel/exec.mjs for what that was.
     let image;
+    if (!EXEC) return -ENOEXEC;
     try {
-      image = await programImage(req.path);
+      image = await EXEC.load(caller, req.path);
     } catch (error) {
       // A program that will not load is ENOEXEC, not EIO: the path resolved and the bytes were
-      // not a program this kernel can run.
-      noteOut(`spawn ${req.path}: ${error && error.message}`);
+      // not a program this kernel can run. The reason is NOTED rather than swallowed — the errno
+      // alone cannot tell a bad module from a missing one.
+      noteOut(`spawn ${req.path}: ${(error && error.message) || error}`);
       return -ENOEXEC;
     }
-    const childPid = spawn(image, { argv: req.argv }, 0, caller);
+    // An errno from the loader is the FILESYSTEM'S answer and travels unchanged: ENOENT for a
+    // program that is not there, EACCES for one without an execute bit, EISDIR for a directory.
+    // Collapsing them all into ENOEXEC was this codebase's recurring bug in the other direction.
+    if (typeof image === "number") return image;
+
+    /* M5'S NEGATIVE CONTROL, in MILESTONES.md's own words: "make `spawn` return the parent's pid;
+     * `ps` must show one process and the check must fail."
+     *
+     * NOTHING IS CREATED and the CALLER'S OWN PID is the answer, so the shell believes it started
+     * a stage, waits on itself, and `/proc` holds one process. Placed AFTER the loader on purpose:
+     * every refusal above still refuses, so the exec proofs (a missing program is 127, a file with
+     * no execute bit is 126) must HOLD under the control and only the successful creation is
+     * subverted. A control that also broke the error paths would be satisfied by a kernel that
+     * had merely stopped working.
+     *
+     * IT SUBVERTS ONLY A CALLER THAT WAS ITSELF SPAWNED BY A PROCESS — `caller.ppid` non-zero —
+     * and that narrowing is the difference between a control and a broken kernel. The page's
+     * orchestrator has no parent, so it still starts the shell; the shell has one, so none of ITS
+     * stages exist. Without the test, nothing could run at all and every section went red
+     * together: measured, 7 of 8 sections failing, which is a control "satisfied by any failure"
+     * and verifies nothing about pipelines. With it, the builtins, the refusals and the URL
+     * refusals must HOLD — none of them creates a process — and only the sections that need a real
+     * child may move.
+     *
+     * Gated on a bench boot, as every control hook here is. */
+    if (cfg.spawnSelf && caller.ppid) {
+      if (cfg.bench !== 1) throw new Error("spawnSelf requires bench=1");
+      return caller.pid;
+    }
+    const childPid = spawn(
+      image,
+      {
+        argv: req.argv,
+        // What `/proc/<pid>/cmdline` reports for an exec'd program: its argv, NUL-joined, which is
+        // Linux's own content for that file. The PAGE's spawn keeps reporting the image URL it
+        // fetched, because that is what a page-spawned process actually ran.
+        cmdline: (req.argv.length ? req.argv : [req.path]).join("\0"),
+      },
+      0,
+      caller,
+    );
     if (childPid < 0) return childPid;             // -EAGAIN, the cap
     const child = table.get(childPid);
     if (!child) return -EAGAIN;
@@ -1698,7 +1814,47 @@ async function handle(m) {
             noteOut(`/usr not mounted: ${usrReport.code} ${usrReport.why}`);
           }
         }
+
+        // M5. `/bench`, UNDER A BENCH BOOT ONLY, so that the orchestrator programs M4 and M4b
+        // spawn by path still resolve now that `SYS_spawn` loads from the filesystem and not from
+        // the network (src/kernel/exec.mjs says why that changed).
+        //
+        // IT IS THE SAME MOUNT MECHANISM AS `/usr` and the same committed manifest shape — a row,
+        // not a driver. The paths the bench programs name (`/bench/m4-fs/program.mjs`) are
+        // unchanged, which is deliberate: a milestone that is already proved must not have its
+        // proof edited to keep passing.
+        if (cfg.bench === 1 && cfg.benchMount !== false) {
+          try {
+            const mounted = await mountProvider({ id: "local", entries: BENCH_ENTRIES });
+            mounted.fs.setDev(
+              mounts.add("/bench", { fs: mounted.fs, type: FS_PROVIDER, flags: MNT_RO }).dev);
+            benchReport = { ok: true, ...mounted.report };
+          } catch (error) {
+            benchReport = {
+              ok: false, code: error.code || "EIO", why: String(error.message || error),
+            };
+            noteOut(`/bench not mounted: ${benchReport.code} ${benchReport.why}`);
+          }
+        }
       }
+
+      // M5. THE EXEC LOADER. Built after the mount table, because a program path is resolved
+      // through it, and before CALLS, because `spawnChild` is wired into the handler surface.
+      //
+      // The loader buffer is registered with the I/O worker under a negative id, so a durable-
+      // volume program is read through the same `Store.readFd` a process's `read(2)` goes through
+      // without borrowing a process's byte region. A kernel with no I/O worker registers nothing
+      // and the durable arm answers -EIO, which is the state it is in.
+      execSab = new SharedArrayBuffer(EXEC_CHUNK);
+      execView = new Uint8Array(execSab);
+      if (IO) IO.register(EXEC_VIEW_ID, execSab);
+      EXEC = makeExec({
+        mounts: () => mounts,
+        store: () => STORE,
+        execView: () => execView,
+        base: self.location.href,
+        note: noteOut,
+      });
 
       // k.table is a getter in the surface below, so handlers see the live ProcTable rather
       // than a snapshot taken before anything was spawned. The alternative — passing `table`

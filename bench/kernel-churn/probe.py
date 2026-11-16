@@ -26,7 +26,7 @@ so the step that stalls localises it:
 A `spawned` stall is where the defect this probe found actually lived. `spawn` cannot answer until
 the program is loaded, so an unbounded `fetch` there makes process creation HANG rather than fail —
 no errno, nothing in the trace. `programImage` is bounded and retried for that reason
-(constraint 123), and `--stall` is the demonstration. Only a stall at `up` belongs to Chrome.
+(constraint 155), and `--stall` is the demonstration. Only a stall at `up` belongs to Chrome.
 """
 
 import argparse

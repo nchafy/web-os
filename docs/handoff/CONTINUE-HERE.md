@@ -27,17 +27,19 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, **M3**, **M4** and **M4b**. Each has a record in `MILESTONES.md` with its actual cost and
-what it changed in the plan. Current gates, all green:
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b and **M5**. Each has a record in `MILESTONES.md` with its actual cost
+and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 7 checks, 298 expectations |
+| `scripts/check.py` | the suite — 8 checks, 336 expectations |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `bench/kernel-churn/probe.py` | how reliable is one kernel boot? `--n 60 --runs 6`; `--stall` proves the program-fetch deadline fires |
 | `bench/kernel-churn/rangetest.py` | the byte-range server is byte-exact and refuses what it cannot serve |
-| `scripts/check.py --negative <control>` | 16 controls; `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs**, and do not run two phases at once. `pkill` returns before Chrome is gone. Load is the mechanism behind every intermittent result in this suite — see the m4b section above, where contention took kernel-boot stalls from 0 in 360 to 3 in 540. `--negative kernel-stall` is the most load-sensitive control (2 ms busy-wait per syscall across 16 processes); it went red twice in 13 runs, both inside a back-to-back sweep, and 11 times clean when spaced. Treat a single red as unmeasured and re-run it alone |
+| `scripts/check.py --negative <control>` | `--controls` lists what each proves. **Kill stray Chrome AND WAIT FOR IT TO EXIT between runs**, and do not run two phases at once — `pkill` returns before Chrome is gone. **Load is the mechanism behind every intermittent result in this suite**, and it is now measured rather than suspected: contention took kernel-boot stalls from 0 in 360 to 3 in 540 (constraint 155). `--negative kernel-stall` is the most load-sensitive control (2 ms busy-wait per syscall across 16 processes); it went red twice in 13 runs, both inside a back-to-back sweep, and 11 times clean when spaced. Treat a single red as unmeasured and re-run it alone |
+| `node bench/m5-sh/probe.mjs` | M5's host gate, no browser: 111 checks over the shell's pure front end and the programs' pure parts |
+| `python3 bench/m5-exec/controls.py` | 5 mutations of the exec loader, each scored on WHICH labels move. Two are narrow (the execute bit, the network refusal); one proves the import allowlist is what refuses an off-origin specifier; and two are a PAIR — collapsing the image cache key must move NOTHING, collapsing it *and* removing the byte comparison must move 17 |
 | `scripts/fsfuzz.py` | host-side fs gate, no browser: 129 host tests, 10k torn journals, 42 failure-path assertions + a control, purity and lock lints |
 | `scripts/check_links.py` | every path reference in the authored docs resolves |
 
@@ -63,10 +65,10 @@ one trivial process each. It reproduces the identical stall, at the identical st
 At 0.56% per boot a thirteen-kernel page fails ≈1 run in 14. m4b was failing at 1 in 12. That
 arithmetic closing is why this explanation is believed and the five below were not.
 
-**The defect:** `programImage` awaited `fetch` with no timeout, and both the page-driven batch and
-`SYS_spawn` await that load — so a stalled program fetch made `spawn` HANG rather than fail, with
-no errno and nothing in the trace. Now bounded at 5 s through `AbortController` and retried once
-(constraint 123, `docs/DECISIONS.md` D21). Demonstrated both ways with
+**The defect:** `programImage` awaited `fetch` with no timeout, and the caller cannot be answered
+until that load resolves — so a stalled program fetch made `spawn` HANG rather than fail, with no
+errno and nothing in the trace. **M5 narrowed what this covers and the bound still holds:** `SYS_spawn` no longer fetches at all — `src/kernel/exec.mjs` reads a program through the mount table (constraint 123) — so a process cannot hang this way, and what `programImage` still serves is the page's own `t: "spawn"`, the supervisor path every bench page boots through and where the stall was measured. Now bounded at 5 s through `AbortController` and retried once
+(constraint 155, `docs/DECISIONS.md` D21). Demonstrated both ways with
 `bench/kernel-churn/probe.py --stall`, which serves headers and never a body: with the deadline the
 kernel refuses by name, and with it raised the kernel hangs.
 
@@ -99,6 +101,45 @@ changed nothing), the spin stage's CPU burn (1.5 s vs 10 s, unchanged), the serv
 listen-queue overflows in `netstat -s -p tcp`), and truncated modules from the byte-range server
 (`bench/kernel-churn/rangetest.py` — eight range forms byte-exact, four malformed forms refused).
 
+## What M5 changed that touches everything after it
+
+**`SYS_spawn` NO LONGER FETCHES.** A program path is resolved through the mount table and the bytes
+come from the mount (`src/kernel/exec.mjs`). Three consequences a later milestone will meet:
+
+- **A program's only linkable import is an absolute specifier** — `/src/abi.mjs`, never
+  `"../x.mjs"`. A Blob image has no base for a relative one. The loader refuses such a program with
+  -ENOEXEC and a note naming the specifier, because the alternative was measured: every stage of
+  M4's pipelines faulted with SIGABRT and `/proc` said `never issued a syscall`, with nothing
+  anywhere naming a specifier. Constraint 125.
+- **Everything a process spawns must be IN a mount.** `/bench` is mounted under `bench: 1` only, so
+  M4's and M4b's orchestrators keep spawning their stages by the same path strings. A new bench
+  program that spawns anything needs a row in `BENCH_ENTRIES`.
+- **The page's own `t: "spawn"` still takes a URL** and still fetches. That is deliberate — the
+  page is the supervisor — and it is why only the process-side half moved. D18.
+
+**Two libos stubs existed with no caller and were wrong-shaped until one arrived.** `sigaction`
+had had none since M1; a shell without it DIES on the Ctrl-C it exists to forward. `nanosleep` had
+every caller open-coding `packI64` and one of them passed (0, 0) — a zero-length sleep. Constraint
+100's rule keeps earning its place.
+
+**THE ONE THING M5 LEFT OPEN, and it is M6's.** A program's static imports are an ALLOWLIST of
+exact literals now (`PROGRAM_IMPORTS`), because a pattern leaked: `new URL("//host/x.mjs", base)`
+resolves OFF-ORIGIN, so a program could have the CHILD's module loader fetch and evaluate remote
+code while the kernel's own accounting stayed at zero loads (constraint 139). A DYNAMIC
+`import(expr)` with a computed argument cannot be caught by reading the text and no scanner can.
+Deleting `fetch` does not close it either — `import` is the module loader. **A
+Content-Security-Policy on the document is the answer**, and it belongs with constraint 41's realm
+stripping in M6.
+
+**A process worker's error is now that PROCESS's fault, not a kernel panic** (constraint 140). If
+you add a second caller of `EXEC.load`, note that `linkProgram` can still throw for a specifier
+`new URL` refuses; `spawnChild` wraps it, and an unwrapped caller would be a kernel panic on a
+four-byte program.
+
+**One signal costs two `-EINTR`s** (constraint 131). Any call made immediately after a signal may
+answer -EINTR, and a program that cares must retry once. The kernel was NOT changed to deliver
+once, and D20 records why and what a milestone that changes it owes.
+
 ## Next: M4a — the terminal gets a real window
 
 `MILESTONES.md` §M4a is the spec. The pty it points at exists and is verified, so this is the UI
@@ -119,7 +160,10 @@ Three things the docs already settle, so do not re-derive them:
 - **The "not responding" detector lands here**, deliberately deferred from M1 — a kernel-side timer
   plus a UI hook, and there was no UI to hook until now.
 
-Then M5 (the shell and ten programs), M6, then option A (M7–M14).
+Then M6, then option A (M7–M14). **M5 is done**, so M4a now has a real shell to point the pty
+at: `spawn("/usr/bin/sh", ["sh"], actions)` with the slave on fds 0, 1 and 2, the shell in its own
+group, and that group made the terminal's foreground — `bench/m5-sh/program.mjs`'s `p_tty` is a
+working example of exactly that, including the Ctrl-C and Ctrl-D paths.
 
 ### What M4 and M4b leave you
 
@@ -130,7 +174,8 @@ Six host probes run without a browser and are the fast loop: `probe.mjs` under `
 proof, each spawning its own stages. Add a mode rather than a new program.
 
 **`pipe2` and `pty_open` can return fd 0** (constraint 94), because `spawn` leaves fd 0 free and
-`fds.add` hands out the lowest. Both orchestrators call `ensureStdin` first. M5's shell must too.
+`fds.add` hands out the lowest. Both orchestrators call `ensureStdin` first, and M5's shell does — it `fstat`s fd 0 and opens
+`/dev/zero` only when it has to, so a shell started on a terminal pays one syscall.
 
 **A blocking call parks on SEQ, never inside a synchronous call** (constraint 88, measured). An ops
 row returns `null` to mean parked; `null` must be tested before any numeric use, because `null >= 0`

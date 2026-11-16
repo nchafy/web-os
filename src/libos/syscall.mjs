@@ -18,12 +18,12 @@ import {
   SYS_lstat, SYS_seek, SYS_mkdir, SYS_unlink, SYS_chmod, SYS_readdir, SYS_readlink,
   SYS_symlink, SYS_rename, SYS_link, SYS_statfs, SYS_ftruncate, SYS_chown,
   SYS_pread, SYS_pwrite, SYS_rmdir, SYS_truncate, SYS_dup, SYS_dup2,
-  SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_setpgid, SYS_setsid,
+  SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid, SYS_setsid,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
-  SYS_getpgid, SYS_getppid, SYS_exit, encodeSpawnRequest,
+  SYS_getpgid, SYS_getppid, SYS_exit, SYS_clock_nanosleep, SYS_chdir, encodeSpawnRequest,
   STAT_EXITED, STAT_KILLED, WNOHANG,
   FILESTAT_BYTES, DIRENT_HEADER, decodeFilestat,
   EINTR, EIO, EINVAL, isErr, nextCallId, unpackI64, packI64,
@@ -440,6 +440,18 @@ export function lstat(path) {
   return statAt(SYS_lstat, 0, pathBytes(path));
 }
 
+/**
+ * chdir(path). 0, or a negative errno.
+ *
+ * There is no `getcwd` to pair with it: `/proc/<pid>/cwd` publishes the answer through calls that
+ * already exist, and a second renderer of one fact is what CLAUDE.md forbids. `src/bin/sh.mjs`
+ * reads it that way.
+ */
+export function chdir(path) {
+  const bytes = pathBytes(path);
+  return syscall(SYS_chdir, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
 export function mkdir(path, mode = 0o755) {
   const bytes = pathBytes(path);
   return syscall(SYS_mkdir, mode, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
@@ -591,6 +603,24 @@ export function kill(pid, sig) {
   return syscall(SYS_kill, pid, sig);
 }
 
+/**
+ * Set a signal's disposition. Returns the PREVIOUS one, or a negative errno.
+ *
+ * M5 ADDED THE STUB, not the call: `SYS_sigaction` has existed since M1 with no caller anywhere,
+ * which by the handoff's own rule — "treat any mechanism with no live caller as unverified" —
+ * means its three dispositions had never been exercised from a process. The shell is the first
+ * honest consumer: a shell that did not touch this DIES on the Ctrl-C it is supposed to pass to
+ * the pipeline in front of it (measured: `killed: true, code: 2`).
+ *
+ * `SIG_HANDLE` means "set the bit and let the process notice at its next syscall entry" — so a
+ * blocking `read` answers -EINTR and the caller decides. There is no handler function to register:
+ * a callback would be kernel-side state a process could not be killed out of, which constraint 15
+ * forbids. The disposition is the whole interface.
+ */
+export function sigaction(sig, disp) {
+  return syscall(SYS_sigaction, sig, disp);
+}
+
 export function setpgid(pid = 0, pgid = 0) {
   return syscall(SYS_setpgid, pid, pgid);
 }
@@ -610,6 +640,23 @@ export function getppid() {
 /** Never returns. The kernel reaps the caller, so there is nothing to come back to. */
 export function exit(code = 0) {
   return syscall(SYS_exit, code & 0xff);
+}
+
+/**
+ * Sleep for `ns` nanoseconds. 0 on completion, -EINTR when a signal arrived first.
+ *
+ * M5 ADDED THE STUB, not the call: `SYS_clock_nanosleep` has existed since M0 and every caller so
+ * far open-coded `env.syscall(2, lo, hi, 0)` with its own `packI64`. One of them passed (0, 0) —
+ * a zero-nanosecond sleep, answered on the next macrotask — and two proofs that meant to signal a
+ * parked process were racing worker startup instead (bench/m4-fs/program.mjs records it). A stub
+ * taking nanoseconds is the fix: there is one place the pair is packed.
+ *
+ * -EINTR IS A NORMAL RETURN AND NOT AN ERROR. A `sleep` that was interrupted slept for less time
+ * than it asked for, which is exactly what POSIX says `nanosleep` reports.
+ */
+export function nanosleep(ns) {
+  const [lo, hi] = packI64(ns);
+  return syscall(SYS_clock_nanosleep, lo, hi, 0);
 }
 
 /* --------------------------- M4b: the terminal, and poll ---------------------------------
