@@ -6483,9 +6483,11 @@ def check_m4b(env: Env) -> None:
     document=M5_DOCUMENT,
     ready_expr=M5_READY,
     ready_what="globalThis.M5.state reaching done, aborted or error (www/m5.html)",
-    # 38 s measured for the headline run over nine fresh kernels, each of which mounts /usr (14
-    # objects) and /bench (3) over the local provider before a process exists. The bound is
-    # generous and is still a BOUND: a deadlocked pipeline raises no error anywhere - a parked
+    # 9.7 s measured for the headline run over nine fresh kernels, each of which mounts /usr (15
+    # objects) and /bench (3) over the local provider before a process exists. It was 38 s until
+    # `p_exec` stopped draining a pipe a backgrounded `sleep 30` was holding open — 30.9 s of
+    # waiting for a process it was about to kill (constraint 185). The bound is generous and is
+    # still a BOUND: a deadlocked pipeline raises no error anywhere - a parked
     # reader and a parked writer are both legitimate states - so a shell that stopped must end as
     # a BROKEN check carrying the kernel's park and refcount state, which www/m5.html attaches to
     # its own timeout, rather than as a suite that never returns.
