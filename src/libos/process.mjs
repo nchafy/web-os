@@ -13,10 +13,26 @@ import {
   observeHeartbeat, barrierArrive, barrierDepart, barrierCounters,
   open, close, read, pread, pwrite, readAll, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, linkAt, rename,
-  readlink, readdir, statfs, dup, dup2,
-  pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
+  readlink, readdir, statfs, dup, dup2, chdir,
+  pipe2, spawn, waitpid, kill, sigaction, setpgid, setsid, getpgid, getppid, exit,
+  nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
 } from "./syscall.mjs";
+/**
+ * M5. The two libraries a program in `/usr/bin` is handed.
+ *
+ * IMPORTED HERE SO A PROGRAM NEVER HAS TO. A program's image is a Blob URL whose static specifiers
+ * the kernel rewrites against the document (src/kernel/exec.mjs), so a module no process had
+ * already imported would be fetched once PER SPAWNED PROCESS — the herd `src/kernel/kernel.mjs`
+ * measured losing 6 of 480 connections to. These two are in this module's own graph, so a
+ * program receives them through `env` and imports nothing, and a pipeline of three processes costs
+ * no extra request at all.
+ *
+ * Both are function-only and hold no state, so the constraint-15 seam the bench enumerates still
+ * shows nothing with a `byteLength` or a `postMessage`.
+ */
+import * as std from "./std.mjs";
+import * as shlex from "./shlex.mjs";
 
 /**
  * M2's file API, as ONE object on `env.fs`.
@@ -29,7 +45,7 @@ import {
 const FS = Object.freeze({
   open, close, read, pread, pwrite, readAll, write, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, link: linkAt,
-  rename, readlink, readdir, statfs, dup, dup2,
+  rename, readlink, readdir, statfs, dup, dup2, chdir,
 });
 
 /**
@@ -41,7 +57,8 @@ const FS = Object.freeze({
  * here; there is no `fork` (constraint 20).
  */
 const PROC = Object.freeze({
-  pipe2, spawn, waitpid, kill, setpgid, setsid, getpgid, getppid, exit,
+  pipe2, spawn, waitpid, kill, sigaction, setpgid, setsid, getpgid, getppid, exit,
+  nanosleep,
 });
 
 /**
@@ -56,6 +73,17 @@ const TTY = Object.freeze({
   getPgrp: tcGetPgrp, setPgrp: tcSetPgrp,
   poll,
 });
+
+/**
+ * M5's two libraries, frozen once at module load.
+ *
+ * A module namespace object is already non-writable per property, but it is not frozen and a
+ * program could still add to it — and every program this worker ever runs sees the same object.
+ * `Object.freeze` over a shallow copy is what makes `env.std` the same thing for the second
+ * program as for the first.
+ */
+const STD = Object.freeze({ ...std });
+const SHLEX = Object.freeze({ ...shlex });
 
 const now = () => performance.now();
 
@@ -117,8 +145,29 @@ function panic(why) {
   port.postMessage({ t: "fault", pid, why: String(why) });
 }
 
-self.onerror = (e) => panic(`process onerror: ${e.message ?? e}`);
-self.onunhandledrejection = (e) => panic(`process rejection: ${e.reason}`);
+/**
+ * A FAULT IS REPORTED AND THE EVENT IS CANCELLED. Both halves, and the second one is the fix.
+ *
+ * An `onerror` handler that does not cancel the event leaves the runtime to "report the exception",
+ * which for a dedicated worker RE-FIRES it at the `Worker` object in the parent — and the parent
+ * here is the kernel, whose `worker.onerror` used to call `panic`. So a program containing
+ * `setTimeout(() => { throw new Error("x") })` took the WHOLE SYSTEM down: `G_KSTATE` went
+ * K_PANIC and every live process was told through its own SAB that the kernel was dead.
+ *
+ * That wiring predates M5. What M5 changed is that a process now chooses its own program text, so
+ * it needed no cooperation from the page. Returning true is how an `onerror` handler cancels;
+ * `preventDefault` is the same thing for the rejection event, which has no return-value form.
+ * The kernel's side is the other half (src/kernel/kernel.mjs): a process worker's error is that
+ * PROCESS's fault and is reaped as one.
+ */
+self.onerror = (e) => {
+  panic(`process onerror: ${e.message ?? e}`);
+  return true;
+};
+self.onunhandledrejection = (e) => {
+  panic(`process rejection: ${e.reason}`);
+  if (e.preventDefault) e.preventDefault();
+};
 
 let exiting = false;
 
@@ -183,6 +232,11 @@ function onCommand(m) {
       fs: FS,
       proc: PROC,
       tty: TTY,
+      // M5. Frozen, so one program cannot leave a monkey-patched helper behind for the next —
+      // these are MODULE objects shared by every program this worker runs, which a per-spawn
+      // object would not be.
+      std: STD,
+      shlex: SHLEX,
       pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
     };
     const data = program.run(env, m);
