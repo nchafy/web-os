@@ -111,6 +111,36 @@ class Handler(SimpleHTTPRequestHandler):
     #: not been shown to be the control.
     csp = True
 
+    def _in_process_realm(self) -> bool:
+        """Does this response create, or sit inside, the process realm?
+
+        ASKED OF THE RESOLVED FILE, never of the request's spelling, and that is the whole point
+        of this function. Two spellings of one file must not get two different policies, in either
+        direction: `/src/libos/../kernel/kernel.mjs` is the KERNEL, which fetches providers and
+        mints program images, so handing it `connect-src 'none'` would break the system with no
+        visible cause — and anything that resolves to `src/libos/` is a process realm and must
+        carry the policy however it was asked for.
+
+        A NORMALIZED PREFIX TEST WAS NOT ENOUGH, and an adversarial review measured it:
+        `GET /%2fsrc/libos/process.mjs` served the real `process.mjs` — byte-identical, 13,675
+        bytes — with NO policy, because `unquote` runs after `urlparse` and `normpath` keeps the
+        two leading slashes that `%2f` produces, while `translate_path` collapses them and serves
+        the file anyway. A process worker created from that URL would have had an unbounded module
+        loader: `eval` and a computed `import(expr)` both work. Deferring to `translate_path` —
+        the same resolution that decides which bytes are sent — closes the whole class rather than
+        the spelling that was found.
+        """
+        try:
+            resolved = os.path.realpath(self.translate_path(self.path))
+            realm = os.path.realpath(os.path.join(
+                getattr(self, "directory", os.getcwd()),
+                *PROCESS_REALM_PREFIX.strip("/").split("/")))
+        except (OSError, ValueError):
+            # A path the resolver cannot make sense of is not a response this server will serve
+            # from the process realm either. Fail closed in the direction that matters: no claim.
+            return False
+        return resolved == realm or resolved.startswith(realm + os.sep)
+
     def send_head(self):
         # The default root is the repository root, which contains .git and .claude. Nothing
         # dot-prefixed is ever part of the OS being served, so refuse it rather than rely on
@@ -223,7 +253,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.isolate:
             for name, value in ISOLATION_HEADERS:
                 self.send_header(name, value)
-        if self.csp and self.path.split("?")[0].startswith(PROCESS_REALM_PREFIX):
+        if self.csp and self._in_process_realm():
             self.send_header("Content-Security-Policy", PROCESS_REALM_CSP)
         # No-store, because a cached pre-isolation response is a confusing half-hour.
         self.send_header("Cache-Control", "no-store")

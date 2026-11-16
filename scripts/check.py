@@ -433,6 +433,32 @@ def _assert_policy(serving: Serving, csp: bool) -> None:
             "remove what it claims to remove."
             % (PROCESS_REALM_SCRIPT, header), reason=Gate.WIRE_HEADERS)
 
+    # THE SAME FILE, ASKED FOR ANOTHER WAY, and this is here because an adversarial review found
+    # the server answering the two spellings differently: `GET /%2fsrc/libos/process.mjs` served a
+    # byte-identical `process.mjs` with NO policy, because the prefix test read the request's
+    # spelling instead of the file it resolves to. A process worker created from that URL had an
+    # unbounded module loader. The policy must follow the BYTES; one spelling here keeps the class
+    # closed rather than the instance.
+    dodge = "/%2f" + PROCESS_REALM_SCRIPT.lstrip("/")
+    try:
+        with _harness_get(serving.base + dodge) as response:
+            body = response.read()
+            dodged = response.headers.get("Content-Security-Policy")
+    except (urllib.error.URLError, OSError):
+        # A server that refuses the spelling outright is a server that cannot serve the realm by
+        # it either, which is the safe answer and not a finding.
+        return
+    if not body:
+        return
+    if bool(dodged) != bool(csp):
+        raise ServeError(
+            "GET %s returned %d bytes of the process realm's own script with the policy %s, "
+            "while %s got it %s. Two spellings of one file must not get two policies: the one "
+            "without is a realm whose module loader is unbounded."
+            % (dodge, len(body), "absent" if not dodged else "present",
+               PROCESS_REALM_SCRIPT, "present" if csp else "absent"),
+            reason=Gate.WIRE_HEADERS)
+
 
 def _assert_serving(serving: Serving, document: str = "/") -> None:
     """The gate that runs before Chrome exists: mode on the wire, document against disk.
@@ -7436,6 +7462,19 @@ def check_m6(env: Env) -> None:
 
     # ---- PROOF 4: MILESTONES.md M6's own proof -------------------------------------------
     fa = ev("fault")
+    # AN EXPIRED READ IS AN UNTAKEN MEASUREMENT, NOT A FAILED PROOF, and reporting it as the
+    # second would be this harness scoring correct kernel behaviour as a defect. A reaped pid
+    # leaves the table when the ~2.2 s terminate quarantine ends (constraint 14), so a read that
+    # lands after it finds ENOENT and says nothing about whether the process faulted. The page
+    # runs that read on an already-live process to make this rare; this keeps it honest when it
+    # happens anyway. Raised BEFORE the clauses below, so no label is recorded from a run that
+    # could not answer.
+    if fa.get("expired") is True:
+        env.unmeasurable(
+            "/proc lost the faulted pid before it could be read: %s. The fault itself was "
+            "observed (faulted=%s), but the quarantine had expired, so the state could not be. "
+            "Re-run; if it repeats on an idle machine, the read is too slow rather than flaky."
+            % (fa.get("why"), fa.get("faulted")))
     env.expect_that("fault ok", section_ok("fault"), fa)
     env.expect_that("the bypass program faulted",
                     fa.get("faulted") is True and fa.get("bypassed") is False,
