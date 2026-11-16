@@ -331,7 +331,17 @@ refcount was wrong for every dup'd description and had no symptom until a pty sl
   the main session's calls were reliable when subagents were not.
 - **Kill stray Chrome between runs:** `pgrep -f "showup-chrome-" | wc -l`, then
   `pkill -f "showup-chrome-"`. Leftovers compete for the renderer and corrupt latency numbers. One
-  earlier run accumulated 136.
+  earlier run accumulated 136; an M4a session found 20 left by its own runs.
+  **WAIT TEN SECONDS, NOT FIVE.** Measured by the M5 session: a run started five seconds after
+  `pkill` came back BROKEN on three checks with `connection closed mid-frame`, and ten seconds was
+  reliable. `pkill` returns before Chrome is gone, and constraint 121's flake has the same
+  signature — so a single red immediately after a kill is unmeasured, not a failure.
+- **Read `sysctl vm.swapusage` before believing any browser result.** M4a could not run
+  `scripts/check.py` AT ALL for a stretch: swap read 24.2 GB of 23.5 GB used with ~390 MB free and
+  Chrome was killed mid-run every time, which arrives as exit 144 and as BROKEN checks reporting
+  `socket is already closed`. The harness fails closed and says it measured nothing, which is the
+  correct outcome and easy to misread as a defect in the change under test. At 14.6 GB used the
+  same gates passed unchanged.
 - **Never run two browser-driving things at once.** Doing so produced "Chrome could not be driven:
   connection closed mid-frame" — the harness correctly refused to report, but the measurement was
   mine contaminating my own.
