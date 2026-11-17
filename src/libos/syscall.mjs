@@ -969,4 +969,3 @@ export function samples() {
   };
 }
 
-export { kernelDown as isKernelDown };

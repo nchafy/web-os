@@ -1023,8 +1023,3 @@ export function run(env) {
   return { exit: status & 0xff, status, trace: sh.trace, cwd: sh.cwd };
 }
 
-/** Exported for the host probe and for `complete`: the parts that need no kernel. */
-export const _BUILTINS = BUILTINS;
-export const _statusOf = statusOf;
-export const _howDone = howDone;
-export const _commandNames = commandNames;

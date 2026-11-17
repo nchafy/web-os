@@ -680,9 +680,6 @@ export function isErr(r0, r1) {
   return r0 < 0 && r1 === -1;
 }
 
-export function errOf(r0) {
-  return -r0;
-}
 
 export function errName(errno) {
   return ERRNO_NAMES[errno] ?? (errno === EHOSTGONE ? "EHOSTGONE" : `E?${errno}`);
