@@ -30,7 +30,7 @@ import {
 import { mountProvider, USR_ENTRIES, BENCH_ENTRIES } from "./providerfs.mjs";
 import { makeExec, EXEC_VIEW_ID, EXEC_CHUNK } from "./exec.mjs";
 import { makeProcFS } from "./procfs.mjs";
-import { makeDevFS, renderTrace } from "./devfs.mjs";
+import { makeDevFS, renderTrace, TRACE_RENDER_LIMIT } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
@@ -2252,8 +2252,13 @@ async function handle(m) {
       return;
     case "trace-read":
       // The trace as TEXT, through the same renderer `/dev/trace` uses, so the page and a process
-      // cannot be shown two different traces. One renderer of one fact.
-      post({ t: "trace-read", text: renderTrace(trace, { limit: (m.limit | 0) || 256 }) });
+      // cannot be shown two different traces. One renderer of one fact — which means the LIMIT
+      // comes from the renderer too: a hand-copied 256 here is a second copy of that fact, and
+      // raising the constant in devfs.mjs would have shown a process 512 rows and the page 256.
+      post({
+        t: "trace-read",
+        text: renderTrace(trace, { limit: m.limit > 0 ? (m.limit | 0) : TRACE_RENDER_LIMIT }),
+      });
       return;
     case "stats":
       post({ t: "stats", kernel: kstats() });
