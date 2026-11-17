@@ -24,7 +24,8 @@ import {
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
   SYS_getpgid, SYS_getppid, SYS_exit, SYS_clock_nanosleep, SYS_chdir, encodeSpawnRequest,
   STAT_EXITED, STAT_KILLED, WNOHANG,
-  FILESTAT_BYTES, DIRENT_HEADER, decodeFilestat,
+  FILESTAT_BYTES, DIRENT_HEADER, DE_INO, DE_TYPE, DE_NLEN, direntSize,
+  STATFS_BYTES, decodeFilestat, decodeStatfs,
   EINTR, EIO, EINVAL, isErr, nextCallId, unpackI64, packI64,
 } from "../abi.mjs";
 
@@ -442,13 +443,13 @@ export function readdir(fd, cookie = 0) {
   const out = [];
   let at = 0;
   while (at + DIRENT_HEADER <= bytes.length) {
-    const ino = dv.getBigUint64(at, true);
-    const type = bytes[at + 8];
-    const nlen = bytes[at + 9];
+    const ino = dv.getBigUint64(at + DE_INO, true);
+    const type = bytes[at + DE_TYPE];
+    const nlen = bytes[at + DE_NLEN];
     if (at + DIRENT_HEADER + nlen > bytes.length) return -EIO;
     const name = PATH_DEC.decode(bytes.subarray(at + DIRENT_HEADER, at + DIRENT_HEADER + nlen));
     out.push({ ino, type, name });
-    at += (DIRENT_HEADER + nlen + 3) & ~3;
+    at += direntSize(nlen);
   }
   return { entries: out, cookie: next, done: out.length === 0 };
 }
@@ -603,13 +604,9 @@ export function poll(fds, timeoutMs = -1) {
 export function statfs() {
   const n = syscall(SYS_statfs);
   if (n < 0) return n;
-  const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n));
-  const dv = new DataView(bytes.buffer);
-  return {
-    blocks: dv.getBigUint64(0, true), bfree: dv.getBigUint64(8, true),
-    files: dv.getBigUint64(16, true), ffree: dv.getBigUint64(24, true),
-    bsize: dv.getUint32(32, true), namemax: dv.getUint32(36, true),
-  };
+  if (n !== STATFS_BYTES) return -EIO;
+  const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + STATFS_BYTES));
+  return decodeStatfs(new DataView(bytes.buffer), 0);
 }
 
 /** The raw path that bypasses layer 2's split, for the check that an impossible length is refused

@@ -15,7 +15,8 @@ import {
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   encodeTermios, decodeTermios, encodeWinsize,
-  encodeFilestat, unpackI64, packI64,
+  encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
+  unpackI64, packI64,
 } from "../abi.mjs";
 import { KIND_OPS } from "./files.mjs";
 import { Pipe } from "./pipe.mjs";
@@ -764,13 +765,13 @@ HANDLERS.readdir = (p, k) => {
       const entry = entries[index];
       const name = encoder.encode(entry.name);
       if (name.length > NAME_MAX) return -ENAMETOOLONG;
-      const size = (DIRENT_HEADER + name.length + 3) & ~3;
+      const size = direntSize(name.length);
       if (used + size > MAX_INLINE) break;
       const record = new Uint8Array(size);
       const dv = new DataView(record.buffer);
-      dv.setBigUint64(0, BigInt(entry.ino), true);
-      record[8] = DIRENT_TYPE[entry.type] ?? DT_UNKNOWN;
-      record[9] = name.length;
+      dv.setBigUint64(DE_INO, BigInt(entry.ino), true);
+      record[DE_TYPE] = DIRENT_TYPE[entry.type] ?? DT_UNKNOWN;
+      record[DE_NLEN] = name.length;
       record.set(name, DIRENT_HEADER);
       out.push(record);
       used += size;
@@ -1086,28 +1087,25 @@ HANDLERS.statfs = (p, k) => {
     if (!k.mounts) return -EIO;
     mount = k.mounts.root;
   }
-  const record = new Uint8Array(40);
+  const record = new Uint8Array(STATFS_BYTES);
   const dv = new DataView(record.buffer);
   if (mount.fs !== k.store.vfs) {
     // EVERY FIELD COMES FROM THE FILESYSTEM, including `bsize` and `namemax`: hardcoding those
     // here means a filesystem that declares a block size cannot publish it.
-    const s = mount.fs.statfs();
-    dv.setBigUint64(0, BigInt(s.blocks), true);
-    dv.setBigUint64(8, BigInt(s.bfree), true);
-    dv.setBigUint64(16, BigInt(s.files), true);
-    dv.setBigUint64(24, BigInt(s.ffree), true);
-    dv.setUint32(32, s.bsize >>> 0, true);
-    dv.setUint32(36, s.namemax >>> 0, true);
+    encodeStatfs(dv, 0, mount.fs.statfs());
     return replyBytes(p, record);
   }
   const counted = k.store.vfs.stats();
   const quota = k.store.quota || { usage: counted.bytes, quota: 0 };
-  dv.setBigUint64(0, BigInt(quota.quota || 0), true);
-  dv.setBigUint64(8, BigInt(Math.max(0, (quota.quota || 0) - (quota.usage || 0))), true);
-  dv.setBigUint64(16, BigInt(counted.inodes), true);
-  dv.setBigUint64(24, 0n, true);
-  dv.setUint32(32, 1, true);
-  dv.setUint32(36, NAME_MAX, true);
+  // bsize 1, so `blocks` and `bfree` are BYTES on the durable volume.
+  encodeStatfs(dv, 0, {
+    blocks: quota.quota || 0,
+    bfree: Math.max(0, (quota.quota || 0) - (quota.usage || 0)),
+    files: counted.inodes,
+    ffree: 0,
+    bsize: 1,
+    namemax: NAME_MAX,
+  });
   return replyBytes(p, record);
 };
 
