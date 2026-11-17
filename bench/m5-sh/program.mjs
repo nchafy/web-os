@@ -5,9 +5,8 @@
 // loaded out of `/usr/bin/sh` by the kernel's exec path and runs in its own process worker; the
 // stages it spawns are separate processes with separate pids, pipes and exit statuses.
 //
-// ONE ORCHESTRATOR PER PROOF, spawned by the page, which then spawns `sh`. The orchestrator is
-// the only thing here that is not a real program — it exists because the page cannot make
-// syscalls, and `src/libos/process.mjs` hands it the same `env` every program gets.
+// One orchestrator per proof, spawned by the page, which then spawns `sh`. The orchestrator is the
+// only thing here that is not a real program: it exists because the page cannot make syscalls.
 //
 // Orchestrator modes:
 //   p_pipeline     `ls /usr/bin | grep c | wc -l` through three processes, against a count this
@@ -25,13 +24,9 @@
 import {
   E, EACCES, ENOENT, MAX_INLINE, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
   POLLIN, SIGINT, SIGTERM, SPAWN_CLOSE, SPAWN_DUP2, SYS_read,
-// ABSOLUTE, NOT RELATIVE, and M5 is why. This program is spawned BY A PROCESS, so the kernel
-// loads it out of the filesystem and links it as a program (src/kernel/exec.mjs): a program's image
-// is a Blob URL whose path is opaque, so a RELATIVE specifier inside it has nothing to resolve
-// against and the module fails to load — measured, every stage here faulted with SIGABRT and
-// "never issued a syscall". An absolute specifier resolves against the document and comes out as
-// the same URL src/libos/process.mjs already has in its module map, so it costs no fetch and works
-// under BOTH loaders: the page's own spawn rewrites `/x` the same way.
+// Absolute, not relative. A program spawned by a process is loaded as a Blob URL whose path is
+// opaque (src/kernel/exec.mjs), so a relative specifier has nothing to resolve against and the
+// module fails to load — measured, every stage faulted with SIGABRT and "never issued a syscall".
 } from "/src/abi.mjs";
 
 const ENC = new TextEncoder();
@@ -43,14 +38,9 @@ const SH = "/usr/bin/sh";
  *  error anywhere, so a bounded wait that reports beats a harness timeout that does not. */
 const WAIT_CEILING_MS = 15000;
 
-/* ----------------------------------- plumbing -------------------------------------------- */
-
-/**
- * Hold fd 0 before calling `pipe2`. Constraint 94.
- *
- * `spawn` leaves fd 0 free and `fds.add` hands out the lowest, so `pipe2` here would return 0 as
- * its read end and every convention that treats 0 as stdin would wire the pipeline backwards.
- */
+/** Hold fd 0 before calling `pipe2`. Constraint 94: `spawn` leaves fd 0 free and `fds.add` hands
+ *  out the lowest, so `pipe2` would return 0 as its read end and every convention that treats 0 as
+ *  stdin would wire the pipeline backwards. */
 function ensureStdin(env) {
   const fd = env.fs.open("/dev/zero", O_RDONLY);
   if (fd < 0) throw new Error(`ensureStdin: /dev/zero is ${env.std.errnoName(fd)}`);
@@ -61,14 +51,12 @@ function ensureStdin(env) {
 /**
  * Run one shell line and collect everything it wrote.
  *
- * THE READ COMES BEFORE THE WAIT, and that order is the whole correctness of this helper. A
- * pipeline whose output exceeds the 64 KiB pipe buffer blocks its last stage in `write`; an
- * orchestrator that called `waitpid` first would be waiting for a process that is waiting for it,
- * which is a deadlock with no error anywhere. Draining to EOF first cannot deadlock: EOF arrives
- * when the last writer's fds are closed, which happens at its teardown whether it exited or was
- * killed.
+ * The read comes before the wait. A pipeline whose output exceeds the 64 KiB pipe buffer blocks its
+ * last stage in `write`, so an orchestrator that called `waitpid` first would wait for a process
+ * that is waiting for it — a deadlock with no error anywhere. Draining to EOF first cannot
+ * deadlock: EOF arrives when the last writer's fds close, at its teardown, exited or killed.
  *
- * stdout AND stderr both land on the pipe, because a proof about a refusal needs the message.
+ * stdout and stderr both land on the pipe, because a proof about a refusal needs the message.
  */
 function runSh(env, line, { argv = ["sh", "-c", line] } = {}) {
   const pipe = env.proc.pipe2();
@@ -86,8 +74,8 @@ function runSh(env, line, { argv = ["sh", "-c", line] } = {}) {
     env.fs.close(wfd);
     return { error: `spawn ${SH}: ${env.std.errnoName(pid)}`, errno: -pid };
   }
-  // THE ORCHESTRATOR'S WRITE END GOES NOW. While it holds one the pipe has a writer and the read
-  // below never sees EOF — the classic pipeline mistake, and the one M4 recorded twice.
+  // While the orchestrator holds a write end the pipe has a writer and the read below never sees
+  // EOF.
   env.fs.close(wfd);
   const out = env.std.slurpText(env, rfd);
   env.fs.close(rfd);
@@ -113,8 +101,8 @@ function status(env, pid) {
   return out;
 }
 
-/** Wait until `pid` is parked inside syscall `nr`. Observed, never slept for: a fixed wait raced
- *  worker startup in M4 and killed processes that had never run. */
+/** Wait until `pid` is parked inside syscall `nr`. Observed, never slept for: a fixed wait races
+ *  worker startup and signals processes that have never run. */
 function awaitParkedIn(env, pid, nr, rounds = 400) {
   for (let i = 0; i < rounds; i += 1) {
     const f = status(env, pid);
@@ -143,16 +131,13 @@ function livePids(env) {
   return entries.filter((e) => /^\d+$/.test(e.name)).map((e) => Number(e.name)).sort((a, b) => a - b);
 }
 
-/* ----------------------------------- the proofs ------------------------------------------ */
-
 /**
  * PROOF 1. `ls /usr/bin | grep c | wc -l`, through three real processes.
  *
- * THE EXPECTED NUMBER IS COMPUTED HERE, by this program, from `/usr/bin` itself — not written
- * down. A hardcoded count would have to be edited every time a program is added to the manifest,
- * and an expectation that gets edited to match the output is not an expectation. It is also the
- * one way to tell "the pipeline worked" from "the pipeline printed a plausible number": the two
- * routes to the same count are an independent listing and three processes talking over two pipes.
+ * The expected number is computed here from `/usr/bin` itself, never written down: an expectation
+ * edited to match the output is not an expectation. It is also the only way to tell "the pipeline
+ * worked" from "the pipeline printed a plausible number" — the two routes to the same count are an
+ * independent listing and three processes talking over two pipes.
  */
 function pPipeline(env) {
   ensureStdin(env);
@@ -167,18 +152,17 @@ function pPipeline(env) {
   if (r.error) return { ok: false, why: r.error };
   const printed = Number(r.output.trim());
 
-  // AND THE TRACE SAYS HOW MANY PROCESSES DID IT. `/dev/trace` is the kernel's own record of every
-  // syscall with the pid that issued it (M3), so "three real processes" is read out of the kernel
-  // rather than inferred from the answer being right — which is exactly the claim the negative
-  // control attacks.
+  // `/dev/trace` is the kernel's own record of every syscall with the pid that issued it (M3), so
+  // "three real processes" is read out of the kernel rather than inferred from the answer being
+  // right — which is the claim the negative control attacks.
   const trace = env.std.readFileText(env, "/dev/trace");
   const pids = new Set();
   if (typeof trace === "string") {
     for (const row of env.std.lines(trace)) {
-      // A RECORD IS TAB-SEPARATED `seq pid nr name kind r0 extra t` and a header line is
-      // `key:\tvalue` (src/kernel/devfs.mjs `renderTrace`). Selected by shape — eight fields with
-      // a numeric first — rather than by excluding the header names, so a header row added later
-      // cannot be read as a record with a pid of NaN.
+      // A record is tab-separated `seq pid nr name kind r0 extra t`; a header line is `key:\tvalue`
+      // (src/kernel/devfs.mjs `renderTrace`). Selected by shape — eight fields, numeric first —
+      // rather than by excluding header names, so a header row added later cannot be read as a
+      // record with a pid of NaN.
       const f = row.split("\t");
       if (f.length !== 8 || !/^\d+$/.test(f[0]) || !/^\d+$/.test(f[1])) continue;
       pids.add(Number(f[1]));
@@ -211,10 +195,9 @@ function pPipeline(env) {
 /**
  * PROOF 2. `sleep 60 &`, `ps`, `kill %1`.
  *
- * ONE SHELL FOR ALL THREE LINES, because a job table does not survive a process: `%1` means
- * nothing to a second shell. So this drives the shell through a PIPE on its stdin and sends the
- * three lines down it, which is also the first thing in this milestone that proves the shell can
- * read a script rather than a `-c` argument.
+ * One shell for all three lines, because a job table does not survive a process: `%1` means
+ * nothing to a second shell. The shell is therefore driven through a pipe on its stdin, which also
+ * proves it can read a script rather than a `-c` argument.
  */
 function pJobs(env) {
   ensureStdin(env);
@@ -237,9 +220,9 @@ function pJobs(env) {
   env.fs.close(inPipe.rfd);
   env.fs.close(outPipe.wfd);
 
-  // THE WHOLE SCRIPT IN ONE WRITE, and then the input end is closed so the shell sees EOF and
-  // exits after the last line. Writing line by line and waiting for a prompt would be a second
-  // line discipline in the orchestrator.
+  // The whole script in one write, then the input end closes so the shell sees EOF and exits after
+  // the last line. Writing line by line and waiting for a prompt would be a second line discipline
+  // in the orchestrator.
   const script = "sleep 60 &\nps\nkill %1\njobs\n";
   const wrote = env.fs.write(inPipe.wfd, ENC.encode(script));
   env.fs.close(inPipe.wfd);
@@ -249,12 +232,11 @@ function pJobs(env) {
   const stat = env.proc.waitpid(shPid, 0);
   const text = typeof out === "string" ? out : "";
 
-  // `[1] <pid>` is the shell's announcement of a background job, and the pid in it is the thing
-  // `%1` had to resolve to.
+  // `[1] <pid>` announces a background job, and that pid is what `%1` had to resolve to.
   const announced = /^\[1\] (\d+)/m.exec(text);
   const sleeperPid = announced ? Number(announced[1]) : 0;
-  // `ps`'s own row for the sleeper, found by pid, which is what makes this a proof about the
-  // process table rather than about the word "sleep" appearing in some output.
+  // Found by pid, which makes this a proof about the process table rather than about the word
+  // "sleep" appearing in some output.
   const psRow = sleeperPid
     ? new RegExp(`^\\s*${sleeperPid}\\s+\\d+\\s+\\d+\\s+\\S+\\s+(.*)$`, "m").exec(text) : null;
   return {
@@ -262,8 +244,8 @@ function pJobs(env) {
     shellPid: shPid,
     wrote,
     sleeperPid,
-    // THE COMMAND `ps` PRINTED FOR IT, which comes from /proc/<pid>/cmdline — so this also proves
-    // argv reached the process table.
+    // The command `ps` printed for it comes from /proc/<pid>/cmdline, so this also proves argv
+    // reached the process table.
     psCommand: psRow ? psRow[1].trim() : null,
     psSawSleeper: !!psRow,
     psSawShell: new RegExp(`^\\s*${shPid}\\s`, "m").test(text),
@@ -276,7 +258,7 @@ function pJobs(env) {
   };
 }
 
-/** PROOF 3. Redirection, including the one the predecessor got wrong. */
+/** PROOF 3. Redirection. */
 function pRedirect(env) {
   ensureStdin(env);
   const rows = [];
@@ -293,8 +275,7 @@ function pRedirect(env) {
   const counted = runSh(env, "wc -l < /tmp/m5a");
   add("input redirection feeds a program with no operands", counted.output.trim(), "2");
 
-  // THE PREDECESSOR'S BUG, AS A CHECK. `echo a > f1 > f2` must create BOTH and write only the
-  // last: writing only the last one created neither the file nor a word about it.
+  // `echo a > f1 > f2` must create both targets and write only to the last.
   runSh(env, "echo twice > /tmp/m5b > /tmp/m5c");
   const b = runSh(env, "wc -c < /tmp/m5b");
   const c = runSh(env, "cat /tmp/m5c");
@@ -315,13 +296,12 @@ function pRedirect(env) {
 }
 
 /**
- * PROOF 4. The builtins, which run IN the shell and spawn nothing.
+ * PROOF 4. The builtins, which run in the shell and spawn nothing.
  *
- * EVERY ROW HERE IS PROGRAM-FREE, deliberately, and that is what makes M5's negative control
- * specific rather than total: `spawn_self` creates no child, so a section that reached for `echo`
- * to print a variable would go red along with the pipelines and the control would be "satisfied by
- * any failure". So `$$` is observed by `cd /proc/$$` and `$?` by the shell's own exit status —
- * both of which a shell can answer without starting anything.
+ * Every row here is program-free, which is what makes M5's negative control specific rather than
+ * total: `spawn_self` creates no child, so a section that reached for `echo` to print a variable
+ * would go red along with the pipelines and the control would be satisfied by any failure. `$$` is
+ * therefore observed by `cd /proc/$$` and `$?` by the shell's own exit status.
  */
 function pBuiltins(env) {
   ensureStdin(env);
@@ -329,15 +309,13 @@ function pBuiltins(env) {
   const add = (name, got, want) => rows.push({ name, got, want, ok: got === want });
 
   add("pwd prints the working directory", runSh(env, "pwd").output, "/\n");
-  // `cd` then `pwd` IN ONE SHELL. In two shells it would prove nothing: a `cd` in a child process
-  // that then exits is the oldest shell bug there is, and it is exactly what a `cd` PROGRAM would
-  // be — which is why `cd` is one of the few builtins.
+  // `cd` then `pwd` in one shell. In two shells it would prove nothing: a `cd` in a child that then
+  // exits is what a `cd` program would be, which is why `cd` is a builtin.
   const script = runShScript(env, "cd /usr/bin\npwd\n");
   add("cd moves this shell's own directory", script.output, "/usr/bin\n");
 
-  // `$$` WITHOUT A PROGRAM: `/proc/<pid>` exists only for a live pid, so a `cd` into it that
-  // succeeds and a `pwd` that names it are together a proof that `$$` expanded to this shell's own
-  // pid — and the SHELL's pid is the one the orchestrator was handed by `spawn`.
+  // `$$` without a program: `/proc/<pid>` exists only for a live pid, so a `cd` into it that
+  // succeeds and a `pwd` that names it together prove `$$` expanded to the pid `spawn` handed back.
   const self = runShScript(env, "cd /proc/$$\npwd\n");
   rows.push({
     name: "$$ is the shell's own pid",
@@ -346,8 +324,8 @@ function pBuiltins(env) {
     ok: self.output.trim() === `/proc/${self.pid}`,
   });
 
-  // `$?` WITHOUT A PROGRAM: a failed builtin sets it, and `exit $?` carries it out through the
-  // wait status — so the assertion is on a number the kernel reported, not on text.
+  // `$?` without a program: `exit $?` carries it out through the wait status, so the assertion is
+  // on a number the kernel reported and not on text.
   const failedCd = runShScript(env, "cd /definitely-not-a-directory\nexit $?\n");
   rows.push({
     name: "$? carries a failed builtin's status",
@@ -360,8 +338,7 @@ function pBuiltins(env) {
   const okStatus = runShScript(env, "pwd\nexit $?\n");
   add("$? after a builtin that worked is 0", okStatus.status, 0);
 
-  // The ported completion front end, through a real program, with no spawn: `complete` is a
-  // builtin precisely because the answer is the shell's own PATH and builtin table.
+  // `complete` is a builtin because the answer is the shell's own PATH and builtin table.
   const comp = runSh(env, "complete l");
   rows.push({
     name: "complete offers command names for a command position",
@@ -381,7 +358,7 @@ function pBuiltins(env) {
   return { ok: failed.length === 0, rows, failed };
 }
 
-/** The shell driven by a SCRIPT on stdin rather than `-c`, for the proofs that need one session. */
+/** The shell driven by a script on stdin rather than `-c`, for the proofs that need one session. */
 function runShScript(env, script) {
   const started = startShScript(env, script);
   if (started.error) return { error: started.error, output: "" };
@@ -389,23 +366,17 @@ function runShScript(env, script) {
 }
 
 /**
- * Start a shell on a script and RETURN BEFORE DRAINING ITS OUTPUT.
+ * Start a shell on a script and return before draining its output, so the caller decides when to
+ * drain.
  *
- * SPLIT FROM `runShScript` BECAUSE DRAINING WAITS FOR THE LAST WRITER, and a backgrounded job is
- * one. `p_exec`'s row needed `sleep 30 &` alive while it read `/proc/<pid>/cmdline`, so it used
- * `runShScript` and then read — but the drain cannot finish until EOF, and EOF cannot arrive until
- * the backgrounded `sleep` closes the stdout it inherited. The proof therefore sat in `read` for
- * the full thirty seconds and then killed a job it had never been waiting for: 30.9 s of a 40.3 s
- * page, measured by timestamping the page's own log lines.
+ * Split from `runShScript` because draining waits for the last writer, and a backgrounded job is
+ * one: EOF cannot arrive until the backgrounded `sleep` closes the stdout it inherited, so a
+ * caller that drains first sits in `read` for the whole sleep — measured at 30.9 s of a 40.3 s
+ * page, by timestamping the page's own log lines.
  *
- * THE OBVIOUS FIX IS NOT AVAILABLE: `sleep 30 > /dev/null &` would stop the job holding the pipe,
- * and `/dev` is mounted MNT_RO, so the `O_CREAT` in a `>` redirection is -EROFS. Shortening the
- * sleep does not work either — the drain's own duration is what the job has to outlive, so the two
- * numbers are the same number.
- *
- * So the caller gets the shell running and decides when to drain. `p_exec` now finds the job
- * through `/proc`, reads its cmdline, kills it, and only then drains — which is also a better
- * proof: the pid comes from the process table rather than from the shell's own announcement.
+ * The obvious fix is not available. `sleep 30 > /dev/null &` would stop the job holding the pipe,
+ * but `/dev` is mounted MNT_RO so the `O_CREAT` in a `>` redirection is -EROFS. Shortening the
+ * sleep does not work either: the drain's own duration is what the job has to outlive.
  */
 function startShScript(env, script) {
   const inPipe = env.proc.pipe2();
@@ -425,8 +396,7 @@ function startShScript(env, script) {
   env.fs.close(inPipe.rfd);
   env.fs.close(outPipe.wfd);
   env.fs.write(inPipe.wfd, ENC.encode(script));
-  // THE SCRIPT'S END IS THE SHELL'S EOF, so the input end closes here and the shell runs to the
-  // last line and exits on its own.
+  // The script's end is the shell's EOF, so the shell runs to the last line and exits on its own.
   env.fs.close(inPipe.wfd);
   return { pid, rfd: outPipe.rfd };
 }
@@ -444,14 +414,9 @@ function finishShScript(env, started) {
   };
 }
 
-/**
- * The pid of a live process whose cmdline matches, found by SCANNING `/proc`.
- *
- * The shell announces a background job's pid on its stdout, and that stdout is the pipe this proof
- * is deliberately not draining yet — so the pid is read out of the process table instead, which is
- * where it actually lives. Bounded: a process that never appears is reported rather than waited on
- * forever.
- */
+/** The pid of a live process whose cmdline matches, found by scanning `/proc`. The shell announces
+ *  a background job's pid on the stdout this proof is deliberately not draining yet, so the pid is
+ *  read out of the process table instead. Bounded: a process that never appears is reported. */
 function awaitProcByCmdline(env, want, rounds = 400) {
   for (let i = 0; i < rounds; i += 1) {
     for (const pid of livePids(env)) {
@@ -468,19 +433,18 @@ function awaitProcByCmdline(env, want, rounds = 400) {
 /**
  * PROOF 5. What `spawn` will and will not load.
  *
- * THE SUBJECT IS THE EXEC PATH, not the shell: a program on a writable mount runs, a file without
+ * The subject is the exec path, not the shell: a program on a writable mount runs, a file without
  * an execute bit does not, a path that is not there is 127, and the argv reaches
- * `/proc/<pid>/cmdline`. The first of those is also the only thing in this milestone that proves
- * a program can come from somewhere other than the read-only `/usr`.
+ * `/proc/<pid>/cmdline`. The first is the only thing in this milestone that proves a program can
+ * come from somewhere other than the read-only `/usr`.
  */
 function pExec(env) {
   ensureStdin(env);
   const rows = [];
   const add = (name, ok, got, want) => rows.push({ name, ok: !!ok, got, want });
 
-  // A PROGRAM THIS PROCESS WRITES, then runs. `/tmp` is a writable in-memory mount, so this is the
-  // kernel reading program text out of a filesystem a process can write — which is what makes
-  // `/usr/bin` a directory rather than a special case.
+  // A program this process writes, then runs: the kernel reading program text out of a filesystem
+  // a process can write, which is what makes `/usr/bin` a directory rather than a special case.
   const path = "/tmp/m5prog.mjs";
   const source = "export function run() { return { exit: 7 } }\n";
   const fd = env.fs.open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644);
@@ -509,15 +473,10 @@ function pExec(env) {
   const t = runSh(env, "true");
   add("/usr/bin/true exits 0", t.status === 0, t.status, 0);
 
-  /* ARGV REACHES THE PROCESS TABLE. A long-running program is backgrounded by a real shell, found
-   * in `/proc` WHILE IT IS STILL ALIVE, and then killed.
-   *
-   * THE ORDER IS THE POINT. The first version drained the shell's output first and read the
-   * cmdline after — which cannot work, because the drain waits for EOF and the backgrounded job
-   * holds the stdout it inherited: the proof sat in `read` for the whole sleep, 30.9 s of a 40.3 s
-   * page. It passed, so nothing failed; it was just thirty seconds of waiting for a process it
-   * was about to kill. The pid now comes from the process table rather than from the shell's
-   * announcement, which also removes a parse of this shell's own output format. */
+  /* Argv reaches the process table. A long-running program is backgrounded by a real shell, found
+   * in `/proc` while it is still alive, killed, and only then drained — see `startShScript` for
+   * why the drain cannot come first. The pid comes from the process table rather than from the
+   * shell's announcement, which also removes a parse of this shell's own output format. */
   const bg = startShScript(env, "sleep 30 &\necho ready\n");
   let cmdline = "";
   let found = { ok: false, why: bg.error || "not started" };
@@ -528,7 +487,7 @@ function pExec(env) {
       env.proc.kill(found.pid, SIGTERM);
       env.proc.waitpid(found.pid, 0);
     }
-    // ONLY NOW is the pipe drained: its last writer has gone, so EOF is immediate.
+    // Only now: the pipe's last writer has gone, so EOF is immediate.
     finishShScript(env, bg);
   }
   add("argv reaches /proc/<pid>/cmdline", cmdline === "sleep 30",
@@ -549,7 +508,6 @@ function pRefusals(env) {
     ok: r.status === wantStatus && new RegExp(pattern).test(r.output),
   });
 
-  // The bug the host probe found: a pipeline missing its last stage used to RUN as the first.
   add("a pipeline with no last stage is a syntax error",
     runSh(env, "ls |"), "syntax error near", 2);
   add("&& is refused rather than read as a filename",
@@ -566,12 +524,10 @@ function pRefusals(env) {
 }
 
 /**
- * PROOF 7. The shell interactive on a real pty.
- *
- * THIS IS THE ONE THAT USES THE LINE DISCIPLINE. Everything above drives the shell through a pipe,
- * where there is no echo, no canonical buffering and no foreground process group. Here the shell
- * is on a terminal: a line is typed at the master, the discipline echoes it and delivers it whole,
- * the shell runs it, and the output comes back up the master.
+ * PROOF 7. The shell interactive on a real pty — the only proof that uses the line discipline.
+ * Everything above drives the shell through a pipe, where there is no echo, no canonical buffering
+ * and no foreground process group. Here a line is typed at the master, the discipline echoes it
+ * and delivers it whole, the shell runs it, and the output comes back up the master.
  */
 function pTty(env) {
   ensureStdin(env);
@@ -591,8 +547,8 @@ function pTty(env) {
   // leader does for the shell it starts.
   env.proc.setpgid(pid, pid);
   env.tty.setPgrp(master, pid);
-  // AND THE ORCHESTRATOR LETS GO OF THE SLAVE. While any reference to it exists the master never
-  // sees EOF, and a read after the shell exits would park forever with no error anywhere.
+  // While any reference to the slave exists the master never sees EOF, and a read after the shell
+  // exits would park forever with no error anywhere.
   env.fs.close(slave);
 
   const started = awaitStarted(env, pid, 1);
@@ -623,14 +579,13 @@ function pTty(env) {
   env.fs.write(master, ENC.encode("echo typed\n"));
   const echoed = drain(1500);
 
-  // CTRL-C AT A PROMPT. The shell's foreground group is its own, so the discipline raises SIGINT
-  // on the shell itself — and the shell must survive it and print another prompt. That is the
-  // difference between a shell and a program: a program dies.
+  // Ctrl-C at a prompt. The shell's foreground group is its own, so the discipline raises SIGINT on
+  // the shell itself, and the shell must survive it and print another prompt. A program dies.
   env.fs.write(master, ENC.encode("\x03"));
   const afterIntr = drain(800);
   const aliveAfterIntr = status(env, pid).state === "running";
 
-  // CTRL-D ends the session: `read` returns 0, which the loop treats as end of input.
+  // Ctrl-D ends the session: `read` returns 0, which the loop treats as end of input.
   env.fs.write(master, ENC.encode("\x04"));
   const stat = env.proc.waitpid(pid, 0);
   drain(200);
@@ -643,11 +598,10 @@ function pTty(env) {
     started,
     parkedInRead: parked.ok,
     parkedWhy: parked.why,
-    // The prompt the shell painted before anything was typed.
     sawPrompt: /\$ /.test(banner),
     banner,
-    // THE ECHO AND THE OUTPUT, both on the master: the discipline echoed the keystrokes and the
-    // program's own write came back the same way.
+    // Both on the master: the discipline echoed the keystrokes and the program's own write came
+    // back the same way.
     echoedTheLine: /echo typed/.test(echoed),
     ranTheLine: /^typed$/m.test(echoed.replace(/\r/g, "")),
     echoed,
@@ -663,11 +617,10 @@ function pTty(env) {
 /**
  * PROOF 8. A process cannot make the kernel fetch a URL. Constraint 123.
  *
- * Until M5, `SYS_spawn` handed its caller's path to `new URL(path, location)` and then to
- * `fetch` — so a process could name any origin, have the kernel request it from the browser's
- * network position, and have the kernel EVALUATE the reply as a program. Every spelling that used
- * to work must now be refused BY THE FILESYSTEM, which is what the errnos below assert: ENOENT
- * means the path was looked up in the mount table and was not there.
+ * Every URL spelling must be refused by the filesystem, which is what the errnos below assert:
+ * ENOENT means the path was looked up in the mount table and was not there. A kernel that resolved
+ * these against `location` and fetched them would let a process name any origin and have the reply
+ * evaluated as a program.
  */
 function pNoUrl(env) {
   ensureStdin(env);
@@ -684,17 +637,15 @@ function pNoUrl(env) {
     rows.push({ spec, r, errno: r < 0 ? -r : 0, name: r < 0 ? env.std.errnoName(r) : "SPAWNED" });
   }
 
-  /* AND THE OTHER HALF, which the first version of this proof missed entirely: a program's own
-   * IMPORT naming a host. The kernel never calls `fetch`, so its own accounting stayed at zero
-   * loads while the CHILD's module loader fetched and evaluated remote code on its behalf — the
-   * worst property a security fix can have. Measured: `new URL("//evil/p.mjs", base)` resolves
-   * OFF-ORIGIN, and a bare `https://…` specifier was not matched by the rewriter at all and
-   * travelled into the Blob verbatim.
+  /* The other half: a program's own import naming a host. The kernel never calls `fetch`, so its
+   * accounting can read zero loads while the child's module loader fetches and evaluates remote
+   * code on its behalf. Measured: `new URL("//evil/p.mjs", base)` resolves off-origin, and a bare
+   * `https://…` specifier is not matched by a path-shaped rewriter at all.
    *
    * Each program below is written to `/tmp`, made executable, and spawned. Every one must be
-   * refused with ENOEXEC by the LINKER, before any Blob exists. `/src/abi.mjs` is in the list as
-   * the positive control: the one specifier that must still work, so a refusal of everything is
-   * not mistaken for a working allowlist. */
+   * refused with ENOEXEC by the linker, before any Blob exists. `/src/abi.mjs` is the positive
+   * control: the one specifier that must still work, so a refusal of everything is not mistaken
+   * for a working allowlist. */
   const imports = [];
   for (const [name, specifier, want] of [
     ["offorigin", "//example.invalid/p.mjs", "refused"],
@@ -726,17 +677,17 @@ function pNoUrl(env) {
       errno: pid < 0 ? -pid : 0,
       errName: pid < 0 ? env.std.errnoName(pid) : "SPAWNED",
       stat: typeof stat === "object" ? stat : null,
-      // A REFUSAL IS -ENOEXEC FROM `spawn` ITSELF. A program that spawned and then faulted would
-      // mean the Blob was built and the child's loader did the refusing — which is the browser
-      // declining, not this kernel.
+      // A refusal is -ENOEXEC from `spawn` itself. A program that spawned and then faulted would
+      // mean the Blob was built and the child's loader did the refusing: the browser declining,
+      // not this kernel.
       ok: want === "refused" ? (pid === -E.ENOEXEC)
         : (pid > 0 && typeof stat === "object" && stat.exited && stat.code === 5),
     });
   }
 
-  // `/src/bin/true.mjs` is in the path list on purpose: it IS a real file on the server and it is
-  // NOT in this system's filesystem, so it must be refused too. A kernel that still reached the
-  // network would spawn that one and nothing else, which is the narrowest possible tell.
+  // `/src/bin/true.mjs` is a real file on the server and not in this system's filesystem, so it
+  // must be refused too. A kernel that still reached the network would spawn that one and nothing
+  // else, which is the narrowest possible tell.
   const importFailures = imports.filter((row) => !row.ok);
   return {
     ok: rows.every((row) => row.r < 0) && importFailures.length === 0,
@@ -747,31 +698,25 @@ function pNoUrl(env) {
       || row.errno === E.EINVAL),
     imports,
     importFailures,
-    // The positive control, named separately: the allowlisted specifier must still load, or
-    // "everything was refused" would pass for a loader that refuses everything.
+    // The positive control, named separately in the report.
     allowedStillRuns: !!(imports.find((row) => row.name === "allowed") || {}).ok,
     ENOEXEC: E.ENOEXEC,
   };
 }
 
 /**
- * PROOF 9. `yes | head -1` terminates.
+ * PROOF 9. `yes | head -1` terminates — M4's headline proof, said in shell.
  *
- * M4'S HEADLINE PROOF, SAID IN SHELL FOR THE FIRST TIME. docs/ABI.md decision 5 is the asymmetry:
- * a blocked reader whose last writer went sees EOF, and a blocked WRITER whose last reader went
- * gets -EPIPE plus SIGPIPE. `head` exits after one line, the pipe loses its reader, and `yes`
- * dies of the signal — which is also the reason `cat`, `head`, `grep` and `std.eachLine` all
- * stream instead of waiting for an end that never comes.
- *
- * UNTIL `yes` EXISTED THIS HAD NO SPELLING IN THIS SYSTEM. There was no endless source — the only
- * candidate, `/dev/zero`, is an honest finite 256-byte file — so four programs cited a case no
- * check could reach. That is what this proof is for.
+ * docs/ABI.md decision 5 is the asymmetry: a blocked reader whose last writer went sees EOF, and a
+ * blocked writer whose last reader went gets -EPIPE plus SIGPIPE. `head` exits after one line, the
+ * pipe loses its reader, and `yes` dies of the signal — which is also why `cat`, `head`, `grep`
+ * and `std.eachLine` all stream instead of waiting for an end that never comes. `yes` is the
+ * system's only endless source; `/dev/zero` here is a finite 256-byte file.
  */
 function pEndless(env) {
   ensureStdin(env);
   const one = runSh(env, "yes | head -1");
-  // The whole pipeline's status is its LAST stage's, which is `head` exiting cleanly. `yes` being
-  // killed is read off its own status below, through `ps`-free evidence: the shell's trace.
+  // The whole pipeline's status is its last stage's, which is `head` exiting cleanly.
   const many = runSh(env, "yes hello | head -3");
   const counted = runSh(env, "yes | head -5 | wc -l");
   return {
@@ -781,14 +726,11 @@ function pEndless(env) {
     oneStatus: one.status,
     threeLines: many.output,
     counted: counted.output.trim(),
-    // THE PROOF IS THAT IT RETURNED AT ALL. An endless writer whose reader went away must be
-    // stopped by the kernel; if SIGPIPE were not fatal, `yes` would write until its own cap and
-    // these calls would take the harness's timeout instead of answering.
+    // The proof is that it returned at all. If SIGPIPE were not fatal, `yes` would write until its
+    // own cap and these calls would take the harness's timeout instead of answering.
     terminated: true,
   };
 }
-
-/* ----------------------------------- entry ----------------------------------------------- */
 
 export function run(env, go) {
   const mode = String((env.argv && env.argv[0]) || (go && go.argv && go.argv[0]) || "noop");
@@ -808,9 +750,8 @@ export function run(env, go) {
       default: out = { ok: false, why: `unknown mode ${mode}` };
     }
   } catch (error) {
-    // A THROW IN THE ORCHESTRATOR IS REPORTED AS ONE. Left to `self.onerror` it would arrive as a
-    // process fault with no mode attached, and the page would wait out its timeout for a result
-    // that can never come.
+    // Left to `self.onerror` a throw arrives as a process fault with no mode attached, and the
+    // page waits out its timeout for a result that can never come.
     out = { ok: false, why: `${mode} threw: ${(error && error.stack) || error}` };
   }
   return { mode, ms: performance.now() - t0, ceiling: WAIT_CEILING_MS, ...out };

@@ -1,15 +1,7 @@
 // A pseudo-terminal: two queues and a line discipline, all kernel-side.
 //
-// WHY THE DISCIPLINE IS HERE AND NOT IN THE TERMINAL APP. `PLAN.md`: "Ctrl-C raises SIGINT on the
-// foreground process group even when the UI is wedged, which is the entire point of putting it
-// there." Three constraints make it non-negotiable rather than stylistic:
-//
-//   15 — pipe buffers and the like are kernel-side; a process holds only integers. A discipline
-//        living in the terminal app would hold the pty's line buffer in a process.
-//   16 — a process parked in `Atomics.wait` cannot service `postMessage`, so a signal must travel
-//        through the SAB control word. "Ctrl-C depends on this."
-//   21 — there is no preemption, so a compute-bound process is killable but not interruptible. A
-//        cancel affordance must degrade to SIGKILL, and the UI must show the distinction.
+// THE DISCIPLINE IS HERE AND NOT IN THE TERMINAL APP, so Ctrl-C raises SIGINT on the foreground
+// process group even when the UI is wedged (constraints 15, 16, 21).
 //
 // THE TWO DIRECTIONS ARE NOT SYMMETRIC, which is why the master and the slave are separate kinds:
 //
@@ -18,10 +10,9 @@
 //   read(slave)   takes processed input. In canonical mode, only whole lines.
 //   read(master)  takes the slave's output, plus whatever the echo produced.
 //
-// WHAT IS SPECIFIED AND WHAT IS ASSUMED. `MILESTONES.md` M4 specifies exactly one behaviour: ISIG
-// with VINTR must raise SIGINT on the foreground group. **`ICANON` and `ECHO` semantics are
-// specified in no authored document**, so what follows is POSIX's default behaviour taken as the
-// assumption, and said here rather than left for a reader to infer it was designed.
+// WHAT IS SPECIFIED AND WHAT IS ASSUMED. `MILESTONES.md` M4 specifies one behaviour: ISIG with
+// VINTR must raise SIGINT on the foreground group. **`ICANON` and `ECHO` semantics are specified in
+// no authored document** — what follows is POSIX's default behaviour taken as an assumption.
 
 import {
   ICANON, ECHO, ISIG, VINTR, VQUIT, VERASE, VKILL, VEOF, VSUSP,
@@ -37,40 +28,24 @@ export function installPtyKernel(surface) {
   K = surface;
 }
 
-/**
- * M4b's first negative control: every new pty comes up with ISIG cleared.
- *
- * TRUE in every real boot, and the kernel refuses to clear it without a bench boot. A flag on the
- * DEFAULT rather than a branch in `#inputByte`, so the headline path is the same single flag test
- * either way — the same discipline as the fatal-signal set being data.
- */
+/** M4b's first negative control: every new pty comes up with ISIG cleared. TRUE in every real
+ *  boot, and the kernel refuses to clear it without a bench boot. */
 let defaultIsig = true;
 
 export function setPtyDefaultIsig(on) {
   defaultIsig = !!on;
 }
 
-/**
- * M4b's fourth control: a resize no longer raises SIGWINCH.
- *
- * TRUE in every real boot, and the kernel refuses to clear it without a bench boot. It exists
- * because the clause asserting the signal could not fail: it read the stage's `exited` flag,
- * which an uninterrupted 8-second sleep also satisfies. A control has to be able to remove the
- * signal while leaving the resize, and this is that switch.
- */
+/** M4b's fourth control: a resize no longer raises SIGWINCH, under the same bench-boot gate. The
+ *  control removes the signal and leaves the resize, so the check cannot pass on the resize alone. */
 let winchEnabled = true;
 
 export function setPtyWinch(on) {
   winchEnabled = !!on;
 }
 
-/**
- * M4a's negative control: the master's input side is detached.
- *
- * FALSE in every real boot, and the kernel refuses to set it without a bench boot — the same
- * discipline `defaultIsig` and `winchEnabled` follow. `writeInput` carries the reason this is the
- * right place to cut.
- */
+/** M4a's negative control: the master's input side is detached. FALSE in every real boot, and the
+ *  kernel refuses to set it without a bench boot. `writeInput` carries why this is where to cut. */
 let detached = false;
 
 export function setPtyDetached(on) {
@@ -79,38 +54,21 @@ export function setPtyDetached(on) {
 
 export class Pty {
   constructor() {
-    /** Processed input, waiting for the slave to read it. In canonical mode a line lands here
-     *  only when it is complete. */
     this.input = new ByteRing(PTY_INPUT_BYTES);
     /** The slave's output and the echo, waiting for the master. */
     this.output = new ByteRing(PTY_OUTPUT_BYTES);
-    /**
-     * The canonical line under construction. SEPARATE from `input` because a half-typed line is
-     * not readable: the slave must see nothing until the line is terminated, and ERASE has to be
-     * able to take a byte back — which it cannot once the byte is in a queue the slave may
-     * already have drained.
-     */
+    /** The canonical line under construction. SEPARATE from `input` because a half-typed line is
+     *  not readable, and ERASE must take back a byte the slave may otherwise have drained. */
     this.line = new ByteRing(PTY_INPUT_BYTES);
     this.termios = defaultTermios();
     if (!defaultIsig) this.termios.lflag &= ~ISIG;
     this.winsize = { rows: 24, cols: 80, xpixel: 0, ypixel: 0 };
-    /**
-     * The foreground process group, which is where ISIG sends its signal.
-     *
-     * 0 means "nobody", and a signal is then dropped rather than broadcast — a pty whose
-     * foreground group was unset must not deliver Ctrl-C to every process in the system. Set from
-     * the opener's pgid and moved with `ioctl(TIOCSPGRP)`, which is what a shell does per pipeline.
-     */
+    /** The foreground process group, where ISIG sends its signal. 0 means "nobody", and the signal
+     *  is then DROPPED rather than broadcast: an unset foreground group must not deliver Ctrl-C to
+     *  every process in the system. Moved with `ioctl(TIOCSPGRP)`. */
     this.fgPgid = 0;
-    /**
-     * A ^D typed while nobody is reading.
-     *
-     * `#wakeSlavesWithEof` only answered readers that were ALREADY parked, so an EOF arriving
-     * while the program was computing was dropped and its next `read` parked forever. A terminal
-     * cannot require the reader to be waiting at the moment the key is pressed.
-     *
-     * Cleared by any later input, because a ^D followed by typing is not end of file.
-     */
+    /** A ^D typed while nobody is reading, latched for whichever `read` arrives next. Cleared by
+     *  any later input, because a ^D followed by typing is not end of file. */
     this.pendingEof = false;
     /** Open ends, 0 or 1 each, per description. Same model as the pipe: constraint 92. */
     this.masters = 0;
@@ -137,8 +95,7 @@ export class Pty {
     return this.termios.cc[index];
   }
 
-  /* ---- liveness, the same sequence guard the pipe uses ---------------------------------- */
-
+  // The same sequence guard the pipe uses: src/kernel/pipe.mjs's header.
   #live(rec) {
     if (!rec.slot.ctl || rec.slot.seq !== rec.seq) {
       this.stats.stale += 1;
@@ -147,15 +104,9 @@ export class Pty {
     return true;
   }
 
-  /* ---- the line discipline -------------------------------------------------------------- */
-
-  /**
-   * One byte of input. Returns true if it was consumed by the discipline rather than queued.
-   *
-   * ORDER IS LOAD-BEARING: signals first, then erase and kill, then echo, then buffering. A
-   * Ctrl-C that was echoed before being recognised would put a stray ^C byte in the output; a
-   * Ctrl-C that was buffered first would be delivered to the program as data.
-   */
+  /** One byte of input. True if the discipline consumed it rather than queueing it. ORDER IS
+   *  LOAD-BEARING: signals, then erase and kill, then echo, then buffering. A Ctrl-C echoed before
+   *  being recognised leaves a stray ^C in the output; one buffered first arrives as data. */
   #inputByte(b) {
     // 1. SIGNALS. The byte is consumed and never reaches the program.
     if (this.#on(ISIG)) {
@@ -164,25 +115,20 @@ export class Pty {
           : b === this.#cc(VSUSP) ? SIGTSTP : 0;
       if (sig) {
         this.stats.signals += 1;
-        // THE WHOLE FOREGROUND GROUP, which is the entire reason the discipline is in the kernel:
-        // it reaches a process that is wedged and not servicing messages (constraint 16). A pty
-        // with no foreground group drops the signal rather than broadcasting it.
+        // THE WHOLE FOREGROUND GROUP, which reaches a wedged process (constraint 16).
         if (this.fgPgid > 0 && K) K.signalGroup(this.fgPgid, sig);
-        // POSIX also flushes the pending input on a signal: a half-typed line is abandoned,
-        // because the program that was going to read it is being interrupted.
         if (this.#on(ICANON)) this.line.clear();
         return true;
       }
     }
 
-    // 2. CANONICAL EDITING. Only meaningful while a line is being assembled.
+    // 2. CANONICAL EDITING.
     if (this.#on(ICANON)) {
       if (b === this.#cc(VERASE)) {
         const gone = this.line.popLast();
         if (gone >= 0) {
           this.stats.erased += 1;
-          // The echo of an erase is destructive: back up, overwrite, back up again. That is what
-          // a terminal does and what makes the character visibly disappear.
+          // Back up, overwrite with a space, back up again: the character visibly disappears.
           if (this.#on(ECHO)) this.#echo([8, 32, 8]);
         }
         return true;
@@ -199,14 +145,12 @@ export class Pty {
         return true;
       }
       if (b === this.#cc(VEOF)) {
-        // ^D. A pending line is delivered as-is; an EMPTY line means end of file, which is how
-        // `cat` terminates on a terminal.
+        // ^D. A pending line is delivered as-is; an EMPTY line means end of file.
         if (this.line.length > 0) {
           this.#commitLine();
         } else {
           this.stats.eof += 1;
-          // LATCHED, then delivered. A parked reader is answered now; one that arrives later
-          // reads the latch.
+          // Latched first: a parked reader is answered below, one that arrives later reads this.
           this.pendingEof = true;
           this.#wakeSlavesWithEof();
         }
@@ -214,30 +158,22 @@ export class Pty {
       }
     }
 
-    // 3. ECHO, before buffering, so the typist sees the character whether or not a program ever
-    //    reads it.
+    // 3. ECHO, before buffering, so the typist sees the character whether a program reads it or not.
     if (this.#on(ECHO)) {
-      // A newline echoes as CR LF: a bare LF leaves the cursor in the same column on a real
-      // terminal, which is why every tty does this.
+      // A newline echoes as CR LF: a bare LF leaves the cursor in the same column on a terminal.
       if (b === 10) this.#echo([13, 10]);
       else this.#echo([b]);
     }
 
     // 4. BUFFERING.
     if (!this.#on(ICANON)) {
-      // Raw: straight to the slave's queue, readable immediately.
       if (this.input.pushByte(b) === 0) this.stats.discarded += 1;
       return false;
     }
     if (this.line.pushByte(b) === 0) {
-      /* THE LINE BUFFER IS FULL. Deliver what there is, which is what the comment here used to
-       * claim while nothing did it: the old code counted a discard and RETURNED, so a terminating
-       * newline arriving on a full buffer was thrown away with the overflow. The line then never
-       * committed, `line` stayed full forever, every later keystroke was discarded, and the
-       * slave's read parked with no error — the terminal was permanently wedged. Measured: 4,106
-       * bytes then a newline left linePending 4096 and linesReady 0.
-       *
-       * Committing first frees the buffer, so this byte lands and a newline still terminates. */
+      /* THE LINE BUFFER IS FULL, so deliver what there is. Discarding instead throws away a
+       * terminating newline that arrives on a full buffer: the line never commits, every later
+       * keystroke is discarded, and the terminal is permanently wedged. */
       this.stats.overlong += 1;
       this.#commitLine();
       if (this.line.pushByte(b) === 0) {
@@ -250,7 +186,6 @@ export class Pty {
     return false;
   }
 
-  /** Move the completed line into the slave's queue and wake a reader. */
   #commitLine() {
     const bytes = this.line.drain();
     const n = this.input.push(bytes);
@@ -270,20 +205,10 @@ export class Pty {
     this.#wakeMasters();
   }
 
-  /* ---- the four operations -------------------------------------------------------------- */
-
   /** write(master): INPUT. Always accepts everything — a terminal does not block the typist. */
   writeInput(src) {
-    // M4a'S NEGATIVE CONTROL, and the one line it needs. `MILESTONES.md` M4a: "Detach the pty; the
-    // keystroke must not appear." The bytes are ACCEPTED and DISCARDED, so every other link in the
-    // chain is left working — the key event reaches the widget, the widget reaches the device, the
-    // device wakes the relay, the relay writes the master, and the write succeeds. Only the pty
-    // stops being the pty.
-    //
-    // That is what makes the control specific. A terminal widget that echoed a keystroke locally
-    // would satisfy M4a's proof with no pty behind it at all, and this is the switch that tells
-    // the two apart: with the pty detached, a locally-echoing widget still shows the character and
-    // the check must go RED. Nothing else in the suite can catch that defect.
+    // M4a'S NEGATIVE CONTROL. ACCEPTED and DISCARDED, so every other link stays working and only
+    // the pty stops being the pty — which is what makes a locally-echoing widget's check go RED.
     if (detached) {
       this.stats.discarded += src.length;
       return src.length;
@@ -296,15 +221,10 @@ export class Pty {
     return src.length;
   }
 
-  /**
-   * write(slave): OUTPUT, unprocessed. A count, or null meaning PARKED.
+  /** write(slave): OUTPUT, unprocessed. A count, or null meaning PARKED.
    *
-   * THE WRITER PARKS WHEN THE RING IS FULL, as a pipe's does. This returned `push`'s count — which
-   * is 0 on a full ring — and nothing parked, so a program's output past `PTY_OUTPUT_BYTES` with a
-   * master that was not draining was LOST with no errno: `libos.write` breaks on 0 and reports a
-   * short count. A program whose terminal is not being read must block, which is what every real
-   * tty does.
-   */
+   *  THE WRITER PARKS WHEN THE RING IS FULL, as a pipe's does. Returning `push`'s count — 0 on a
+   *  full ring — loses output past `PTY_OUTPUT_BYTES` with no errno: `libos.write` breaks on 0. */
   writeOutput(slot, seq, src) {
     this.#prune();
     if (src.length === 0) return 0;
@@ -325,8 +245,7 @@ export class Pty {
     if (want <= 0) return 0;
     if (!this.input.empty) return this.input.shift(into, off, want);
     if (this.pendingEof) {
-      // A ^D that arrived before this reader did. Consumed here, so the NEXT read parks again
-      // rather than seeing a permanent end of file.
+      // Consumed, so the NEXT read parks again rather than seeing a permanent end of file.
       this.pendingEof = false;
       return 0;
     }
@@ -363,7 +282,6 @@ export class Pty {
     this.waitingWriters = this.waitingWriters.filter((r) => this.#live(r));
   }
 
-  /** Push what parked slave writers were holding, now that the master has drained. */
   #wakeWriters() {
     while (this.output.free > 0 && this.waitingWriters.length) {
       const w = this.waitingWriters[0];
@@ -398,7 +316,6 @@ export class Pty {
     }
   }
 
-  /** ^D on an empty line: every parked slave reader gets 0, which is end of file. */
   #wakeSlavesWithEof() {
     const waiting = this.waitingSlaves;
     this.waitingSlaves = [];
@@ -408,8 +325,6 @@ export class Pty {
     }
   }
 
-  /* ---- termios, winsize, the foreground group ------------------------------------------ */
-
   getTermios() {
     return {
       iflag: this.termios.iflag, oflag: this.termios.oflag, cflag: this.termios.cflag,
@@ -417,16 +332,9 @@ export class Pty {
     };
   }
 
-  /**
-   * Replace the termios wholesale. The caller supplies every field, including the three reserved
-   * flag words and all twenty cc slots, so a flag a later milestone adds survives a round trip
-   * through a caller that has never heard of it.
-   *
-   * LEAVING CANONICAL MODE FLUSHES THE PENDING LINE into the input queue. The bytes were typed and
-   * the program is now asking for them unbuffered; discarding them would lose input the user had
-   * already entered, and holding them would make them unreachable because nothing will ever
-   * terminate the line.
-   */
+  /** Replace the termios wholesale: the caller supplies every field, so a flag a later milestone
+   *  adds survives a round trip through a caller that has never heard of it. LEAVING CANONICAL
+   *  MODE FLUSHES THE PENDING LINE — held, those bytes are unreachable, nothing terminates them. */
   setTermios(next) {
     const wasCanon = this.#on(ICANON);
     this.termios = {
@@ -445,13 +353,8 @@ export class Pty {
     return { ...this.winsize };
   }
 
-  /**
-   * Resize, and raise SIGWINCH on the foreground group.
-   *
-   * `docs/ABI.md`: "a set on the master raises SIGWINCH on the slave's foreground pgrp". Raised
-   * only when the size actually CHANGED — a program that re-asserts the size it already has has
-   * not been resized, and a spurious SIGWINCH makes every full-screen program redraw.
-   */
+  /** Resize, and raise SIGWINCH on the slave's foreground pgrp (`docs/ABI.md`). Only when the size
+   *  CHANGED: a spurious SIGWINCH makes every full-screen program redraw. */
   setWinsize(ws) {
     const changed = ws.rows !== this.winsize.rows || ws.cols !== this.winsize.cols
       || ws.xpixel !== this.winsize.xpixel || ws.ypixel !== this.winsize.ypixel;
@@ -463,17 +366,12 @@ export class Pty {
     return 0;
   }
 
-  /* ---- closing -------------------------------------------------------------------------- */
-
   close(isMaster) {
     if (isMaster) {
       this.masters = 0;
-      // The terminal went away. Every parked slave reader gets EOF, which is what a program on a
-      // closed terminal must see rather than an error.
+      // The terminal went away: a parked slave READER gets EOF, a parked slave WRITER gets -EPIPE
+      // and SIGPIPE (docs/ABI.md decision 5).
       this.#wakeSlavesWithEof();
-      // And every parked slave WRITER: nothing will ever drain the output now. -EPIPE plus
-      // SIGPIPE, which is what a writer whose reader has gone gets anywhere (docs/ABI.md
-      // decision 5) — a terminal is not special here.
       const writers = this.waitingWriters;
       this.waitingWriters = [];
       for (const w of writers) {
@@ -485,9 +383,7 @@ export class Pty {
       return 0;
     }
     this.slaves = 0;
-    // The program went away. A parked master reader gets EOF: there is nothing left to produce
-    // output. NOT -EPIPE — the master is a reader here, and readers see EOF (docs/ABI.md
-    // decision 5).
+    // The program went away, so a parked master reader gets EOF. NOT -EPIPE: it is a reader.
     const waiting = this.waitingMasters;
     this.waitingMasters = [];
     for (const r of waiting) {
@@ -498,7 +394,6 @@ export class Pty {
     return 0;
   }
 
-  /** What a check reads. The flags and the queue depths are the mechanism. */
   report() {
     return {
       lflag: this.termios.lflag,
@@ -523,15 +418,9 @@ export class Pty {
       : (!this.input.empty || this.pendingEof || this.masters === 0);
   }
 
-  /**
-   * Whether a write on this end would make progress, which is what `poll` must report for
-   * POLLOUT.
-   *
-   * `pollOne` set POLLOUT unconditionally on the claim that "neither direction of a pty ever
-   * refuses a write". That was false for the slave once its output ring filled, so a
-   * poll-then-write loop busy-spun on the kernel thread. The master is genuinely always writable:
-   * input is never refused, because a terminal does not block the typist.
-   */
+  /** Whether a write would make progress, which is what `poll` reports for POLLOUT. NOT
+   *  unconditional: the slave stops being writable once its output ring fills, and asserting
+   *  POLLOUT anyway makes a poll-then-write loop busy-spin on the kernel thread. */
   writable(isMaster) {
     return isMaster ? true : this.output.free > 0;
   }

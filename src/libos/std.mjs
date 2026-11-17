@@ -1,23 +1,16 @@
 // The program support library: what every program in `/usr/bin` would otherwise write out again.
+// It lives in src/libos/ and not src/bin/lib/ so that `src/libos/process.mjs` has it in its own
+// module graph: under src/bin/lib/ it would be fetched once per spawned process.
 //
-// WHY IT IS IN src/libos/ AND NOT src/bin/lib/. A program's image is a Blob URL built by the
-// kernel (src/kernel/exec.mjs), and a static specifier inside it resolves against the DOCUMENT —
-// so a module no process has already imported would be fetched once per spawned process, which is
-// the herd `src/kernel/kernel.mjs` measured losing 6 of 480 connections to. `src/libos/process.mjs`
-// imports this file for its own graph, so it is already in every process's module map; a program
-// receives it as `env.std` and imports nothing at all.
-//
-// EVERY FUNCTION HERE TAKES `env` AND HOLDS NOTHING. There is no module state, no fd cached across
-// calls and no capability closed over — constraint 15's seam is that a process holds only
-// integers, and a helper library that cached a file description would be the first thing to break
-// it. The rule is testable: nothing below is a class and nothing below assigns a module variable.
+// EVERY FUNCTION HERE TAKES `env` AND HOLDS NOTHING — no module state, no cached fd, no capability
+// closed over. Constraint 15's seam is that a process holds only integers, and a helper library
+// caching a file description is the first thing that would break it.
 
 import { E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName } from "../abi.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-/** Text as UTF-8 bytes. One encoder for every program rather than one per program. */
 export function bytes(text) {
   return ENC.encode(text);
 }
@@ -26,64 +19,42 @@ export function text(u8) {
   return DEC.decode(u8);
 }
 
-/** The errno behind a negative return, as a name. `-2` reads as nothing; `ENOENT` reads as itself. */
 export function errnoName(r) {
   return errName(r < 0 ? -r : r);
 }
 
-/**
- * Write a whole string to `fd`. Returns the byte count, or a NEGATIVE ERRNO.
- *
- * The short-count loop is already in `env.write`; this is the string half, and it returns the
- * errno rather than throwing because a program's answer to EPIPE is to stop, not to unwind.
- */
+/** Write a whole string to `fd`. Returns the byte count, or a NEGATIVE ERRNO, never a throw. */
 export function out(env, fd, s) {
   return env.write(fd, ENC.encode(s));
 }
 
-/** stdout, which is fd 1 for every program this system starts. */
 export function say(env, s) {
   return out(env, 1, s);
 }
 
-/** stderr. NEVER redirected into a pipeline by this shell, which is why a failing stage inside a
- *  pipeline still says so. */
+/** stderr, which is never redirected into a pipeline, so a failing stage inside one still says so. */
 export function warn(env, s) {
   return out(env, 2, s.endsWith("\n") ? s : `${s}\n`);
 }
 
-/**
- * A program's own diagnostic, in the one format every program here uses:
- * `name: subject: reason`, on stderr, with the exit code the caller should return.
- *
- * ONE RENDERER, because the shape of a diagnostic is a fact about this system rather than a
- * preference of each program — and a reader greps for `grep:` across every program's output.
- */
+/** A program's own diagnostic: `name: subject: reason`, on stderr, with the exit code the caller
+ *  should return. One renderer, so a reader can grep `grep:` across every program's output. */
 export function complain(env, name, subject, reason, code = 1) {
-  // `null` MEANS "NO SUBJECT"; an empty string is a subject that happens to be empty, and the two
-  // are different. A truthiness test treated `""` as absent, so a command name that expanded to
-  // nothing produced `sh: command not found` naming nothing at all.
+  // `null` means "no subject"; `""` is a subject that happens to be empty. A truthiness test
+  // treats `""` as absent and prints `sh: command not found` naming nothing at all.
   const has = subject !== null && subject !== undefined;
   warn(env, has ? `${name}: ${subject}: ${reason}` : `${name}: ${reason}`);
   return code;
 }
 
-/** `complain` for a negative errno, which is the overwhelmingly common case. */
 export function complainErrno(env, name, subject, r, code = 1) {
   return complain(env, name, subject, errnoName(r), code);
 }
 
-/**
- * Read `fd` to end of file. Returns bytes, or a NEGATIVE ERRNO.
- *
- * SIZE IS NOT ASKED FOR, and that is the point: a pipe and a terminal have no size, and a file's
- * size can change under a reader. The loop consumes short counts, which is what makes this correct
- * over a pipe whose writer is slow — `read` returning 3 bytes is not end of file.
- *
- * `cap` bounds the result. A program that slurps an unbounded stream is a program that can be made
- * to exhaust the renderer's heap by its own input, so the default is generous and finite, and
- * hitting it is reported as -EFBIG rather than as a short read that looks like EOF.
- */
+/** Read `fd` to end of file. Returns bytes, or a NEGATIVE ERRNO. No size is asked for: a pipe and a
+ *  terminal have none, and the short-count loop is what makes it correct over a slow writer —
+ *  `read` returning 3 bytes is not end of file. `cap` stops a program's own input exhausting the
+ *  renderer's heap, and hitting it is -EFBIG rather than a short read that looks like EOF. */
 export function slurp(env, fd, cap = 8 * 1024 * 1024) {
   const chunk = new Uint8Array(MAX_INLINE);
   const parts = [];
@@ -111,8 +82,7 @@ export function slurpText(env, fd, cap) {
   return typeof r === "number" ? r : DEC.decode(r);
 }
 
-/** One file's whole contents as text, by path. Returns a string or a NEGATIVE ERRNO — and closes
- *  the fd on every path, including the failing one. */
+/** One file's whole contents as text, by path. Returns a string or a NEGATIVE ERRNO. */
 export function readFileText(env, path, cap) {
   const fd = env.fs.open(path, O_RDONLY);
   if (fd < 0) return fd;
@@ -123,14 +93,9 @@ export function readFileText(env, path, cap) {
   }
 }
 
-/**
- * Split text into lines, WITHOUT inventing a last empty one.
- *
- * `"a\nb\n".split("\n")` is `["a", "b", ""]`, and every program that counted those got one line
- * too many — `wc -l` and `grep -c` both. A trailing newline terminates the last line; it does not
- * start another. Text with no trailing newline still has its last line, which is what `head` on a
- * file with no final newline has to preserve.
- */
+/** Split text into lines, without inventing a last empty one. `"a\nb\n".split("\n")` ends in `""`,
+ *  which gives `wc -l` and `grep -c` one line too many: a trailing newline terminates the last line
+ *  rather than starting another. Text with no trailing newline still has its last line. */
 export function lines(s) {
   if (s === "") return [];
   const out2 = s.split("\n");
@@ -138,26 +103,13 @@ export function lines(s) {
   return out2;
 }
 
-/**
- * Call `onLine(text, number)` for each line of `fd`, STREAMING.
- *
- * NOT `slurp` THEN SPLIT, and the difference is a hang: a filter that reads its whole input before
- * emitting anything turns `yes | grep y | head -1` into a program that never prints, because the
- * middle stage is waiting for an EOF its writer will never send. The same reason `cat` and `head`
- * copy in pieces.
- *
- * The last line is delivered even with no trailing newline, which is what `grep` on a file whose
- * final line is unterminated has to do. `onLine` returning `false` stops the read — that is how a
- * caller gives up early and lets its writer see EPIPE.
- *
- * `maxLine` bounds the buffer. A stream with no newline in it is otherwise a way to make a filter
- * allocate without limit; -EFBIG names what happened.
- */
+/** Call `onLine(text, number)` for each line of `fd`, STREAMING — not `slurp` then split, and the
+ *  difference is a hang: a filter that reads its whole input first turns `yes | grep y | head -1`
+ *  into a program that never prints (constraint 134). `onLine` returning `false` stops the read, so
+ *  a caller can give up early and let its writer see EPIPE. `maxLine` answers -EFBIG. */
 export function eachLine(env, fd, onLine, { maxLine = 1024 * 1024 } = {}) {
-  // ITS OWN DECODER, not the module's. `{stream: true}` makes a TextDecoder STATEFUL across calls
-  // — it holds the tail of a split multi-byte character — so a shared one would carry that state
-  // into the next unrelated `text()` call, and two reads interleaved by a nested `eachLine` would
-  // each decode with the other's partial character.
+  // Its own decoder, not the module's: `{stream: true}` makes a TextDecoder STATEFUL across calls,
+  // so a shared one would carry a split character into the next unrelated `text()` call.
   const dec = new TextDecoder();
   const buf = new Uint8Array(MAX_INLINE);
   let rest = "";
@@ -176,8 +128,7 @@ export function eachLine(env, fd, onLine, { maxLine = 1024 * 1024 } = {}) {
     }
     if (rest.length > maxLine) return -E.EFBIG;
   }
-  // The flush: a truncated multi-byte character at end of input becomes a replacement character
-  // here rather than being dropped.
+  // A truncated multi-byte character at end of input becomes a replacement character, not nothing.
   rest += dec.decode();
   if (rest !== "") {
     number += 1;
@@ -186,13 +137,9 @@ export function eachLine(env, fd, onLine, { maxLine = 1024 * 1024 } = {}) {
   return 0;
 }
 
-/**
- * Every entry of a directory fd, through `readdir`'s cookie protocol.
- *
- * `cookie === entries.length` is NOT the end condition — a directory can run out exactly at a
- * batch boundary (src/libos/syscall.mjs says so). An EMPTY BATCH is the end, and the bound on the
- * loop is here so a filesystem that answered a non-empty batch forever reports instead of hanging.
- */
+/** Every entry of a directory fd, through `readdir`'s cookie protocol. An empty batch is the end;
+ *  `cookie === entries.length` is not, because a directory can run out exactly at a batch boundary.
+ *  `rounds` bounds the loop, so a filesystem answering non-empty for ever reports, not hangs. */
 export function readdirAll(env, fd, rounds = 4096) {
   const all = [];
   let cookie = 0;
@@ -208,9 +155,8 @@ export function readdirAll(env, fd, rounds = 4096) {
 
 /** A directory's entries by path. Returns an array or a NEGATIVE ERRNO. */
 export function listDir(env, path) {
-  // O_DIRECTORY IS REQUIRED HERE, not optional: both this system's filesystems refuse to open a
-  // directory without it with EISDIR (constraint 82 records the divergence from Linux, where the
-  // open succeeds and the read fails instead).
+  // O_DIRECTORY is required, not optional: both filesystems here answer EISDIR without it, which
+  // is constraint 82's divergence from Linux.
   const fd = env.fs.open(path, O_RDONLY | O_DIRECTORY);
   if (fd < 0) return fd;
   try {
@@ -221,20 +167,13 @@ export function listDir(env, path) {
 }
 
 /**
- * A tiny getopt: single-letter flags, with an optional argument.
+ * A tiny getopt: single-letter flags, with an optional argument. An unknown letter is reported, so
+ * `head -5` — a real idiom this does not support — says so instead of treating 5 as a filename.
  *
  * @param {string[]} args  argv WITHOUT the program name.
  * @param {string} spec    letters that are flags; a letter followed by `:` takes an argument.
- * @returns {{flags: object, operands: string[], bad: string|null, why: string}}
- *
- * `why` IS "unknown" OR "missing-argument", because a program cannot write a useful message
- * without knowing which: `head -n` with no operand answered `unknown option -n (use -n n)`,
- * telling the reader to type what they had just typed.
- *
- * `--` ends option parsing, `-` is an operand (POSIX's "read standard input"), and an unknown
- * letter is REPORTED rather than ignored: a program that silently accepted `-Q` would run with
- * behaviour nobody asked for, and `head -5` — a real idiom this does not support — must say so
- * instead of treating 5 as a filename.
+ * @returns {{flags: object, operands: string[], bad: string|null, why: string}} `why` separates
+ *          "unknown" from "missing-argument", or `head -n` is told to type what it just typed.
  */
 export function getopt(args, spec) {
   const takesArg = new Set();
@@ -271,21 +210,13 @@ export function getopt(args, spec) {
   return { flags, operands, bad: null, why: "" };
 }
 
-/**
- * A non-negative integer option, or null.
- *
- * SEPARATE FROM `getopt` because the refusal belongs to the program: `head -n banana` is a usage
- * error with a message naming `banana`, and `Number("banana")` is NaN, which compares false against
- * every bound and would silently behave like `-n 0`.
- */
+/** A non-negative integer option, or null. The refusal belongs to the program: `Number("banana")`
+ *  is NaN, which compares false against every bound and so behaves like `-n 0`. */
 export function wholeNumber(s) {
   if (typeof s !== "string" || !/^\d+$/.test(s)) return null;
   const n = Number(s);
   return Number.isSafeInteger(n) ? n : null;
 }
 
-/** A usage error, which is what every Unix tool returns for one. Named because seven programs
- *  return it. Success and plain failure are 0 and 1 at the `return` that means them; naming those
- *  bought nothing and the two names had no consumer. 127 is the shell's own "command not found"
- *  and is not a program's to return. */
+/** A usage error. 127 is the shell's own "command not found" and is not a program's to return. */
 export const EXIT_USAGE = 2;

@@ -9,14 +9,12 @@ const NAME = "wc";
 /**
  * Count one stream.
  *
- * LINES ARE NEWLINE CHARACTERS, not "pieces between newlines", which is what `wc -l` actually
- * counts everywhere — a file with no final newline reports one fewer line than it has text lines,
- * and that is correct rather than an off-by-one. `src/libos/std.mjs`'s `lines()` answers the other
- * question and is deliberately not used here.
+ * Lines are newline characters, not pieces between them: a file with no final newline reports one
+ * fewer line than it has text lines, and that is correct. `src/libos/std.mjs`'s `lines()` answers
+ * the other question and is deliberately not used here.
  *
- * WORDS ARE RUNS OF NON-WHITESPACE, counted in one pass over the bytes rather than by splitting:
- * splitting a 1 MiB file on whitespace allocates an array of every word in it to then take only
- * its length.
+ * Words are counted in one pass rather than by splitting, which would allocate every word of the
+ * stream to take only the array's length.
  */
 function count(env, fd) {
   const buf = new Uint8Array(MAX_INLINE);
@@ -42,9 +40,8 @@ function count(env, fd) {
   return { lines, words, bytes };
 }
 
-/** The selected counts, in POSIX's own order — lines, words, bytes — whatever order the flags came
- *  in. `wc -cl` and `wc -lc` print the same thing everywhere, and a program that echoed the flag
- *  order would be the only one that did not. */
+/** The selected counts, in POSIX's order — lines, words, bytes — whatever order the flags came in,
+ *  so `wc -cl` and `wc -lc` print the same thing. */
 function format(got, want) {
   const parts = [];
   if (want.l) parts.push(String(got.lines));
@@ -59,8 +56,7 @@ export function run(env) {
   if (bad) {
     return { exit: std.complain(env, NAME, null, `unknown option ${bad}`, std.EXIT_USAGE) };
   }
-  // NO FLAGS MEANS ALL THREE, which is POSIX's default and not a special case to remember: the
-  // selection is computed once, here, so `format` has one input shape.
+  // No flags means all three, POSIX's default, resolved once here so `format` has one input shape.
   const want = (flags.l || flags.w || flags.c) ? flags : { l: true, w: true, c: true };
 
   if (operands.length === 0) {
@@ -93,8 +89,7 @@ export function run(env) {
     counted += 1;
     std.say(env, `${format(got, want)} ${path}\n`);
   }
-  // A TOTAL ONLY FOR TWO OR MORE FILES THAT WERE ACTUALLY READ. `wc a missing` prints one row and
-  // no total, because a total under a row is a sum of one number.
+  // `wc a missing` prints one row and no total: a total under one row is a sum of one number.
   if (counted > 1) std.say(env, `${format(total, want)} total\n`);
   return { exit: status, total };
 }

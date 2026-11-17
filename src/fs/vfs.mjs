@@ -1,27 +1,14 @@
 // The metadata filesystem: inodes, path resolution, symlinks, permissions, and nothing else.
 //
-// PORTED from ../webxp/shared/fs/vfs.mjs (1,301 lines). What came across unchanged in shape is the
-// part that was already right: the POSIX model where a name in a directory is a number, `#lookup`
-// with MAX_LINKS=40, the permission checks, the FsError code space, and serialize/parse as the
-// snapshot writer and half of fsck.
+// Two properties run through every method:
 //
-// TWO CHANGES TOUCH NEARLY EVERY METHOD AND THEY ARE THE WORK.
-//
-//   1. FILE DATA IS BYTES, AND IT IS NOT HERE. The predecessor stored a JS string in the inode and
-//      called its character count `size`. Bytes live in a flat OPFS blob named by inode
+//   1. FILE DATA IS BYTES AND IT IS NOT HERE. Bytes live in a flat OPFS blob named by inode
 //      (constraint 26); an inode carries `size` in BYTES plus `gen`, the blob generation its data
-//      is in. That is what keeps this module PURE — it is the standing constraint M2a bought, and
-//      scripts/fsfuzz.py stops running the moment a parse path reaches for storage.
+//      is in. That is what keeps this module pure, and scripts/fsfuzz.py stops running the moment
+//      a parse path reaches for storage.
 //   2. THE CREDENTIAL IS THE FIRST ARGUMENT OF EVERY CALL, never instance state (constraint 29).
-//      The predecessor held one `this.uid`, so every process shared one identity and the mode bits
-//      were decoration. There is no `this.uid` here. `cred` is `{uid, gid}` and a method cannot be
-//      invoked without one.
-//
-// WHAT WAS DROPPED, so a reader does not go looking for it: mountIndex/mountText/pending/fill (M3
-// owns mounts, on a provider table rather than a one-off driver), the watcher set (the kernel
-// journals the op this returns instead), `reset()` (constraint 28 — this filesystem never
-// reseeds), and MAX_FILE_SIZE/MAX_TOTAL_SIZE (they existed because the predecessor lived in
-// localStorage; OPFS's ceiling is the storage quota and `statfs` reports it).
+//      There is no `this.uid`; `cred` is `{uid, gid}` and a method cannot be invoked without one.
+//      One stored identity would make the mode bits decoration.
 //
 // MUTATION IS TWO HALVES, and the split is what makes crash consistency possible: a mutating
 // method decides (resolve, check permissions, allocate an inode number) and returns an OP RECORD;
@@ -38,7 +25,7 @@ export const LINK = "link";
 export const ROOT_INO = 1;
 
 /** Linux's own `MAXSYMLINKS`. A cycle is indistinguishable from a very long chain, so the only
- *  honest answer is a limit. Exported because a check that asserts the ceiling must name it. */
+ *  honest answer is a limit. */
 export const MAX_LINKS = 40;
 
 export const PERM = Object.freeze({ R: 4, W: 2, X: 1 });
@@ -46,10 +33,9 @@ const R = PERM.R;
 const W = PERM.W;
 const X = PERM.X;
 
-/** POSIX's own `NAME_MAX`. Declared in src/abi.mjs and re-exported here, because it crosses the
- *  kernel/process boundary: the kernel refuses a longer component with -ENAMETOOLONG and a program
- *  has to know what length it is being refused for. src/abi.mjs is pure integers and importable
- *  from Node, so taking it from there costs this module none of its purity. */
+/** Declared in src/abi.mjs and re-exported, because it crosses the kernel/process boundary: a
+ *  program refused with -ENAMETOOLONG has to know what length it was refused for. src/abi.mjs is
+ *  pure integers and importable from Node, so taking it from there costs no purity. */
 export { NAME_MAX } from "../abi.mjs";
 
 /** Bumped when the serialized shape changes. A mismatch is a REFUSAL, never a migration and never
@@ -69,13 +55,9 @@ const MESSAGES = {
   ENOSPC: "No space left on device",
   ENAMETOOLONG: "File name too long",
   EBUSY: "Device or resource busy",
-  // M3. docs/ABI.md's path group already lists NODEV, and `mount` is the call that raises it: a
-  // filesystem type nobody implements. Without the row the code would reach a process as -EIO,
-  // which says "the disk failed" about a typo in a mount row.
+  // Without these two rows the code would reach a process as -EIO, saying "the disk failed" about
+  // a typo in a mount row or an operation on a description whose inode is gone.
   ENODEV: "No such device",
-  // M3. An operation on a description whose inode is gone. The OPFS store already answers this
-  // (src/abi.mjs ESTALE) and the tmpfs now answers it too, so the two agree; without the row the
-  // code would reach a process as -EIO and say "the disk failed" about an unlinked file.
   ESTALE: "Stale file handle",
   EFBIG: "File too large",
   EMLINK: "Too many links",
@@ -83,10 +65,7 @@ const MESSAGES = {
   EIO: "Input/output error",
 };
 
-/**
- * A refusal, carrying the POSIX code a caller branches on. The kernel maps `code` to a number
- * through src/abi.mjs's `E` table, which is the one place a name becomes an errno.
- */
+/** The kernel maps `code` through src/abi.mjs's `E` table, the one place a name becomes an errno. */
 export class FsError extends Error {
   constructor(code, path = "", detail = "") {
     const reason = detail || MESSAGES[code] || code;
@@ -97,8 +76,8 @@ export class FsError extends Error {
   }
 }
 
-/** Every code this module can throw. Asserted against src/abi.mjs's errno table by the host test:
- *  a code with no errno would reach a process as -EIO and lose the reason. */
+/** Asserted against src/abi.mjs's errno table by the host test: a code with no errno would reach a
+ *  process as -EIO and lose the reason. */
 export const FS_CODES = Object.freeze(Object.keys(MESSAGES));
 
 /* ---------------------------------------------------------------------------
@@ -128,10 +107,9 @@ export function joinPath(...parts) {
 /**
  * Collapse `.`, `..` and repeated slashes WITHOUT consulting the filesystem.
  *
- * This is the `-L` rule a shell uses for its own working directory, and it is deliberately not
- * what resolution does: `..` here cancels the previous name in the string, where resolution
- * follows the real parent of whatever that name pointed at. The two disagree exactly when a
- * symlink is involved, which is why `pwd` and `pwd -P` are different commands.
+ * The `-L` rule a shell uses for its own working directory, deliberately not what resolution does:
+ * `..` here cancels the previous name in the string, where resolution follows the real parent of
+ * whatever that name pointed at. They disagree exactly when a symlink is involved.
  */
 export function normalize(path) {
   const absolute = isAbsolute(path);
@@ -181,11 +159,11 @@ export function modeString(type, mode) {
    --------------------------------------------------------------------------- */
 
 /**
- * The op kinds. Strings rather than integers because the journal payload is JSON and a reader
- * holding a corrupt image is better served by a name than by a number — fsck prints these.
+ * Strings rather than integers because the journal payload is JSON and fsck prints these: a reader
+ * holding a corrupt image is better served by a name than by a number.
  *
- * COMMIT is the COW swing and the only op that touches file data: it moves an inode's reference
- * from one blob generation to the next. Every other op is pure metadata.
+ * COMMIT is the COW swing and the only op that touches file data, moving an inode's reference from
+ * one blob generation to the next. Every other op is pure metadata.
  */
 export const OP = Object.freeze({
   MKDIR: "mkdir",
@@ -204,24 +182,18 @@ export const OP = Object.freeze({
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-/** One op as journal payload bytes. */
 export function encodeOp(op) {
   return ENC.encode(JSON.stringify(op));
 }
 
 /**
- * Payload bytes back to an op, or null when they are not one.
- *
  * Never throws. A journal record whose CRC checked out can still hold bytes this version does not
- * understand — a record written by a newer minor, or a payload that was valid JSON and the wrong
- * shape — and the caller that has to decide what a bad op means is fsck, not a JSON parser.
+ * understand, and the caller that decides what a bad op means is fsck, not a JSON parser.
  *
- * `slice()` UNCONDITIONALLY, because TextDecoder refuses a view backed by a SharedArrayBuffer
- * outright ("must not be shared") and a decoder that threw inside a parse path would turn a torn
- * record into a stack trace instead of a named refusal. It is a copy of a hundred-odd bytes, and
- * the alternative — sniffing the buffer's type — would name `SharedArrayBuffer` in a module whose
- * whole value is that it names no capability at all. scripts/fsfuzz.py's purity lint caught that
- * version on its first run.
+ * `slice()` unconditionally, because TextDecoder refuses a view backed by a SharedArrayBuffer
+ * ("must not be shared"), which would turn a torn record into a stack trace instead of a named
+ * refusal. Sniffing the buffer's type instead would name `SharedArrayBuffer` in a module whose
+ * whole value is that it names no capability at all.
  */
 export function decodeOp(bytes) {
   try {
@@ -241,19 +213,15 @@ export function decodeOp(bytes) {
 export class VFS {
   /**
    * @param {object} [options]
-   * @param {{uid: number, gid: number}} [options.owner] Who owns the root. NOT a stored identity:
-   *        there is no `this.uid` here, because constraint 29 makes a credential a per-call
-   *        argument. This is the root directory's owner and nothing else.
+   * @param {{uid: number, gid: number}} [options.owner] The root directory's owner and nothing
+   *        else. Not a stored identity: constraint 29 makes a credential a per-call argument.
    * @param {() => number} [options.now] Milliseconds. Injectable so replay is exact and a host
    *        test is deterministic: every op carries the timestamp it was written with.
    *
-   *        NO DEFAULT CLOCK, and that is the point. This used to default to `Date.now`, and
-   *        `src/fs/fsck.mjs` builds a VFS without passing one — so the REPLAY path read the wall
-   *        clock, and two `fsck` runs over identical bytes produced different mtimes for any op
-   *        whose `t` was missing. A parse path that is not a function of its input is not
-   *        fuzzable, which is the premise `scripts/fsfuzz.py` rests on. Omitting it now yields a
-   *        clock that REFUSES, so a replayed op with no timestamp is a named error instead of
-   *        a silently invented one, and the capability lives at the edges that have it.
+   *        There is NO DEFAULT. A parse path that reads the wall clock is not a function of its
+   *        input and so is not fuzzable, which is the premise `scripts/fsfuzz.py` rests on.
+   *        Omitting it yields a clock that refuses, so a replayed op with no timestamp is a named
+   *        error instead of a silently invented one, and the capability lives at the edges.
    * @param {boolean} [options.empty] Build with NO root inode, for `parse` to fill.
    */
   constructor({ owner = { uid: 0, gid: 0 }, now = undefined, empty = false } = {}) {
@@ -297,10 +265,9 @@ export class VFS {
     } else if (type === LINK) {
       inode.target = "";
     } else {
-      // THE TWO FIELDS THAT REPLACE THE PREDECESSOR'S `data` STRING. `size` is a byte count;
-      // `gen` names which blob in the flat directory holds those bytes. gen 0 means "no blob has
-      // ever been committed", which is distinct from "a blob of length zero" — the first has
-      // nothing on disk to read and the second has a file.
+      // `size` is a byte count; `gen` names which blob in the flat directory holds those bytes.
+      // gen 0 means "no blob has ever been committed", distinct from "a blob of length zero" —
+      // the first has nothing on disk to read and the second has a file.
       inode.size = 0;
       inode.gen = 0;
     }
@@ -317,7 +284,7 @@ export class VFS {
     return inode;
   }
 
-  /** Whether `cred` has EVERY requested bit on an inode. Constraint 29: cred, never this.uid. */
+  /** EVERY requested bit, not any. Constraint 29: cred, never this.uid. */
   #may(cred, inode, bits) {
     if (cred.uid === 0) {
       // Root ignores read and write bits, and still needs one execute bit to run a file — which
@@ -336,8 +303,7 @@ export class VFS {
   /* --------------------------- resolution --------------------------- */
 
   /**
-   * Walk a path and report the directory it lands in, the final name, and what that name holds —
-   * `null` when the name is free, which is what the create operations need.
+   * `ino` is `null` when the final name is free, which is what the create operations need.
    *
    * @returns {{dirIno: number, name: string, ino: number|null}}
    */
@@ -377,9 +343,9 @@ export class VFS {
           depth: depth + 1, followFinal: true, shown: shown || target,
         });
         if (hit.ino === null) {
-          // A dangling symlink. As the final component that is still a usable answer for a
-          // create: writing through a broken link creates its target, which is POSIX's behaviour
-          // and the reason this returns the target's parent rather than the link's.
+          // A dangling symlink is still a usable answer for a create as the final component:
+          // writing through a broken link creates its target, which is why this returns the
+          // target's parent rather than the link's.
           if (last) return hit;
           throw new FsError("ENOENT", shown);
         }
@@ -409,7 +375,7 @@ export class VFS {
     return { ...hit, inode: this.#inode(hit.ino) };
   }
 
-  /** The directory a create writes into, with the name it writes. */
+  /** The directory a create writes into, with the name it writes. Never follows the final link. */
   #slot(cred, path, options = {}) {
     const hit = this.#resolve(cred, path, { ...options, followFinal: false });
     if (hit.dirIno === null || hit.name === "") throw new FsError("EEXIST", path);
@@ -428,33 +394,26 @@ export class VFS {
     return this.#info(this.#existing(cred, path, { ...options, followFinal: false }).inode);
   }
 
-  /** Metadata for an inode already resolved to an fd. No path, so no permission walk. */
+  /** No path, so no permission walk. */
   fstat(ino) {
     return this.#info(this.#inode(ino));
   }
 
   /**
-   * The generation and size a FILE inode currently publishes.
-   *
-   * THE INPUT TO THE COPY-ON-WRITE DECISION, and it is separate from `fstat` because that is the
-   * only way the decision can be made per write without paying for a whole stat: `#info` renders
-   * a mode string and a type-dependent size, and the append-vs-copy-up test runs on every write
-   * (constraint 22's "open is rare, fd I/O is common"). Two file descriptions on one inode share
-   * the file, so this — never a snapshot taken when a description was opened — is what a write
-   * must be measured against.
-   */
-  /**
-   * Whether an inode is still in the table.
-   *
    * The kernel's only way to tell an UNLINKED file from a corrupt image. `#inode` throws EIO for
-   * both — correctly, because the VFS does not know file descriptions exist and an inode number
-   * can otherwise only have come out of a directory — so the one caller that DOES hold a
-   * description asks this first and reports the two states apart.
+   * both — correctly, because the VFS does not know file descriptions exist — so the one caller
+   * that does hold a description asks this first and reports the two states apart.
    */
   holds(ino) {
     return this.inodes.has(ino);
   }
 
+  /**
+   * The input to the copy-on-write decision, separate from `fstat` because the append-vs-copy-up
+   * test runs on every write and `#info` renders a mode string and a type-dependent size
+   * (constraint 22's "open is rare, fd I/O is common"). Two file descriptions on one inode share
+   * the file, so this — never a snapshot taken at open — is what a write is measured against.
+   */
   committed(ino) {
     const inode = this.#inode(ino);
     if (inode.type !== FILE) throw new FsError("EINVAL", `inode ${ino}`, "Not a regular file");
@@ -462,11 +421,9 @@ export class VFS {
   }
 
   /**
-   * Whether a name resolves. A broken symlink does not.
-   *
-   * Only absence answers `false`. A name inside a directory this credential may not look into is
-   * not absent, and reporting it as absent is how `mkdir -p` ends up reporting EEXIST for a path
-   * it was refused.
+   * A broken symlink does not resolve. Only absence answers `false`: a name inside a directory
+   * this credential may not look into is not absent, and reporting it as absent is how `mkdir -p`
+   * ends up reporting EEXIST for a path it was refused.
    */
   exists(cred, path, options = {}) {
     try {
@@ -481,11 +438,8 @@ export class VFS {
   }
 
   /**
-   * Refuse unless this credential may do these things to a name.
-   *
-   * Exists because the right to enter a directory and the right to list it are different bits, and
-   * `cd` wants the first one. Probing with a read would refuse a directory that is `--x`, which is
-   * a real mode and a legal place to stand.
+   * The right to enter a directory and the right to list it are different bits, and `cd` wants the
+   * first. Probing with a read would refuse a `--x` directory, which is a legal place to stand.
    */
   access(cred, path, bits, options = {}) {
     const { inode } = this.#existing(cred, path, options);
@@ -504,8 +458,7 @@ export class VFS {
       mtime: inode.mtime,
       ctime: inode.ctime,
       atime: inode.atime,
-      // A directory's size is its entry count; a symlink's is its target's byte length; a file's
-      // is the BYTE count of the blob generation the metadata points at.
+      // A file's size is the BYTE count of the blob generation the metadata points at.
       size: inode.type === DIR
         ? inode.entries.size
         : inode.type === LINK
@@ -516,7 +469,7 @@ export class VFS {
     };
   }
 
-  /** The names in a directory, in insertion order. Sorting is the caller's business. */
+  /** Insertion order. Sorting is the caller's business. */
   readdir(cred, path, options = {}) {
     const { inode } = this.#existing(cred, path, options);
     if (inode.type !== DIR) throw new FsError("ENOTDIR", path);
@@ -534,7 +487,7 @@ export class VFS {
     }));
   }
 
-  /** Directory entries by inode number, for a readdir(fd, cookie) that has no path to re-walk. */
+  /** For a readdir(fd, cookie) that has no path to re-walk. */
   listIno(ino) {
     const inode = this.#inode(ino);
     if (inode.type !== DIR) throw new FsError("ENOTDIR", `inode ${ino}`);
@@ -550,9 +503,8 @@ export class VFS {
   }
 
   /**
-   * The path with every symlink resolved away, component by component, splicing a link's target
-   * back into the queue — the only way to get this right, because a link in the middle of a path
-   * changes what a later `..` means.
+   * Every symlink resolved away, component by component, splicing a link's target back into the
+   * queue: a link in the middle of a path changes what a later `..` means.
    */
   realpath(cred, path, { cwd = "/" } = {}) {
     let pending = splitPath(isAbsolute(path) ? path : joinPath(cwd, path));
@@ -580,10 +532,8 @@ export class VFS {
   }
 
   /**
-   * Resolve a path for `open`, applying O_CREAT/O_EXCL/O_TRUNC's permission rules and NOTHING
-   * else: no blob, no handle, no I/O. Returns the decision the kernel then executes.
-   *
-   * Decision separated from execution, which is what lets this stay pure while
+   * O_CREAT/O_EXCL/O_TRUNC's permission rules and NOTHING else: no blob, no handle, no I/O. The
+   * decision the kernel then executes, which is what lets this stay pure while
    * `createSyncAccessHandle` lives in the I/O worker.
    *
    * @returns {{ino, type, created: op|null, needR: boolean, needW: boolean, gen, size}}
@@ -598,10 +548,10 @@ export class VFS {
       if (inode.type === DIR && wantW) throw new FsError("EISDIR", path);
       if (wantR) this.#need(cred, inode, R, path);
       if (wantW) this.#need(cred, inode, W, path);
-      // M5. `wantX` IS THE EXEC CHECK, and it is here rather than in the loader so that the mode
-      // bits have one interpreter (`#may`, which is the only thing that knows root ignores read
-      // and write but still needs an execute bit). `wantX` never creates: a caller asking to
-      // execute a file that is not there wants ENOENT, not an empty file it then cannot run.
+      // The exec check is here rather than in the loader so the mode bits have one interpreter
+      // (`#may`, the only thing that knows root ignores read and write but still needs an execute
+      // bit). `wantX` never creates: a caller asking to execute a file that is not there wants
+      // ENOENT, not an empty file it then cannot run.
       if (wantX) this.#need(cred, inode, X, path);
       return {
         ino: inode.ino, type: inode.type, created: null,
@@ -609,11 +559,6 @@ export class VFS {
       };
     }
     if (!create) throw new FsError("ENOENT", path);
-    // M5. `wantX` NEVER CREATES, which the comment above promised and the code did not enforce:
-    // the create arm tests the directory for W and never looked at `wantX`, so a caller passing
-    // both got a fresh 0o644 file back with no execute check where ENOENT was documented. No live
-    // caller passes both — the trap is the point, and it is the one place this file's own stated
-    // invariant was not code.
     if (wantX) throw new FsError("ENOENT", path);
     const dir = this.#inode(hit.dirIno);
     if (dir.type !== DIR) throw new FsError("ENOTDIR", path);
@@ -654,9 +599,8 @@ export class VFS {
     return op;
   }
 
-  /** Remove one name. The inode survives while another name still holds it — the whole of what a
-   *  hard link is. The op records whether the last link went, because that is what tells the
-   *  kernel a blob is now free. */
+  /** The inode survives while another name still holds it — the whole of what a hard link is. The
+   *  op records whether the last link went, because that is what tells the kernel a blob is free. */
   unlink(cred, path, { cwd = "/" } = {}) {
     const hit = this.#existing(cred, path, { cwd, followFinal: false });
     if (hit.inode.type === DIR) throw new FsError("EISDIR", path);
@@ -764,13 +708,11 @@ export class VFS {
   }
 
   /**
-   * THE COW SWING, as metadata. Move an inode's reference from the generation it is on to `gen`,
-   * and publish `size`.
+   * The COW swing, as metadata: move an inode's reference to `gen` and publish `size`.
    *
-   * The kernel calls this only after the new blob has been written AND flushed (constraint 23's
-   * ordering: blob -> flush -> journal -> flush -> apply in memory). This method is the "apply in
-   * memory" step and the op it returns is the journal record; it knows nothing about either blob,
-   * which is what keeps it pure.
+   * Called only after the new blob is written AND flushed (constraint 23's ordering: blob ->
+   * flush -> journal -> flush -> apply in memory). This is the "apply in memory" step and the op
+   * it returns is the journal record; it knows nothing about either blob, which keeps it pure.
    *
    * `prevGen` is recorded so the kernel knows which blob the swing freed without re-reading the
    * inode, and so fsck can say what an interrupted swing left behind.
@@ -787,36 +729,32 @@ export class VFS {
   }
 
   /**
-   * EVERY FIELD A COMMIT MOVES, so a caller can put them back. The pair with `revertCommit`.
+   * Every field a commit moves, so a caller can put them back. The pair with `revertCommit`.
    *
-   * WHY THE INVERSE EXISTS AT ALL. The kernel applies a commit in memory as its VALIDATION —
-   * `applyOp` refuses an op that cannot be applied to this state rather than guessing, and a
-   * record must not reach the disk before that refusal (src/kernel/store.mjs `commitOnce`, and the
-   * measured read-only mount that made the order what it is). So the apply necessarily precedes
-   * the journal append, and an append that fails leaves the tree holding a generation no record
-   * names: the running kernel publishes it, the next mount does not, and the two disagree with the
-   * journal in the middle.
+   * The kernel applies a commit in memory as its validation — `applyOp` refuses an op that cannot
+   * be applied to this state, and a record must not reach the disk before that refusal
+   * (src/kernel/store.mjs `commitOnce`). The apply therefore precedes the journal append, and an
+   * append that fails leaves the tree holding a generation no record names: the running kernel
+   * publishes it and the next mount does not.
    *
-   * IT LIVES HERE AND NOT IN THE KERNEL because `inode.gen` has one writer. A copy of this
-   * arithmetic in the storage edge would be a second one, and it would drift the first time
-   * `applyOp`'s COMMIT arm moved a field this does not.
+   * It lives here and not in the kernel because `inode.gen` has one writer; a copy in the storage
+   * edge would drift the first time `applyOp`'s COMMIT arm moved a field this does not.
    *
-   * NOT JOURNALLED, and that is the point: the record it undoes never landed, so there is nothing
-   * for replay to be told. It is also not reachable through `applyOp` — a commit that moves a
-   * generation BACKWARDS is corruption there, which is exactly the shape of a legitimate undo.
+   * Not journalled: the record it undoes never landed, so there is nothing for replay to be told.
+   * It is also not reachable through `applyOp`, where a generation moving BACKWARDS is corruption
+   * — exactly the shape of a legitimate undo.
    */
   commitState(ino) {
     const inode = this.#inode(ino);
     if (inode.type !== FILE) throw new FsError("EINVAL", `inode ${ino}`, "Not a regular file");
-    // `opSeq` IS PART OF THE STATE A COMMIT MOVES, because `applyOp` bumps it on every op and it is
-    // serialized into the image and read back out of it. Left advanced by the undo, the image
-    // carries a count no record accounts for: the number says more ops were applied than the
-    // journal and the tree between them can name.
+    // `opSeq` is part of the state a commit moves: `applyOp` bumps it on every op and it is
+    // serialized into the image. Left advanced by the undo, the image claims more ops were applied
+    // than the journal and the tree between them can name.
     return { gen: inode.gen, size: inode.size, mtime: inode.mtime, ctime: inode.ctime,
       opSeq: this.opSeq };
   }
 
-  /** Put a `commitState` back. The one undo in this module. */
+  /** The one undo in this module. */
   revertCommit(ino, state) {
     const inode = this.#inode(ino);
     if (inode.type !== FILE) throw new FsError("EINVAL", `inode ${ino}`, "Not a regular file");
@@ -835,13 +773,12 @@ export class VFS {
   }
 
   /**
-   * Apply one op. The ONE executor: a mutating method above calls this, and journal replay calls
-   * it with the op it decoded. There is no second path, which is the property that makes replay
-   * worth trusting — a replay implemented beside the writer drifts from it.
+   * The ONE executor: a mutating method above calls this, and journal replay calls it with the op
+   * it decoded. A replay implemented beside the writer would drift from it.
    *
    * Refuses rather than guesses. An op naming a missing inode, a missing name or a colliding name
-   * is an op that cannot be applied to this state, and fsck's whole job is to report that instead
-   * of building a tree nobody wrote (constraint 28).
+   * cannot be applied to this state, and reporting that instead of building a tree nobody wrote is
+   * fsck's whole job (constraint 28).
    *
    * @returns {{freed: number|null}} the inode whose last link went, for the caller that frees its
    *          blob. `null` when nothing was freed.
@@ -993,9 +930,9 @@ export class VFS {
       case OP.COMMIT: {
         const inode = this.#inode(op.ino);
         if (inode.type !== FILE) throw new FsError("EINVAL", `inode ${op.ino}`, "Not a file");
-        // A commit that moves the generation BACKWARDS is a replayed record arriving after a
-        // newer snapshot, which replay's sequence rule already excludes — so reaching here means
-        // the journal and the snapshot disagree, and that is corruption rather than an update.
+        // Replay's sequence rule already excludes a record arriving after a newer snapshot, so a
+        // generation moving BACKWARDS means the journal and the snapshot disagree: corruption,
+        // not an update.
         if (op.gen < inode.gen) {
           throw new FsError("EIO", `inode ${op.ino}`,
             `commit moves generation ${inode.gen} back to ${op.gen}`);
@@ -1014,9 +951,8 @@ export class VFS {
 
   /* --------------------------- accounting --------------------------- */
 
-  /** What `statfs` reports. Byte totals are the committed blob sizes; the real ceiling is the
-   *  storage quota, which only the kernel can ask for, so this reports usage and the kernel adds
-   *  the quota. */
+  /** What `statfs` reports, minus the ceiling: byte totals are the committed blob sizes, and only
+   *  the kernel can ask the storage quota, so it adds that. */
   stats() {
     let files = 0;
     let dirs = 0;
@@ -1033,8 +969,8 @@ export class VFS {
     return { files, dirs, links, inodes: this.inodes.size, bytes, nextIno: this.nextIno };
   }
 
-  /** Every committed blob name a healthy volume should hold, as `ino.gen`. fsck compares this
-   *  against what the directory actually has, which is how a lost blob is found. */
+  /** Every blob name a healthy volume should hold. fsck compares it against what the directory
+   *  actually has, which is how a lost blob is found. */
   blobNames() {
     const out = [];
     for (const inode of this.inodes.values()) {
@@ -1050,10 +986,8 @@ export class VFS {
   /**
    * A plain object `JSON.stringify` can take. Inode numbers are the whole structure.
    *
-   * The predecessor's two exclusions — mounted inodes, and the entries pointing at them — are
-   * gone with the mount machinery. What survives is the invariant underneath them: REACHABILITY.
-   * An inode no path can reach still counted against the predecessor's quota and was still
-   * tallied by `df`, recoverable only by a format. Here it is reported rather than written.
+   * REACHABILITY is the invariant: an inode no path can reach is reported rather than written, so
+   * it cannot count against a quota or be tallied by `df` with no way to reach it.
    */
   serialize() {
     const reachable = new Set([this.rootIno]);
@@ -1074,8 +1008,7 @@ export class VFS {
       rootIno: this.rootIno,
       opSeq: this.opSeq,
       // Reported, never silently dropped: an orphan is a leak the kernel can collect on an idle
-      // task (constraint 33 forbids an orphan sweep at boot), and a snapshot that quietly omitted
-      // them would hide the leak instead of naming it.
+      // task (constraint 33 forbids an orphan sweep at boot).
       orphans,
       inodes: [...this.inodes.values()].map((inode) => {
         const row = {
@@ -1099,10 +1032,10 @@ export class VFS {
   /**
    * Rebuild from `serialize`'s output, refusing anything that would not hold together.
    *
-   * Validated rather than trusted: the input is bytes off a disk that a half-finished write may
-   * have torn. An inode number pointing at nothing would otherwise surface much later as a
-   * directory that cannot be listed — and this is the half of fsck that runs on every mount, so
-   * the refusal is the product. It NEVER reseeds (constraint 28); the caller mounts read-only.
+   * Validated rather than trusted: the input is bytes off a disk a half-finished write may have
+   * torn, and an inode number pointing at nothing would otherwise surface much later as a
+   * directory that cannot be listed. It NEVER reseeds (constraint 28); the caller mounts
+   * read-only.
    */
   static parse(data, options = {}) {
     const bad = (why) => {
@@ -1122,9 +1055,8 @@ export class VFS {
       const inode = {
         ino: row.ino,
         type: row.type,
-        // STRICT, not defaulted. The predecessor defaulted a missing mode to 0o644, so an image
-        // whose mode column was lost came back as a tree of plausible files — and the 10k-file
-        // proof would then compare two copies of the same default and pass.
+        // Strict, not defaulted: an image whose mode column was lost would come back as a tree of
+        // plausible files, and the 10k-file proof would compare two copies of one default and pass.
         mode: Number.isInteger(row.mode) ? row.mode : bad(`inode ${row.ino} has no mode`),
         uid: Number.isInteger(row.uid) ? row.uid : bad(`inode ${row.ino} has no uid`),
         gid: Number.isInteger(row.gid) ? row.gid : bad(`inode ${row.ino} has no gid`),
@@ -1134,9 +1066,8 @@ export class VFS {
         atime: Number.isFinite(row.atime) ? row.atime : bad(`inode ${row.ino} has no atime`),
       };
       if (row.type === DIR) {
-        // Not defaulted to empty. A directory whose entry list is the wrong shape would come back
-        // as an empty directory, which restores a tree with every file silently missing — the one
-        // outcome worse than refusing.
+        // Not defaulted to empty: a directory whose entry list is the wrong shape would restore a
+        // tree with every file silently missing.
         if (!Array.isArray(row.entries)) bad(`inode ${row.ino} has no entry list`);
         inode.entries = new Map();
         for (const entry of row.entries) {
@@ -1194,20 +1125,18 @@ export class VFS {
 }
 
 /**
- * The blob's name in the flat OPFS directory, and the ONE place that name is formed.
+ * The ONE place a blob name is formed.
  *
- * Constraint 26 keeps the directory flat and named by inode — not as a workaround, but because it
- * is how a real filesystem works and it is what makes rename O(1) and hard links expressible. The
- * GENERATION SUFFIX is this milestone's addition: a copy-on-write overwrite needs a name that is
- * not yet the inode's, and `<ino>.<gen>` is that name. The inode is still the whole of the
- * identity; the suffix says WHICH of its generations, and exactly one generation at a time is the
- * one the metadata points at.
+ * Constraint 26 keeps the directory flat and named by inode — not a workaround: it is what makes
+ * rename O(1) and hard links expressible. A copy-on-write overwrite needs a name that is not yet
+ * the inode's, so the suffix says which generation, and exactly one of them at a time is the one
+ * the metadata points at.
  */
 export function blobName(ino, gen) {
   return `${ino}.${gen}`;
 }
 
-/** The inverse, for the blob sweep. Returns null for a name that is not a blob. */
+/** The inverse, for the blob sweep. Null for a name that is not a blob. */
 export function parseBlobName(name) {
   const m = /^(\d+)\.(\d+)$/.exec(name);
   if (!m) return null;

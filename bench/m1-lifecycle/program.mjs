@@ -1,21 +1,11 @@
-// The programs M1's four proofs need, in one place. USERLAND: reaches the system only through
-// syscall(), and is handed no SAB, no port, no handle (src/libos/process.mjs).
+// The programs M1's four proofs need. Userland: reaches the system only through syscall().
 //
-// Four modes keyed on the role the page hands each process:
+//   spin     for(;;){}, no syscalls, so no SIGPEND check point exists and only terminate() ends it
+//   nap      clock_nanosleep in a loop, so signals have a syscall entry to land on
+//   sleeper  one long clock_nanosleep, parked in the kernel
 //
-//   spin     — for(;;){}, no syscalls. Proof (a) the headline: dies only on End Process via
-//              Worker.terminate(), because there is no SIGPEND check point for the kernel to
-//              interrupt at. If this mode is also interruptible, M1 has not delivered.
-//   nap      — clock_nanosleep in a loop, so the process IS at a syscall entry periodically
-//              and SIGKILL/SIGTERM can land as -EINTR or as an exit. Proof (b) under contention
-//              uses this.
-//   sleeper  — one long clock_nanosleep, parks in the kernel. Proof (d) uses this: terminate
-//              the kernel worker and every process returns -EIO via the heartbeat timeout
-//              inside REARM_MS * (HB_MISS_LIMIT + 1) = 200 ms.
-//
-// The program never signals its own exit — the kernel is the only writer of exit status
-// (MILESTONES M1 item (c)): terminate() leaves the dying worker no way to report, so the
-// status is written at teardown or lost.
+// The kernel is the only writer of exit status: terminate() leaves the dying worker no way to
+// report, so the status is written at teardown or lost.
 
 import {
   SYS_getpid, SYS_clock_nanosleep, SYS_sigaction, SYS_exit,
@@ -24,37 +14,29 @@ import {
 
 const now = () => performance.now();
 
-/** A tight loop that touches nothing the kernel can observe. The headline proof: this process
- *  is unkillable except by terminate(), because it never visits a syscall entry and so can
- *  never drain SIGPEND. */
+/** Unkillable except by terminate(): never visits a syscall entry, so never drains SIGPEND. */
 function spin(env) {
   let x = 0;
   for (;;) {
-    // Any observable work would end up as a readable side effect the kernel could race against.
-    // A pure arithmetic loop is what the "compute-bound process" in MILESTONES refers to.
     x = (x + 1) | 0;
   }
 }
 
-/** Sleep in short slices, so the stream of syscall entries gives SIGPEND something to land on.
- *  A SIGKILL takes this down out-of-band (reap() at raise), and a SIGTERM-at-SIG_DFL also kills
- *  because POSIX default for it is fatal. */
+/** Short slices, so the stream of syscall entries gives SIGPEND something to land on. */
 function nap(env) {
   for (;;) {
     env.syscall(SYS_clock_nanosleep, 1000000, 0, 0);   // 1 ms
   }
 }
 
-/** One long sleep, so the process is parked in Atomics.wait when the kernel is terminated.
- *  Proof (d) reads KDOWN_SEEN off the SAB after terminate(), inside the heartbeat bound. */
+/** Parked in Atomics.wait when the kernel is terminated. Proof (d) reads KDOWN_SEEN off the SAB
+ *  afterwards, inside REARM_MS * (HB_MISS_LIMIT + 1) = 200 ms.
+ *
+ *  DEFECT, unreached: nanosleep takes an i64 as (lo, hi) and 10e9 ns does not fit in the lo word,
+ *  so this sleeps 1.41 s, not 10. The driver below passes lo/hi correctly and is what the proofs
+ *  use; this path has no caller. */
 function sleeper(env) {
-  // 10 seconds. The page terminates the kernel after a short delay and asserts every parked
-  // process has set KDOWN_SEEN inside REARM_MS * (HB_MISS_LIMIT + 1) = 200 ms.
-  env.syscall(SYS_clock_nanosleep, 10000000000 | 0, 2, 0);   // 10e9 ns fits in a 32-bit lo word is wrong; use lo/hi
-  // The line above is a trap I nearly left: nanosleep takes a (lo, hi) i64 argument, and
-  // 10,000,000,000 ns does not fit in an i32. The driver below handles this correctly; this
-  // function is only a fallback for a one-off caller and keeps the right shape rather than
-  // the right magnitude.
+  env.syscall(SYS_clock_nanosleep, 10000000000 | 0, 2, 0);
   return;
 }
 

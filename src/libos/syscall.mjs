@@ -1,10 +1,9 @@
-// The in-process syscall stub. This file is the trust boundary in file form: it runs inside a
-// process, so it is reviewed as untrusted-adjacent. It acquires nothing the kernel did not hand it
-// — one SAB, the globals SAB and one MessagePort, all three of which the kernel also holds.
+// The in-process syscall stub, and the trust boundary in file form: it runs inside a process, so it
+// acquires nothing the kernel did not hand it — one SAB, the globals SAB and one MessagePort.
 //
-// Two layers, deliberately. syscall() is the raw ABI and returns short counts; write() below is
-// the libc-shaped loop that consumes them. That split is the whole answer to overflow above
-// MAX_INLINE (docs/ABI.md decision 4, constraint 9).
+// TWO LAYERS. syscall() is the raw ABI and returns short counts; write() below is the libc-shaped
+// loop that consumes them, which is the whole answer to overflow above MAX_INLINE (docs/ABI.md
+// decision 4, constraint 9).
 
 import {
   SEQ, STATUS, RLEN, SIGPEND, CALLID, NR, A0, R0, R1, KDOWN_SEEN, KDOWN_MS, IDLE_PARK,
@@ -39,8 +38,7 @@ let myPid = 0;
 let callid = 0;
 let kernelDown = false;
 
-/** Wait-outcome and accounting tallies. Two counters per agent is what ties every increment to a
- *  message the kernel actually dispatched: issued == returned here, dispatched == replied there. */
+/** Wait-outcome and accounting tallies: issued == returned here, dispatched == replied there. */
 const C = {
   issued: 0, returned: 0,
   ok: 0, notEqual: 0, spurious: 0, timedOut: 0, timedOutButReplied: 0,
@@ -49,18 +47,14 @@ const C = {
   forcedNotEqual: 0, forcedOther: 0,
 };
 
-/** The same five outcomes, tallied separately for the barrier: a re-arm spent waiting to be
- *  released is not a syscall that took 50 ms, and adding it to C would say it was. */
+/** The same outcomes for the barrier: a re-arm waiting for release is not a 50 ms syscall. */
 const B = {
   ok: 0, notEqual: 0, spurious: 0, timedOut: 0, timedOutButReplied: 0, hostGone: 0,
 };
 
-// ---------------------------------------------------------------------------- the histogram
-//
-// Lossless, not a raw array. A 128 x 60k Float64Array is 61 MB and the allocation would land
-// inside the measured region. Deltas from performance.now() are exact integer multiples of the
-// clamp, so a bin width of one measured quantum loses nothing and the percentiles are exact
-// rather than interpolated.
+// The histogram is lossless, not a raw array: a 128 x 60k Float64Array is 61 MB and the allocation
+// would land inside the measured region. Deltas from performance.now() are exact integer multiples
+// of the clamp, so a bin width of one measured quantum loses nothing and the percentiles are exact.
 
 const LIN_BINS = 400;          // 0..2 ms at a 5 us quantum
 const LOG_BINS = 60;           // the linear top out to 10 s
@@ -79,8 +73,7 @@ let max = 0;
 let beyondTop = 0;             // a sample no bin can represent. Non-zero INVALIDATES the run.
 
 function setQuantum(ms) {
-  // A zero or negative quantum makes every bin index NaN and the histogram would silently count
-  // nothing while reporting a count. Fail at init instead.
+  // A zero or negative quantum makes every bin index NaN: nothing counted, yet a count reported.
   if (!(ms > 0)) throw new Error(`syscall.mjs: measured clock quantum is ${ms}`);
   quantumMs = ms;
   linTopMs = LIN_BINS * quantumMs;
@@ -106,32 +99,15 @@ function bin(dt) {
   log[j] += 1;
 }
 
-// ---------------------------------------------------------------------------- signals
-
 let onsignal = null;
 
 /**
- * Constraint 16. A process parked in Atomics.wait cannot service postMessage, so a signal cannot
- * arrive that way; it arrives as a bit in SIGPEND and is drained at syscall entry.
+ * The SIGPEND check at syscall entry (constraint 16). A process parked in Atomics.wait cannot
+ * service postMessage, so a signal arrives as a bit here instead.
  *
- * M1 replaces the body with handler dispatch and must add masking — exchange, then restore the
- * masked bits. The seam exists at M0 so M1's negative control (remove this call, Ctrl-C must stop
- * working) has something to remove.
- */
-/**
- * The SIGPEND check at syscall entry (constraint 16). Returns the bits it drained, because a
- * pending signal must INTERRUPT the call rather than merely be noticed before it.
- *
- * It returned nothing at first, and that was the defect M1's negative control was built to catch:
- * the bit was read, cleared, recorded, and the syscall then proceeded normally, so a signal raised
- * at a RUNNING process was seen and discarded. Measured with the `entry` program — 400 rounds of
- * arithmetic with a SIGINT raised in the middle — the process never observed it and ran to
- * completion.
- *
- * Any bit present here means "interrupt": the kernel does not set SIGPEND for a signal it is
- * dropping (SIG_IGN returns before the store) or for one that is fatal by default (those reap the
- * process instead), so the disposition has already been applied kernel-side and the stub does not
- * need to know it.
+ * IT RETURNS THE BITS IT DRAINED, because a pending signal must INTERRUPT the call rather than
+ * merely be noticed before it. Any bit present means "interrupt": the kernel does not set SIGPEND
+ * for a signal it drops or for one fatal by default, so the disposition is already applied.
  */
 function drainSignals() {
   const bits = Atomics.exchange(ctl, SIGPEND, 0);
@@ -143,42 +119,23 @@ function drainSignals() {
   return bits;
 }
 
-// ---------------------------------------------------------------------------- think time
-
-/**
- * The offered-rate gap for the rate-limited control, and it MUST be idle rather than a spin.
- *
- * A performance.now() busy-spin was measured to break the control's own subject: at N=16 with
- * --think-us 2000 the gates failed as designed AND the p99 went to 8,270 us, because sixteen
- * spinning workers on twelve cores starve the kernel. The control is supposed to show the gates
- * failing while the latency HOLDS, so the gap has to release the core.
- *
- * Atomics.wait on IDLE_PARK is that: nothing ever writes or notifies that word, so the wait always
- * times out, and it costs no syscall — a clock_nanosleep gap would put one extra round trip per
- * iteration inside the thing being measured.
- */
+/** The offered-rate gap for the rate-limited control. IT MUST BE IDLE RATHER THAN A SPIN: spinning
+ *  workers starve the kernel and inflate the p99 the control is measuring. Nothing writes or
+ *  notifies IDLE_PARK, so this wait always times out and costs no syscall. */
 let think = () => {};
 
-/** M1's negative control: skip the SIGPEND check at syscall entry entirely. */
+/** The negative control: skip the SIGPEND check at syscall entry entirely. */
 let noSigpendCheck = false;
-
-// ---------------------------------------------------------------------------- the park
 
 /**
  * The park, and every outcome Atomics.wait can return. Constraint 46: finite re-arm, heartbeat
- * check, and a timeout that NEVER faults a process on elapsed time alone.
+ * check, and a timeout that NEVER faults a process on elapsed time alone. The watched word is an
+ * argument because this is the one copy of the wake protocol — the syscall path watches (ctl, SEQ),
+ * the barrier (globals, G_WINDOW). Returns true if that word changed, false if the kernel is gone.
  *
- * THE EXPECTED VALUE `s` STAYS CONSTANT ACROSS EVERY RE-ARM. Re-reading SEQ as a fresh baseline is
- * the bug this sentence exists to prevent: if the reply landed between the timeout returning and
- * the next wait, a re-read baseline parks forever on a value that will never change again.
- *
- * This is the ONE copy of the wake protocol, which is why it takes the word to watch as an
- * argument: the syscall path watches (ctl, SEQ) and the barrier watches (globals, G_WINDOW), and a
- * second copy of the five outcomes is the defect — two renderers of one fact, with nobody
- * exercising the second. probeNotEqual() below repeats the four lines of marshal-and-post for the
- * same reason, and calls this.
- *
- * @returns true if the watched word changed, false if the kernel is gone.
+ * THE EXPECTED VALUE `s` STAYS CONSTANT ACROSS EVERY RE-ARM. If the reply lands between the timeout
+ * returning and the next wait, a baseline re-read from SEQ parks for ever on a value that will
+ * never change again.
  */
 function park(arr, index, s, t) {
   let misses = 0;
@@ -188,8 +145,7 @@ function park(arr, index, s, t) {
     const w = Atomics.wait(arr, index, s, REARM_MS);
     if (w !== "timed-out") {
       // "ok" and "not-equal" are ONE path: not-equal is the absence of a park, not an error
-      // (constraint 7). The re-check is what makes them one path safely — a notify with nothing
-      // published must never return the previous call's r0.
+      // (constraint 7). The re-check is what makes that safe.
       if (Atomics.load(arr, index) !== s) {
         if (w === "ok") t.ok += 1; else t.notEqual += 1;
         return true;
@@ -199,9 +155,8 @@ function park(arr, index, s, t) {
     }
     const hb2 = Atomics.load(g, G_HEARTBEAT);
     if (Atomics.load(arr, index) !== s) {
-      // The fourth outcome: the reply landed inside the timeout-firing window. Neither a timeout
-      // nor a not-equal, and a stub that called it a timeout would lose a reply. A non-zero count
-      // at REARM_MS means re-arm-length syscalls exist and the headline is suspect.
+      // The reply landed inside the timeout-firing window: neither a timeout nor a not-equal, and
+      // calling it a timeout would lose a reply.
       t.timedOutButReplied += 1;
       return true;
     }
@@ -215,45 +170,28 @@ function park(arr, index, s, t) {
       t.timedOut += 1;
       continue;
     }
-    // HB_MISS_LIMIT consecutive re-arms with no heartbeat ADVANCE. Never elapsed time: a
-    // clock_nanosleep(500 ms) takes ten silent re-arms and an idle waitpid at M1 takes thousands,
-    // and no fixed timeout can separate those from a dead kernel.
-    //
-    // THE DESIGNED TRADE, where the reader meets the -EIO: a kernel that is alive but
-    // SYNCHRONOUSLY BUSY for longer than REARM_MS x HB_MISS_LIMIT is indistinguishable from a dead
-    // one here, and is declared dead. That is the cost of constraint 46's rule that elapsed time
-    // alone must never fault a process, and it makes that product a hard ceiling on any
-    // synchronous kernel work — M2's flush and snapshot included.
+    // HB_MISS_LIMIT consecutive re-arms with no heartbeat ADVANCE, never elapsed time: an idle
+    // waitpid takes thousands of silent re-arms and no fixed timeout separates that from a dead
+    // kernel. THE DESIGNED TRADE: a kernel alive but SYNCHRONOUSLY BUSY for longer than
+    // REARM_MS x HB_MISS_LIMIT is declared dead, so that product is a ceiling on synchronous work.
     t.hostGone += 1;
     kernelDown = true;
-    // Stated in the SAB, because the port is the thing that died: a terminated kernel worker
-    // cannot forward this process's conclusion, so it records it where whoever still holds the
-    // SAB can read it.
+    // Stated in the SAB, because a terminated kernel worker cannot forward this conclusion.
     Atomics.store(ctl, KDOWN_MS, Math.round(now() - tPark));
     Atomics.store(ctl, KDOWN_SEEN, 1);
     return false;
   }
 }
 
-// ---------------------------------------------------------------------------- the stub
-
-/**
- * The raw ABI. Returns r0; r1 is readable with r1of() for the calls that use an i64 or a pair.
- * Error iff isErr(r0, r1of()).
- */
+/** The raw ABI. Returns r0; r1 is readable with r1of(). Error iff isErr(r0, r1of()). */
 export function syscall(
   nr, a0 = 0, a1 = 0, a2 = 0, a3 = 0, a4 = 0, a5 = 0, a6 = 0, a7 = 0,
   src = null, srcOff = 0, srcLen = 0,
 ) {
-  // The entry check, and it interrupts rather than observes. A pending bit returns -EINTR WITHOUT
-  // issuing the call, which is what makes Ctrl-C reach a process that is computing rather than
-  // parked — the parked case is handled kernel-side by ST_INTR (docs/ABI.md decision 1).
-  //
-  // The bits are already cleared by the exchange, so the caller's next syscall proceeds: a program
-  // that answers -EINTR by calling exit() is not interrupted again on the way out.
+  // The entry check INTERRUPTS rather than observes: a pending bit returns -EINTR WITHOUT issuing
+  // the call, which is what reaches a process that is computing rather than parked (the parked case
+  // is kernel-side ST_INTR, docs/ABI.md decision 1). The exchange has already cleared the bits.
   if (noSigpendCheck) {
-    // The M1 negative control: skip the entry check entirely. Ctrl-C must stop working for a
-    // process that is not parked, which is the claim constraint 16 makes.
     think();
   } else if (drainSignals() !== 0) {
     C.interruptedAtEntry += 1;
@@ -270,13 +208,11 @@ export function syscall(
   if (srcLen > 0) u8.set(src.subarray(srcOff, srcOff + srcLen), DATA_OFF);
 
   const s = Atomics.load(ctl, SEQ);
-  // One statement pair, so the depth device cannot be inflated without also inflating the
-  // accounting identity that ties it to a dispatched message (section 5 of the design).
+  // One statement pair: the depth device cannot be inflated without the accounting identity too.
   Atomics.add(g, G_INFLIGHT, 1); C.issued += 1;
   callid = nextCallId(callid);
-  // RELEASE: the last write before the post. The plain stores above are made visible to the
-  // kernel by its matching Atomics.load of CALLID. Move this earlier and the kernel can read the
-  // previous call's a0..a7 and NR.
+  // RELEASE: the last write before the post, which is how the plain stores above become visible to
+  // the kernel. Move it earlier and the kernel can read the previous call's a0..a7 and NR.
   Atomics.store(ctl, CALLID, callid);
   const t0 = now();
   port.postMessage(callid);
@@ -285,8 +221,8 @@ export function syscall(
   bin(now() - t0);
 
   if (Atomics.load(ctl, SEQ) - s !== 1) C.seqSkip += 1;
-  // The reply direction is where wanix actually failed: bounds-check RLEN BEFORE reading any
-  // reply payload. A larger value is a kernel fault, not an out-of-range read (constraint 9).
+  // RLEN is bounds-checked BEFORE any reply payload is read: a larger value is a kernel fault,
+  // not an out-of-range read (constraint 9).
   if (Atomics.load(ctl, RLEN) > MAX_INLINE) {
     C.rlenFault += 1;
     return -EIO;
@@ -306,10 +242,8 @@ export function r1of() {
   return ctl[R1];
 }
 
-/**
- * Layer 2: the libc-shaped loop that consumes short counts. Every program calls this, never
- * syscall(SYS_write) directly, which is why a 1 MiB write is 17 calls rather than a truncation.
- */
+/** Layer 2: the libc-shaped loop that consumes short counts. Every program calls this, never
+ *  syscall(SYS_write) directly, which is why a 1 MiB write is 17 calls rather than a truncation. */
 export function write(fd, buf) {
   let off = 0;
   while (off < buf.length) {
@@ -322,21 +256,14 @@ export function write(fd, buf) {
   return off;
 }
 
-// ---------------------------------------------------------------------------- M2: the file API
-//
-// Layer 2 for the filesystem. A program calls these, never `syscall(SYS_open)` directly, for the
-// same reason it calls write() rather than syscall(SYS_write): the short-count loop, the path
-// encoding and the reply-record decoding each want exactly one implementation.
-//
-// EVERY ONE OF THESE RUNS INSIDE A PROCESS and acquires nothing. A path goes out as bytes in the
-// process's own SAB and an fd comes back as an integer, which is the whole of what constraint 15
-// permits a process to hold.
+// Layer 2 for the filesystem, so the short-count loop, the path encoding and the reply-record
+// decoding each have one implementation. A path goes out as bytes in the process's own SAB and an
+// fd comes back as an integer, which is the whole of what constraint 15 permits a process to hold.
 
 const PATH_ENC = new TextEncoder();
 const PATH_DEC = new TextDecoder();
 
-/** A path as bytes in a PRIVATE buffer. The kernel copies it out of the SAB before decoding —
- *  TextDecoder refuses a shared view — and this is the encoding half of that pair. */
+/** A path as bytes in a PRIVATE buffer: the kernel's TextDecoder refuses a shared view. */
 function pathBytes(path) {
   return PATH_ENC.encode(path);
 }
@@ -355,12 +282,8 @@ export function close(fd) {
   return syscall(SYS_close, fd);
 }
 
-/**
- * Read up to `want` bytes into `into` at `at`. Returns the count, 0 at EOF, or -errno.
- *
- * The bytes land in the process's own byte region and are copied out here, because `into` is the
- * caller's private buffer and the region is reused by the next syscall.
- */
+/** Read up to `want` bytes into `into` at `at`. Returns the count, 0 at EOF, or -errno. The copy
+ *  out of the byte region is required: the region is reused by the next syscall. */
 export function read(fd, into, at = 0, want = into.length - at) {
   const n = syscall(SYS_read, fd, Math.min(want, MAX_INLINE));
   if (n <= 0) return n;
@@ -368,11 +291,7 @@ export function read(fd, into, at = 0, want = into.length - at) {
   return n;
 }
 
-/**
- * pread/pwrite: the same two calls at an explicit offset, which does NOT move the fd's cursor.
- * That is the whole reason they exist — two readers sharing one description must be able to read
- * different places — so the offset goes out as an (lo, hi) pair and the cursor is never touched.
- */
+/** pread/pwrite at an explicit offset, which does NOT move the fd's cursor. */
 export function pread(fd, into, offset, want = into.length) {
   const [lo, hi] = packI64(offset);
   const n = syscall(SYS_pread, fd, Math.min(want, MAX_INLINE), lo, hi);
@@ -386,7 +305,6 @@ export function pwrite(fd, buf, offset) {
   return syscall(SYS_pwrite, fd, buf.length, lo, hi, 0, 0, 0, 0, buf, 0, buf.length);
 }
 
-/** The whole of a file, through the short-count loop. Returns bytes or -errno. */
 export function readAll(fd, size) {
   const out = new Uint8Array(size);
   let off = 0;
@@ -399,8 +317,7 @@ export function readAll(fd, size) {
   return off === size ? out : out.subarray(0, off);
 }
 
-/** fsync is its own call (constraint 23): the 260 us flush is paid when a caller asks for
- *  durability, never per write. */
+/** fsync is its own call (constraint 23): durability is paid when asked for, never per write. */
 export function fsync(fd) {
   return syscall(SYS_fsync, fd);
 }
@@ -440,13 +357,8 @@ export function lstat(path) {
   return statAt(SYS_lstat, 0, pathBytes(path));
 }
 
-/**
- * chdir(path). 0, or a negative errno.
- *
- * There is no `getcwd` to pair with it: `/proc/<pid>/cwd` publishes the answer through calls that
- * already exist, and a second renderer of one fact is what CLAUDE.md forbids. `src/bin/sh.mjs`
- * reads it that way.
- */
+/** chdir(path). 0, or a negative errno. There is no `getcwd`: `/proc/<pid>/cwd` already publishes
+ *  the answer, and `src/bin/sh.mjs` reads it that way. */
 export function chdir(path) {
   const bytes = pathBytes(path);
   return syscall(SYS_chdir, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
@@ -457,8 +369,7 @@ export function mkdir(path, mode = 0o755) {
   return syscall(SYS_mkdir, mode, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
 }
 
-/** dup/dup2 share one file DESCRIPTION, so a seek through either moves both. That is POSIX's own
- *  shape and it is what makes `2>&1` mean anything. */
+/** dup/dup2 share one file DESCRIPTION, so a seek through either moves both. */
 export function dup(fd) {
   return syscall(SYS_dup, fd);
 }
@@ -519,8 +430,8 @@ export function readlink(path) {
  * One batch of directory entries, and the cookie for the next. Unpacks docs/ABI.md's record:
  * [u64 ino][u8 type][u8 nlen][u16 pad][char[] name], each padded to four bytes.
  *
- * `cookie === entries.length` is NOT the end condition — a directory can run out exactly at a
- * batch boundary. An empty batch is the end, which is what `readdir(3)` means by a null return.
+ * AN EMPTY BATCH IS THE END; `cookie === entries.length` is not, because a directory can run out
+ * exactly at a batch boundary.
  */
 export function readdir(fd, cookie = 0) {
   const n = syscall(SYS_readdir, fd, cookie);
@@ -542,50 +453,29 @@ export function readdir(fd, cookie = 0) {
   return { entries: out, cookie: next, done: out.length === 0 };
 }
 
-/* --------------------------- M4: pipes and process control ---------------------------
- *
- * These are the calls `spawn` + `pipe` + `setpgid` replaces `fork` with (constraint 20). Grouped
- * on `env.proc` in src/libos/process.mjs for the reason `FS` is grouped: constraint 15's seam is
- * asserted by ENUMERATING what a program was handed, and one object of functions keeps that
- * enumeration readable.
- */
+/* What `spawn` + `pipe` + `setpgid` replaces `fork` with (constraint 20). Grouped on `env.proc` in
+ * src/libos/process.mjs. */
 
-/**
- * pipe2(flags) -> {rfd, wfd}, or a negative errno.
- *
- * Two fds from one call, so the write end comes back in r1 — the same channel `seek` uses for the
- * high half of an i64 and `readdir` for its cookie. Returned as an OBJECT rather than a pair,
- * because a caller that mixed up the order of a two-element array would wire a pipeline backwards
- * and the mistake would look like a hang.
- */
+/** pipe2(flags) -> {rfd, wfd}, or a negative errno. An OBJECT rather than a pair, because a caller
+ *  that mixed up the order would wire a pipeline backwards, which looks like a hang. */
 export function pipe2(flags = 0) {
   const r = syscall(SYS_pipe2, flags);
   if (r < 0) return r;
   return { rfd: r, wfd: r1of() };
 }
 
-/**
- * spawn a child. `actions` are posix_spawn-shaped: `{op: SPAWN_DUP2, a: from, b: to}` and
- * `{op: SPAWN_CLOSE, a: fd}`.
- *
- * The child inherits this process's whole fd table and THEN the actions rearrange it, which is
- * posix_spawn's own order and what lets a shell say "put the pipe's write end on 1, then close the
- * pipe fd". Encoding is the shared codec in src/abi.mjs, so there is one definition of the bytes.
- */
+/** spawn a child. `actions` are posix_spawn-shaped: `{op: SPAWN_DUP2, a: from, b: to}` and
+ *  `{op: SPAWN_CLOSE, a: fd}`. The child inherits this process's whole fd table and THEN the
+ *  actions rearrange it, which is posix_spawn's own order. */
 export function spawn(path, argv = [], actions = []) {
   const bytes = encodeSpawnRequest({ path, argv, actions });
   if (bytes.length > MAX_INLINE) return -EINVAL;
   return syscall(SYS_spawn, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
 }
 
-/**
- * waitpid(pid, flags) -> {pid, exited, killed, code}, or a negative errno.
- *
- * The status is in r1, encoded `(kind << 8) | value` by the kernel — the only call that uses r1 as
- * a value rather than as the error sentinel. Decoded here so a caller never open-codes the shift:
- * `exited` with code 0 and `killed` by signal 0 are the two states that would otherwise be
- * indistinguishable, which is why the kernel carries a kind bit at all.
- */
+/** waitpid(pid, flags) -> {pid, exited, killed, code}, or a negative errno. The status is in r1,
+ *  encoded `(kind << 8) | value`: the kind bit exists because `exited` with code 0 and `killed` by
+ *  signal 0 are otherwise indistinguishable. */
 export function waitpid(pid = -1, flags = 0) {
   const r = syscall(SYS_waitpid, pid, flags);
   if (r < 0) return r;
@@ -603,20 +493,11 @@ export function kill(pid, sig) {
   return syscall(SYS_kill, pid, sig);
 }
 
-/**
- * Set a signal's disposition. Returns the PREVIOUS one, or a negative errno.
- *
- * M5 ADDED THE STUB, not the call: `SYS_sigaction` has existed since M1 with no caller anywhere,
- * which by the handoff's own rule — "treat any mechanism with no live caller as unverified" —
- * means its three dispositions had never been exercised from a process. The shell is the first
- * honest consumer: a shell that did not touch this DIES on the Ctrl-C it is supposed to pass to
- * the pipeline in front of it (measured: `killed: true, code: 2`).
- *
- * `SIG_HANDLE` means "set the bit and let the process notice at its next syscall entry" — so a
- * blocking `read` answers -EINTR and the caller decides. There is no handler function to register:
- * a callback would be kernel-side state a process could not be killed out of, which constraint 15
- * forbids. The disposition is the whole interface.
- */
+/** Set a signal's disposition; returns the PREVIOUS one, or a negative errno. `SIG_HANDLE` means
+ *  "set the bit and let the process notice at its next syscall entry", so a blocking `read` answers
+ *  -EINTR and the caller decides. THE DISPOSITION IS THE WHOLE INTERFACE: there is no handler
+ *  function to register, because a callback would be kernel-side state a process could not be
+ *  killed out of (constraint 15). */
 export function sigaction(sig, disp) {
   return syscall(SYS_sigaction, sig, disp);
 }
@@ -642,38 +523,22 @@ export function exit(code = 0) {
   return syscall(SYS_exit, code & 0xff);
 }
 
-/**
- * Sleep for `ns` nanoseconds. 0 on completion, -EINTR when a signal arrived first.
- *
- * M5 ADDED THE STUB, not the call: `SYS_clock_nanosleep` has existed since M0 and every caller so
- * far open-coded `env.syscall(2, lo, hi, 0)` with its own `packI64`. One of them passed (0, 0) —
- * a zero-nanosecond sleep, answered on the next macrotask — and two proofs that meant to signal a
- * parked process were racing worker startup instead (bench/m4-fs/program.mjs records it). A stub
- * taking nanoseconds is the fix: there is one place the pair is packed.
- *
- * -EINTR IS A NORMAL RETURN AND NOT AN ERROR. A `sleep` that was interrupted slept for less time
- * than it asked for, which is exactly what POSIX says `nanosleep` reports.
- */
+/** Sleep for `ns` NANOSECONDS. 0 on completion, -EINTR when a signal arrived first. It packs the
+ *  (lo, hi) pair in one place: a caller open-coding `env.syscall(2, lo, hi, 0)` can pass (0, 0), a
+ *  zero-nanosecond sleep answered on the next macrotask. -EINTR IS A NORMAL RETURN: an interrupted
+ *  `sleep` slept for less time than it asked for. */
 export function nanosleep(ns) {
   const [lo, hi] = packI64(ns);
   return syscall(SYS_clock_nanosleep, lo, hi, 0);
 }
 
-/* --------------------------- M4b: the terminal, and poll ---------------------------------
- *
- * Grouped on `env.tty` and `env.poll` in src/libos/process.mjs, as `FS` and `PROC` are.
- */
-
-/** pty_open() -> {master, slave}, or a negative errno. An object, not a pair: a caller that
- *  mixed up the order of a two-element array would wire a terminal backwards and the mistake
- *  would look like a program that never prints. */
+/** pty_open() -> {master, slave}, or a negative errno. */
 export function ptyOpen() {
   const r = syscall(SYS_pty_open);
   if (r < 0) return r;
   return { master: r, slave: r1of() };
 }
 
-/** The termios of a pty fd, decoded, or a negative errno. */
 export function ttyGet(fd) {
   const n = syscall(SYS_tty_get, fd);
   if (n < 0) return n;
@@ -681,11 +546,9 @@ export function ttyGet(fd) {
   return decodeTermios(dv, 0);
 }
 
-/**
- * Replace a pty's termios. The caller supplies EVERY field — the three reserved flag words and
- * all twenty cc slots — so a flag a later milestone adds survives a round trip through a caller
- * that has never heard of it. `ttyGet`, mutate, `ttySet` is the shape that stays correct.
- */
+/** Replace a pty's termios. The caller supplies EVERY field, so `ttyGet`, mutate, `ttySet` is the
+ *  only shape that stays correct: a flag a later milestone adds must survive a caller that has
+ *  never heard of it. */
 export function ttySet(fd, tm) {
   const bytes = new Uint8Array(TERMIOS_BYTES);
   encodeTermios(new DataView(bytes.buffer), 0, tm);
@@ -711,16 +574,10 @@ export function tcSetPgrp(fd, pgid) {
   return syscall(SYS_ioctl, fd, TIOCSPGRP, pgid);
 }
 
-/**
- * poll(fds, timeoutMs) -> {nready, fds: [{fd, events, revents}]}, or a negative errno.
- *
- * THE SINGLE WAIT PRIMITIVE OVER FDS (constraint 42). A process has one futex word and one
- * outstanding call, so one window plus a pipe cannot otherwise wake it — which is why this exists
- * before there is a window to wait on.
- *
- * `revents` comes back IN PLACE in the byte region, so the returned rows carry it rather than the
- * caller re-reading the buffer.
- */
+/** poll(fds, timeoutMs) -> {nready, fds: [{fd, events, revents}]}, or a negative errno. THE SINGLE
+ *  WAIT PRIMITIVE OVER FDS (constraint 42): a process has one futex word and one outstanding call,
+ *  so nothing else can wake it on a window plus a pipe. `revents` comes back IN PLACE in the byte
+ *  region, so the returned rows carry it. */
 export function poll(fds, timeoutMs = -1) {
   const n = fds.length;
   const bytes = new Uint8Array(n * POLLFD_BYTES);
@@ -755,10 +612,8 @@ export function statfs() {
   };
 }
 
-/**
- * The raw path that bypasses layer 2's split, for the check that an impossible length is refused
- * loudly rather than clamped. The kernel must answer -EINVAL and leave its byte counter alone.
- */
+/** The raw path that bypasses layer 2's split, for the check that an impossible length is refused
+ *  loudly: the kernel must answer -EINVAL and leave its byte counter alone. */
 export function rawWriteLength(fd, length) {
   ctl[A0] = fd | 0;
   ctl[NR] = SYS_write;
@@ -773,14 +628,10 @@ export function rawWriteLength(fd, length) {
   return ctl[R0];
 }
 
-/**
- * Constraint 7's fast path, FORCED. A check that waits for a natural 0.065% occurrence either
- * costs thousands of iterations or passes vacuously; this is what would catch a kernel that only
- * handles "ok". Post, busy-spin without yielding until the reply has certainly landed, then park.
- *
- * It repeats the marshal-and-post lines on purpose and calls the same park() as the hot path, so
- * the four-outcome logic still has exactly one copy.
- */
+/** Constraint 7's fast path, FORCED. A check that waits for the natural occurrence either costs
+ *  thousands of iterations or passes vacuously; this catches a kernel that only handles "ok". It
+ *  repeats the marshal-and-post lines but calls the same park(), so the four-outcome logic still
+ *  has exactly one copy. */
 export function probeNotEqual(spinMs = 5) {
   const before = C.notEqual;
   ctl[NR] = SYS_getpid;         // a zero-work handler
@@ -801,17 +652,12 @@ export function probeNotEqual(spinMs = 5) {
 }
 
 /**
- * The heartbeat-gap distribution, the number Decision 2 makes M0 owe M1: HB_MISS_LIMIT is set
- * from this, and M1 restates its "within 2x the re-arm interval" bar from it rather than guessing.
+ * The heartbeat-gap distribution. HB_MISS_LIMIT is set from this (Decision 2). It reads the globals
+ * SAB, which a program never receives (constraint 15).
  *
- * It lives here because it reads the globals SAB, which a program never receives (constraint 15),
- * and it is the same Atomics.load a parked process does in park()'s timed-out branch.
- *
- * DEVIATION, stated where it is introduced: this POLLS rather than parking. A parked process reads
- * the heartbeat once per REARM_MS (50 ms), which cannot resolve the distribution of a 10 ms-period
- * signal — the measurement would be quantised twenty times coarser than the thing measured. The
- * cost is one busy process, so the observer's own figures are reported as a separate row and the
- * sweep's N excludes it.
+ * DEVIATION, stated where it is introduced: this POLLS rather than parking, because a parked
+ * process reads the heartbeat once per REARM_MS — twenty times coarser than the signal. The cost is
+ * one busy process, so the observer's figures are a separate row and the sweep's N excludes it.
  */
 export function observeHeartbeat(untilLocalMs) {
   const gaps = [];
@@ -841,29 +687,20 @@ export function observeHeartbeat(untilLocalMs) {
   };
 }
 
-// ---------------------------------------------------------------------------- the barrier
-//
-// Why a barrier exists at all: without one, every process runs its own warm-up and then its own
-// window, the windows do not overlap, and the first dispatch of each window genuinely sees an
-// arrival backlog of one. A sweep whose processes are not simultaneously inside their measured
-// windows is measuring a partially loaded kernel and calling the result contention.
-//
-// Both edges are needed. G_WINDOW: W_PRE -> W_OPEN releases everyone together; the FIRST process
-// to reach the deadline moves it W_OPEN -> W_CLOSED, which is what keeps the ramp-down — processes
-// stopping one at a time — out of the kernel's depth histogram. The kernel moves it to W_DONE once
-// every process has left, and only then may a process issue the out-of-window checks.
+// THE BARRIER. Without one the windows do not overlap and the first dispatch of each process sees
+// an arrival backlog of one, so a sweep measures a partially loaded kernel and calls it contention.
+// BOTH EDGES ARE NEEDED: W_PRE -> W_OPEN releases everyone together, the FIRST process to reach the
+// deadline moves W_OPEN -> W_CLOSED to keep the ramp-down out of the kernel's depth histogram, and
+// W_DONE, set by the kernel once every process has left, gates the out-of-window checks.
 
-/** Arrive, park until released, and return the window this process must run. */
 export function barrierArrive() {
   const tArrive = now();
   Atomics.add(g, G_BARRIER, 1);
   while (Atomics.load(g, G_WINDOW) === W_PRE) {
     if (!park(g, G_WINDOW, W_PRE, B)) return { released: false, why: "kernel gone at the barrier" };
   }
-  // ONE deadline for the cell, published once by the kernel in the shared wall clock, then
-  // derived into this agent's own monotonic clock exactly once. performance.now() instants are not
-  // comparable across agents — timeOrigin differs — so the wall clock carries the deadline and the
-  // monotonic clock runs the loop.
+  // ONE deadline for the cell. performance.now() instants are NOT comparable across agents, so the
+  // wall clock carries the deadline and the monotonic clock runs the loop.
   const wall = Date.now();
   const deadlineWall = Number(unpackI64(
     Atomics.load(g, G_DEADLINE_LO), Atomics.load(g, G_DEADLINE_HI),
@@ -877,11 +714,9 @@ export function barrierArrive() {
   };
 }
 
-/** Leave the window: close it for everyone, then park until every process has left. */
 export function barrierDepart() {
   const leftWall = Date.now();
-  // The first departure closes the depth window, at dispatch-entry granularity in the kernel, so
-  // not one ramp-down sample can enter it.
+  // The first departure closes the depth window, so no ramp-down sample can enter it.
   const first = Atomics.compareExchange(g, G_WINDOW, W_OPEN, W_CLOSED) === W_OPEN;
   Atomics.add(g, G_BARRIER, 1);
   while (Atomics.load(g, G_WINDOW) !== W_DONE) {
@@ -890,18 +725,12 @@ export function barrierDepart() {
   return { left: true, leftWall, closedTheWindow: first };
 }
 
-/** The barrier's own wait outcomes, reported separately from the syscall path's. */
 export function barrierCounters() {
   return { ...B };
 }
 
-// ---------------------------------------------------------------------------- init and readout
-
-/**
- * Advance the program-visible progress word. NOT a syscall: it is a plain atomic store into the
- * process's own SAB, so a program can say "I reached phase N" without being inside a syscall when
- * an observer reacts. M1's proof (e) needs that distinction — see bench/m1-lifecycle/program.mjs.
- */
+/** Advance the program-visible progress word. NOT a syscall but a plain atomic store into the
+ *  process's own SAB, so a program can say "I reached phase N" without being inside a syscall. */
 export function publishProgress(n) {
   Atomics.store(ctl, P_PROGRESS, n | 0);
 }
@@ -913,8 +742,7 @@ export function initSyscall(opts) {
   port = opts.port;
   myPid = opts.pid;
   noSigpendCheck = !!opts.noSigpend;
-  // M1 (f). Four bytes, read once. A kernel that wrote the wrong magic, or a stale SAB from a
-  // kernel running a previous ABI version, fails here rather than six calls in as a wrong reply.
+  // Four bytes, read once: a wrong magic or a stale SAB fails here rather than six calls in.
   const seenMagic = Atomics.load(ctl, H_MAGIC);
   const seenVersion = Atomics.load(ctl, H_VERSION);
   if ((seenMagic | 0) !== (SAB_MAGIC | 0)) {
@@ -927,12 +755,11 @@ export function initSyscall(opts) {
       + "step ahead of this stub would read the registers at different offsets.");
   }
   setQuantum(opts.quantumMs);
-  // Boot-time specialisation, not a per-call branch: the headline path contains no control
-  // branch at all, so "your flags perturbed the measurement" is not available as an objection.
+  // Boot-time specialisation, not a per-call branch, so the headline path has no control branch.
   const thinkUs = Atomics.load(g, G_THINK_US);
   if (thinkUs > 0) {
-    // If anything ever writes IDLE_PARK, the wait below returns "not-equal" immediately, the gap
-    // silently becomes zero and the rate-limited control passes while rate-limiting nothing.
+    // Anything that writes IDLE_PARK makes the wait below return "not-equal" immediately, the gap
+    // becomes zero, and the rate-limited control passes while rate-limiting nothing.
     if (Atomics.load(ctl, IDLE_PARK) !== 0) {
       throw new Error(`syscall.mjs: IDLE_PARK is ${Atomics.load(ctl, IDLE_PARK)}, not 0; the `
         + "think gap would not wait and the rate-limited control would be vacuous");
@@ -949,8 +776,7 @@ export function resetSamples() {
   count = 0; sum = 0; sumsq = 0; min = Infinity; max = 0; beyondTop = 0;
 }
 
-/** The raw histogram and every tally. summarise.mjs is the only thing that turns these into
- *  percentiles, so the bench and the suite cannot disagree about what a p99 means. */
+/** The raw histogram and every tally. summarise.mjs alone turns these into percentiles. */
 export function samples() {
   return {
     pid: myPid,

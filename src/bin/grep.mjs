@@ -2,19 +2,15 @@
 //
 // The contract this program is written against is in src/bin/true.mjs.
 //
-// THE PATTERN IS A FIXED STRING BY DEFAULT, not a basic regular expression, and that is a stated
-// floor rather than an unfinished feature. A BRE engine is a different afternoon — POSIX BRE is
-// not JavaScript's syntax, so `grep 'a\+b'` would silently mean something else — and quietly
-// accepting JS regexes under a name that promises BRE is worse than refusing to pretend.
-// `-E` opts into a JavaScript regular expression and says so where a reader meets it. Recorded as
-// docs/CONSTRAINTS.md 138.
+// The pattern is a fixed string by default, and `-E` opts into a JavaScript regular expression:
+// POSIX BRE is not JavaScript's syntax, so `grep 'a\+b'` under a BRE promise would silently mean
+// something else. docs/CONSTRAINTS.md 138.
 
 import { O_RDONLY } from "/src/abi.mjs";
 
 const NAME = "grep";
 
-/** A matcher over one line. ONE closure built once per run, so the flag test is not inside the
- *  per-line loop of a 10,000-line file. */
+/** A matcher over one line, built once per run so the flag test stays out of the per-line loop. */
 function makeMatch(pattern, flags) {
   if (flags.E) {
     let re;
@@ -54,23 +50,18 @@ export function run(env) {
   let status = 0;
 
   /**
-   * One stream, LINE AT A TIME.
-   *
-   * Streamed and not slurped, because a filter that waits for EOF before printing makes
-   * `yes | grep y | head -1` hang — the middle stage would be waiting for an end its writer never
-   * sends. `src/libos/std.mjs` `eachLine` carries the buffering.
+   * One stream, a line at a time. Streamed and not slurped: a filter that waits for EOF before
+   * printing makes `yes | grep y | head -1` hang. `src/libos/std.mjs` `eachLine` buffers.
    */
   const scan = (fd, label) => {
     let hits = 0;
     let wrote = 0;
     const r = std.eachLine(env, fd, (line, number) => {
-      // `-v` INVERTS THE SELECTION, which is why the test is compared against the flag rather than
-      // branched on: two branches over the same loop is where one of them stops getting the `-n`
-      // prefix.
+      // `-v` is compared against, not branched on: two loops is where one stops printing `-n`.
       if (matcher.test(line) === !!flags.v) return true;
       hits += 1;
-      // `-l` NEEDS NO MORE THAN THE FIRST HIT, and stopping is what lets the writer upstream see
-      // EPIPE instead of filling a pipe nobody will drain.
+      // Stopping at the first hit under `-l` is what lets the upstream writer see EPIPE instead of
+      // filling a pipe nobody will drain.
       if (flags.l) return false;
       if (flags.c) return true;
       const head = (prefix ? `${label}:` : "") + (flags.n ? `${number}:` : "");
@@ -99,9 +90,8 @@ export function run(env) {
     for (const path of paths) {
       const fd = path === "-" ? 0 : env.fs.open(path, O_RDONLY);
       if (fd < 0) {
-        // Exit 2, NOT 1. grep's statuses are three and they are load-bearing in scripts: 0 found,
-        // 1 not found, 2 something went wrong. Reporting a missing file as 1 would make
-        // `grep x missing` indistinguishable from a file that simply had no match.
+        // grep's three statuses are load-bearing in scripts: 0 found, 1 not found, 2 went wrong.
+        // A missing file reported as 1 is indistinguishable from a file with no match.
         status = std.complainErrno(env, NAME, path, fd, 2);
         continue;
       }

@@ -1,19 +1,16 @@
 // fsck. PURE: it takes bytes and a directory listing, and returns a report.
 //
-// IT HAS NO WAY TO WRITE, AND THAT IS THE PROOF RATHER THAN A PROMISE (constraint 28). This module
-// imports four codecs and nothing else; it holds no handle, no root directory, no port and no
-// Worker, so there is no object here through which a reseed could be expressed. webxp reseeded on
-// a bad image — `VFS.reset()` plus `seed.mjs`, called from the mount path — and that is silent data
-// loss presented as success. The structural answer is that the code which decides a volume is bad
-// cannot be the code that could rebuild it.
+// It has no way to write, and that is a proof rather than a promise (constraint 28): it holds no
+// handle, no root directory, no port and no Worker, so there is no object here through which a
+// reseed could be expressed. The code that decides a volume is bad cannot be the code that could
+// rebuild it.
 //
-// What a caller does with a report is its business, and `mountable` is the one field that says it:
+// `mountable` is the one field a caller acts on:
 //   'rw'        — clean, mount read-write
-//   'ro'        — the image is readable and something is wrong. Mount READ-ONLY and report.
+//   'ro'        — the image is readable and something is wrong. Mount read-only and report.
 //   'refuse'    — no valid superblock slot and bytes are present. Not a fresh volume; refuse.
-//   'fresh'     — nothing is there at all. A first boot, which is the ONE case where writing an
-//                 initial superblock is correct, and it is correct because there is nothing to
-//                 lose. Distinguishing this from 'refuse' is the whole of constraint 28.
+//   'fresh'     — nothing is there at all, so writing an initial superblock loses nothing.
+//                 Distinguishing this from 'refuse' is the whole of constraint 28.
 
 import { chooseSuperblock, SUPER_BYTES } from "./superblock.mjs";
 import { decodeImage } from "./image.mjs";
@@ -26,49 +23,38 @@ export const MOUNT_REFUSE = "refuse";
 export const MOUNT_FRESH = "fresh";
 
 /**
+ * Every input takes three shapes and the third is load-bearing: the bytes, `null` for genuinely
+ * ABSENT, or `{errno: n}` for a read that was REFUSED. An errno read as `null` makes a volume that
+ * could not be read indistinguishable from one nobody has ever written, and `fresh` is the one
+ * verdict whose caller may write a superblock — over live blobs, with `problems` empty.
+ *
  * @param {object} input
- * @param {(Uint8Array|null|{errno: number})[]} input.slots  The three superblock slots. The bytes,
- *        `null` for a slot that is genuinely ABSENT, or `{errno: n}` for one whose read was
- *        REFUSED.
- *
- *        THE THIRD SHAPE IS THE POINT, and it is the same correction `blobs` carries below. An
- *        errno read as `null` makes a refused read indistinguishable from a volume nobody has ever
- *        written: a volume whose slots could not be read, with an empty journal because the last
- *        snapshot truncated it, reaches the FRESH arm — and FRESH is the one verdict whose caller
- *        is allowed to write a superblock. Measured as a reseed over live blobs, read-write, with
- *        `problems` empty.
- * @param {Uint8Array|null|{errno: number}} input.journal  The journal file's bytes, `null` for
- *        absent, `{errno: n}` for a refused read. A refused journal is REFUSE and not read-only:
- *        the ops since the last snapshot are unknown, so a tree built from the snapshot alone is a
- *        tree missing every op after it, presented as complete.
+ * @param {(Uint8Array|null|{errno: number})[]} input.slots  The three superblock slots.
+ * @param {Uint8Array|null|{errno: number}} input.journal  The journal file's bytes. A refused
+ *        journal is REFUSE and not read-only: the ops since the last snapshot are unknown, so a
+ *        tree built from the snapshot alone is missing every op after it, presented as complete.
  * @param {{name: string, size: number}[]|{errno: number}|null} input.blobs  The flat blob
- *        directory's listing; null when the caller chose not to enumerate it; `{errno: n}` when it
- *        TRIED and was refused. Constraint 33: Safari's enumeration is
- *        0.60 ms per name, so 10k names is ~6 s and the sweep belongs on an explicit fsck or an
- *        idle task, NEVER at boot. A null listing produces `blobs: {swept: false}` and the report
- *        says the sweep did not run rather than that it found nothing.
+ *        directory's listing; `null` when the caller chose not to enumerate it. Constraint 33:
+ *        Safari's enumeration is 0.60 ms per name, so 10k names is ~6 s and the sweep belongs on
+ *        an explicit fsck or an idle task, never at boot.
  *
- *        THE THREE ARE THREE DIFFERENT VOLUMES, and `[]` is only one of them: the directory was
- *        read and holds nothing, which against metadata that names blobs is the worst verdict this
- *        function has — every committed blob ABSENT, "intact metadata pointing at data that was
- *        never written". A refusal converted to `[]` therefore reports a loss that did not happen,
- *        and on a volume with no files it reports a sweep that never ran as clean. An errno is
- *        neither reading: the sweep did not happen, it is a PROBLEM, and the reason is named.
+ *        `[]` is a fourth volume: the directory was read and holds nothing, which against metadata
+ *        that names blobs is every committed blob ABSENT. A refusal converted to `[]` reports a
+ *        loss that did not happen; on a volume with no files it reports a sweep that never ran as
+ *        clean.
  * @param {boolean} [input.checkCrc]  false arms negative-control stage 2. The gate that this is a
  *        control and not a mode lives in the kernel, which refuses it without bench=1.
  */
 export function fsck(input) {
   const problems = [];
   const given = input.slots || [];
-  // A REFUSED READ, told from bytes by SHAPE rather than by `instanceof`: this module is pure and
-  // every caller hands it views it built itself, so the test is "does it carry an errno".
+  // Told from bytes by shape rather than `instanceof`: the views arrive from another realm.
   const refused = (x) => !!x && typeof x.errno === "number";
   const unreadable = given
     .map((s, i) => (refused(s) ? { i, errno: s.errno } : null))
     .filter((e) => e !== null);
-  // The slots AS BYTES. An unreadable slot has none, so every length test below reads it as having
-  // nothing to decode — which is correct, and is why the FRESH decision and the problem list are
-  // the two places that must see the difference.
+  // An unreadable slot has no bytes to decode, so the FRESH decision and the problem list are the
+  // only two places that must still see the difference.
   const slots = given.map((s) => (refused(s) ? null : s));
   const journalRefused = refused(input.journal);
   const journal = journalRefused ? null : input.journal;
@@ -79,31 +65,26 @@ export function fsck(input) {
     superblock: null,
     image: null,
     journal: null,
-    // THE SWEEP'S DEFAULT IS "DID NOT RUN", and the reason travels with the flag so a reader of a
-    // boot report meets the decision rather than a false. Constraint 33: 0.60 ms per name on
-    // Safari, so a 10k-name volume would spend ~6 s in the sweep before the first process runs.
+    // The sweep's default is "did not run", and the reason travels with the flag so a reader of a
+    // boot report meets the decision rather than a bare false (constraint 33).
     blobs: {
       swept: false,
-      // `attempted` is what tells a DECISION from a FAILURE, and both arms carry it so a reader
-      // never has to infer one from the absence of the other.
+      // `attempted` tells a decision from a failure. Both arms carry it, so neither is inferred
+      // from the absence of the other.
       attempted: false,
       why: "the caller did not enumerate the blob directory. Constraint 33 prices the sweep at "
         + "0.60 ms per name, so it runs on an EXPLICIT fsck, never at mount",
     },
-    // Written by nothing in this module. Reported so a caller can assert it: a reseed would have
-    // to appear as a write, and there is no writer here to make one.
+    // Reported so a caller can assert it: a reseed would have to appear as a write, and there is
+    // no writer here to make one.
     wrote: false,
     vfs: null,
   };
 
-  // A volume with no superblock bytes AT ALL and no journal is a first boot. One with bytes that
-  // do not decode is a damaged volume wearing the same clothes, and the two must never be
-  // confused — that confusion IS the defect constraint 28 names.
-  // A REFUSED LISTING CANNOT PROVE A VOLUME IS EMPTY, so it is bytes-present for this decision.
-  // Read as "no blobs", it would let a volume whose directory could not be enumerated reach the
-  // FRESH arm — and FRESH is the one verdict whose caller is allowed to write a superblock.
-  // A REFUSED SLOT OR JOURNAL READ CANNOT PROVE A VOLUME WAS NEVER WRITTEN either, for the same
-  // reason, so both are bytes-present for this decision.
+  // A volume with no superblock bytes at all and no journal is a first boot; one with bytes that
+  // do not decode is a damaged volume wearing the same clothes, and confusing the two is the
+  // defect constraint 28 names. A refused listing, slot or journal cannot prove a volume is empty,
+  // so each counts as bytes-present here rather than reaching the FRESH arm.
   const refusedListing = !!input.blobs && !Array.isArray(input.blobs);
   const anyBytes = present.length > 0 || (journal && journal.length > 0)
     || unreadable.length > 0 || journalRefused
@@ -113,9 +94,8 @@ export function fsck(input) {
     return report;
   }
 
-  // NAMED BEFORE ANY VERDICT IS REACHED, so the report carries the reason whichever arm below
-  // returns. An unreadable slot is not a damaged one — there are no bytes to call damaged — and it
-  // is not an absent one either, which is the whole of this problem's text.
+  // Named before any verdict, so the report carries the reason whichever arm below returns. An
+  // unreadable slot is neither damaged — there are no bytes to call damaged — nor absent.
   if (unreadable.length) {
     problems.push({
       what: "superblock",
@@ -150,13 +130,12 @@ export function fsck(input) {
     report.mountable = MOUNT_REFUSE;
     return report;
   }
-  // ABSENT IS NOT INVALID. A volume whose snapshots have only ever landed in slot 0 has two slots
-  // that do not exist, and reporting those as rejected would make every young filesystem mount
-  // read-only. Only a slot with BYTES that do not decode is a problem.
+  // Absent is not invalid: a volume whose snapshots have only ever landed in slot 0 has two slots
+  // that do not exist, and reporting those as rejected would mount every young filesystem
+  // read-only. Only a slot with bytes that do not decode is damaged, and an unreadable slot has no
+  // bytes, so it is in neither set and must not be counted as absent.
   const damaged = chosen.rejected.filter((r) => slots[r.i] && slots[r.i].length >= SUPER_BYTES);
   report.superblock.damagedSlots = damaged.length;
-  // AND UNREADABLE IS NEITHER. A refused read has no bytes, so it falls in neither set above and
-  // would otherwise be counted as absent — the one reading this change exists to prevent.
   report.superblock.unreadableSlots = unreadable.length;
   report.superblock.absentSlots = chosen.rejected.length - damaged.length - unreadable.length;
   if (damaged.length) {
@@ -181,9 +160,9 @@ export function fsck(input) {
 
   let vfs = null;
   try {
-    // THE CLOCK IS THE CALLER'S. The VFS this returns is the LIVE one for an existing
-    // volume, so it needs the same clock a fresh volume gets; replay's strictness about a
-    // missing `t` is a property of the op, not of whether a clock was supplied.
+    // The clock is the caller's: this VFS is the live one for an existing volume, so it needs the
+    // same clock a fresh volume gets. Replay's strictness about a missing `t` is a property of the
+    // op, not of whether a clock was supplied.
     vfs = VFS.parse(decoded.object, { now: input.now });
   } catch (error) {
     problems.push({
@@ -194,9 +173,8 @@ export function fsck(input) {
     return report;
   }
 
-  // The superblock's own counts against the image it introduces. Two independent records of one
-  // fact: a mismatch means one of the two writes did not land, and saying so is how a torn commit
-  // is found rather than inferred.
+  // Two independent records of one fact: a mismatch means one of the two writes did not land, and
+  // saying so is how a torn commit is found rather than inferred.
   const counted = vfs.stats();
   if (BigInt(counted.inodes) !== chosen.super.inodeCount) {
     problems.push({
@@ -213,10 +191,7 @@ export function fsck(input) {
     });
   }
 
-  // The journal. Replay REPORTS the discarded tail rather than reseeding, and it stops at the
-  // first record it will not accept — including a sequence gap, because records after a missing
-  // one are not later records, they are records whose predecessor is gone.
-  // THE SEQUENCE THE JOURNAL MUST START AT, read off the image rather than assumed. Without it a
+  // The sequence the journal must start at, read off the image rather than assumed. Without it a
   // journal whose first record is missing replays as a shorter but valid journal: the gap rule in
   // src/fs/journal.mjs only fires once replay knows what the first sequence was supposed to be,
   // and the snapshot is the only thing that knows.
@@ -264,20 +239,18 @@ export function fsck(input) {
         why: `record ${record.seq} (${op.k}) could not be applied: `
           + (error instanceof FsError ? error.message : String(error && error.message)),
       });
-      // Stopped, not skipped. An op that cannot apply leaves every later op describing a state
-      // this volume is not in, and applying them anyway builds a tree nobody wrote.
+      // Stopped, not skipped: every later op describes a state this volume is not in, so applying
+      // them would build a tree nobody wrote.
       break;
     }
   }
 
-  // The blob sweep. THIS IS WHERE A DROPPED data-before-metadata ORDERING SHOWS UP: metadata that
-  // points at a blob which is absent, or shorter than the size the metadata publishes, is exactly
-  // "intact metadata pointing at torn data" — the outcome copy-on-write exists to prevent.
+  // Where a dropped data-before-metadata ordering shows up: metadata pointing at a blob which is
+  // absent, or shorter than the size the metadata publishes, is intact metadata over torn data —
+  // the outcome copy-on-write exists to prevent.
   if (refusedListing) {
-    // THE SWEEP DID NOT RUN AND THAT IS A PROBLEM, which is the difference between this and the
-    // `swept: false` default: the caller ASKED for the sweep and the directory refused, so the one
-    // check that can find intact metadata over absent data was not taken on a volume somebody is
-    // about to mount.
+    // Unlike the `swept: false` default, the caller asked and the directory refused, so the one
+    // check that can find intact metadata over absent data was not taken.
     report.blobs = {
       swept: false, attempted: true, errno: input.blobs.errno,
       why: `the blob directory could not be enumerated: errno ${input.blobs.errno}`,
@@ -293,18 +266,12 @@ export function fsck(input) {
     const want = vfs.blobNames();
     const missing = [];
     const short = [];
-    // A BLOB LONGER THAN THE SIZE ITS METADATA PUBLISHES, which this sweep could not see at all:
-    // it tested `onDisk < entry.size` and nothing else, so every silent failure across four rounds
-    // of attacks passed it — each one ended with a blob whose length matched its published size, or
-    // longer. A validator that can only see truncation is half a validator.
-    //
-    // THOSE BYTES ARE SLACK AND NOT CORRUPTION, which is why this is reported and does not refuse
-    // the mount. The published size is the only authority on what a file contains
-    // (src/kernel/store.mjs), so bytes above it were never published to any reader and the volume
-    // is consistent without them. The state a crash leaves mid-append is exactly this one, and
-    // mounting every such volume read-only would refuse a healthy filesystem over reclaimable
-    // bytes. They are counted into `reclaimableBytes` beside the stale generations for the same
-    // reason.
+    // A blob longer than its published size is slack, not corruption, which is why it is reported
+    // and does not refuse the mount. The published size is the only authority on what a file
+    // contains (src/kernel/store.mjs), so bytes above it were never published to any reader and
+    // the volume is consistent without them — and that is the state a crash mid-append leaves, so
+    // refusing it would mount a healthy filesystem read-only over reclaimable bytes. A validator
+    // that can only see truncation is half a validator.
     const long = [];
     for (const entry of want) {
       if (!have.has(entry.name)) {
@@ -318,8 +285,7 @@ export function fsck(input) {
       }
     }
     // A blob no inode points at is a stale generation an interrupted swing left behind, or an
-    // orphan. Reclaimable; not corruption, and reported as its own thing so the two are not
-    // confused.
+    // orphan. Reclaimable, not corruption, and reported separately so the two are not confused.
     const wanted = new Set(want.map((e) => e.name));
     const stale = [];
     let reclaimableBytes = 0;

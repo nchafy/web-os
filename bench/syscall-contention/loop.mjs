@@ -1,14 +1,8 @@
-// The program a process runs. USERLAND: it reaches the system only through syscall(), and it is
-// handed no SAB, no port and no handle — see src/libos/process.mjs.
+// The program a process runs: a closed syscall loop with no think time, so N processes offer N
+// outstanding calls and the kernel's arrival backlog is the measurement. Per-call timing and the
+// lossless histogram live in the stub, the only place that can bracket the park.
 //
-// Closed loop, no think time, so N processes offer N outstanding calls and the kernel's arrival
-// backlog is the measurement. Per-call timing and the lossless histogram live in the stub, which
-// is the only place that can bracket the park.
-
-// The syscall numbers come from the one module that defines them. A program imports no capability
-// by doing this — src/abi.mjs is integers and four pure codecs, and its standing rule is what
-// makes it importable from inside a process. Writing `const SYS_write = 1` here instead would be
-// the second hand-synced copy CLAUDE.md names as the defect this rule exists for.
+// Modes (m.mode / m.call): park, getpid, write, nanosleep, io.
 import {
   SYS_getpid, SYS_write, SYS_clock_nanosleep, SYS_open, SYS_fsync,
   O_WRONLY, O_CREAT, O_TRUNC,
@@ -27,13 +21,11 @@ function payload(bytes) {
 /**
  * Everything this process intended to send through fd 1, in order, as one running checksum.
  *
- * It must be ONE accumulator over the whole run and not one per phase, because the kernel's sink
- * is cumulative: comparing a per-phase checksum against a cumulative sink compares two different
- * byte streams and reports a mismatch that means nothing.
+ * One accumulator over the whole run, never one per phase: the kernel's sink is cumulative, so a
+ * per-phase checksum compares two different byte streams and reports a meaningless mismatch.
  *
- * The hash and its seed are imported, not restated. The kernel's sink hashes with the same one
- * copy, pinned in src/abi.mjs against a published test vector — two hand-synced copies would drift
- * together and this comparison would become a tautology.
+ * The hash and its seed are imported, not restated. Two hand-synced copies would drift together
+ * and this comparison would become a tautology.
  */
 const sent = { sum: FNV1A_BASIS, bytes: 0 };
 
@@ -44,7 +36,7 @@ function track(buf, length) {
 }
 
 /**
- * The measured window. `until` is NOT this process's own idea of when to stop: it is the one
+ * The measured window. `until` is not this process's own idea of when to stop: it is the one
  * deadline the kernel published at the barrier release, derived into this agent's clock once.
  */
 function runWindow(env, { call, until, buf }) {
@@ -76,11 +68,11 @@ function runWindow(env, { call, until, buf }) {
 }
 
 /**
- * M0a's arrangement. A few processes do real OPFS work; the rest issue getpid. The question is
- * what a getpid costs WHILE someone else's file I/O is in flight, so the two groups must run in
- * the same window and be reported separately — a pooled figure is exactly what would hide it.
+ * M0a's arrangement: a few processes do real OPFS work, the rest issue getpid. The subject is what
+ * a getpid costs while someone else's file I/O is in flight, so the two groups run in the same
+ * window and are reported separately — a pooled figure hides it.
  *
- * The split is by role rather than by alternating calls inside one process, because a process that
+ * The split is by role rather than by alternating calls inside one process: a process that
  * interleaves its own cheap and expensive calls measures its own queue, not the kernel's.
  */
 function runIoWindow(env, { until, buf, ioRole }) {
@@ -90,11 +82,7 @@ function runIoWindow(env, { until, buf, ioRole }) {
   let fd = -1;
   let opened = 0;
   if (ioRole) {
-    // One open per process, not one per write: constraint 22 says open is rare and fd I/O common,
-    // and this is the shape M2 will have.
-    // A real path through the real VFS. M0a measured this call with the VFS missing underneath
-    // it; the flags are open(2)'s and the mix is the same one — an open per process, then fd I/O
-    // (constraint 22: open is rare, fd I/O common).
+    // One open per process, then fd I/O: constraint 22, open is rare and fd I/O common.
     const name = new TextEncoder().encode(`/m0a-${env.pid}.bin`);
     fd = env.syscall(SYS_open, O_WRONLY | O_CREAT | O_TRUNC, 0o644,
       0, 0, 0, 0, 0, 0, name, 0, name.length);
@@ -103,8 +91,8 @@ function runIoWindow(env, { until, buf, ioRole }) {
     while (now() < until) {
       const w = env.syscall(SYS_write, fd, 0, 0, 0, 0, 0, 0, 0, buf, 0, buf.length);
       if (w !== buf.length) wrong += 1;
-      // The expensive half, and the reason for the milestone: flush() is synchronous and holds the
-      // kernel thread for ~260 us (constraint 23) while every other process waits.
+      // The expensive half: flush() is synchronous and holds the kernel thread for ~260 us
+      // (constraint 23) while every other process waits.
       if (env.syscall(SYS_fsync, fd) !== 0) wrong += 1;
       calls += 2;
     }
@@ -139,9 +127,8 @@ function overflowChecks(env) {
 
   const zero = env.syscall(SYS_write, 1, 0, 0, 0, 0, 0, 0, 0, exact, 0, 0);
 
-  // The raw bypass, LAST, and r1 is captured on the next line. r1of() reads the live register,
-  // so any intervening syscall overwrites it — which is how the first version of this reported
-  // r1 = 0 for an error the kernel had correctly marked -1.
+  // The raw bypass runs last and r1 is captured on the next line: r1of() reads the live register,
+  // so any intervening syscall overwrites it.
   const raw = env.rawWriteLength(1, maxInline + 1);
   const rawR1 = env.r1of();
 
@@ -162,26 +149,22 @@ function overflowChecks(env) {
 
 export function run(env, m) {
   if (m.mode === "park") {
-    // Control 7.4's half of the kernel-dead phase, and control 7.5's whole subject: ONE long
-    // sleep against a 50 ms re-arm. If the kernel lives it must return 0 after ten silent
-    // re-arms, and if the kernel is terminated the same call must return -EIO. A timeout alone
-    // must never decide which (constraint 46).
+    // Control 7.4's half of the kernel-dead phase, and control 7.5's whole subject: one long
+    // sleep against a 50 ms re-arm. Live kernel must return 0 after ten silent re-arms; terminated
+    // kernel must return -EIO. A timeout alone must never decide which (constraint 46).
     const [lo, hi] = packI64(BigInt(m.sleepMs) * 1000000n);
     const t = now();
     const r = env.syscall(SYS_clock_nanosleep, lo, hi, 0);
     return { role: "park", r0: r, r1: env.r1of(), elapsedMs: now() - t, counters: env.samples() };
   }
-  // The injected fault, control 7.8. It exists so the kernel's fault path is exercised rather
-  // than assumed: before it, a process that threw turned N into N-1 silently and the page waited
-  // out a two-minute timeout with `dropped 1` as the only trace.
+  // The injected fault, control 7.8: it exercises the kernel's fault path rather than assuming it.
   if (m.faultIndex === env.index) {
     throw new Error(`injected process fault at index ${env.index}, control 7.8`);
   }
 
   if (m.roleOf === env.index) {
-    // The heartbeat-gap observer. Decision 2: this distribution is what sets HB_MISS_LIMIT, and
-    // M1 restates its liveness bar from it. It joins the barrier like every other process, so it
-    // observes exactly the measured window and not a window of its own.
+    // The heartbeat-gap observer. Decision 2: this distribution sets HB_MISS_LIMIT. It joins the
+    // barrier like every other process, so it observes the measured window and not one of its own.
     const released = env.barrierArrive();
     if (!released.released) return { role: "hb", barrier: released, barrierFailed: true };
     const heartbeat = env.observeHeartbeat(released.untilLocalMs);
@@ -189,13 +172,12 @@ export function run(env, m) {
   }
 
   const buf = payload(m.payloadBytes || 64);
-  // One named round trip before anything else, so the smallest end-to-end claim — the kernel
-  // booted, this process was spawned by the kernel, one getpid returned the right pid — is a
-  // reported value rather than an inference from an aggregate.
+  // One named round trip, so the smallest end-to-end claim — kernel booted, process spawned, one
+  // getpid returned the right pid — is a reported value rather than an inference from an aggregate.
   const firstGetpid = env.syscall(SYS_getpid);
 
-  // Warm-up is a SEPARATE window, reported rather than silently dropped: JIT and the first SAB
-  // touch are real costs, and hiding them is how a harness flatters itself.
+  // Warm-up is a separate window, reported rather than silently dropped: JIT and the first SAB
+  // touch are real costs.
   const warm = { calls: 0 };
   const t0 = now();
   while (warm.calls < (m.warmupCalls || 2000)) {
@@ -206,15 +188,13 @@ export function run(env, m) {
   warm.samples = env.samples();
   env.resetSamples();
 
-  // THE BARRIER. Warm up, report ready, then wait to be released with everyone else. Without this
-  // each process ran its own window back to back with its own warm-up, the windows did not
-  // overlap, and the first dispatch of each window saw an arrival backlog of one.
+  // Without the barrier each process runs its own window back to back with its own warm-up, the
+  // windows do not overlap, and the first dispatch of each window sees an arrival backlog of one.
   const released = env.barrierArrive();
   if (!released.released) {
     return { role: "loop", barrier: released, barrierFailed: true, counters: env.samples() };
   }
 
-  // M0a: ioProcs processes do file I/O, the rest issue getpid, all inside one barrier-held window.
   const ioProcs = m.ioProcs | 0;
   const ioRole = ioProcs > 0 && env.index < ioProcs;
   const measured = (m.call === "io")
@@ -222,7 +202,7 @@ export function run(env, m) {
     : runWindow(env, { call: m.call || "getpid", until: released.untilLocalMs, buf });
   const after = env.samples();
   // Leave the window before anything out-of-window runs: a 1 MiB write or a 5 ms spin landing
-  // inside another process's window would move its p99, and 1 ms of a 1,000 ms window is enough
+  // inside another process's window moves its p99, and 1 ms of a 1,000 ms window is enough
   // samples to do it.
   const departed = env.barrierDepart();
 
@@ -235,28 +215,24 @@ export function run(env, m) {
   if (m.overflow) extra.overflow = overflowChecks(env);
 
   return {
-    // The role the statistics partition on. "io" and "cheap" exist only in the M0a mix; every
-    // other call keeps the plain "loop" so nothing downstream has to special-case the normal path.
+    // The role the statistics partition on. "io" and "cheap" exist only in the M0a mix.
     role: m.call === "io" ? (ioRole ? "io" : "cheap") : "loop",
     firstGetpid,
-    // WHAT THIS PROCESS THINKS IT IS, from the program's side of the boundary. The kernel's table
-    // and the kernel's getpid are one source checked against itself; this is the identity the
-    // kernel handed the process at spawn and the one a program actually uses, so M1's getppid,
-    // setpgid and signal delivery all inherit it being wrong.
+    // The identity from the program's side of the boundary. The kernel's table and the kernel's
+    // getpid are one source checked against itself; this is what the process was handed at spawn.
     envPid: env.pid,
     call: m.call || "getpid",
     warm: { calls: warm.calls, ms: warm.ms, count: warm.samples.count, sumMs: warm.samples.sum },
-    // The window's two ends in the wall clock, which is the only clock comparable across agents.
-    // The harness intersects these across processes: a cell whose windows do not overlap is not
+    // The window's two ends in the wall clock, the only clock comparable across agents. The
+    // harness intersects these across processes: a cell whose windows do not overlap is not
     // measuring a saturated kernel, whatever its depth histogram says.
     barrier: { ...released, ...departed, barrierCounters: env.barrierCounters() },
     measured,
     sent: { bytes: sent.bytes, sum: sent.sum },
     samples: after,
-    // The extras run OUTSIDE the measured window, so the histogram above excludes them. These
-    // final counters include them, and they are what the accounting identity is read from:
-    // reading the identity off `after` would show issued < dispatched for no better reason than
-    // the order of two snapshots.
+    // The extras run outside the measured window, so `samples` above excludes them. The accounting
+    // identity is read from these final counters, which include them: read off `after` it would
+    // show issued < dispatched purely from the order of two snapshots.
     counters: env.samples(),
     ...extra,
   };

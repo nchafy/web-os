@@ -1,31 +1,27 @@
-// THE STORAGE EDGE'S FAILURE PATHS, under plain Node, against a scripted I/O worker.
+// The storage edge's failure paths, under plain Node, against a scripted I/O worker.
 //
-// WHY THIS EXISTS BESIDE bench/fs-core/probe.py RATHER THAN INSIDE IT. The browser proofs drive
-// real processes against a real OPFS, which is the only way to measure the headline path — and it
-// is the wrong instrument for an ERROR path, because there is no way to make a real
-// `createSyncAccessHandle` refuse on the fourth call, or to put an append inside the window a
-// snapshot holds open. Every finding below is a path taken when something fails, and a failure
+// It sits beside bench/fs-core/probe.py rather than inside it because the browser proofs are the
+// wrong instrument for an error path: there is no way to make a real `createSyncAccessHandle`
+// refuse on the fourth call, or to put an append inside the window a snapshot holds open. A failure
 // nobody can schedule is a path nobody has run.
 //
-// WHAT MAKES IT HONEST: `src/kernel/store.mjs` is imported, not ported. Its only non-pure
-// dependency is the `io` surface — `request(t, m)` and nothing else — so the subject here is the
-// same module the kernel loads, with the OPFS replaced by a Map and a per-request HOOK that can
-// return any errno at any point. The volume is bytes, so a "crash" is a second `Store` mounted
-// over the journal's FLUSHED prefix: exactly what the next boot would read.
+// `src/kernel/store.mjs` is imported, not ported. Its only non-pure dependency is the `io`
+// surface — `request(t, m)` — so the subject is the same module the kernel loads, with the OPFS
+// replaced by a Map and a per-request hook that can return any errno at any point. The volume is
+// bytes, so a "crash" is a second `Store` mounted over the journal's flushed prefix: what the next
+// boot would read.
 //
-// WHAT IT IS NOT: a replacement for the page. Nothing here exercises a syscall, a process, a SAB
-// or a real flush, and the cases below say nothing about latency. scripts/fsfuzz.py runs it
-// as a gate; scripts/check.py still owns the proofs.
+// Nothing here exercises a syscall, a process, a SAB or a real flush, and the cases say nothing
+// about latency. scripts/fsfuzz.py runs it as a gate; scripts/check.py owns the proofs.
 //
 //     node bench/fs-core/edge.mjs                 the gate
 //     node bench/fs-core/edge.mjs --control       every fix put back the way it was found
 //
-// `--control` IS THE NEGATIVE CONTROL AND IT IS THE POINT. Each case's `unfix` is the pre-fix code
-// reconstructed at the one line it lived on — an `O_APPEND` seek taken once at open, a refused
-// listing converted to an empty array, a revert that does nothing, a dirty flag cleared after the
-// await, a volume lock that lets anything through. The run must then report a failure in EVERY
-// family, which is what says these assertions are coupled to their subjects rather than to a
-// constant.
+// `--control` is the negative control. Each case's `unfix` reconstructs the defect at the one line
+// it lives on — an `O_APPEND` seek taken once at open, a refused listing converted to an empty
+// array, a revert that does nothing, a dirty flag cleared after the await, a volume lock that lets
+// anything through. The run must then report a failure in every family, which is what says these
+// assertions are coupled to their subjects rather than to a constant.
 
 import {
   IO_BLOB_OPEN, IO_WRITE, IO_READ, IO_FSYNC, IO_CLOSE, IO_TRUNCATE, IO_FREE, IO_LIST,
@@ -43,13 +39,11 @@ const ROOT_CRED = { uid: 0, gid: 0 };
 const PID = 1;
 const REGION = 4096;
 
-/* ------------------------------------------------------------------ the volume, as bytes */
-
 /**
- * A volume. `journal` is the file's bytes and `journalFlushed` is how many of them a flush has
- * made durable — which is what lets a case assert that an unflushed record is LOST rather than
- * merely late. A real handle's unflushed write is still readable in the same agent, so a harness
- * that read `journal` back would see every record whether or not it was ever flushed.
+ * A volume. `journal` is the file's bytes and `journalFlushed` is how many of them a flush has made
+ * durable, which is what lets a case assert that an unflushed record is lost rather than merely
+ * late. A real handle's unflushed write is still readable in the same agent, so a harness that read
+ * `journal` back would see every record whether or not it was ever flushed.
  */
 function newVolume() {
   return {
@@ -60,7 +54,7 @@ function newVolume() {
   };
 }
 
-/** What the NEXT BOOT would read: the journal's flushed prefix, and every blob. */
+/** What the next boot would read: the journal's flushed prefix, and every blob. */
 function afterCrash(volume) {
   return {
     files: new Map(volume.files),
@@ -87,19 +81,17 @@ function putBytes(blob, src, at) {
   return src.length;
 }
 
-/* ------------------------------------------------------------------ the scripted I/O worker */
-
 /**
  * The I/O worker's surface over a `newVolume()`, faithful to src/kernel/iocore.mjs in the parts the
  * cases below depend on: one refcounted handle per NAME, a free deferred while a handle is open, a
  * strictly consecutive journal sequence with a burn, and `copy` reporting `want` beside `copied`.
  *
- * `hooks` is keyed by request kind and runs BEFORE the worker: a hook returning anything but
+ * `hooks` is keyed by request kind and runs before the worker: a hook returning anything but
  * `undefined` answers in its place, which is how an errno lands on exactly one call. `after` runs
- * once the worker has done the work and before the answer is returned, which is the REPLY'S TRIP
- * BACK — and that distinction is load-bearing. A flush held before it runs still flushes whatever
- * was appended while it waited, so a hook on the way in cannot reproduce "the bytes were flushed
- * and then something was appended"; only one on the way out can.
+ * once the worker has done the work and before the answer is returned — the reply's trip back — and
+ * that distinction is load-bearing. A flush held before it runs still flushes whatever was appended
+ * while it waited, so a hook on the way in cannot reproduce "the bytes were flushed and then
+ * something was appended"; only one on the way out can.
  */
 function makeIo(volume, hooks = {}, after = {}) {
   const handles = new Map();
@@ -287,12 +279,9 @@ function makeIo(volume, hooks = {}, after = {}) {
   return io;
 }
 
-/**
- * A mounted Store over `volume`, with its notes collected: a refusal nobody awaits is evidence.
- *
- * `before` runs with the store built and not yet mounted, which is the only place a control can
- * put back a line the MOUNT path takes.
- */
+/** A mounted Store over `volume`, with its notes collected: a refusal nobody awaits is evidence.
+ *  `before` runs with the store built and not yet mounted, which is the only place a control can
+ *  put back a line the mount path takes. */
 async function mountStore(volume, { hooks = {}, after = {}, cfg = {}, before = null } = {}) {
   const notes = [];
   const io = makeIo(volume, hooks, after);
@@ -301,8 +290,6 @@ async function mountStore(volume, { hooks = {}, after = {}, cfg = {}, before = n
   const report = await store.mount();
   return { store, io, notes, report, volume };
 }
-
-/* ------------------------------------------------------------------ small helpers */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -344,8 +331,6 @@ async function readWhole(h, d, length) {
 const filled = (len, byte) => new Uint8Array(len).fill(byte);
 const hex = (bytes) => [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 
-/* ------------------------------------------------------------------ the cases */
-
 const results = [];
 /** `family` is the finding this case is evidence for. `--control` is scored per family, because a
  *  control scored on a count passes with one rule still working. */
@@ -356,14 +341,14 @@ function record(family, name, ok, detail) {
 const FAMILIES = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8"];
 
 /**
- * F1. O_APPEND IS AN OFFSET PER WRITE.
+ * F1. O_APPEND is an offset per write.
  *
  * One process, no race: an 8-byte file, two descriptions opened for append, one 4-byte write and
  * one fsync on each. POSIX puts both writers' bytes in the file, so the file is 16 bytes and the
  * first writer's four are still there.
  *
- * THE CONTROL IS THE PRE-FIX CODE: the offset taken once at open (`d.pos = endFd(d)`) and no flag
- * on the description, so nothing re-reads the end per write.
+ * The control takes the offset once at open (`d.pos = endFd(d)`) and sets no flag on the
+ * description, so nothing re-reads the end per write.
  */
 async function f1_append(unfix) {
   const h = await mountStore(newVolume());
@@ -379,7 +364,7 @@ async function f1_append(unfix) {
   for (let i = 0; i < 2; i += 1) {
     const d = await openAgain(h, path, { flags });
     if (unfix) {
-      // The seek at open, which is what `calls.mjs` used to do once and nothing re-did.
+      // The seek taken once at open, which nothing re-does per write.
       const end = await h.store.endFd(d);
       d.pos = end;
     }
@@ -409,14 +394,14 @@ async function f1_append(unfix) {
 }
 
 /**
- * F2. AN ERRNO FROM THE BLOB LISTING IS NOT AN EMPTY DIRECTORY.
+ * F2. An errno from the blob listing is not an empty directory.
  *
- * Two arms, because the conversion had two callers. The explicit fsck's sweep must report that it
- * could not enumerate — not that every committed blob the metadata names is ABSENT, which is the
- * one verdict that means data was never written. And the mount's staging floor must refuse to hand
- * out generation numbers it cannot see, which means mounting read-only.
+ * Two arms, because the conversion has two callers. The explicit fsck's sweep must report that it
+ * could not enumerate, not that every committed blob the metadata names is absent — the one verdict
+ * that means data was never written. And the mount's staging floor must refuse to hand out
+ * generation numbers it cannot see, which means mounting read-only.
  *
- * THE CONTROL IS THE PRE-FIX CONVERSION, re-installed on the two methods that did it.
+ * The control re-installs the errno-to-empty-array conversion on both methods.
  */
 async function f2_listing(unfix) {
   const volume = newVolume();
@@ -432,7 +417,6 @@ async function f2_listing(unfix) {
     hooks: { [IO_LIST]: () => -EIO },
     before: (store) => {
       if (!unfix) return;
-      // The pre-fix conversion, on the two methods that did it.
       store.blobListing = async () => [];
       store.blobNameListing = async () => [];
     },
@@ -455,8 +439,8 @@ async function f2_listing(unfix) {
   // The mount arm. A floor nobody could read is not a floor of zero.
   const mounted = await mountStore(afterCrash(volume), {
     hooks: { [IO_LIST]: () => -EIO },
-    // The pre-fix floor: the errno became an empty listing and the mount carried on read-write,
-    // ready to hand generation 1 out again.
+    // With the errno as an empty listing the mount carries on read-write, ready to hand generation
+    // 1 out again.
     before: (store) => { if (unfix) store.blobNameListing = async () => []; },
   });
   record("f2", "a mount that cannot read the staging floor is read-only",
@@ -468,17 +452,15 @@ async function f2_listing(unfix) {
 }
 
 /**
- * F3. A FAILED JOURNAL APPEND TAKES THE PUBLISH WITH IT.
+ * F3. A failed journal append takes the publish with it.
  *
  * The commit applies the op in memory as its validation and appends the record two awaits later.
- * When the append refuses, the record is not in the file and its sequence is burned — so nothing
- * will ever name that generation, and a tree that keeps it published disagrees with both the
- * journal and the next mount.
+ * When the append refuses, the record is not in the file and its sequence is burned, so nothing
+ * will ever name that generation and a tree that keeps it published disagrees with both the journal
+ * and the next mount. The assertion is that disagreement, read as a number on both sides: what the
+ * live kernel reports for the file, and what a kernel mounted over the same bytes reports.
  *
- * The assertion is that disagreement, read as a NUMBER on both sides: what the live kernel reports
- * for the file, and what a kernel mounted over the same bytes reports.
- *
- * THE CONTROL IS A REVERT THAT DOES NOTHING, which is the pre-fix `return appended`.
+ * The control is a revert that does nothing.
  */
 async function f3_journal_fails(unfix) {
   const volume = newVolume();
@@ -489,7 +471,7 @@ async function f3_journal_fails(unfix) {
   await h.store.writeSnapshot();
   if (unfix) h.store.vfs.revertCommit = () => {};
 
-  // The write must SUCCEED and only the commit's record refuse, so that what is lost is a publish
+  // The write must succeed and only the commit's record refuse, so what is lost is a publish
   // rather than a write nobody acknowledged.
   const wrote = await write(h, d, filled(4, 0x33), undefined);
   const origin = h.io.request.bind(h.io);
@@ -522,30 +504,28 @@ async function f3_journal_fails(unfix) {
 }
 
 /**
- * F4. THE IDLE FLUSH CANNOT LOSE THE RECORD APPENDED INSIDE IT.
+ * F4. The idle flush cannot lose the record appended inside it.
  *
  * The timer fires, nulls itself, reads `dirty`, and awaits a flush. A record appended inside that
- * await is the whole case: the flag it set is cleared by the flush that did not include it, and the
- * timer it re-armed then finds nothing to do.
+ * await is the case: the flag it set is cleared by the flush that did not include it, and the timer
+ * it re-armed then finds nothing to do.
  *
- * The flush is held open here by a hook, which is the only way to put an append inside a window
- * that is otherwise a few hundred microseconds wide. The loss is read off the volume: the journal's
- * FLUSHED prefix is what the next boot gets, so a record above it is gone.
+ * The flush is held open by a hook, which is the only way to put an append inside a window that is
+ * otherwise a few hundred microseconds wide. The loss is read off the volume: the journal's flushed
+ * prefix is what the next boot gets, so a record above it is gone.
  *
- * THE CONTROL IS THE LATE CLEAR **AND** THE VOLUME LOCK REMOVED, and the pair is deliberate: F5's
- * lock closes this window too, because every read and every write of `dirty` now happens under it.
- * So the state this finding was written against is the unlocked one, and a control that put back
- * only the late clear would stay green on a line that is genuinely wrong. Both fixes are kept: the
- * claim-before-await makes `flushJournal` correct on its own terms rather than correct because
- * something else serialises it, which is the difference between a fix and a coincidence.
+ * The control puts back the late clear **and** removes the volume lock, and the pair is deliberate.
+ * F5's lock closes this window too, because every read and every write of `dirty` happens under it,
+ * so a control that put back only the late clear would stay green on a line that is genuinely
+ * wrong. Both fixes are kept: the claim-before-await makes `flushJournal` correct on its own terms
+ * rather than correct because something else serialises it.
  */
 async function f4_idle_flush(unfix) {
   const volume = newVolume();
   let holding = null;
   const h = await mountStore(volume, {
-    // ON THE WAY OUT, so the bytes really are flushed and the append below really does land after
-    // the flush and before the store sees its answer. That is the window, and it is the reply's
-    // own trip back from the I/O worker.
+    // On the way out, so the bytes really are flushed and the append below lands after the flush
+    // and before the store sees its answer. That window is the reply's trip back from the worker.
     after: {
       [IO_JOURNAL]: async (m) => {
         if (m.op !== "flush" || !holding) return;
@@ -572,8 +552,8 @@ async function f4_idle_flush(unfix) {
   let release;
   holding = new Promise((r) => { release = r; });
   await sleep(JOURNAL_IDLE_MS + 60);
-  // The flush is parked inside its await now. This record is issued into that window — NOT awaited
-  // first, because with the volume lock in place it is queued behind the flush and the flush is
+  // The flush is parked inside its await now. This record is issued into that window and not
+  // awaited first: with the volume lock in place it is queued behind the flush, and the flush is
   // waiting on the line below.
   const second = h.store.vfs.mkdir(ROOT_CRED, "/late", { mode: 0o755 });
   const appending = h.store.journal(second);
@@ -603,19 +583,19 @@ async function f4_idle_flush(unfix) {
 }
 
 /**
- * F5. THE SNAPSHOT AND THE JOURNAL TAKE THE SAME LOCK.
+ * F5. The snapshot and the journal take the same lock.
  *
  * A snapshot serialises the tree with `journalFirstSeq = seq` and then truncates the journal. A
  * record allocated after the serialize and destroyed by the truncate took exactly the sequence the
- * image says the journal starts at — so replay reads an EMPTY journal that starts where it expects,
+ * image says the journal starts at, so replay reads an empty journal that starts where it expects,
  * reports no gap and no discarded tail, and the op is gone with the volume reported clean. That
  * last part is what makes it worth a lock rather than a report.
  *
  * The window is held open by a hook on the superblock write, which is where the real one is 260 us
  * of flush wide.
  *
- * THE CONTROL IS A VOLUME LOCK THAT LETS ANYTHING THROUGH, which is the pre-fix code: `journal`
- * and `writeSnapshot` serialised against nothing.
+ * The control is a volume lock that lets anything through, so `journal` and `writeSnapshot`
+ * serialise against nothing.
  */
 async function f5_snapshot_lock(unfix) {
   const volume = newVolume();
@@ -664,17 +644,17 @@ async function f5_snapshot_lock(unfix) {
 }
 
 /**
- * F6. AN ERRNO FROM A SUPERBLOCK SLOT IS NOT AN ABSENT SLOT.
+ * F6. An errno from a superblock slot is not an absent slot.
  *
- * The same correction as F2, on the reader the mount decides the volume's whole fate from. An
- * errno and a missing file both became `null`, so a volume whose slots could not be READ was
- * indistinguishable from one nobody had ever written — and the journal is EMPTY on a healthy
- * volume, because the last snapshot truncates it. So the three facts fsck weighs were all absent,
- * the verdict was FRESH, and the mount's fresh arm is the one arm allowed to write: a new
- * superblock over live blobs, read-write, with `problems` empty. Constraint 28's named defect,
- * reached through an error path rather than a bad image.
+ * The same correction as F2, on the reader the mount decides the volume's whole fate from. With an
+ * errno and a missing file both collapsing to `null`, a volume whose slots cannot be read is
+ * indistinguishable from one nobody ever wrote — and the journal is empty on a healthy volume,
+ * because the last snapshot truncates it. All three facts fsck weighs are then absent, the verdict
+ * is FRESH, and the fresh arm is the one arm allowed to write: a new superblock over live blobs,
+ * read-write, with `problems` empty. Constraint 28's named defect, reached through an error path
+ * rather than a bad image.
  *
- * THREE ARMS, because the answer is not the same verdict each time and that is the point:
+ * Three arms, because the right answer is a different verdict each time:
  *
  *   every slot refused   there is no image, so REFUSE and keep the bytes. Never FRESH.
  *   one slot refused     the readable slots still carry the volume, so READ-ONLY at that
@@ -682,10 +662,9 @@ async function f5_snapshot_lock(unfix) {
  *   the explicit fsck    `unreadableSlots` is its own count, so a refused read is not added to
  *                        `absentSlots` and reported as a young filesystem.
  *
- * THE CONTROL IS THE PRE-FIX COLLAPSE, re-installed on `readWhole` — the one method the mount and
- * the explicit fsck both read slots through, which is why there is one place to put it back. Under
- * it this case reports `mountable: "fresh"`, `mode: "rw"`, `problems: []`, a slot rewritten on
- * disk, and a tree of one inode where the volume had two. That is the reseed, as numbers.
+ * The control re-installs the collapse on `readWhole`, the one method the mount and the explicit
+ * fsck both read slots through. Under it this case reports `mountable: "fresh"`, `mode: "rw"`,
+ * `problems: []`, a slot rewritten on disk, and a tree of one inode where the volume had two.
  */
 async function f6_slot_errno(unfix) {
   const volume = newVolume();
@@ -694,12 +673,12 @@ async function f6_slot_errno(unfix) {
   await write(h, d, filled(8, 0x66), undefined);
   await h.store.fsyncFd(d);
   await h.store.closeFd(d);
-  // THE SNAPSHOT IS WHAT MAKES THIS DANGEROUS rather than a curiosity: it truncates the journal, so
-  // the volume's only remaining evidence of itself is the slots this case makes unreadable.
+  // The snapshot truncates the journal, so the volume's only remaining evidence of itself is the
+  // slots this case makes unreadable.
   await h.store.writeSnapshot();
   const inodesBefore = h.store.vfs.stats().inodes;
 
-  // The pre-fix reader, as it stood: one `null` for an errno and for an absent file alike.
+  // One `null` for an errno and for an absent file alike.
   const collapse = (store) => {
     if (!unfix) return;
     store.readWhole = async function preFix(name) {
@@ -738,9 +717,9 @@ async function f6_slot_errno(unfix) {
 
   // ---- arm 2: one slot refuses, and it is the oldest -----------------------------------
   //
-  // Three snapshots so all three slots hold live copies, then the OLDEST is the one made
-  // unreadable — so the generation the volume comes up at is the one it was already on, and a
-  // clause on it cannot pass by falling back.
+  // Three snapshots so all three slots hold live copies, then the oldest is made unreadable, so the
+  // generation the volume comes up at is the one it was already on and a clause on it cannot pass
+  // by falling back.
   await h.store.writeSnapshot();
   await h.store.writeSnapshot();
   const generationBefore = String(h.store.generation);
@@ -777,26 +756,26 @@ async function f6_slot_errno(unfix) {
 }
 
 /**
- * F7. THE SNAPSHOT AND ITS JOURNAL TRUNCATE FAIL TOGETHER.
+ * F7. The snapshot and its journal truncate fail together.
  *
- * The slot is written and FLUSHED, and only then is the journal truncated. A refused truncate used
- * to return its errno there and leave the new slot on disk — so the volume carried a generation the
- * kernel does not believe in, and the next mount is the one that finds out: it picks the highest
- * valid slot, reads `journalFirstSeq` off it, and replays a journal that starts BEFORE that base.
- * The records already folded into the image come back, the gap rule fires, and the volume mounts
- * read-only on a snapshot that was never completed.
+ * The slot is written and flushed, and only then is the journal truncated. A refused truncate that
+ * returns its errno there and leaves the new slot on disk gives the volume a generation the kernel
+ * does not believe in, and the next mount finds out: it picks the highest valid slot, reads
+ * `journalFirstSeq` off it, and replays a journal that starts before that base. The records already
+ * folded into the image come back, the gap rule fires, and the volume mounts read-only on a
+ * snapshot that was never completed.
  *
- * The pair fails by UNDOING the durable half, which is `commitOnce`'s shape: the slot this call
- * wrote is invalidated with a zero-length write, and the volume stays exactly where it was.
+ * The pair fails by undoing the durable half, which is `commitOnce`'s shape: the slot this call
+ * wrote is invalidated with a zero-length write, and the volume stays where it was.
  *
- * THE CONTROL DROPS THE UNDO'S WRITE and nothing else — answered 0 without touching the file,
- * which is the pre-fix state at one line and leaves the real `snapshotHeld` as the subject.
+ * The control drops the undo's write and nothing else, answering 0 without touching the file, so
+ * the real `snapshotHeld` stays the subject.
  */
 async function f7_snapshot_truncate(unfix) {
   const volume = newVolume();
-  // ARMED AFTER THE MOUNT, because a fresh volume's mount writes the FIRST superblock and
-  // truncates the journal behind it. Refusing that one puts the volume read-only before the case
-  // has started, which is the right behaviour and the wrong subject.
+  // Armed after the mount, because a fresh volume's mount writes the first superblock and truncates
+  // the journal behind it. Refusing that one puts the volume read-only before the case has started,
+  // which is the right behaviour and the wrong subject.
   let armed = false;
   const h = await mountStore(volume, {
     hooks: {
@@ -847,17 +826,15 @@ async function f7_snapshot_truncate(unfix) {
 }
 
 /**
- * F8. THE COMMIT'S UNDO PUTS `opSeq` BACK.
+ * F8. The commit's undo puts `opSeq` back.
  *
  * `applyOp` bumps `opSeq` on every op and `serialize` writes it into the image, so an undo that
- * restores the generation, the size and the timestamps and not that counter leaves the image
- * carrying a number no record accounts for.
+ * restores the generation, the size and the timestamps but not that counter leaves the image
+ * carrying a number no record accounts for. Reached through the same refused append as F3: the
+ * commit applies in memory as its validation, the record will not land, and the apply is undone.
  *
- * Reached through the same refused append as F3: the commit applies in memory as its validation,
- * the record will not land, and the apply is undone.
- *
- * THE CONTROL IS A REVERT THAT PUTS THE CURRENT VALUE BACK, which is the pre-fix behaviour exactly
- * — the state object carried no `opSeq`, so the field was never assigned.
+ * The control is a revert that puts the current value back, which is what happens when the state
+ * object carries no `opSeq` and the field is never assigned.
  */
 async function f8_revert_opseq(unfix) {
   const volume = newVolume();
@@ -884,9 +861,8 @@ async function f8_revert_opseq(unfix) {
   };
   const synced = await h.store.fsyncFd(d);
   h.io.request = origin;
-  // READ BEFORE THE CLOSE. A description whose commit refused is still dirty, so `closeFd` commits
-  // it again — and that commit succeeds, applies, and bumps the counter past what this case is
-  // measuring.
+  // Read before the close. A description whose commit refused is still dirty, so `closeFd` commits
+  // it again, and that commit succeeds, applies, and bumps the counter past what is measured here.
   const after = h.store.vfs.opSeq;
   const serialized = h.store.vfs.serialize().opSeq;
   await h.store.closeFd(d);
@@ -897,8 +873,6 @@ async function f8_revert_opseq(unfix) {
   record("f8", "and the image carries that number and no other", serialized === before,
     { serialized, want: before });
 }
-
-/* ------------------------------------------------------------------ the run */
 
 const CASES = [
   ["f1", f1_append],
@@ -934,8 +908,8 @@ async function main() {
   const silent = FAMILIES.filter((f) => perFamily[f].failed === 0);
   console.log(JSON.stringify({
     control,
-    // In control mode the PRODUCT is the failures, and a family that stayed clean means its
-    // assertions are not coupled to the line the fix is on.
+    // In control mode the failures are the product: a family that stays clean means its assertions
+    // are not coupled to the line the fix is on.
     ok: control ? silent.length === 0 && broken.length === 0 : failed.length === 0,
     total: results.length,
     failed: failed.length,

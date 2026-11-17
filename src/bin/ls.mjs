@@ -6,8 +6,7 @@ import { DT_DIR, DT_LNK, S_IFDIR, S_IFLNK, S_IFMT } from "/src/abi.mjs";
 
 const NAME = "ls";
 
-/** A fallback width for the column layout when the terminal will not say. 80 is the width every
- *  terminal has had since the card deck. */
+/** A fallback width for the column layout when the terminal will not say. */
 const DEFAULT_COLUMNS = 80;
 
 /** Two spaces between columns, which is what `ls` leaves. */
@@ -32,12 +31,9 @@ function joinPath(dir, name) {
 }
 
 /**
- * Whether fd 1 is a terminal, and how wide it is.
- *
- * THIS IS WHAT MAKES `ls | wc -l` COUNT FILES rather than counting 1. A terminal gets columns
- * because a reader wants them; a pipe gets one name per line because the next program parses it.
- * `tty_get` answering ENOTTY is `isatty()` — the ABI has no separate call for it, which is why
- * there is no second way to ask.
+ * Whether fd 1 is a terminal, and how wide it is. This is what makes `ls | wc -l` count files
+ * rather than 1: a pipe gets one name per line because the next program parses it. `tty_get`
+ * answering ENOTTY is `isatty()`; the ABI has no separate call for it.
  */
 function outputWidth(env) {
   const tm = env.tty.get(1);
@@ -48,10 +44,8 @@ function outputWidth(env) {
 }
 
 /**
- * Names laid out down columns, as `ls` does.
- *
- * The column count is the largest that fits, computed from the longest name — not a fixed four.
- * `rows` is a ceiling division so the last column is the short one.
+ * Names laid out down columns, as `ls` does. The column count is the largest that fits the longest
+ * name; `rows` is a ceiling division so the last column is the short one.
  */
 function columnize(names, width) {
   const longest = names.reduce((n, s) => Math.max(n, s.length), 0);
@@ -65,22 +59,18 @@ function columnize(names, width) {
     for (let c = 0; c < perRow; c += 1) {
       const i = c * rows + r;
       if (i >= names.length) continue;
-      // The LAST cell in a row is not padded: trailing spaces on every line are invisible until
-      // something diffs the output.
+      // The last cell in a row is not padded: trailing spaces are invisible until something diffs
+      // the output. Stripping the line instead would eat a filename that is itself whitespace.
       const isLast = i + rows >= names.length;
       line += isLast ? names[i] : names[i].padEnd(cell);
     }
-    // NO TRAILING-WHITESPACE STRIP. It was lossy and redundant: `isLast` above already leaves the
-    // last cell unpadded, and the strip ate the name itself when a filename WAS whitespace — a
-    // file called "  " printed as a blank line and `ls` output stopped round-tripping.
     out += `${line}\n`;
   }
   return out;
 }
 
-/** One `-l` row. The fields are POSIX's, in POSIX's order, minus the timestamp — the VFS keeps
- *  nanosecond times and there is no `strftime` here, so the field is omitted rather than printed
- *  in a format nothing else in this system uses. Named as a gap in docs/CONSTRAINTS.md 138. */
+/** One `-l` row: POSIX's fields in POSIX's order, minus the timestamp — there is no `strftime`
+ *  here, so the field is omitted rather than invented. docs/CONSTRAINTS.md 138. */
 function longRow(env, path, name) {
   const st = env.fs.lstat(path);
   if (typeof st === "number") {
@@ -105,8 +95,7 @@ export function run(env) {
 
   for (let t = 0; t < targets.length; t += 1) {
     const path = targets[t];
-    // STAT FIRST, so a file operand is printed as itself rather than reported as ENOTDIR. `ls
-    // /usr/bin/ls` naming one program is how a caller checks a program exists.
+    // Stat first, so a file operand is printed as itself rather than reported as ENOTDIR.
     const st = env.fs.stat(path);
     if (typeof st === "number") {
       status = std.complainErrno(env, NAME, path, st);
@@ -122,12 +111,11 @@ export function run(env) {
       status = std.complainErrno(env, NAME, path, entries);
       continue;
     }
-    // A HEADER ONLY WHEN THERE IS MORE THAN ONE TARGET, so one directory's listing pipes cleanly.
+    // One directory's listing must pipe cleanly, with no header in front of it.
     if (targets.length > 1) std.say(env, `${t > 0 ? "\n" : ""}${path}:\n`);
     const names = entries
-      // A LEADING DOT IS HIDDEN unless `-a`. `.` and `..` are not in this system's directories at
-      // all — the VFS keeps parents as a field, not as entries — so there is nothing to filter for
-      // them and `-a` shows only real dotfiles.
+      // `.` and `..` are not entries in this system's directories — the VFS keeps the parent as a
+      // field — so `-a` shows only real dotfiles.
       .filter((e) => flags.a || !e.name.startsWith("."))
       .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     listed += names.length;
@@ -135,8 +123,7 @@ export function run(env) {
       for (const e of names) std.say(env, longRow(env, joinPath(path, e.name), e.name));
       continue;
     }
-    // A DIRECTORY GETS A TRAILING SLASH, which is the one piece of `-F` worth having: it is how a
-    // reader tells `bin` from `sh` without a second column.
+    // The one piece of `-F` worth having: a reader tells `bin` from `sh` without a second column.
     const shown = names.map((e) => (e.type === DT_DIR ? `${e.name}/`
       : e.type === DT_LNK ? `${e.name}@` : e.name));
     if (!shown.length) continue;
@@ -146,7 +133,6 @@ export function run(env) {
   return { exit: status, listed, tty: out.tty, columns: out.columns };
 }
 
-/** Exported for the host probe: the two pure functions in this program — a layout over names and
- *  a width, and a mode word as a string. Neither touches an fd, so `node` can check both. */
+/** Exported for the host probe: neither function touches an fd, so `node` can check both. */
 export const _columnize = columnize;
 export const _modeString = modeString;

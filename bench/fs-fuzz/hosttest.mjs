@@ -1,9 +1,8 @@
 // M2a's host test: the fs codecs under plain Node, no Worker, no SAB, no OPFS.
 //
-// These are not test doubles. They are the codecs M2 uses, imported from src/fs/, which is the
-// scope condition the milestone turns on: the host-runnable path must be the SAME CODE, not a
-// port. If a codec ever reaches for storage inside its parse path this file stops running and
-// that is the intended alarm.
+// These are not test doubles: they are the codecs M2 uses, imported from src/fs/. The
+// host-runnable path must be the same code, not a port — if a codec ever reaches for storage
+// inside its parse path this file stops running, which is the intended alarm.
 
 import { crc32, crc32SelfTest } from "../../src/fs/crc32.mjs";
 import {
@@ -37,13 +36,11 @@ function checkThat(name, ok, detail) {
   results.push({ name, ok: !!ok, detail: ok ? undefined : detail });
 }
 
-// ---- crc32 -------------------------------------------------------------------------------
 const self = crc32SelfTest();
 checkThat("crc32 matches the published check value", self.ok, self.why);
 checkThat("crc32 is order-sensitive", crc32(bytes(1, 2)) !== crc32(bytes(2, 1)),
   "a checksum that ignores order would not detect a swapped pair");
 
-// ---- journal round-trip ------------------------------------------------------------------
 const payload = bytes(1, 2, 3, 4, 5);
 const rec = encodeRecord(7, payload);
 check("record size is header + payload", rec.length, HEADER_BYTES + payload.length);
@@ -54,7 +51,6 @@ checkThat("record round-trips", back.ok && back.seq === 7n
 const empty = decodeRecord(encodeRecord(0, bytes()));
 checkThat("a zero-length payload round-trips", empty.ok && empty.payload.length === 0, empty);
 
-// ---- journal refusals, each named --------------------------------------------------------
 check("a short header is refused", decodeRecord(rec.subarray(0, HEADER_BYTES - 1)).why,
   REFUSE.SHORT_HEADER);
 const badMagic = rec.slice(); badMagic[0] ^= 0xff;
@@ -78,7 +74,6 @@ const flippedLen = rec.slice();
 new DataView(flippedLen.buffer).setUint32(4, 4, true);
 check("a flipped length is caught by the CRC", decodeRecord(flippedLen).why, REFUSE.BAD_CRC);
 
-// ---- replay semantics --------------------------------------------------------------------
 const three = new Uint8Array([
   ...encodeRecord(0, bytes(10)), ...encodeRecord(1, bytes(20)), ...encodeRecord(2, bytes(30)),
 ]);
@@ -114,7 +109,6 @@ const gapR = replay(gapped, { firstSeq: 0 });
 checkThat("a sequence gap stops replay", gapR.records.length === 1 && gapR.stopped === "seq-gap",
   gapR);
 
-// ---- superblock --------------------------------------------------------------------------
 const sb = encodeSuperblock({ generation: 5, inodeCount: 12, nextIno: 13 });
 check("superblock size", sb.length, SUPER_BYTES);
 const sbBack = decodeSuperblock(sb);
@@ -151,16 +145,13 @@ checkThat("no valid slot is a refusal, not a reseed",
 
 // ---- M2: the VFS port, the image container and fsck -------------------------------------
 //
-// Here for the reason M2a exists: these are PURE over byte arrays, so they run under plain Node in
-// milliseconds. The day one of them reaches for a sync access handle inside a parse path this file
-// stops running, and that is the intended alarm rather than a silent decay into a second
-// implementation.
+// Pure over byte arrays, so they run under plain Node in milliseconds.
 
 const ROOT = { uid: 0, gid: 0 };
 const ALICE = { uid: 1000, gid: 1000 };
 const BOB = { uid: 1001, gid: 1001 };
 
-// Every FsError code must BE an errno. A code with no entry in the ABI's table reaches a process
+// Every FsError code must be an errno. A code with no entry in the ABI's table reaches a process
 // as -EIO and the reason is lost; this is the one assertion that keeps the two files in step.
 const unmapped = FS_CODES.filter((code) => E[code] === undefined);
 checkThat("every FsError code maps to an errno", unmapped.length === 0,
@@ -180,13 +171,12 @@ note(vfs.mkdir(ROOT, "/home", { mode: 0o755 }));
 note(vfs.chown(ROOT, "/home", 1000, 1000));
 note(vfs.mkdir(ALICE, "/home/alice", { mode: 0o700 }));
 
-// CONSTRAINT 29, the half a write test never reaches: a credential that lacks the bit is TURNED
-// AWAY. Without this the mode bits are decoration and every process shares one identity.
+// Constraint 29, the half a write test never reaches: a credential that lacks the bit is turned
+// away. Without this the mode bits are decoration and every process shares one identity.
 //
-// It asserts on a name INSIDE the 0700 directory, which is what the bit governs. `stat` of the
-// directory itself needs execute on its PARENT, not on the directory — the first version of this
-// test asserted the wrong thing and the port was right: a 0700 directory is listed by anyone who
-// can read the directory above it, and only entering it is refused.
+// It asserts on a name inside the 0700 directory, which is what the bit governs. `stat` of the
+// directory itself needs execute on its parent, not on the directory: a 0700 directory is listed
+// by anyone who can read the directory above it, and only entering it is refused.
 checkThat("the owner may stat a 0700 directory", vfs.stat(ALICE, "/home/alice").mode === 0o700,
   "alice was refused her own directory");
 checkThat("a non-owner may stat it too, because that needs execute on the PARENT",
@@ -197,24 +187,23 @@ checkThat("a non-root chown away from one's own uid is EPERM",
 checkThat("a non-owner cannot chmod",
   refuses(() => vfs.chmod(BOB, "/home/alice", 0o777), "EPERM"), "bob chmodded alice's directory");
 
-// ---- THE PERMISSION MODEL, IN THE FAST GATE ----------------------------------------------
+// ---- the permission model, in the fast gate ----------------------------------------------
 //
-// Here because of what its absence cost: forcing `#may()` to return true passed all 84 host tests
-// in three seconds, and only the 60-second browser run caught it. The VFS is pure and lives in
-// src/fs/, so the model costs nothing to check under Node — and a gate that cannot see a
-// permission model is a gate that cannot defend constraint 29.
+// Without these rows, forcing `#may()` to return true passes all 84 host tests in three seconds
+// and only the 60-second browser run catches it. A gate that cannot see a permission model cannot
+// defend constraint 29.
 //
-// THREE ARMS, BOTH DIRECTIONS EACH, and the directions are the point. A table that only ever sees
-// an arm GRANT cannot tell that arm from a fallthrough to the next one: the group rows where the
-// group bits are clear and `other`'s are set are the rows that fail if the group arm is deleted,
-// and every DENY row is a row that fails if `#may()` stops reading the mode at all.
+// Three arms, both directions each, and the directions are the point: a table that only ever sees
+// an arm grant cannot tell that arm from a fallthrough to the next one. The group rows where the
+// group bits are clear and `other`'s are set fail if the group arm is deleted, and every deny row
+// fails if `#may()` stops reading the mode at all.
 const { R: PR, W: PW, X: PX } = PERM;
 const CAROL = { uid: 1002, gid: 1000 };     // not the owner, IN the owner's group
 const perms = new VFS({ owner: ROOT, now: () => ++clock });
 perms.mkdir(ROOT, "/p", { mode: 0o755 });
 /** name, mode, the file's [uid, gid], the asking credential, the bits asked for, allowed? */
 const PERM_CASES = [
-  // The owner arm, and its exclusivity: owner bits are the ANSWER for the owner, not a floor.
+  // The owner arm, and its exclusivity: owner bits are the answer for the owner, not a floor.
   ["owner r on 0600", 0o600, [1000, 1000], ALICE, PR, true],
   ["owner w on 0600", 0o600, [1000, 1000], ALICE, PW, true],
   ["owner x on 0600", 0o600, [1000, 1000], ALICE, PX, false],
@@ -313,9 +302,9 @@ checkThat("rename into one's own subtree is EINVAL",
   refuses(() => vfs.rename(ROOT, "/home", "/home/alice/home"), "EINVAL"),
   "a directory was moved inside itself");
 
-// REPLAY IS THE SAME CODE AS THE WRITER. Every op above, re-applied to the snapshot the writer
+// Replay is the same code as the writer: every op above, re-applied to the snapshot the writer
 // started from, must reproduce the writer's tree exactly. A replay implemented beside the writer
-// drifts from it, and this is the assertion that would catch the drift.
+// drifts from it, and this assertion catches the drift.
 const replayed = VFS.parse(base);
 let replayFailed = "";
 for (const op of log) {
@@ -336,7 +325,7 @@ checkThat("every op survives encode/decode", !replayFailed, replayFailed);
 check("replay through applyOp reproduces the writer's tree byte for byte",
   asJson(replayed.serialize()), asJson(vfs.serialize()));
 
-// applyOp REFUSES rather than guessing. fsck's whole job rests on this: an op that cannot be
+// applyOp refuses rather than guessing. fsck's whole job rests on this: an op that cannot be
 // applied to this state is corruption to be reported, not a tree to be invented.
 checkThat("an op naming a missing directory is refused",
   refuses(() => replayed.applyOp({ k: OP.MKDIR, ino: 900, dir: 8000, name: "x", mode: 0o755,
@@ -349,9 +338,9 @@ check("a payload that is not an op decodes to null",
 check("a payload that is not JSON decodes to null",
   decodeOp(new Uint8Array([0xff, 0x00, 0x41])), null);
 
-// VFS.parse refuses what would not hold together. Each of these came back as a plausible tree in
-// the predecessor, which is worse than refusing: a mode defaulted to 0644 is a file whose
-// permissions were invented, and the 10k-file proof would compare two copies of that invention.
+// VFS.parse refuses what would not hold together. Returning a plausible tree instead is worse: a
+// mode defaulted to 0644 is a file whose permissions were invented, and the 10k-file proof would
+// compare two copies of that invention.
 const image = vfs.serialize();
 const withoutMode = structured(image, (row) => { delete row.mode; });
 checkThat("an inode with no mode is refused, not defaulted",
@@ -398,8 +387,8 @@ new DataView(imageBadReserved.buffer).setUint32(12, 1, true);
 check("a non-zero image reserved word is refused", decodeImage(imageBadReserved).why,
   IMAGE_REFUSE.BAD_RESERVED);
 
-// fsck. The ONE thing it must never do is reseed, and the structural proof is that it holds no
-// writer: these assertions are about which verdict it reaches for each volume.
+// fsck must never reseed, and the structural proof is that it holds no writer: these assertions
+// are about which verdict it reaches for each volume.
 checkThat("fsck writes nothing, by construction",
   fsck({ slots: [null, null, null], journal: null }).wrote === false, "fsck reported a write");
 check("an empty volume is FRESH, not corrupt",
@@ -407,10 +396,10 @@ check("an empty volume is FRESH, not corrupt",
 check("a volume whose bytes do not decode is REFUSED, never reseeded",
   fsck({ slots: [new Uint8Array(SUPER_BYTES).fill(9), null, null], journal: null }).mountable,
   MOUNT_REFUSE);
-// AN ERRNO IS NOT AN ABSENT SLOT, and an empty journal is what makes the confusion fatal: the
-// last snapshot truncates it, so on a healthy volume the slots are the only evidence left that
-// the volume exists. Read as absent, they make it a FIRST BOOT — the one verdict whose caller is
-// allowed to write a superblock.
+// An errno is not an absent slot, and an empty journal makes the confusion fatal: the last
+// snapshot truncates it, so on a healthy volume the slots are the only evidence left that the
+// volume exists. Read as absent they make it a first boot, the one verdict whose caller is allowed
+// to write a superblock.
 check("a volume whose slots could not be READ is never FRESH",
   fsck({ slots: [{ errno: 5 }, { errno: 5 }, { errno: 5 }], journal: null }).mountable,
   MOUNT_REFUSE);
@@ -422,7 +411,7 @@ check("a journal that could not be READ is REFUSED, never replayed as empty",
   fsck({ slots: [null, null, null], journal: { errno: 5 }, blobs: [] }).mountable, MOUNT_REFUSE);
 const good = buildVolume(vfs, []);
 const cleanReport = fsck(good);
-// The same volume with one of its two ABSENT slots refused instead. The chosen slot still decodes,
+// The same volume with one of its two absent slots refused instead. The chosen slot still decodes,
 // so there is a tree to mount — read-only, with the refused read counted as its own thing rather
 // than folded into `absentSlots` and reported as a young filesystem.
 const oneRefused = fsck({
@@ -457,7 +446,7 @@ checkThat("a blob no inode points at is RECLAIMABLE, reported apart from corrupt
   staleBlobs.blobs.stale.length === 1 && staleBlobs.blobs.reclaimableBytes === 5,
   staleBlobs.blobs);
 
-// The journal's three tear shapes, and they matter because THREE DIFFERENT GUARDS catch them. The
+// The journal's three tear shapes, which matter because three different guards catch them. The
 // browser-side control that removes the CRC must move the second and third and leave the first
 // standing; a control that moved all three would not say which guard it removed.
 const late = { k: OP.MKDIR, ino: 950, dir: 1, name: "late", mode: 0o755, uid: 0, gid: 0, t: 9 };
@@ -478,13 +467,12 @@ check("a tail whose block was allocated and not written is caught by the CRC",
 checkThat("with the CRC removed that torn tail is ACCEPTED",
   fsck({ ...zeroPadded, checkCrc: false }).journal.stopped === null,
   "the CRC is not what catches a zero-padded tail, so the control proves nothing");
-// ONE DIGIT INSIDE A MODE FIELD. Not an arbitrary byte: the claim is that the CRC is the only
+// One digit inside a mode field, not an arbitrary byte: the claim is that the CRC is the only
 // thing between a flipped bit and a tree whose permissions nobody wrote, and a flip that landed on
-// a timestamp would not have shown that. 488 is 0o750; 480 is 0o740.
+// a timestamp would not show that. 488 is 0o750; 480 is 0o740.
 //
-// SEARCHED IN THE BYTES, not in a decoded string. A record's header holds bytes above 0x7F, which
-// TextDecoder turns into replacement characters — so a character index is not a byte index, and
-// the first version of this flipped the digit one place to the left and made 0630 instead.
+// Searched in the bytes, not in a decoded string. A record's header holds bytes above 0x7F, which
+// TextDecoder turns into replacement characters, so a character index is not a byte index.
 const flippedByte = { ...journalled, journal: journalled.journal.slice() };
 const modeAt = lastIndexOfBytes(flippedByte.journal, '"mode":488');
 checkThat("the corpus holds the mode field the flip is aimed at", modeAt > 0,
@@ -559,7 +547,7 @@ function buildVolume(source, ops, firstSeq = 0n) {
 
 // ---- M3: the mount table -----------------------------------------------------------------
 //
-// The one defect this table exists to prevent is a LONGEST PREFIX TAKEN ON THE STRING rather than
+// The one defect this table exists to prevent is a longest prefix taken on the string rather than
 // on component boundaries, which puts `/usrlocal` inside the `/usr` mount. That reads fine and
 // writes to the wrong volume, so the boundary cases below are the subject and the rest is shape.
 // Mutating `resolve` to a string-prefix match fails exactly the four labels naming `/usrlocal`
@@ -574,13 +562,13 @@ function buildVolume(source, ops, firstSeq = 0n) {
   const all = [root, usr, tmp, proc, dev];
 
   // A device number per mount, distinct and non-zero. encodeFilestat writes `st.dev || 0`, so a
-  // zero device and an unset one are the same bytes — which is why DEV_FIRST is 1.
+  // zero device and an unset one are the same bytes, which is why DEV_FIRST is 1.
   check("the root mount's device number is DEV_FIRST", root.dev, DEV_FIRST);
   check("every mount has a distinct device number", new Set(all.map((r) => r.dev)).size, all.length);
   checkThat("no mount has device number zero", all.every((r) => r.dev !== 0),
     "a zero device is indistinguishable from a filesystem that never set one");
 
-  // THE SUBJECT.
+  // The subject.
   check("/usrlocal resolves to the root, not the /usr mount",
     t.resolve("/usrlocal").mount.fs.tag, "opfs");
   check("/usrlocal keeps its whole path", t.resolve("/usrlocal").rel, "/usrlocal");
@@ -616,7 +604,7 @@ function buildVolume(source, ops, firstSeq = 0n) {
   check("a path above it takes the shallower mount", nested.resolve("/a/b").mount.fs.tag, "shallow");
 
   // Refusals, each named rather than collapsed. An errno becoming a benign default is this
-  // codebase's recurring bug, so every one of these asserts the CODE.
+  // codebase's recurring bug, so every one of these asserts the code.
   const code = (fn) => { try { fn(); return "<no throw>"; } catch (e) { return e.code; } };
   check("a relative path cannot be resolved", code(() => t.resolve("usr/bin")), "EINVAL");
   check("a non-string path cannot be resolved", code(() => t.resolve(null)), "EINVAL");

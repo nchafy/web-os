@@ -1,9 +1,8 @@
 // The snapshot image container. PURE over byte arrays, for the same reason as the journal codec.
 //
-// A snapshot slot on disk is [superblock, SUPER_BYTES][image, this format]. The superblock answers
-// "which slot is newest and valid"; this answers "and are its bytes whole". Two containers rather
-// than one because they have different lifetimes and different sizes: the superblock is 40 fixed
-// bytes read from three slots at every boot, and the image is megabytes read from exactly one.
+// A snapshot slot on disk is [superblock, SUPER_BYTES][image, this format]. Two containers because
+// the superblock is 40 fixed bytes read from three slots at every boot and the image is megabytes
+// read from exactly one.
 //
 // Layout, little-endian:
 //   u32 MAGIC 'WI1\0' · u32 length · u32 crc (over [MAGIC .. body end) with this field zero)
@@ -39,7 +38,6 @@ export const IMAGE_REFUSE = Object.freeze({
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-/** Encode an arbitrary JSON-able snapshot object. */
 export function encodeImage(object) {
   const body = ENC.encode(JSON.stringify(object));
   if (body.length > MAX_IMAGE) {
@@ -57,7 +55,7 @@ export function encodeImage(object) {
 }
 
 /**
- * Decode one. Never throws, and never allocates on the strength of an unvalidated length.
+ * Never throws, and never allocates on the strength of an unvalidated length.
  *
  * @returns {{ok: true, object: any, size: number}} | {{ok: false, why: string}}
  */
@@ -84,9 +82,8 @@ export function decodeImage(bytes, off = 0, opts = {}) {
     if (crc32(span) !== want) return { ok: false, why: IMAGE_REFUSE.BAD_CRC };
   }
   try {
-    // A slice, not a subarray: TextDecoder refuses a view backed by a SharedArrayBuffer outright
-    // ("must not be shared"), and a decoder that threw inside a parse path would turn a torn
-    // image into a stack trace instead of a named refusal.
+    // A slice, not a subarray: TextDecoder refuses a view backed by a SharedArrayBuffer ("must not
+    // be shared"), which would turn a torn image into a stack trace instead of a named refusal.
     const body = bytes.slice(off + IMAGE_HEADER, off + size);
     return { ok: true, object: JSON.parse(DEC.decode(body)), size };
   } catch (e) {

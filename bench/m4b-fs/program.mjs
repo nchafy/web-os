@@ -26,19 +26,15 @@
 //   ttyline       read one line from fd 0 and report it
 //   ttyspin       spin without syscalls, so only a signal can stop it
 //   ttysleep      park in a long sleep, so a signal interrupts a parked process
-//   ttypoll       PARK in poll over two fds and report which one woke it
+//   ttypoll       park in poll over two fds and report which one woke it
 
 import {
   E, O_RDONLY, O_RDWR, O_CREAT, SPAWN_DUP2, SPAWN_CLOSE, SIGINT, SIGKILL, SIGWINCH,
   ISIG, ICANON, ECHO,
   VINTR, MAX_INLINE, POLLIN, packI64, SYS_read, SYS_poll, OPEN_MAX,
-// ABSOLUTE, NOT RELATIVE, and M5 is why. This program is spawned BY A PROCESS, so the kernel
-// loads it out of the filesystem and links it as a program (src/kernel/exec.mjs): a program's image
-// is a Blob URL whose path is opaque, so a RELATIVE specifier inside it has nothing to resolve
-// against and the module fails to load — measured, every stage here faulted with SIGABRT and
-// "never issued a syscall". An absolute specifier resolves against the document and comes out as
-// the same URL src/libos/process.mjs already has in its module map, so it costs no fetch and works
-// under BOTH loaders: the page's own spawn rewrites `/x` the same way.
+// Absolute, not relative. A program spawned by a process is loaded as a Blob URL whose path is
+// opaque (src/kernel/exec.mjs), so a relative specifier has nothing to resolve against and the
+// module fails to load — measured, every stage faulted with SIGABRT and "never issued a syscall".
 } from "/src/abi.mjs";
 
 const ENC = new TextEncoder();
@@ -47,8 +43,6 @@ const SELF = "/bench/m4b-fs/program.mjs";
 /** The spin's wall-clock ceiling. Generous: it is the error path, not the expected one. */
 const SPIN_CEILING_MS = 10000;
 
-/* ----------------------------------- the stages ----------------------------------------- */
-
 function ttylineStage(env) {
   const buf = new Uint8Array(256);
   const n = env.fs.read(0, buf);
@@ -56,30 +50,26 @@ function ttylineStage(env) {
 }
 
 /**
- * Spin WITHOUT issuing a syscall, so nothing but a signal can stop this.
- *
  * Constraint 21: there is no preemption, so a compute-bound process is killable but not
- * interruptible. The SIGINT raised by the line discipline sets a SIGPEND bit, and this process
- * only notices it at its next syscall — so the loop makes one call every SPIN_CHUNK iterations,
- * which is the shape a real program that polls for interruption has. A loop with NO syscall at
- * all would need SIGKILL, and that is the degradation the constraint names.
+ * interruptible. The SIGINT raised by the line discipline sets a SIGPEND bit this process notices
+ * only at its next syscall, so the loop makes one call every SPIN_CHUNK iterations — the shape a
+ * real program that polls for interruption has. A loop with no syscall at all would need SIGKILL,
+ * which is the degradation the constraint names.
  */
 const SPIN_CHUNK = 20000;
 
 /**
  * Spin, and only a signal stops it. The stage behind MILESTONES.md M4's one specified behaviour.
  *
- * THE CEILING IS WALL CLOCK AND NOT AN ITERATION COUNT, and that is a fix rather than a style:
- * a 200,000-iteration cap was reached in under the time it took the orchestrator to send the
- * keystroke, so on a fast machine the stage EXITED NORMALLY before the Ctrl-C arrived and the
- * proof failed with `killed: false, code: 0`. Measured at 1 failure in 4 runs of
- * `scripts/check.py --only m4b` on this machine. A check that flakes is a check that gets
- * deleted, and the thing it was guarding is the milestone's headline.
+ * The ceiling is wall clock and not an iteration count: a 200,000-iteration cap is reached in under
+ * the time the orchestrator takes to send the keystroke, so on a fast machine the stage exits
+ * normally before the Ctrl-C arrives and the proof fails with `killed: false, code: 0` — measured
+ * at 1 failure in 4 runs of `scripts/check.py --only m4b`.
  *
- * RETURNING AT ALL IS A FAILURE. A delivered SIGINT is fatal at SIG_DFL, so the kernel reaps this
- * process inside `env.syscall(0)` and there is no normal exit from a working run. The ceiling
- * exists so a BROKEN delivery path ends as a failing proof instead of a harness timeout — the
- * ceiling is the error path, so it names itself in the exit code.
+ * Returning at all is a failure: a delivered SIGINT is fatal at SIG_DFL, so the kernel reaps this
+ * process inside `env.syscall(0)` and there is no normal exit from a working run. The ceiling is
+ * the error path, so a broken delivery path ends as a failing proof naming itself in the exit code
+ * rather than as a harness timeout.
  */
 function ttyspinStage(env) {
   let i = 0;
@@ -88,9 +78,9 @@ function ttyspinStage(env) {
   for (;;) {
     acc += i % 7;
     i += 1;
-    // The syscall at which a pending signal is drained. Rare enough that the process is genuinely
-    // compute-bound between them — which is the whole claim, since delivery travels through the
-    // SAB control word and not a message this process could not service (constraint 16).
+    // The syscall at which a pending signal is drained, rare enough that the process is genuinely
+    // compute-bound between them — which is the claim, since delivery travels through the SAB
+    // control word and not a message this process could not service (constraint 16).
     if (i % SPIN_CHUNK === 0) {
       env.syscall(0);
       // The clock is read on the same cadence, so the spin between syscalls stays pure compute.
@@ -101,23 +91,22 @@ function ttyspinStage(env) {
 }
 
 /**
- * Park in `poll` over TWO fds and report which woke it.
- *
- * Constraint 42's whole case: a process has one futex word and one outstanding call, so it cannot
- * wait on a pipe and a terminal at once without this. fd 0 is a pipe's read end and fd 1 is a pty
- * slave, both installed by the orchestrator's spawn file actions.
+ * Park in `poll` over two fds and report which woke it. Constraint 42's case: a process has one
+ * futex word and one outstanding call, so without this it cannot wait on a pipe and a terminal at
+ * once. fd 0 is a pipe's read end and fd 1 is a pty slave, both installed by the orchestrator's
+ * spawn file actions.
  */
 function ttypollStage(env) {
   const r = env.tty.poll([{ fd: 0, events: POLLIN }, { fd: 1, events: POLLIN }], 5000);
   if (typeof r === "number") {
-    // `exit` is how a stage's verdict reaches its parent: the kernel reaps a process-spawned
-    // child and discards its result object, so the EXIT CODE is the channel. 2 = the call failed.
+    // `exit` is how a stage's verdict reaches its parent: the kernel reaps a process-spawned child
+    // and discards its result object, so the exit code is the channel. 2 = the call failed.
     return { ok: false, errno: -r, exit: 2 };
   }
-  // Exactly ONE ready, and it must be the pipe. A timeout would report 0; both ready would mean
+  // Exactly one ready, and it must be the pipe. A timeout would report 0; both ready would mean
   // the poll was woken by something the orchestrator did not do.
   const wokeOnPipeOnly = r.nready === 1 && r.fds[0].revents !== 0 && r.fds[1].revents === 0;
-  // AND THE DETAIL, down the pty, which the orchestrator reads off the master. That exercises the
+  // The detail goes down the pty, which the orchestrator reads off the master: that exercises the
   // slave's output path in the same proof rather than taking it on trust.
   env.fs.write(1, ENC.encode(`poll ${r.nready} ${r.fds[0].revents} ${r.fds[1].revents}\n`));
   return {
@@ -130,27 +119,18 @@ function ttypollStage(env) {
   };
 }
 
-/**
- * Park in a long sleep, so a signal is observable against a PARKED process rather than a racing
- * one. 8 s, not 30: under the `no_isig` control nothing kills this stage and it runs to
- * completion, so a longer sleep would make that control wait half a minute per proof for no extra
- * evidence. 8 s is still far longer than any proof takes to signal it.
- */
+/** Park in a long sleep, so a signal is observable against a parked process rather than a racing
+ *  one. 8 s, not 30: under the `no_isig` control nothing kills this stage and it runs to
+ *  completion, so a longer sleep costs that control half a minute per proof for no extra evidence. */
 function ttysleepStage(env) {
   const [lo, hi] = packI64(8 * 1000 * 1000 * 1000);
   const r = env.syscall(2, lo, hi, 0);
-  // THE VERDICT IS THE SLEEP'S RETURN VALUE, carried in the EXIT CODE, because the kernel reaps a
-  // process-spawned child and discards its result object (see `ttypollStage`).
-  //
-  // `p_winsize` asserted only that this process EXITED, which is true of a sleep that ran its
-  // full 8 s and returned 0 — so the SIGWINCH clause passed whether or not any signal arrived and
-  // could not fail. A non-fatal signal at a parked process is observable ONLY as the park ending
-  // early with -EINTR, so that is what has to be asserted.
+  // The verdict is the sleep's return value, carried in the exit code (see `ttypollStage`). A
+  // non-fatal signal at a parked process is observable only as the park ending early with -EINTR:
+  // the process exiting is also true of a sleep that ran its full 8 s and returned 0.
   const interrupted = r === -E.EINTR;
   return { ok: interrupted, result: r, interrupted, exit: interrupted ? 0 : 1 };
 }
-
-/* -------------------------------- orchestrator helpers ---------------------------------- */
 
 function stage(env, mode, { stdin = -1, stdout = -1, close = [] } = {}) {
   const actions = [];
@@ -195,15 +175,13 @@ function withStage(env, mode) {
   const { master, slave } = pty;
   const pid = stage(env, mode, { stdin: slave, stdout: slave, close: [master, slave] });
   if (pid < 0) return { err: `spawn ${-pid}` };
-  // The child in its OWN group, and that group made the terminal's foreground — which is what a
-  // shell does and what makes one keystroke reach the pipeline and not the shell.
+  // The child in its own group, and that group made the terminal's foreground: what a shell does,
+  // and what makes one keystroke reach the pipeline and not the shell.
   env.proc.setpgid(pid, pid);
   const set = env.tty.setPgrp(master, pid);
-  /* THE ORCHESTRATOR CLOSES ITS SLAVE FD, and this is the same mistake a pipeline makes with a
-   * pipe. The slave end stays alive while ANY reference to its description exists, so a parent
-   * that keeps its copy means the master never sees EOF — and a master read after the child died
-   * parked forever with nothing to read and no error anywhere. A shell hands the slave to the
-   * child and lets go of it. */
+  /* The slave end stays alive while any reference to its description exists, so a parent that keeps
+   * its copy means the master never sees EOF, and a master read after the child dies parks forever
+   * with nothing to read and no error anywhere. A shell hands the slave over and lets go of it. */
   env.fs.close(slave);
   return { master, pid, setPgrp: set, fgPgid: env.tty.getPgrp(master) };
 }
@@ -214,15 +192,13 @@ function masterRead(env, master, want = 256) {
   return { n, text: n > 0 ? DEC.decode(buf.subarray(0, n)) : "" };
 }
 
-/* -------------------------------- the orchestrators ------------------------------------- */
-
 function pEcho(env) {
   const s = withStage(env, "ttyline");
   if (s.err) return { ok: false, why: s.err };
   const started = awaitStarted(env, s.pid);
   env.fs.write(s.master, ENC.encode("hello\n"));
   const stat = env.proc.waitpid(s.pid);
-  // The echo is on the MASTER's read side, which is where a terminal emulator would paint it.
+  // The echo is on the master's read side, where a terminal emulator would paint it.
   const echo = masterRead(env, s.master);
   env.fs.close(s.master);
   return {
@@ -239,12 +215,10 @@ function pCanon(env) {
   const s = withStage(env, "ttyline");
   if (s.err) return { ok: false, why: s.err };
   const started = awaitStarted(env, s.pid);
-  // A PARTIAL LINE. In canonical mode the program must read nothing yet.
+  // A partial line: in canonical mode the program must read nothing yet.
   env.fs.write(s.master, ENC.encode("par"));
-  // PARKED IN `read`, WAITED FOR rather than sampled. This read the status once, immediately,
-  // and asserted `state === "running"` — true of every process that is not a zombie, and read
-  // before the child was necessarily even at its `read`. Now it waits for the two facts that
-  // mean parked: one call outstanding, and that call being SYS_read.
+  // Waited for rather than sampled, on the two facts that mean parked: one call outstanding, and
+  // that call being SYS_read. `state === "running"` is true of every process that is not a zombie.
   const parked = awaitParkedIn(env, s.pid, SYS_read);
   const beforeStatus = readStatus(env, s.pid);
   env.fs.write(s.master, ENC.encode("tial\n"));
@@ -254,7 +228,7 @@ function pCanon(env) {
     ok: !!(started.ok && stat && stat.exited),
     pid: s.pid, started, child: stat,
     stateWhilePartial: beforeStatus.state,
-    // THE CHILD WAS PARKED IN `read` while only half a line had been typed, which is what
+    // The child was parked in `read` while only half a line had been typed, which is what
     // canonical mode means: the bytes are held until the line is terminated.
     parkedOnPartialLine: parked.ok,
     parkedIn: parked.syscall, parkedRounds: parked.rounds, parkedWhy: parked.why,
@@ -288,14 +262,10 @@ function readStatus(env, pid) {
 /**
  * Poll `/proc/<pid>/status` until the process is parked in syscall `nr`.
  *
- * WHY THIS EXISTS. `readStatus(...).state === "running"` was the whole of two "parked" assertions,
- * and `running` is true of every process that is not a zombie — so both passed whether or not the
- * process had ever reached the call in question. Worse, they were read IMMEDIATELY after the write
- * that was supposed to leave the process parked, so they also raced it: a child that had not yet
- * reached its `read` reported exactly the same `running`.
- *
- * PARKED IS TWO FACTS: a call outstanding (`calls` one ahead of `replies`) and WHICH call
- * (`syscall`). Both come from /proc, so this is observed rather than inferred from timing.
+ * Parked is two facts: a call outstanding (`calls` one ahead of `replies`) and which call
+ * (`syscall`). Both come from /proc, so this is observed rather than inferred from timing. A clause
+ * on `state === "running"` would pass whether or not the process ever reached the call, and would
+ * also race the write that was supposed to park it.
  */
 function awaitParkedIn(env, pid, nr, rounds = 300) {
   for (let i = 0; i < rounds; i += 1) {
@@ -331,7 +301,7 @@ function intrAgainst(env, mode) {
     pid: s.pid, started, child: stat,
     fgPgid: s.fgPgid, setPgrp: s.setPgrp,
     killedByInt: !!(stat && stat.killed && stat.code === SIGINT),
-    // The ^C must NOT appear as a byte on the master: it was consumed, not echoed as data.
+    // The ^C must not appear as a byte on the master: it was consumed, not echoed as data.
     echo: echo.text,
     echoHasRawIntr: echo.text.includes("\u0003"),
     SIGINT,
@@ -351,8 +321,8 @@ function pWedged(env) {
 function pRaw(env) {
   const s = withStage(env, "ttyline");
   if (s.err) return { ok: false, why: s.err };
-  // ISIG OFF: a ^C is DATA. Read-modify-write, which is the shape that stays correct as flags
-  // are added — a caller that built a termios from scratch would clear words it never set.
+  // With ISIG off a ^C is data. Read-modify-write, because a caller that built a termios from
+  // scratch would clear words it never set.
   const tm = env.tty.get(s.master);
   if (typeof tm === "number") return { ok: false, why: `tty_get ${-tm}` };
   tm.lflag &= ~ISIG;
@@ -365,7 +335,7 @@ function pRaw(env) {
   return {
     ok: !!(started.ok && set === 0 && stat && stat.exited),
     pid: s.pid, started, setResult: set, child: stat,
-    // The child exited normally, having READ the ^C as a byte rather than dying of it.
+    // The child exited normally, having read the ^C as a byte rather than dying of it.
     exitedNormally: !!(stat && stat.exited),
     lflagAfter: tm.lflag,
   };
@@ -396,7 +366,7 @@ function pTermios(env) {
       && !!(before.lflag & ISIG),
     defaultVintr: before.cc[VINTR],
     after,
-    // THE RESERVED WORDS SURVIVED. A caller built against today's three lflag bits must not
+    // The reserved words survived: a caller built against today's three lflag bits must not
     // silently clear a flag a later milestone adds.
     reservedPreserved: after.iflag === 0x11112222 && after.oflag === 0x33334444
       && after.cflag === 0x55556666,
@@ -412,8 +382,8 @@ function pWinsize(env) {
   if (s.err) return { ok: false, why: s.err };
   const started = awaitStarted(env, s.pid);
   const before = env.tty.winsizeGet(s.master);
-  // A resize on the MASTER must raise SIGWINCH on the slave's foreground group. The stage has
-  // SIGWINCH at SIG_DFL, which is not fatal, so it keeps sleeping — the signal is observable as
+  // A resize on the master must raise SIGWINCH on the slave's foreground group. The stage has
+  // SIGWINCH at SIG_DFL, which is not fatal, so it keeps sleeping and the signal is observable as
   // the sleep returning -EINTR rather than as a death.
   const set = env.tty.winsizeSet(s.master, 40, 120);
   const after = env.tty.winsizeGet(s.master);
@@ -425,8 +395,8 @@ function pWinsize(env) {
     before, after,
     resized: after.rows === 40 && after.cols === 120,
     child: stat,
-    // THE STAGE'S OWN ACCOUNT. `stat.exited` alone was true of an uninterrupted 8-second sleep,
-    // so it said nothing about SIGWINCH; the stage exits 0 only when its sleep returned -EINTR.
+    // The stage's own account: it exits 0 only when its sleep returned -EINTR. `stat.exited` alone
+    // is true of an uninterrupted 8-second sleep and says nothing about SIGWINCH.
     sleepInterrupted: !!(stat && stat.exited && stat.code === 0),
     stageVerdict: stat ? stat.code : null,
     EINTR: E.EINTR,
@@ -434,41 +404,37 @@ function pWinsize(env) {
 }
 
 /**
- * A pty operation whose signal lands on THE PROCESS MAKING THE CALL, which must be answered once.
+ * A pty operation whose signal lands on the process making the call, which must be answered once.
  *
- * `pty_open` sets the foreground group from the OPENER's pgid, so until a shell moves it — and a
+ * `pty_open` sets the foreground group from the opener's pgid, so until a shell moves it — and a
  * shell resizing its terminal before it spawns anything has not moved it — a resize on the master
- * raises SIGWINCH on the caller itself. `raiseOne` then interrupts the in-flight call, and the
- * handler's return used to be replied a SECOND time: two SEQ bumps and two G_INFLIGHT decrements
- * for one call, which drives the kernel's depth gauge negative and breaks the issued == replied
- * identity `check_syscall` asserts. `finish` now drops the second.
+ * raises SIGWINCH on the caller itself. `raiseOne` interrupts the in-flight call, and replying to
+ * the handler's return as well would be two SEQ bumps and two G_INFLIGHT decrements for one call:
+ * the depth gauge goes negative and the issued == replied identity `check_syscall` asserts breaks.
  *
- * WHAT THIS ASSERTS, and why it is checked from here rather than only in the kernel's counters:
- * the process must still be able to make calls afterwards. A channel one reply ahead of itself is
- * the user-visible wreckage, and `getpgid` returning something other than this process's own group
- * is how a program would meet it.
+ * This is checked from here rather than only in the kernel's counters because the process must
+ * still be able to make calls afterwards. A channel one reply ahead of itself is the user-visible
+ * wreckage, and `getpgid` returning something other than this process's own group is how a program
+ * meets it.
  */
 function pSelfwinch(env) {
   const pty = env.tty.ptyOpen();
   if (typeof pty === "number") return { ok: false, why: `pty_open ${-pty}` };
   const { master, slave } = pty;
   const mine = env.proc.getpgid(0);
-  // DELIBERATELY NOT MOVED. `withStage` puts the stage's own group in the foreground, which is
-  // what a shell does per pipeline and what makes every other proof here signal a CHILD.
+  // Deliberately not moved. `withStage` puts the stage's own group in the foreground, which is
+  // what a shell does per pipeline and what makes every other proof here signal a child.
   const fgBefore = env.tty.getPgrp(master);
   const before = env.tty.winsizeGet(master);
   const set = env.tty.winsizeSet(master, 40, 120);
-  /* THE PENDING BIT IS DRAINED AT THE NEXT SYSCALL ENTRY, which answers -EINTR without making a
-   * call at all (src/libos/syscall.mjs's `interruptedAtEntry`). So the first call after a signal
-   * is EXPECTED to refuse — that is delivery, not damage — and the call after THAT is the one
-   * that says whether the channel is still in step: it must return MY group, not the resize
-   * call's answer.
+  /* The pending bit is drained at the next syscall entry, which answers -EINTR without making a
+   * call at all (src/libos/syscall.mjs's `interruptedAtEntry`). So the first call after a signal is
+   * expected to refuse — that is delivery, not damage — and the call after that is the one that
+   * says whether the channel is still in step: it must return my group, not the resize's answer.
    *
-   * THE ORDER HERE IS LOAD-BEARING, and reading the terminal back first is how it was got wrong:
-   * `winsizeGet` was the call that absorbed the drain, so `after` came back as the integer -EINTR
-   * and `resized` compared an errno's `.rows` against 40. Measured: `after: -27, setResult: -27`,
-   * which is `scripts/check.py --only m4b`. Every read of the terminal's state comes after the
-   * drain. */
+   * The order is load-bearing: every read of the terminal's state comes after the drain. A
+   * `winsizeGet` placed first absorbs the drain, so `after` comes back as the integer -EINTR and
+   * `resized` compares an errno's `.rows` against 40. */
   const drained = env.proc.getpgid(0);
   const nextCall = env.proc.getpgid(0);
   const after = env.tty.winsizeGet(master);
@@ -479,15 +445,15 @@ function pSelfwinch(env) {
     myPgid: mine, fgBefore,
     foregroundIsMine: fgBefore === mine,
     before, after,
-    // THE SIDE EFFECT COMPLETED. `setWinsize` resizes and only then signals, so an interrupted
-    // caller must still find the terminal resized — anything else would mean the resize was lost
-    // to its own signal.
+    // The side effect completed. `setWinsize` resizes and only then signals, so an interrupted
+    // caller must still find the terminal resized; anything else means the resize was lost to its
+    // own signal.
     resized: after.rows === 40 && after.cols === 120,
     // The caller observes its own interruption. -EINTR, not 0: the call was answered by the
     // signal rather than by the handler.
     setResult: set,
     sawEintr: set === -E.EINTR,
-    // The channel is not one reply ahead: the NEXT call returns its own answer.
+    // The channel is not one reply ahead: the next call returns its own answer.
     drained, drainedAtEntry: drained === -E.EINTR,
     nextCall, channelIntact: nextCall === mine,
     EINTR: E.EINTR,
@@ -495,9 +461,9 @@ function pSelfwinch(env) {
 }
 
 /**
- * ONE process waiting on TWO fds, woken by either. Constraint 42's whole point: a process has one
- * futex word and one outstanding call, so without `poll` it cannot wait on a pipe and a terminal
- * at once — which is the case M4a's terminal hits first.
+ * One process waiting on two fds, woken by either. Constraint 42's point: a process has one futex
+ * word and one outstanding call, so without `poll` it cannot wait on a pipe and a terminal at once,
+ * which is the case M4a's terminal hits first.
  */
 function pPoll(env) {
   ensureStdin(env);
@@ -508,10 +474,10 @@ function pPoll(env) {
 
   const set = [{ fd: pipe.rfd, events: POLLIN }, { fd: pty.master, events: POLLIN }];
 
-  // 1. NOTHING READY, timeout 0: a poll, not a wait.
+  // 1. Nothing ready, timeout 0: a poll, not a wait.
   const idle = env.tty.poll(set, 0);
 
-  // 2. The PIPE becomes ready.
+  // 2. The pipe becomes ready.
   env.fs.write(pipe.wfd, ENC.encode("p"));
   const viaPipe = env.tty.poll(set, 0);
 
@@ -519,7 +485,7 @@ function pPoll(env) {
   const buf = new Uint8Array(16);
   env.fs.read(pipe.rfd, buf, 0, 1);
 
-  // 3. The TERMINAL becomes ready — via the echo of a keystroke, which is output on the master.
+  // 3. The terminal becomes ready, via the echo of a keystroke, which is output on the master.
   env.fs.write(pty.master, ENC.encode("k"));
   const viaTty = env.tty.poll(set, 0);
 
@@ -535,7 +501,7 @@ function pPoll(env) {
     pipeRevents: viaPipe.fds[0].revents,
     ttyReady: viaTty.nready,
     ttyRevents: viaTty.fds[1].revents,
-    // The pipe must NOT still be flagged once drained, or `poll` is reporting staleness.
+    // The pipe must not still be flagged once drained, or `poll` is reporting staleness.
     pipeQuietAfterDrain: viaTty.fds[0].revents === 0,
     badRevents: typeof bad === "object" ? bad.fds[0].revents : bad,
     POLLIN,
@@ -543,11 +509,9 @@ function pPoll(env) {
 }
 
 /**
- * A process PARKED in `poll` over two fds, woken by one of them.
- *
- * The non-blocking proof above shows `poll` can report readiness; this shows it can WAIT, which is
- * the half constraint 42 is about and the half M4a's terminal needs — parked at idle with no
- * output, keys must still wake it.
+ * A process parked in `poll` over two fds, woken by one of them. The non-blocking proof above shows
+ * `poll` can report readiness; this shows it can wait, which is the half constraint 42 is about and
+ * the half M4a's terminal needs — parked at idle with no output, keys must still wake it.
  */
 function pPollWait(env) {
   ensureStdin(env);
@@ -567,18 +531,17 @@ function pPollWait(env) {
   env.fs.close(pipe.rfd);
   env.fs.close(pty.slave);
 
-  // WAIT UNTIL IT IS ACTUALLY PARKED IN THE POLL, observed rather than slept for — which is what
-  // the comment claimed while `awaitStarted` waited only for the stage's FIRST syscall, several
-  // calls before the `poll`.
+  // Parked in the poll, observed rather than slept for. `awaitStarted` alone waits only for the
+  // stage's first syscall, several calls before the `poll`.
   const started = awaitStarted(env, pid);
   const parkedInPollObserved = awaitParkedIn(env, pid, SYS_poll);
   const statusWhileParked = readStatus(env, pid);
 
-  // Make exactly ONE of the two ready.
+  // Make exactly one of the two ready.
   env.fs.write(pipe.wfd, ENC.encode("wake"));
   const stat = env.proc.waitpid(pid);
-  // The stage's own account, read off the master — so the orchestrator asserts on what the stage
-  // SAW rather than only on that it exited.
+  // The stage's own account, read off the master, so the orchestrator asserts on what the stage saw
+  // rather than only on that it exited.
   const said = masterRead(env, pty.master, 128);
   env.fs.close(pipe.wfd);
   env.fs.close(pty.master);
@@ -594,10 +557,8 @@ function pPollWait(env) {
     ttyRevents: fields ? Number(fields[3]) : null,
     wokeOnPipeOnly: !!(fields && Number(fields[1]) === 1 && Number(fields[2]) !== 0
       && Number(fields[3]) === 0),
-    // THE STAGE WAS PARKED IN `poll`. The comment here claimed the syscall name came from
-    // /proc while the code read `state`, which is `running` for every process that has not
-    // exited. The syscall number now does come from /proc, and `calls` one ahead of `replies` is
-    // what makes it a PARK rather than a call in progress.
+    // The stage was parked in `poll`: the syscall number comes from /proc, and `calls` one ahead of
+    // `replies` is what makes it a park rather than a call in progress.
     parkedInPoll: parkedInPollObserved.ok,
     parkedIn: parkedInPollObserved.syscall,
     parkedRounds: parkedInPollObserved.rounds,
@@ -608,11 +569,10 @@ function pPollWait(env) {
 }
 
 /**
- * A STAGE THAT PARKS IN `poll` OVER NOTHING, which is POSIX's `poll(NULL, 0, -1)`.
- *
- * It must block until a signal arrives. The kernel answered 0 IMMEDIATELY — a busy-wait where the
- * caller asked to block, which is the one shape where a program spins the kernel by doing exactly
- * what POSIX says. Returning at all means it did not block, so the verdict is in the exit code.
+ * A stage that parks in `poll` over nothing, which is POSIX's `poll(NULL, 0, -1)`. It must block
+ * until a signal arrives. A kernel that answers 0 immediately is a busy-wait where the caller asked
+ * to block — the one shape where a program spins the kernel by doing exactly what POSIX says.
+ * Returning at all means it did not block, so the verdict is in the exit code.
  */
 function ttyemptypollStage(env) {
   const r = env.tty.poll([], -1);
@@ -622,11 +582,9 @@ function ttyemptypollStage(env) {
 }
 
 /**
- * `poll(NULL, 0, -1)` blocks until a signal, and the signal ends it.
- *
- * The proof is the stage still being parked in SYS_poll when the orchestrator looks, and dying of
- * the signal rather than exiting. A kernel that answers immediately gives a stage that exits 1
- * before the first look.
+ * `poll(NULL, 0, -1)` blocks until a signal, and the signal ends it. The proof is the stage still
+ * being parked in SYS_poll when the orchestrator looks, and dying of the signal rather than
+ * exiting. A kernel that answers immediately gives a stage that exits 1 before the first look.
  */
 function pEmptyPoll(env) {
   const pid = stage(env, "ttyemptypoll", {});
@@ -638,30 +596,29 @@ function pEmptyPoll(env) {
   return {
     ok: !!(started.ok && parked.ok && stat && stat.killed && stat.code === SIGINT),
     pid, started,
-    // PARKED, not merely alive: a call outstanding, and that call being `poll`.
+    // Parked, not merely alive: a call outstanding, and that call being `poll`.
     parkedInEmptyPoll: parked.ok, parkedIn: parked.syscall, parkedWhy: parked.why,
     child: stat,
-    // Killed BY THE SIGNAL. A stage that returned from the poll would have exited 1 instead.
+    // Killed by the signal. A stage that returned from the poll would have exited 1 instead.
     endedBySignal: !!(stat && stat.killed && stat.code === SIGINT),
     SIGINT, SYS_poll,
   };
 }
 
 /**
- * AN FD TABLE DRIVEN TO `OPEN_MAX`, and then the pipe closed.
+ * An fd table driven to `OPEN_MAX`, and then the pipe closed.
  *
- * `dup` raised the description's refcount BEFORE asking for an fd, so every refused `dup` left the
- * count one high — and a kind's `close` op fires only when the LAST reference goes. A pipe whose
- * writer count never drops leaves its reader on an EOF that cannot arrive, which is constraint
- * 92's deadlock reached through -EMFILE. The observable is the read: EOF, or a hang with no error
- * anywhere.
+ * A `dup` that raises the description's refcount before asking for an fd leaves the count one high
+ * on every refusal, and a kind's `close` op fires only when the last reference goes. A pipe whose
+ * writer count never drops leaves its reader on an EOF that cannot arrive, which is constraint 92's
+ * deadlock reached through -EMFILE. The observable is the read: EOF, or a hang with no error.
  */
 function pFdLimit(env) {
   ensureStdin(env);
   const pipe = env.proc.pipe2();
   if (typeof pipe === "number") return { ok: false, why: `pipe2 ${-pipe}` };
-  // Fill the table with copies of the WRITE end, so every refused dup is a chance to leak a
-  // reference to the description whose closure the reader's EOF depends on.
+  // Copies of the write end, so every refused dup is a chance to leak a reference to the
+  // description whose closure the reader's EOF depends on.
   const copies = [];
   let refused = 0;
   for (let i = 0; i < OPEN_MAX + 8; i += 1) {
@@ -671,11 +628,11 @@ function pFdLimit(env) {
   }
   for (const fd of copies) env.fs.close(fd);
   env.fs.close(pipe.wfd);
-  /* ASKED THROUGH `poll`, NOT `read`, and that is deliberate. Every reference to the write end is
-   * gone, so the reader must see EOF — but with a leaked reference it sees NOTHING, and a `read`
-   * would park forever. A proof whose failure mode is a hang ends as a BROKEN check carrying no
-   * expectations, which cannot be told apart from a harness fault; `poll` with a deadline turns
-   * the same defect into a reported `nready: 0`. A check has to be able to FAIL, not wedge. */
+  /* Asked through `poll`, not `read`. Every reference to the write end is gone, so the reader must
+   * see EOF — but with a leaked reference it sees nothing and a `read` would park forever. A proof
+   * whose failure mode is a hang ends as a BROKEN check carrying no expectations, indistinguishable
+   * from a harness fault; `poll` with a deadline turns the same defect into a reported
+   * `nready: 0`. */
   const ready = env.tty.poll([{ fd: pipe.rfd, events: POLLIN }], 500);
   const sawEof = typeof ready !== "number" && ready.nready === 1
     && (ready.fds[0].revents & POLLIN) !== 0;
@@ -688,7 +645,7 @@ function pFdLimit(env) {
     duped: copies.length, refusedErrno: refused,
     // The table really did fill: otherwise the refused dups never happened and nothing was tested.
     tableFilled: refused > 0,
-    // A pipe with no writer left is READABLE — the read returns 0, and EOF is a readable event
+    // A pipe with no writer left is readable: the read returns 0, and EOF is a readable event
     // rather than a condition a poller should sleep through.
     eofAfterRefusedDups: sawEof,
     pollResult: typeof ready === "number" ? ready : ready.nready,
@@ -699,16 +656,14 @@ function pFdLimit(env) {
 }
 
 /**
- * A stage that parks in `poll` over a pipe FOREVER, so only a wake can end it.
- *
- * An infinite timeout is the only way to assert the wake itself: a finite one is answered
- * correctly by the timeout's own rescan (`docs/DECISIONS.md` D20), so it cannot tell a working
- * wake from a late one.
+ * A stage that parks in `poll` over a pipe forever, so only a wake can end it. An infinite timeout
+ * is the only way to assert the wake itself: a finite one is answered correctly by the timeout's
+ * own rescan (`docs/DECISIONS.md` D20), so it cannot tell a working wake from a late one.
  */
 function ttyhuppollStage(env) {
   const r = env.tty.poll([{ fd: 0, events: POLLIN }], -1);
   if (typeof r === "number") return { ok: false, errno: -r, exit: 2 };
-  // POLLIN because a pipe with no writer is READABLE: the read returns 0, and EOF is a readable
+  // POLLIN because a pipe with no writer is readable: the read returns 0, and EOF is a readable
   // event rather than a condition a poller should sleep through.
   const hup = (r.fds[0].revents & POLLIN) !== 0;
   return { ok: hup, nready: r.nready, revents: r.fds[0].revents, exit: hup ? 0 : 1 };
@@ -728,37 +683,37 @@ function awaitExit(env, pid, rounds = 400) {
 }
 
 /**
- * TEARDOWN'S fd SWEEP MUST WAKE A PEER'S PARKED `poll`.
+ * Teardown's fd sweep must wake a peer's parked `poll`.
  *
- * The wake is hooked on `reply`, which is the single funnel every state change passes through —
- * so no pollable kind can forget it (constraint 109). Teardown is the one path that moves
- * readiness and does NOT reply: its only `reply` runs BEFORE the sweep that drops the dying
- * process's pipe `writers` to 0. A peer parked over that pipe waited forever.
+ * The wake is hooked on `reply`, the single funnel every state change passes through, so no
+ * pollable kind can forget it (constraint 109). Teardown is the one path that moves readiness and
+ * does not reply: its only `reply` runs before the sweep that drops the dying process's pipe
+ * `writers` to 0, leaving a peer parked over that pipe waiting forever.
  *
- * THE ORCHESTRATOR OWNS THE DEADLINE, not the kernel. The stage polls with an infinite timeout,
- * because a finite one would be answered by its own rescan and prove nothing — so a missing wake
- * is a process that never returns. Rather than let that become a harness timeout and a BROKEN
- * check carrying no expectations, this waits a bounded number of rounds and then SIGKILLs, so the
- * failure is reported as `wokenByTeardown: false` with the stage still parked.
+ * The orchestrator owns the deadline, not the kernel. The stage polls with an infinite timeout,
+ * because a finite one would be answered by its own rescan and prove nothing, so a missing wake is
+ * a process that never returns. Rather than let that become a harness timeout and a BROKEN check
+ * carrying no expectations, this waits a bounded number of rounds and then SIGKILLs, so the failure
+ * is reported as `wokenByTeardown: false` with the stage still parked.
  */
 function pTeardownWake(env) {
   ensureStdin(env);
   const pipe = env.proc.pipe2();
   if (typeof pipe === "number") return { ok: false, why: `pipe2 ${-pipe}` };
-  // The POLLER gets the read end on fd 0. The WRITER is a second stage holding the write end, and
+  // The poller gets the read end on fd 0. The writer is a second stage holding the write end, and
   // killing it is what makes the pipe readable through teardown rather than through a close.
   const poller = stage(env, "ttyhuppoll", { stdin: pipe.rfd, close: [pipe.rfd, pipe.wfd] });
   if (poller < 0) return { ok: false, why: `spawn poller ${-poller}` };
   const writer = stage(env, "ttyspin", { stdout: pipe.wfd, close: [pipe.rfd, pipe.wfd] });
   if (writer < 0) return { ok: false, why: `spawn writer ${-writer}` };
-  // THE ORCHESTRATOR LETS GO OF BOTH ENDS, or the poller's EOF depends on this process too.
+  // The orchestrator lets go of both ends, or the poller's EOF depends on this process too.
   env.fs.close(pipe.rfd);
   env.fs.close(pipe.wfd);
   const pollerStarted = awaitStarted(env, poller);
   const writerStarted = awaitStarted(env, writer);
   const parked = awaitParkedIn(env, poller, SYS_poll);
-  // KILL THE WRITER. Its teardown closes the write end, which is the state change that must wake
-  // the poller — and it goes through no `reply` at all.
+  // The writer's teardown closes the write end, which is the state change that must wake the
+  // poller, and it goes through no `reply` at all.
   const killed = env.proc.kill(writer, SIGKILL);
   const woke = awaitExit(env, poller, 400);
   if (!woke.ok) env.proc.kill(poller, SIGKILL);
@@ -770,9 +725,9 @@ function pTeardownWake(env) {
     pollerPid: poller, writerPid: writer,
     parkedInPoll: parked.ok, parkedIn: parked.syscall, parkedWhy: parked.why,
     killResult: killed,
-    // THE SUBJECT. False means the poller was still parked after its only writer was torn down.
+    // The subject. False means the poller was still parked after its only writer was torn down.
     wokenByTeardown: woke.ok, wokeRounds: woke.rounds, stateAfter: woke.state,
-    // And it woke with the RIGHT answer: its exit code is 0 only if revents carried POLLIN.
+    // And it woke with the right answer: its exit code is 0 only if revents carried POLLIN.
     pollerVerdict: pollerStat ? pollerStat.code : null,
     poller: pollerStat, writer: writerStat,
     SYS_poll,
@@ -782,9 +737,9 @@ function pTeardownWake(env) {
 /**
  * An `open` refused with -EMFILE must not keep the file's sync access handle.
  *
- * `createSyncAccessHandle` is AN EXCLUSIVE LOCK PER FILE, so a handle leaked by a refused open
- * made that one file unopenable by any process for the lifetime of the page — a retryable errno
- * turned into permanent loss of one file. The observable is the SECOND open, after room is made.
+ * `createSyncAccessHandle` is an exclusive lock per file, so a handle leaked by a refused open makes
+ * that one file unopenable by any process for the lifetime of the page: a retryable errno turned
+ * into permanent loss of one file. The observable is the second open, after room is made.
  */
 function pOpenLeak(env) {
   ensureStdin(env);
@@ -793,8 +748,8 @@ function pOpenLeak(env) {
   if (seed < 0) return { ok: false, why: `seed open ${-seed}` };
   env.fs.write(seed, ENC.encode("hello"));
   env.fs.close(seed);
-  // Fill the table with copies of something cheap, so the open below is refused for want of an fd
-  // rather than for any reason of its own.
+  // Copies of something cheap, so the open below is refused for want of an fd rather than for any
+  // reason of its own.
   const copies = [];
   let refused = 0;
   for (let i = 0; i < OPEN_MAX + 8; i += 1) {
@@ -805,7 +760,7 @@ function pOpenLeak(env) {
   const refusedOpen = env.fs.open(path, O_RDONLY);
   // Room again.
   for (const fd of copies) env.fs.close(fd);
-  // THE SUBJECT: the file must still be openable. A leaked handle makes this fail forever.
+  // The subject: the file must still be openable. A leaked handle makes this fail forever.
   const second = env.fs.open(path, O_RDONLY);
   const buf = new Uint8Array(16);
   const n = second >= 0 ? env.fs.read(second, buf) : -1;

@@ -1,47 +1,28 @@
-// A generated filesystem: content computed on read, nothing stored.
+// A generated filesystem: content computed on read, nothing stored. ONE adapter, so a new one is a
+// pair of pure functions over a relative path, `lookup` and `list`, and a new generated FILE is a
+// row in a table.
 //
-// ONE adapter, so `/proc` and `/dev` are each a pair of pure functions over a relative path rather
-// than two implementations of fourteen VFS methods. Adding the next generated filesystem is adding
-// data; adding the next generated FILE is adding a row to a table. That is the shape the
-// code-design rule asks for, and the reason this file exists instead of a procfs that answers
-// `chmod` and a devfs that forgot to.
-//
-// WHY THIS IS NOT IN src/fs/. A generated filesystem reads live kernel state — the process table,
-// the trace ring — so it cannot be a total function over its input, and `fsfuzz.py`'s purity lint
-// would reject it. The MOUNT TABLE is pure and lives there; the drivers are here.
-//
-// THE ONE INVARIANT: a generated filesystem is read-only, and it refuses every mutation with a
-// single configured errno. `/proc` refuses with EROFS because it IS a filesystem that cannot be
-// written; a generated file that accepted a `chmod` and then forgot it would be worse than one
-// that refuses, because the caller would believe it.
+// THE ONE INVARIANT: a generated filesystem is read-only, and refuses every mutation with a single
+// configured errno. Not in `src/fs/` because it reads live kernel state, so it is not a total
+// function over its input and `fsfuzz.py`'s purity lint would reject it.
 
 import { fnv1aString, NAME_MAX } from "../abi.mjs";
 import { DIR, FILE, LINK, FsError, splitPath } from "../fs/vfs.mjs";
 
 /**
- * Inode numbers for generated files are a HASH OF THE PATH, not an allocation.
- *
- * There is no inode table to allocate from, and the number has to be stable across reads so that
- * two `stat`s of `/proc/7/status` agree. A hash gives that for free. What it does not give is
- * uniqueness: two generated paths can collide, and then two files report one inode number.
- *
- * Nothing in the system depends on a generated inode being unique — `/proc` has no hard links, no
- * rename and no inode-keyed cache, and the kernel's per-inode lock is only taken by the OPFS
- * store. Said plainly rather than left for a reader to assume: if a future caller starts using an
- * inode number from a generated filesystem as an identity, this becomes a real defect and the
- * number has to become an allocation.
- *
- * The device number is mixed in so two generated mounts cannot collide with each other, and the
- * top bit is forced clear so the value stays a positive safe integer through the u64 field.
+ * A HASH OF THE PATH, not an allocation: there is no inode table, and the number must be stable
+ * across reads so two `stat`s of `/proc/7/status` agree. IT IS NOT AN IDENTITY — a hash is not
+ * unique, and nothing here has hard links, rename or an inode-keyed cache. The device is mixed in
+ * so two generated mounts cannot collide, and the top bit is clear so the value stays a positive
+ * safe integer through the u64 field.
  */
 export function synthIno(dev, rel) {
   const h = fnv1aString(`${dev}:${rel}`);
-  // Never 0: inode 0 means "no inode" in too many places to be worth the ambiguity, and ROOT_INO
-  // is 1 on the OPFS volume so starting above it keeps a generated number visibly different.
+  // Never 0 (which means "no inode") and never 1 (ROOT_INO on the OPFS volume).
   return (h % 0x7ffffffe) + 2;
 }
 
-/** The node shape a generator returns. Normalized here so a generator may omit the boring parts. */
+/** Normalized here so a generator may omit the boring parts. */
 function node(raw) {
   const type = raw.type || FILE;
   return {
@@ -53,19 +34,17 @@ function node(raw) {
     content: raw.content,
     target: raw.target,
     size: raw.size,
-    // A character device's name: the kernel object `open` must resolve this to, instead of bytes.
-    // `src/kernel/devfs.mjs` CHARDEVS is the only producer and `openDecision` the only consumer.
+    // The kernel object `open` resolves to instead of bytes; devfs.mjs CHARDEVS is its only source.
     chardev: raw.chardev,
-    // Whether this file's content changes between one read and the next. See `#info`.
+    // Content changes between one read and the next. See `#info`.
     volatile: raw.volatile === true,
   };
 }
 
 const ENCODER = new TextEncoder();
 
-/** A node's content length without re-generating it. A string is measured as UTF-8 bytes, which is
- *  what `bytesAt` will encode it to — `text.length` would be wrong for any non-ASCII content and
- *  would make `stat` and `read` disagree about the size of the same file. */
+/** UTF-8 bytes, which is what `bytesAt` encodes a string to: `text.length` would make `stat` and
+ *  `read` disagree about the size of any non-ASCII file. */
 function contentLength(content) {
   if (content === undefined) return 0;
   if (typeof content === "string") return ENCODER.encode(content).length;
@@ -73,23 +52,13 @@ function contentLength(content) {
 }
 
 /**
- * A read-only generated filesystem, presenting the subset of the VFS surface the kernel's path
- * calls reach.
- *
- * `lookup(rel)` returns a node or null (null is ENOENT). `list(rel)` returns an array of child
- * names, or null when `rel` is not a directory. Both take a path RELATIVE to the mountpoint and
- * beginning with "/", because the mount table hands them that and a generator that knew where it
- * was mounted could depend on it.
+ * `lookup(rel)` returns a node or null (null is ENOENT); `list(rel)` returns child names, or null
+ * when `rel` is not a directory. Both take a path RELATIVE to the mountpoint and beginning with
+ * "/", so a generator cannot depend on where it was mounted.
  */
 export class SynthFS {
-  /**
-   * @param {object} spec
-   * @param {string} spec.name        the filesystem type, for messages
-   * @param {Function} spec.lookup    (rel) => node | null
-   * @param {Function} spec.list      (rel) => string[] | null
-   * @param {string} [spec.mutErrno]  the code every mutation is refused with
-   * @param {string[]} [spec.chardevs] single-component names that are character devices
-   */
+  /** `mutErrno` is the code every mutation is refused with; `chardevs` are single-component names
+   *  that resolve to a kernel object. */
   constructor({ name, lookup, list, mutErrno = "EROFS", chardevs = [] }) {
     this.name = name;
     this.dev = 0;
@@ -104,39 +73,26 @@ export class SynthFS {
   #mutErrno;
   #chardevs;
 
-  /**
-   * The character device at `rel`, or null. A SET LOOKUP AND NEVER A GENERATOR CALL.
-   *
-   * `open` has to ask this BEFORE it decides a write is refused by the mount, and it asks on every
-   * open of every generated mount — so it cannot be `#lookup(rel).chardev`. `/dev/trace`'s
-   * generator renders the whole trace, and routing this question through it would run that for
-   * every `open("/proc/<pid>/status")`. The names are declared once in `src/kernel/devfs.mjs`'s
-   * CHARDEVS table and handed to the constructor from the same object the node lookup reads.
-   *
-   * `/proc`'s set is empty, so its answer is a constant false.
-   */
+  /** A SET LOOKUP AND NEVER A GENERATOR CALL: `open` asks this on every open of every generated
+   *  mount, and `/dev/trace`'s generator renders the whole trace. */
   chardevAt(rel) {
     if (this.#chardevs.size === 0) return null;
     const parts = splitPath(rel);
     return parts.length === 1 && this.#chardevs.has(parts[0]) ? parts[0] : null;
   }
 
-  /** Set once by the kernel when the filesystem is mounted, so `stat` can report the device. */
   setDev(dev) {
     this.dev = dev | 0;
   }
 
-  /** The node at `rel`, or a thrown ENOENT. The one place a miss becomes an error. */
+  /** The one place a miss becomes an error. */
   #need(rel) {
     const raw = this.#lookup(rel);
     if (!raw) throw new FsError("ENOENT", rel);
     return node(raw);
   }
 
-  /**
-   * A generated file's bytes. Computed on every call, which is the whole point: a cached answer is
-   * what makes a killed process linger in `/proc`.
-   */
+  /** Computed on every call: a cached answer is what makes a killed process linger in `/proc`. */
   bytesAt(rel) {
     const n = this.#need(rel);
     if (n.type === DIR) throw new FsError("EISDIR", rel);
@@ -145,27 +101,14 @@ export class SynthFS {
     return n.content;
   }
 
-  /**
-   * The VFS's `#info` shape, which is what `writeStat` and `statRecord` consume.
-   *
-   * The size is computed FROM THE NODE ALREADY IN HAND, never by looking the path up again. One
-   * operation is one `lookup`, and that is load-bearing rather than an optimisation: a generator
-   * may do real work per call, and `/dev/trace`'s did. When this routed the size through
-   * `bytesAt`, a single `stat` ran the generator twice.
-   */
+  /** The VFS's `#info` shape. The size comes FROM THE NODE ALREADY IN HAND: routing it through
+   *  `bytesAt` would run `/dev/trace`'s whole render twice for one `stat`. */
   #info(rel, n) {
-    // A VOLATILE FILE DOES NOT PUBLISH A SIZE, and reports 0 — which is what Linux's own `/proc`
-    // does, for the reason measured here rather than taken on faith.
-    //
-    // `/proc/<pid>/status` contains the process's syscall counters, so READING IT CHANGES IT. A
-    // `stat` then a `read` ran the generator twice and disagreed: 147 bytes published, 145 bytes
-    // returned, because the counters had grown a digit in between (measured 2026-11-15,
-    // www/m3.html proof `proc_files`). Any number this call published would already be stale, so
-    // it publishes none and a caller reads to EOF.
-    //
-    // `fstat` on an OPEN description is the opposite case and reports an exact size: the bytes
-    // were snapshotted at `open`, so that length is both knowable and stable for the life of the
-    // fd. The two calls answer differently on purpose.
+    // A VOLATILE FILE PUBLISHES NO SIZE and reports 0, as Linux's own `/proc` does: reading
+    // `/proc/<pid>/status` changes it, so a `stat` then a `read` publish 147 bytes and return 145,
+    // the syscall counters having grown a digit in between (measured 2026-11-15, www/m3.html proof
+    // `proc_files`). `fstat` on an OPEN description instead reports the exact length of the
+    // snapshot taken at `open`. The two calls answer differently on purpose.
     const size = n.volatile
       ? 0
       : (n.size !== undefined
@@ -195,9 +138,8 @@ export class SynthFS {
     return this.#info(rel, this.#need(rel));
   }
 
-  /** No generated filesystem here has symlinks, so `lstat` and `stat` agree. Stated, not implied:
-   *  a generator that adds a LINK node gets a correct `lstat` for free and a `stat` that does not
-   *  follow it, which is wrong — and the assertion below is what would catch that. */
+  /** Nothing generated here has symlinks, so `lstat` and `stat` agree. A generator that added a
+   *  LINK node would get a `stat` that does not follow it; the throw below catches that. */
   lstat(cred, rel) {
     const n = this.#need(rel);
     if (n.type === LINK) {
@@ -231,30 +173,17 @@ export class SynthFS {
   }
 
   /**
-   * `open` against a generated file. Returns a description-shaped object the kernel installs
-   * directly — there is no Store round trip and no OPFS handle, because there is no blob.
-   *
-   * The bytes are snapshotted HERE, at open, and that is a decision rather than an accident: a
-   * process that reads `/proc/<pid>/status` in two `read()` calls must not see the first half of
-   * one process and the second half of another. POSIX's `/proc` does the same thing.
+   * A description-shaped object the kernel installs directly: no Store round trip and no OPFS
+   * handle, because there is no blob. THE BYTES ARE SNAPSHOTTED HERE, at open, so a process
+   * reading `/proc/<pid>/status` in two `read()` calls cannot see two different moments.
    */
   openDecision(cred, rel, opts = {}) {
-    // M4a. A CHARACTER DEVICE IS THE ONE THING HERE THAT MAY BE OPENED FOR WRITING.
+    // A CHARACTER DEVICE IS THE ONE THING HERE THAT MAY BE OPENED FOR WRITING; `/dev/console`
+    // opened O_RDWR is its normal case. `create` is refused even for a device: a mount with no
+    // `mknod` must not claim to have made one.
     //
-    // A generated FILE must refuse a write — one that accepted a write and forgot it would be
-    // worse than one that refuses, which is this class's stated invariant. A device is not a
-    // generated file: it is a kernel object with two directions, and `/dev/console` opened O_RDWR
-    // is its normal case.
-    //
-    // THE REFUSAL KEEPS ITS PLACE AND THE EXCEPTION IS CARVED OUT OF IT with `chardevAt`, which
-    // answers from a declared set of names and never runs a generator. Looking the NODE up first
-    // instead would have changed what a write to a path that does not exist answers:
-    // `open("/proc/nope", O_WRONLY)` is refused before the lookup and would have become ENOENT
-    // after it. Measured — it moved `/proc refuses open with O_CREAT with EROFS` in
-    // `bench/m3-synth/probe.mjs`, which is the check that exists so a reorder here is not silent.
-    //
-    // `create` is refused for a device too: `open("/dev/console", O_CREAT)` must not claim to have
-    // made one, and a mount with no `mknod` has no way to.
+    // The refusal stays AHEAD OF THE LOOKUP: `open("/proc/nope", O_WRONLY)` is EROFS before it and
+    // ENOENT after, and `bench/m3-synth/probe.mjs` holds the former so a reorder is not silent.
     const device = this.chardevAt(rel);
     if (opts.create || (opts.wantW && !device)) throw new FsError(this.#mutErrno, rel);
     const n = this.#need(rel);
@@ -270,25 +199,14 @@ export class SynthFS {
         info: this.#info(rel, n),
       };
     }
-    // THE SAME RULE THE VFS APPLIES, so this system has one answer to "can I open a directory".
-    //
-    // `src/fs/vfs.mjs`'s `openDecision` refuses a directory without `O_DIRECTORY` with EISDIR, and
-    // this followed POSIX instead until M3 noticed the two disagreeing — `ls /proc` worked without
-    // the flag and `ls /tmp` did not. ONE behaviour beats the more correct one here: the VFS's is
-    // the established semantics of a shipped milestone with 92 expectations resting on it, and a
-    // caller that has to remember which mount it is on has no portable `ls` at all.
-    //
-    // It diverges from Linux, where `open(dir, O_RDONLY)` succeeds and `read` on the fd is EISDIR.
-    // The divergence is the VFS's and predates M3; constraint 82 records it rather than leaving
-    // the next reader to rediscover it.
+    // THE SAME RULE `src/fs/vfs.mjs` APPLIES, so one answer to "can I open a directory" holds on
+    // every mount. Linux instead succeeds and answers EISDIR on the `read`; constraint 82 records
+    // the divergence.
     if (n.type === DIR && !opts.dirOk) throw new FsError("EISDIR", rel);
     if (opts.dirOk && n.type !== DIR) throw new FsError("ENOTDIR", rel);
-    // M5's exec check. ANY execute bit, not the one belonging to `cred`'s shift, and that is a
-    // deliberate difference from `src/fs/vfs.mjs` rather than an omission: the nodes here are
-    // GENERATED and own no uid or gid worth consulting — `node()` above defaults both to 0 for
-    // every file a generator returns. Checking a shift against ownership nothing maintains would
-    // be a permission model that reads as enforcement and is not. Read and write are not checked
-    // at all here, which long predates this line.
+    // ANY execute bit, not the one belonging to `cred`'s shift: these nodes are generated and
+    // `node()` defaults uid and gid to 0, so a shift checked against ownership nothing maintains
+    // would read as enforcement without being it. Read and write are not checked here at all.
     if (opts.wantX && (n.mode & 0o111) === 0) throw new FsError("EACCES", rel);
     const info = this.#info(rel, n);
     return {
@@ -325,15 +243,13 @@ export class SynthFS {
 
   utimes(cred, rel) { return this.#refuse(rel); }
 
-  /** `statfs`. A generated filesystem has no blocks, and reporting a size it does not have would
-   *  make `df` lie; zeros are the honest answer and POSIX's own for procfs. */
+  /** A generated filesystem has no blocks, so it reports none rather than making `df` lie. */
   statfs() {
     return { blocks: 0, bfree: 0, bavail: 0, files: 0, ffree: 0, bsize: 4096, namemax: NAME_MAX };
   }
 }
 
-/** Split a relative mount path into components. Re-exported so a generator does not import the
- *  VFS for one helper and risk reaching for the rest of it. */
+/** Re-exported so a generator does not import the VFS for one helper. */
 export function relParts(rel) {
   return splitPath(rel);
 }
