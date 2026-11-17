@@ -131,6 +131,38 @@ repo *depends* on it at runtime.
 correct `docs/CONSTRAINTS.md` and note the correction there; do not quietly edit the research to
 match. `docs/DECISIONS.md` §Corrections already carries two such cases.
 
+## Single sources of truth
+
+One fact, one definition. A second copy is how the two drift, so a new call site MUST import the
+row below rather than restate it.
+
+| Fact | Its one definition |
+| --- | --- |
+| Syscall numbers, errnos, SAB offsets, flag bits | `src/abi.mjs` — imported by the kernel and by a process, which are the only two sides |
+| The `filestat` record | `FST_*` + `encodeFilestat`/`decodeFilestat` in `src/abi.mjs` |
+| The `statfs` record | `SFS_*` + `encodeStatfs`/`decodeStatfs` in `src/abi.mjs` |
+| The `dirent` record and its 4-byte padding | `DE_*` + `direntSize` in `src/abi.mjs` |
+| The `termios`, `winsize` and `pollfd` records | `TRM_*`, `WS_*`, `PFD_*` + their codecs in `src/abi.mjs` |
+| The longest component a name may be | `NAME_MAX` in `src/abi.mjs`. Every `statfs` implementation publishes it; none restates 255 |
+| The largest inline payload | `MAX_INLINE` in `src/abi.mjs`. Program read buffers are sized from it, never from 65536 |
+| The trace render limit | `TRACE_RENDER_LIMIT` in `src/kernel/devfs.mjs`. `/dev/trace` and the page's `trace-read` are one renderer, so they are one limit |
+| The console's input queue size | `CONSOLE_INPUT_BYTES` in `src/kernel/console.mjs`, derived from `PTY_INPUT_BYTES` — it feeds the pty's queue and must not exceed it |
+| Which bindings a process realm loses | `TARGETS` in `src/libos/lockdown.mjs`. A check enumerates it; `bench/m6-realm/program.mjs` MUST import it rather than list the names again |
+| The takers of the per-inode lock | the `withInode` docstring in `src/kernel/store.mjs`. `scripts/fsfuzz.py`'s `INODE_TAKERS` mirrors that list and lints against it |
+| Where a provider request URL is built | `urlFor` in `src/kernel/providers.mjs`, and nowhere else |
+| The provider table | `PROVIDERS` in `src/kernel/providers.mjs`, as data |
+| What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
+| The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
+| The 209 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+
+**Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
+`modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
+`src/fs/vfs.mjs` and `src/bin/ls.mjs`; the `crossOriginIsolated` abort gate and `out`/`say` are
+pasted into nine `www/*.html` pages; `class Serving` and `chrome_full_version` are duplicated
+between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; and four files hand-roll
+the CDP connect sequence that `scripts/cdp.py` already provides.
+`docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
+
 ## Architecture rules
 
 These are the ones a plausible-looking change breaks. Each has a constraint number.
