@@ -21,8 +21,8 @@
 /** Smallest a window may be dragged or resized to. webxp's numbers, kept. */
 export const MIN_W = 220;
 export const MIN_H = 120;
-export const DEFAULT_W = 560;
-export const DEFAULT_H = 360;
+const DEFAULT_W = 560;
+const DEFAULT_H = 360;
 
 /** How much of the title bar must stay on screen, so a window cannot be dragged out of reach. */
 const MIN_VISIBLE = 72;

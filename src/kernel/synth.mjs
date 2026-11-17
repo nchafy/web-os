@@ -332,20 +332,6 @@ export class SynthFS {
   }
 }
 
-/**
- * A table-driven directory: a fixed set of named children, each a function returning content.
- *
- * This is what makes `/proc/<pid>/` and `/dev/` additions data. `FILES` in procfs.mjs is one of
- * these per level, so a new `/proc/<pid>/wchan` is one row and no new logic.
- */
-export function tableDir(rows) {
-  return {
-    names: () => Object.keys(rows),
-    has: (name) => Object.prototype.hasOwnProperty.call(rows, name),
-    get: (name) => rows[name],
-  };
-}
-
 /** Split a relative mount path into components. Re-exported so a generator does not import the
  *  VFS for one helper and risk reaching for the rest of it. */
 export function relParts(rel) {

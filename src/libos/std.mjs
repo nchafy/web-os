@@ -284,9 +284,8 @@ export function wholeNumber(s) {
   return Number.isSafeInteger(n) ? n : null;
 }
 
-/** The standard exit codes these programs use, named once. 2 is a usage error, which is what every
- *  Unix tool returns for one; 1 is "ran and something failed"; 127 is the shell's own
- *  "command not found" and is not a program's to return. */
-export const EXIT_OK = 0;
-export const EXIT_FAIL = 1;
+/** A usage error, which is what every Unix tool returns for one. Named because seven programs
+ *  return it. Success and plain failure are 0 and 1 at the `return` that means them; naming those
+ *  bought nothing and the two names had no consumer. 127 is the shell's own "command not found"
+ *  and is not a program's to return. */
 export const EXIT_USAGE = 2;
