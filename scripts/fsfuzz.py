@@ -93,6 +93,15 @@ FORBIDDEN = (
     "fetch(",
     "localStorage",
     "caches.",
+    # A CLOCK IS A CAPABILITY TOO, and leaving it off made the lint blind to the one breach that
+    # was actually present: `src/fs/vfs.mjs`'s constructor defaulted `now = Date.now`, and
+    # `src/fs/fsck.mjs` built a VFS without passing one -- so REPLAY read the wall clock and two
+    # runs over identical bytes produced different mtimes. A codec that is not a function of its
+    # input is not fuzzable, which is the whole premise of this gate.
+    "Date.now",
+    "performance.now",
+    "Math.random",
+    "crypto.getRandomValues",
 )
 
 #: Forbidden as WORDS rather than as substrings, so `awaited` and `asynchronously` in an

@@ -181,7 +181,10 @@ export function fsck(input) {
 
   let vfs = null;
   try {
-    vfs = VFS.parse(decoded.object);
+    // THE CLOCK IS THE CALLER'S. The VFS this returns is the LIVE one for an existing
+    // volume, so it needs the same clock a fresh volume gets; replay's strictness about a
+    // missing `t` is a property of the op, not of whether a clock was supplied.
+    vfs = VFS.parse(decoded.object, { now: input.now });
   } catch (error) {
     problems.push({
       what: "image",
