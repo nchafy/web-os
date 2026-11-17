@@ -217,8 +217,18 @@ reply by CALLID. The process returns `-EINTR` and runs its handler.
 is then `Worker.terminate()`, which runs no cleanup — which is *why* every releasable resource
 lives in the kernel and a process holds only integers.
 
-**2. Nothing is inherited across `spawn`.** Explicit-only, via a `posix_spawn_file_actions`-shaped
-action list:
+**2. The fd table is inherited across `spawn`, then the action list rearranges it.** That is
+`posix_spawn`'s own order, and it is what lets a shell say "dup the pipe onto 1, then close the
+pipe fd". A child of a process with a redirected stdout gets the redirection.
+
+> **Corrected.** This section read "Nothing is inherited across `spawn`. Explicit-only" until it
+> was checked against the code: `src/kernel/kernel.mjs`'s `spawnChild` walks the caller's whole fd
+> table and raises a refcount per description before applying any action, and
+> `docs/CONSTRAINTS.md` constraint 47 already described "a spawned child inherits it". The
+> implementation and the constraints agreed with POSIX; this document did not. A reader who
+> believed it would have leaked every open fd into every child and never closed it.
+
+The action list is `posix_spawn_file_actions`-shaped:
 
 ```
 SpawnSpec = [u32 argc][u32 envc][u32 nact]
