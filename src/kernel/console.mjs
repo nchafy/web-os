@@ -28,7 +28,7 @@
 // `src/kernel/kernel.mjs` serves these two kinds only from it.
 // ======================================================================================
 
-import { EHOSTGONE, ST_RETURN } from "../abi.mjs";
+import { EHOSTGONE, ST_RETURN, PTY_INPUT_BYTES } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
 /** The kernel surface a console needs. Injected once at boot, never imported: `kernel.mjs`
@@ -52,7 +52,7 @@ export function installConsoleKernel(surface) {
  * a reader who obtains the keystrokes without obtaining the number of keystrokes they are missing
  * cannot tell a working terminal from a lossy one.
  */
-export const CONSOLE_INPUT_BYTES = 4096;
+export const CONSOLE_INPUT_BYTES = PTY_INPUT_BYTES;
 
 /**
  * THE "NOT RESPONDING" THRESHOLDS, in milliseconds of keystrokes queued and unread.
