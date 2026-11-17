@@ -2,7 +2,7 @@
 //
 // The contract this program is written against is in src/bin/true.mjs.
 
-import { O_RDONLY } from "/src/abi.mjs";
+import { MAX_INLINE, O_RDONLY } from "/src/abi.mjs";
 
 const NAME = "head";
 
@@ -21,7 +21,7 @@ const DEFAULT_LINES = 10;
  * added, because head copies bytes and does not reformat them.
  */
 function headFd(env, fd, want) {
-  const buf = new Uint8Array(65536);
+  const buf = new Uint8Array(MAX_INLINE);
   let seen = 0;
   if (want === 0) return 0;
   for (;;) {

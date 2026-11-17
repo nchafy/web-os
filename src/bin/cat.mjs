@@ -2,7 +2,7 @@
 //
 // The contract this program is written against is in src/bin/true.mjs.
 
-import { O_RDONLY } from "/src/abi.mjs";
+import { MAX_INLINE, O_RDONLY } from "/src/abi.mjs";
 
 const NAME = "cat";
 
@@ -15,7 +15,7 @@ const NAME = "cat";
  * nothing until it arrived, which is the difference between `yes | cat` printing and hanging.
  */
 function copy(env, fd) {
-  const buf = new Uint8Array(65536);
+  const buf = new Uint8Array(MAX_INLINE);
   for (;;) {
     const n = env.fs.read(fd, buf, 0, buf.length);
     if (n < 0) return n;
