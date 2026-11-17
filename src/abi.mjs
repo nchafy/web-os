@@ -251,10 +251,15 @@ const INTS = {
   FST_SIZE: 32, FST_ATIM: 40, FST_MTIM: 48, FST_CTIM: 56,
   FILESTAT_BYTES: 64,
 
+  // statfs: [u64 blocks][u64 bfree][u64 files][u64 ffree][u32 bsize][u32 namemax].
+  SFS_BLOCKS: 0, SFS_BFREE: 8, SFS_FILES: 16, SFS_FFREE: 24, SFS_BSIZE: 32, SFS_NAMEMAX: 36,
+  STATFS_BYTES: 40,
+
   // A readdir record: [u64 ino][u8 type][u8 nlen][u16 pad][char[] name], padded to 4 bytes.
   // docs/ABI.md's shape with the pad made explicit, because an unaligned u64 read is the kind of
   // defect that only shows up on a name of the wrong length.
   DT_UNKNOWN: 0, DT_DIR: 4, DT_REG: 8, DT_LNK: 10,
+  DE_INO: 0, DE_TYPE: 8, DE_NLEN: 9,
   DIRENT_HEADER: 12,
 
   // Constraint 48: the boot lock must retry for LONGER than the terminate abort grace before
@@ -363,7 +368,8 @@ export const {
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
   FST_DEV, FST_INO, FST_MODE, FST_NLINK, FST_UID, FST_GID, FST_SIZE,
   FST_ATIM, FST_MTIM, FST_CTIM, FILESTAT_BYTES,
-  DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DIRENT_HEADER,
+  SFS_BLOCKS, SFS_BFREE, SFS_FILES, SFS_FFREE, SFS_BSIZE, SFS_NAMEMAX, STATFS_BYTES,
+  DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DE_INO, DE_TYPE, DE_NLEN, DIRENT_HEADER,
   BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
   F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP, F_PTY_M,
@@ -606,6 +612,34 @@ export function encodeFilestat(dv, off, st) {
   dv.setBigUint64(off + FST_ATIM, BigInt(st.atimeNs), true);
   dv.setBigUint64(off + FST_MTIM, BigInt(st.mtimeNs), true);
   dv.setBigUint64(off + FST_CTIM, BigInt(st.ctimeNs), true);
+}
+
+/** statfs, both directions, so the kernel's writer and a process's reader cannot disagree.
+ *  `bsize` is 1 on the durable volume, which makes `blocks` and `bfree` BYTES rather than blocks. */
+export function encodeStatfs(dv, off, s) {
+  dv.setBigUint64(off + SFS_BLOCKS, BigInt(s.blocks), true);
+  dv.setBigUint64(off + SFS_BFREE, BigInt(s.bfree), true);
+  dv.setBigUint64(off + SFS_FILES, BigInt(s.files), true);
+  dv.setBigUint64(off + SFS_FFREE, BigInt(s.ffree), true);
+  dv.setUint32(off + SFS_BSIZE, s.bsize >>> 0, true);
+  dv.setUint32(off + SFS_NAMEMAX, s.namemax >>> 0, true);
+}
+
+export function decodeStatfs(dv, off) {
+  return {
+    blocks: dv.getBigUint64(off + SFS_BLOCKS, true),
+    bfree: dv.getBigUint64(off + SFS_BFREE, true),
+    files: dv.getBigUint64(off + SFS_FILES, true),
+    ffree: dv.getBigUint64(off + SFS_FFREE, true),
+    bsize: dv.getUint32(off + SFS_BSIZE, true),
+    namemax: dv.getUint32(off + SFS_NAMEMAX, true),
+  };
+}
+
+/** The byte length of one readdir record for a name of `nlen` bytes, padded to 4. Declared once
+ *  because the writer walks forward by it and the reader walks forward by it. */
+export function direntSize(nlen) {
+  return (DIRENT_HEADER + nlen + 3) & ~3;
 }
 
 export function decodeFilestat(dv, off) {
@@ -930,6 +964,44 @@ export function selfTest() {
     fail("the boot-lock backoff must start inside its budget");
   }
   if (DIRENT_HEADER % 4 !== 0) fail("a dirent header that is not 4-byte aligned unaligns its u64");
+
+  // statfs, pinned to LITERAL byte positions and to a known-answer vector.
+  //
+  // A ROUND-TRIP ALONE CANNOT CATCH A MOVED OFFSET, and this check was written that way first:
+  // `encodeStatfs` and `decodeStatfs` read the same constants, so swapping SFS_FILES with
+  // SFS_FFREE swaps both sides and the comparison passes over two copies of one mistake. Measured
+  // -- the swap was made and the round-trip stayed green. So the offsets are asserted against the
+  // numbers docs/ABI.md publishes, and the encoded bytes against a vector computed by hand.
+  if (SFS_BLOCKS !== 0 || SFS_BFREE !== 8 || SFS_FILES !== 16 || SFS_FFREE !== 24
+      || SFS_BSIZE !== 32 || SFS_NAMEMAX !== 36 || STATFS_BYTES !== 40) {
+    fail("a statfs offset moved away from the layout docs/ABI.md publishes");
+  }
+  {
+    const buf = new DataView(new ArrayBuffer(STATFS_BYTES));
+    encodeStatfs(buf, 0, { blocks: 1n, bfree: 2n, files: 3n, ffree: 4n, bsize: 5, namemax: 6 });
+    const bytes = new Uint8Array(buf.buffer);
+    // One distinct value per field, each little-endian at its own offset: byte 0 is blocks, byte 8
+    // is bfree, and so on. Any pair swapped moves a 1..6 to the wrong index and this fires.
+    const wantAt = [[0, 1], [8, 2], [16, 3], [24, 4], [32, 5], [36, 6]];
+    for (const [at, v] of wantAt) {
+      if (bytes[at] !== v) fail(`statfs byte ${at} is ${bytes[at]}, not the ${v} its field holds`);
+    }
+    const got = decodeStatfs(buf, 0);
+    if (String(got.blocks) !== "1" || String(got.ffree) !== "4" || got.namemax !== 6) {
+      fail("statfs does not read back what it wrote");
+    }
+  }
+
+  // The dirent offsets and the padding are one declaration each, because the kernel writes a
+  // record and a process walks forward by the same arithmetic. A name whose length is not a
+  // multiple of 4 is the only input that catches a wrong pad.
+  if (DE_INO !== 0 || DE_TYPE !== 8 || DE_NLEN !== 9) fail("dirent offsets moved under their u64");
+  if (direntSize(0) !== DIRENT_HEADER) fail("an empty name must occupy exactly the header");
+  for (const [nlen, want] of [[1, 16], [3, 16], [4, 16], [5, 20], [8, 20]]) {
+    if (direntSize(nlen) !== want) {
+      fail(`direntSize(${nlen}) is ${direntSize(nlen)}, not the 4-byte-padded ${want}`);
+    }
+  }
 
   // The spawn codec round-trips, and REFUSES rather than throws. The refusal half is the
   // load-bearing one: this decodes process-controlled bytes in the kernel, and a throw there is a
