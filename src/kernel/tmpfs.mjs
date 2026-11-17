@@ -18,6 +18,7 @@
 // data operation and it carries the generation forward; reaching past it would put a second writer
 // on a field the VFS maintains.
 
+import { NAME_MAX } from "../abi.mjs";
 import { VFS, FILE, DIR, OP, FsError } from "../fs/vfs.mjs";
 
 /**
@@ -79,7 +80,7 @@ export class TmpFS {
       // `df -i` read as full on a filesystem that creates files freely.
       ffree: Math.max(0, this.limit - this.bytes),
       bsize: 1,
-      namemax: 255,
+      namemax: NAME_MAX,
     };
   }
 

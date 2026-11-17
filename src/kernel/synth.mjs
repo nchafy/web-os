@@ -15,7 +15,7 @@
 // written; a generated file that accepted a `chmod` and then forgot it would be worse than one
 // that refuses, because the caller would believe it.
 
-import { fnv1aString } from "../abi.mjs";
+import { fnv1aString, NAME_MAX } from "../abi.mjs";
 import { DIR, FILE, LINK, FsError, splitPath } from "../fs/vfs.mjs";
 
 /**
@@ -328,7 +328,7 @@ export class SynthFS {
   /** `statfs`. A generated filesystem has no blocks, and reporting a size it does not have would
    *  make `df` lie; zeros are the honest answer and POSIX's own for procfs. */
   statfs() {
-    return { blocks: 0, bfree: 0, bavail: 0, files: 0, ffree: 0, bsize: 4096, namemax: 255 };
+    return { blocks: 0, bfree: 0, bavail: 0, files: 0, ffree: 0, bsize: 4096, namemax: NAME_MAX };
   }
 }
 
