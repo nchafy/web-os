@@ -505,6 +505,40 @@ critic assigned. **A row here is a lead.**
 
 ---
 
+## Found by the comment pass
+
+Reducing the comment volume turned up defects that reading for correctness had missed, because a
+comment that contradicts its code is only visible when someone is reading the comments on purpose.
+Six were corrected in the pass itself; one is code and is left open.
+
+| # | Address | What was wrong |
+| --- | --- | --- |
+| P1 | `src/kernel/calls.mjs` spawn handler | Described M1-era behaviour as current — "the caller supplies the program URL", "argv parsing waits for M2's VFS". M5 resolves a path through the mount table and decodes argv and envp. As written it read as a licence to pass a URL. Corrected. |
+| P2 | `src/kernel/calls.mjs` `HANDLERS.pipe2` | Claimed "the SLOT is recorded on each description", contradicting the inline comment three lines below and the `F_PIPE_R` ops row. The slot lives on the parked record (`src/kernel/pipe.mjs` pushes `{slot, seq, …}` into the waiting queues), not the description. Deleted. |
+| P3 | `src/kernel/exec.mjs` | A comment asserting `decision.type !== FILE` "is handled by the filesystems themselves" sat four lines below the explicit `if (decision.type !== FILE) return -EISDIR;`. Deleted. |
+| P4 | `src/kernel/pipe.mjs` | A parked-record shape list naming `dstOff` where the code uses `into` and `off`. Drifted as well as redundant. Deleted. |
+| P5 | `src/kernel/table.mjs` `free` | "Called by waitpid." Its only caller is `scheduleFree`'s quarantine timer; `detachChild` is what makes the zombie reapable once. A reader chasing a slot leak was sent to the wrong function. Corrected. |
+| P6 | `src/wm/window.mjs` `clampBox` | Said the RIGHT edge is bounded by `surface.w - MIN_VISIBLE`; the code bounds the LEFT edge, and the code is correct — `bench/m4a-window/probe.mjs` asserts both bounds on `box.x`. The comment is what a reader uses to judge whether a clamp change is safe. Corrected. |
+| P7 | `src/bin/sh.mjs` | Said a job spec expands "anywhere in an unquoted word" and that `kill -TERM -%1` works. `jobSpecOf` requires the whole word, and `src/libos/shlex.mjs` says so correctly. Deleted. |
+| P8 | `docs/ABI.md` §2 | "Nothing is inherited across `spawn`. Explicit-only." The code inherits the whole fd table before applying the action list (`src/kernel/kernel.mjs` `spawnChild`), which is `posix_spawn`'s order, and constraint 47 already said a spawned child inherits a description. A reader who believed the document would have leaked every open fd into every child. Corrected in place with the correction noted. |
+| P9 | `src/bench/m1-lifecycle/program.mjs` | A comment stating its own code is wrong — `10000000000 \| 0` truncates to 1.41 s, not the 10 s intended — followed by a paragraph narrating "a trap I nearly left". The path has no caller. Narration cut, the defect kept as a one-line marker. |
+
+**OPEN, minor, also code.** `src/kernel/exec.mjs`'s three read arms disagree about what
+`bytesRead` counts: the synth arm checks `PROGRAM_MAX` before incrementing, so a refused image
+counts zero, while the durable arm increments per chunk and then checks, so a chunk that trips the
+cap is counted. Both readings of the counter are defensible — bytes delivered, or bytes read off
+storage — but it cannot be both, and nothing asserts on it. The ordering is now stated at the
+durable arm so it does not read as accidental.
+
+**OPEN, because it is code and not a comment.** `src/kernel/table.mjs:69` assigns
+`this.waiters = []` and nothing in `src/` ever reads it — the kernel parks a parent through
+`inflight.waitingFor`, which is what `teardown` reads. Either a leftover or a field a later
+milestone wants; a comment pass is the wrong change to delete it in.
+
+Also corrected, in `docs/CONSTRAINTS.md` rather than in code: constraint 53 ended with "until M6
+lands, the cap is advisory", which M6 closed. The finding is kept in its original tense with the
+correction appended beneath it, per CLAUDE.md's rule for a constraint that has been superseded.
+
 ## What this review's own verification measured
 
 Recorded because two of these numbers are not in `MILESTONES.md` and the next session will
@@ -516,6 +550,15 @@ with no `--only` died at `m2` with `connection closed mid-frame` and then
 `nothing in this run is evidence of anything`. The harness failed closed, which is the right
 outcome. Run one check per Chrome with the ~12 s spacing after `pkill` that
 `docs/handoff/CONTINUE-HERE.md` records, and all ten pass.
+
+**A second non-result signature, distinct from the memory one.** Running the ten checks
+back to back, one Chrome each, about one check per full sweep comes back BROKEN with
+`www/m<n>.html reported state 'error' before producing proofs: Error: kernel worker: undefined` at
+`worker.onerror`, 0 expectations. It moves between checks run to run — observed on `m4a` in one
+sweep and `m1` in the next — and each passes on its own immediately afterwards, so it is Chrome
+failing to start a worker rather than anything in the tree. It FAILS CLOSED: the check reports a
+run it could not measure, never a pass. A sweep is only evidence when every row is green or
+re-run individually.
 
 **`m2` has a timing flake, and it predates this work.** It needs about 105 s and the harness can
 read the page before the `drop` section has finished, which surfaces as a single clause failing
