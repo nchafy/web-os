@@ -343,6 +343,13 @@ a different measurement and not a continuation of the old one.
     lockdown must also delete `SharedWorker` and `URL.createObjectURL`, or make `Worker` a stub that
     becomes a `spawn` syscall, and **until M6 lands, the cap is advisory.** M0's process table says
     so where it checks the cap. `tmp/m0-probe-nested/probe.py`.
+
+    **CLOSED BY M6, and the "advisory" clause above no longer holds.** `src/libos/lockdown.mjs`
+    deletes `Worker`, `SharedWorker` and `URL.createObjectURL` from a process realm, so a process
+    cannot construct a worker the table never sees and the cap counts the renderer's real worker
+    count. Constraints 190 and 206 carry the measurement. The finding is kept in its original
+    tense above rather than rewritten, because it is what was true when it was taken and the
+    correction is the more useful record.
 54. **For handlers of a few microseconds**, the kernel's per-message cost dominates its handler
     work. At N=128 the in-handler mean is 3.03 µs against a serving rate of ~145 k calls/s, i.e.
     ρ ≈ 0.44 — the kernel is busy inside its handlers only 44% of the time it is saturated, and the
