@@ -316,8 +316,8 @@ this repository.
 - **`docs/…`, `scripts/…`, `src/…`, `bench/…`, `www/…` in `CLAUDE.md`, `README.md`, `CONTEXT.md`,
   `PLAN.md`, `MILESTONES.md`, `docs/CONSTRAINTS.md`, `docs/ABI.md`, `docs/DECISIONS.md`** — paths
   in *this* repo, written **relative to the repository root** wherever they appear. Some are
-  forward references to files a milestone has not created yet;
-  `scripts/check.py` is the main one, and `MILESTONES.md` records it as owed.
+  forward references to files a milestone has not created yet, and `MILESTONES.md` records each
+  as owed. `scripts/check.py` is no longer one of them — it is the harness, documented above.
 - **`../webxp/…`** — the predecessor, a sibling checkout, also
   <https://github.com/nchafy/webxp>. Always written with the prefix in the authored docs.
 - **Bare `src/…` or `scripts/…` inside `docs/designs/` and `docs/research/`** — these are

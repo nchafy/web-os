@@ -6,10 +6,10 @@ Three options. They are not three different systems: **the first 30 working days
 all three**, so the choice gets made with working code in hand rather than from a document now.
 What differs is what gets built on top of the same kernel, and each gives up something real.
 
-Evidence is in `docs/research/` — 507 cited claims across 15 files: 192 exploration findings, 182
+Evidence is in `docs/research/` — 662 distinct cited URLs across 16 files (`grep -ohE 'https?://[^ )>]+' docs/research/*.md | sort -u | wc -l`): 192 exploration findings, 182
 claims from the gap-closing round, and 133 from the hobbyist-OS survey, each labelled measured,
 spec-normative, documented, inferred or unverified. The normative distillation is
-`docs/CONSTRAINTS.md` — 51 constraints every option must satisfy. The long-form candidate designs are
+`docs/CONSTRAINTS.md` — 209 constraints every option must satisfy. The long-form candidate designs are
 in `docs/designs/`, and `docs/designs/REVIEW-FINDINGS.md` holds the 24 findings that survived an adversarial
 verifier whose default was to refute.
 

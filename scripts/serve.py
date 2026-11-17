@@ -12,8 +12,8 @@ convenience — it is the first dependency.
 never, so it is a relaxation and never a plan. See docs/CONSTRAINTS.md constraint 31.
 
 Usage:
-    scripts/serve.py                 # serve ./www on 8000
-    scripts/serve.py --port 8771 --root .
+    scripts/serve.py                 # serve the REPOSITORY ROOT on 8000; preflight at /www/
+    scripts/serve.py --port 8771 --root www
     scripts/serve.py --no-isolation  # deliberately omit the headers, to prove a check fails
 """
 

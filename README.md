@@ -3,12 +3,16 @@
 A browser-hosted operating system. Windows 7 surface, Linux-shaped runtime: processes with pids, a
 syscall ABI, a POSIX-ish filesystem, a real shell.
 
-No kernel yet. This is the research, the plan, and a verified environment to build it in — in that
-order, deliberately. The predecessor ([webxp](https://github.com/nchafy/webxp)) was built first and
-designed afterwards, and became a very good window manager that was not an operating system.
+Research and plan first, kernel second — deliberately, and in that order. The predecessor
+([webxp](https://github.com/nchafy/webxp)) was built first and designed afterwards, and became a very
+good window manager that was not an operating system.
+
+M0 to M6 are done: the syscall channel, the process table, the journalled filesystem, the mount table
+with `/proc`, `/dev`, `/tmp` and `/usr`, pipes, a pty with a line discipline, a shell with eleven
+programs, a real window, and the process realm stripped of its ambient capabilities.
 
 ```sh
-scripts/serve.py          # then open http://127.0.0.1:8000/
+scripts/serve.py          # then open http://127.0.0.1:8000/www/
 ```
 
 That serves a preflight which checks the seven capabilities the kernel needs and refuses to
@@ -24,10 +28,10 @@ how you know it works.
 | [MILESTONES.md](MILESTONES.md) | The tracker. What is done, what is next, the proof each milestone owes. |
 | [CLAUDE.md](CLAUDE.md) | Working rules for this codebase. Architecture invariants, conventions, verification discipline. |
 | [docs/LEARNING-MODE.md](docs/LEARNING-MODE.md) | Option D — the learning mode: an interactive drill-down into every OS principle, and the RV32I teaching machine that makes virtual memory and preemption real. |
-| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 51 numbered constraints. Normative — cite by number. |
+| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 209 numbered constraints. Normative — cite by number. |
 | [docs/designs/REVIEW-FINDINGS.md](docs/designs/REVIEW-FINDINGS.md) | 24 critiques that survived adversarial verification. |
 | `docs/designs/*.md` | Four long-form candidate architectures, ~900 lines each. |
-| `docs/research/*.md` | 507 cited claims across 15 files. Raw evidence; append-only. `09-hobbyist-os-actions.md` is the distilled proposal from the newest round. |
+| `docs/research/*.md` | 662 distinct cited URLs across 16 files; re-derive with the `research-urls` recipe below. Raw evidence; append-only. `09-hobbyist-os-actions.md` is the distilled proposal from the newest round. |
 
 ## The thesis
 
@@ -116,6 +120,20 @@ python3 -m venv .venv && .venv/bin/pip install websocket-client
 `python3 -m http.server` **will not work** — it cannot send `COOP`/`COEP`, so `SharedArrayBuffer`
 is undefined. For the same reason this cannot be hosted on GitHub Pages or bare S3; Cloudflare
 Pages, Netlify, Vercel, Firebase and CloudFront all can.
+
+## Re-deriving the numbers
+
+Every count in this file is a statistic, so each names the command that produces it. A number with
+no reproduction path is an assertion.
+
+```sh
+# research-urls: distinct cited URLs in the raw evidence, and the file count beside it
+grep -ohE 'https?://[^ )>]+' docs/research/*.md | sort -u | wc -l
+ls docs/research/*.md | wc -l
+
+# constraints: the numbered, normative ones
+grep -cE '^[0-9]+\.' docs/CONSTRAINTS.md
+```
 
 ## Licence
 
