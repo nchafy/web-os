@@ -379,7 +379,14 @@ def main(argv: list[str] | None = None) -> int:
           f"{', '.join(lock_fired) or 'NOTHING'}"
           f"{' · MISSED ' + ', '.join(lock_missed) if lock_missed else ''}")
 
+    # EVERY SUBPROCESS'S EXIT STATUS IS A GATE. Only `json.loads` succeeding used to count as
+    # "it ran", so a script that printed its summary and then threw in a teardown path exited
+    # non-zero and this reported clean -- a gate over an interpreter that failed.
+    exits: list[str] = []
+
     rc, host, err = run_node(HOSTTEST)
+    if rc != 0:
+        exits.append("bench/fs-fuzz/hosttest.mjs exited %d" % rc)
     if host is None:
         print(f"  host tests  COULD NOT RUN: {err}", file=sys.stderr)
         return 3
@@ -390,6 +397,8 @@ def main(argv: list[str] | None = None) -> int:
     # The storage edge's failure paths, and the control that puts every fix back. Before the
     # fuzzer because it is the faster loop: a broken error path reports in 2 s.
     rc_edge, edge, err = run_node(EDGE)
+    if rc_edge != 0:
+        exits.append("bench/fs-core/edge.mjs exited %d" % rc_edge)
     if edge is None:
         print(f"  edge        COULD NOT RUN: {err}", file=sys.stderr)
         return 3
@@ -400,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     for b in edge.get("broken", []):
         print(f"     BROKEN {b['family']}: {b['why'][:300]}", file=sys.stderr)
     rc_ectl, edgectl, err = run_node(EDGE, "--control")
+    if rc_ectl != 0:
+        exits.append("bench/fs-core/edge.mjs --control exited %d" % rc_ectl)
     if edgectl is None:
         print(f"  edge ctl    COULD NOT RUN: {err}", file=sys.stderr)
         return 3
@@ -409,7 +420,9 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(edgectl['families'])} finding(s)"
           f"{' · SILENT ' + ', '.join(edgectl['silentFamilies']) if edgectl['silentFamilies'] else ''}")
 
-    rc, fuzz, err = run_node(FUZZ, "--seed", str(args.seed), "--cases", str(args.cases))
+    rc_fuzz, fuzz, err = run_node(FUZZ, "--seed", str(args.seed), "--cases", str(args.cases))
+    if rc_fuzz != 0:
+        exits.append("bench/fs-fuzz/fuzz.mjs exited %d" % rc_fuzz)
     if fuzz is None:
         print(f"  fuzz        COULD NOT RUN: {err}", file=sys.stderr)
         return 3
@@ -424,6 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     # clean run above was not evidence of anything.
     rc_nc, nocrc, err = run_node(FUZZ, "--seed", str(args.seed),
                                  "--cases", str(args.cases), "--no-crc")
+    # NO EXIT-STATUS GATE ON THIS ONE, and the reason is the control's job: with the CRC check
+    # removed the fuzzer MUST find silent acceptances, so it exits non-zero BY DESIGN -- measured
+    # at 2767 acceptances, exit 1. Gating on the status here reported the working control as a
+    # failure. What the control owes is asserted below, on the acceptance count itself.
     if nocrc is None:
         print(f"  control     COULD NOT RUN: {err}", file=sys.stderr)
         return 3
@@ -431,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  control     --no-crc found {found} silent acceptance(s) "
           f"({'the fuzzer can fail' if found else 'THE FUZZER PROVES NOTHING'})")
 
-    problems = list(impure)
+    problems = list(impure) + exits
     if missed:
         problems.append(
             "the purity lint did not fire on its own control for: %s, so a clean purity verdict "
