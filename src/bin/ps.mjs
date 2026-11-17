@@ -2,19 +2,17 @@
 //
 // The contract this program is written against is in src/bin/true.mjs.
 //
-// THIS PROGRAM HAS NO PRIVILEGE. It opens `/proc`, reads `/proc/<pid>/status` and
-// `/proc/<pid>/cmdline`, and formats what it finds — the same three syscalls any program may make.
-// The predecessor had no equivalent because it had no process table; there is nothing to port.
+// This program has no privilege: it opens `/proc` and reads two files per pid, the same syscalls
+// any program may make.
 //
-// WHAT `ps` WITH NO OPTIONS SHOWS is EVERY process, not "processes with the same controlling
-// terminal" as POSIX specifies. There is one session and one terminal in this system today, so the
-// filter would be a no-op that reads as a feature; `-s` would be the flag to add when a second
-// session exists. Said here rather than left as a silent divergence (docs/CONSTRAINTS.md 138).
+// With no options it shows every process, not those sharing a controlling terminal as POSIX
+// specifies. There is one session and one terminal here, so the filter would be a no-op that reads
+// as a feature. docs/CONSTRAINTS.md 138.
 
 const NAME = "ps";
 
-/** `key:\tvalue` lines into an object. `/proc/<pid>/status` is written in exactly this shape so it
- *  is greppable without a parser, and this is the parser for the program that wants fields. */
+/** `key:\tvalue` lines into an object. `/proc/<pid>/status` is written in that shape so it stays
+ *  greppable without a parser. */
 function fields(text) {
   const out = Object.create(null);
   for (const line of text.split("\n")) {
@@ -25,19 +23,18 @@ function fields(text) {
   return out;
 }
 
-/** One pid's row, or null when the process went between the listing and the read — which is NOT an
- *  error and is the normal case for a `ps` that ran while something exited. */
+/** One pid's row, or null when the process went between the listing and the read. That is not an
+ *  error: it is the normal case for a `ps` that ran while something exited. */
 function rowOf(env, pid) {
   const status = env.std.readFileText(env, `/proc/${pid}/status`);
   if (typeof status === "number") return null;
   const f = fields(status);
   const cmdline = env.std.readFileText(env, `/proc/${pid}/cmdline`);
-  // THE RACE IS HANDLED ON BOTH READS. A pid that exited between the two left a row whose command
-  // was `?`, which reads as a live process with an unknown command rather than as one that went.
+  // The race is handled on both reads: a pid that exits between them must drop out, not surface as
+  // a live process whose command is `?`.
   if (typeof cmdline === "number") return null;
-  // CMDLINE IS NUL-SEPARATED AND NUL-TERMINATED (Linux's own shape), so the trailing empty field
-  // is dropped and the rest joined with spaces. Splitting without dropping it printed every
-  // command with a trailing space.
+  // cmdline is NUL-separated and NUL-terminated (Linux's shape), so the trailing empty field is
+  // dropped rather than joined into a trailing space.
   const argv = typeof cmdline === "string"
     ? cmdline.split("\0").filter((s) => s !== "")
     : [];
@@ -56,10 +53,8 @@ function rowOf(env, pid) {
 const HEAD = "  PID  PPID  PGID STAT CMD";
 
 function format(row) {
-  // A PARKED PROCESS IS NOT THE SAME AS A RUNNING ONE, and `state` cannot tell them apart —
-  // `/proc/<pid>/status` reports `running` for everything that is not a zombie, which is why M4b
-  // added the `syscall` field. `S` for a process inside a syscall, `R` for one that is computing,
-  // `Z` for a zombie: the three a reader actually wants from this column.
+  // `state` cannot distinguish parked from running — it reports `running` for everything that is
+  // not a zombie — so the column is derived from `syscall`: `S` inside a syscall, `R` computing.
   const stat = row.state === "zombie" ? "Z" : row.syscall >= 0 ? "S" : "R";
   return `${String(row.pid).padStart(5)} ${String(row.ppid).padStart(5)} `
     + `${String(row.pgid).padStart(5)} ${stat.padEnd(4)} ${row.cmd}\n`;
@@ -71,8 +66,8 @@ export function run(env) {
   if (bad) {
     return { exit: std.complain(env, NAME, null, `unknown option ${bad}`, std.EXIT_USAGE) };
   }
-  // AN OPERAND IS REFUSED, not discarded. `ps 123` used to list every process and exit 0, which
-  // reads as "pid 123 is one of these" — this program takes no operands and says so.
+  // An operand is refused, not discarded: `ps 123` listing every process and exiting 0 reads as
+  // "pid 123 is one of these".
   if (operands.length) {
     return {
       exit: std.complain(env, NAME, operands[0], "ps takes no operands", std.EXIT_USAGE),
@@ -82,8 +77,8 @@ export function run(env) {
   if (typeof entries === "number") {
     return { exit: std.complainErrno(env, NAME, "/proc", entries), errno: -entries };
   }
-  // `/proc` CARRIES `mounts` AS WELL AS THE PIDS, so the numeric names are selected rather than
-  // every name taken as a pid. Sorted numerically: a string sort puts pid 10 before pid 2.
+  // `/proc` carries `mounts` as well as the pids, so only numeric names are taken. Sorted
+  // numerically: a string sort puts pid 10 before pid 2.
   const pids = entries
     .filter((e) => /^\d+$/.test(e.name))
     .map((e) => Number(e.name))
@@ -102,9 +97,8 @@ export function run(env) {
         + `syscall=${row.syscall}\n`);
     }
   }
-  // THE ROWS TRAVEL IN THE RESULT as well as to stdout. A proof asserting "ps shows three
-  // processes" would otherwise have to parse this program's own column layout out of a pty, and
-  // then the proof would be about the padding.
+  // The rows travel in the result as well as to stdout, so a proof about what `ps` sees does not
+  // have to parse this program's column padding out of a pty.
   return { exit: 0, count: rows.length, pids: rows.map((r) => r.pid), rows };
 }
 

@@ -10,15 +10,11 @@ const NAME = "head";
 const DEFAULT_LINES = 10;
 
 /**
- * Copy the first `want` lines of `fd` to standard output, then STOP READING.
+ * Copy the first `want` lines of `fd` to standard output, then stop reading.
  *
- * STOPPING IS THE POINT, not an optimization. `yes | head -1` terminates because `head` closes
- * its end of the pipe and the writer dies of SIGPIPE — M4's headline proof. A `head` that slurped
- * its input first would make that pipeline hang forever, and the whole dead-peer asymmetry in
- * docs/ABI.md decision 5 would be untestable through the shell.
- *
- * A partial last line is still emitted: `printf 'a'` through `head -1` prints `a` with no newline
- * added, because head copies bytes and does not reformat them.
+ * Stopping is the point, not an optimization: `yes | head -1` terminates because `head` closes its
+ * end of the pipe and the writer dies of SIGPIPE (docs/ABI.md decision 5). A `head` that slurped
+ * would hang that pipeline forever.
  */
 function headFd(env, fd, want) {
   const buf = new Uint8Array(MAX_INLINE);
@@ -43,14 +39,8 @@ function headFd(env, fd, want) {
 export function run(env) {
   const std = env.std;
   const args = (env.argv || []).slice(1);
-  /* `head -1` IS A LINE COUNT, not an unknown option.
-   *
-   * It was refused on the grounds that this program does not support the obsolescent form — and
-   * MILESTONES.md M5's own headline proof is written `yes | head -1`, so the first thing anybody
-   * typed hit the refusal. It is also what every `head` in existence accepts. Consumed here,
-   * before `getopt`, because `-1` is not an option letter and a general parser can only read it
-   * as one.
-   */
+  /* `head -1` is a line count. It is consumed before `getopt`, because `-1` is not an option
+   * letter and a general parser can only read it as one. */
   let obsolescent = null;
   if (args.length && /^-\d+$/.test(args[0])) {
     obsolescent = args[0].slice(1);
@@ -58,15 +48,12 @@ export function run(env) {
   }
   const { flags, operands, bad, why } = std.getopt(args, "n:");
   if (bad) {
-    // `head -n` with nothing after it is a MISSING OPERAND, and saying "use -n n" to that reader
-    // told them to type what they had just typed.
     const message = why === "missing-argument"
       ? `option ${bad} needs a line count`
       : `unknown option ${bad}`;
     return { exit: std.complain(env, NAME, null, message, std.EXIT_USAGE) };
   }
-  // `-n` WINS OVER `-5` when both are written, which is what GNU head does: the last count given
-  // is the one that applies and `-n` is the current spelling.
+  // `-n` wins over `-5` when both are written, as GNU head does.
   if (obsolescent !== null && flags.n === undefined) flags.n = obsolescent;
   let want = DEFAULT_LINES;
   if (flags.n !== undefined) {
@@ -93,8 +80,7 @@ export function run(env) {
       status = std.complainErrno(env, NAME, path, fd);
       continue;
     }
-    // THE HEADER ONLY FOR TWO OR MORE OPERANDS, which is what head does: one file's output must be
-    // pipeable without a banner in front of it.
+    // One file's output must be pipeable without a banner in front of it.
     if (operands.length > 1) std.say(env, `${i > 0 ? "\n" : ""}==> ${path} <==\n`);
     const r = headFd(env, fd, want);
     if (fd !== 0) env.fs.close(fd);

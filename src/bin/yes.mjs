@@ -1,37 +1,12 @@
-// `yes`: write its argument, or `y`, until something stops it.
-//
-// The contract this program is written against is in src/bin/true.mjs.
-//
-// ======================================================================================
-// THE ELEVENTH PROGRAM, and MILESTONES.md M5 asks for ten. It is here because a property four
-// other programs are written around was otherwise ASSERTED BY COMMENT ONLY:
-//
-//     `yes | head -1` must terminate.
-//
-// That is M4's headline proof (docs/ABI.md decision 5: a writer whose last reader went gets EPIPE
-// plus SIGPIPE), and it is the reason `cat`, `head`, `grep` and `src/libos/std.mjs`'s `eachLine`
-// all stream instead of slurping. Until this file existed the sentence had no spelling in this
-// system: there was no endless source, and the only candidate — `/dev/zero` — is an honest finite
-// 256-byte file. So every one of those comments cited a case no check could reach.
-//
-// A PROGRAM THAT IGNORES ITS WRITE'S RETURN IS THE POINT, and it is deliberate rather than sloppy.
-// `bench/m4-fs/program.mjs` records why: breaking out of the loop on a negative return made M4's
-// control unobservable, because with SIGPIPE non-fatal the first write after the reader goes
-// returns -EPIPE and a careful writer exits quietly. The naive program — the one every real
-// pipeline contains — keeps writing, and dies of the signal. This is that program.
-// ======================================================================================
+// `yes`: write its argument, or `y`, until something stops it; program contract in
+// src/bin/true.mjs. Ignoring the write's return is the point — a writer that stops on -EPIPE exits
+// quietly and leaves the SIGPIPE disposition unobservable, and this is the naive program that keeps
+// writing and dies of the signal (M4's `yes | head -1` proof, bench/m4-fs/program.mjs).
 
 const NAME = "yes";
 
-/**
- * A bound on "forever", in writes.
- *
- * NOT A CORRECTNESS BOUND: a working `yes` in a pipeline is killed by SIGPIPE long before it, and
- * the kernel's pipe parks the writer when the buffer fills so this is not a spin either. It is
- * there so a BROKEN dead-peer path ends as a program that reports rather than a harness that
- * times out with no information — the same reason `bench/m4-fs/program.mjs` caps its own loop and
- * reports `hitCap`.
- */
+/** A bound on "forever", in writes. Not a correctness bound — SIGPIPE kills a working `yes` long
+ *  before it — so a broken dead-peer path reports instead of timing out with no information. */
 const WRITE_CAP = 1000000;
 
 export function run(env) {
@@ -43,8 +18,6 @@ export function run(env) {
   let last = 0;
   for (; writes < WRITE_CAP; writes += 1) {
     last = env.write(1, bytes);
-    // DELIBERATELY NOT BROKEN OUT OF. See the header: a writer that stops on -EPIPE makes the
-    // SIGPIPE disposition unobservable, and this program exists to be killed by it.
     if (last < 0) errors += 1;
   }
   // Reached only if nothing ever stopped it, which is the failure the cap exists to report.

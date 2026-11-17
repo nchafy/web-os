@@ -4,15 +4,8 @@
 // handed to it, so `fsfuzz.py` can drive it without a browser. It names no capability, performs no
 // I/O and cannot suspend.
 //
-// IT EXISTS BECAUSE THERE WERE ABOUT TO BE TWO. M4's pipe had this inline, and M4b's pty needs
-// three more queues — the slave's input, the master's output, and the canonical line buffer. Four
-// hand-written rings is four places for the wrap arithmetic to be wrong, and the wrap is the part
-// that is easy to get wrong: a write that straddles the end of the buffer is two copies, and a
-// reader that forgets the second one loses the tail silently.
-//
-// `length` IS EXPLICIT rather than derived from a head/tail pair. With two indices, "full" and
-// "empty" are the same state unless a byte of capacity is sacrificed or a flag is carried; with an
-// explicit length both are answerable and the whole buffer is usable.
+// `length` is explicit rather than derived from a head/tail pair. With two indices, "full" and
+// "empty" are the same state unless a byte of capacity is sacrificed or a flag is carried.
 
 export class ByteRing {
   constructor(capacity) {
@@ -38,10 +31,8 @@ export class ByteRing {
   }
 
   /**
-   * Append as much of `src` as fits. Returns the count taken, which may be 0 or a short count.
-   *
-   * A SHORT COUNT IS NOT AN ERROR — it is what `write(2)` does on a nearly-full pipe, and the
-   * caller's job is to report the count rather than to assume it wrote everything.
+   * Append as much of `src` as fits. A short count is not an error — it is what `write(2)` does on
+   * a nearly-full pipe, and the caller must report the count rather than assume a full write.
    */
   push(src, from = 0) {
     const want = src.length - from;
@@ -50,14 +41,13 @@ export class ByteRing {
     const at = (this.head + this.length) % this.capacity;
     const first = Math.min(n, this.capacity - at);
     this.buf.set(src.subarray(from, from + first), at);
-    // THE WRAP. A push that straddles the end of the buffer is two copies, and this second one is
-    // the line a hand-written ring forgets.
+    // A push straddling the end of the buffer is two copies; dropping this one loses the tail
+    // silently.
     if (first < n) this.buf.set(src.subarray(from + first, from + n), 0);
     this.length += n;
     return n;
   }
 
-  /** Append one byte. Returns 1 or 0. The line discipline's hot path. */
   pushByte(b) {
     if (this.full) return 0;
     this.buf[(this.head + this.length) % this.capacity] = b & 0xff;
@@ -65,7 +55,7 @@ export class ByteRing {
     return 1;
   }
 
-  /** Copy up to `want` bytes into `into` at `off`, removing them. Returns the count. */
+  /** Copy up to `want` bytes into `into` at `off`, removing them from the ring. */
   shift(into, off, want) {
     const n = Math.min(want, this.length);
     if (n <= 0) return 0;
@@ -77,7 +67,7 @@ export class ByteRing {
     return n;
   }
 
-  /** Remove the most recently pushed byte. Returns it, or -1. Canonical-mode erase. */
+  /** Canonical-mode erase. Returns the byte removed, or -1. */
   popLast() {
     if (this.empty) return -1;
     const b = this.buf[(this.head + this.length - 1) % this.capacity];
@@ -85,7 +75,7 @@ export class ByteRing {
     return b;
   }
 
-  /** Every byte, oldest first, as a fresh array. Drains the ring. */
+  /** Every byte, oldest first, as a fresh array. */
   drain() {
     const out = new Uint8Array(this.length);
     this.shift(out, 0, out.length);

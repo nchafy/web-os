@@ -1,11 +1,6 @@
-// The dense syscall table. Adding a call is adding one entry in HANDLERS keyed by SYS_NAME, so
-// the dispatch table is DERIVED from src/abi.mjs at boot (MILESTONES.md M1 item (f)): no second
-// declaration of a syscall number, no generator, no build step.
-//
-// A handler receives the slot, and returns either a value or PENDING. It MUST NOT touch SEQ,
-// STATUS, RLEN, the notify or G_INFLIGHT: reply() in kernel.mjs is the only writer of those, and
-// that single invariant is what makes M1/M2/M4 additive — a new handler cannot get the wake
-// protocol wrong because it cannot reach it.
+// The syscall table: one HANDLERS entry per SYS_NAME, so the dispatch table is DERIVED from
+// src/abi.mjs at boot. A handler returns a value or PENDING, and MUST NOT touch SEQ, STATUS, RLEN,
+// the notify or G_INFLIGHT — reply() in kernel.mjs is the only writer of those.
 
 import {
   A0, A1, A2, A3, LEN_I32, DATA_OFF, MAX_INLINE, NSYS, SYS_NAME,
@@ -34,12 +29,7 @@ import { ZOMBIE, RUNNING, dropCaps } from "./table.mjs";
 /** A handler that will reply later, by calling k.reply() itself. */
 export const PENDING = Symbol("PENDING");
 
-/**
- * An ops method MAY return a promise, and then the call becomes PENDING and the kernel answers it
- * through later(). This one rule is what lets a file description be served by the I/O worker
- * without any syscall handler knowing where the bytes went: F_SINK answers synchronously, F_FILE
- * answers from another agent, and SYS_write is the same four lines either way.
- */
+/** An ops method MAY return a promise; the call then becomes PENDING and later() answers it. */
 function settle(k, p, r) {
   if (r && typeof r.then === "function") {
     k.later(p, () => r);
@@ -48,29 +38,10 @@ function settle(k, p, r) {
   return r;
 }
 
-/**
- * The per-fd in-flight budget (item (e)). Charge at async entry, discharge at reply. The budget
- * lives on the description, not on the FileTable row, so dup/dup2 and close(fd) interact with it
- * the way an fd is supposed to — one fd at ELIMIT does not prevent writing on the other handle of
- * the same description, which would be the wrong shape.
- *
- * CONFIRMED against the dispatch code (task asked explicitly): calls.mjs resolves fd -> d, the
- * only place write/fsync can know which fd was invoked. We charge BEFORE the handler runs and
- * discharge in the settlement path via k.later's completion. This matches the task's definition
- * of per-fd: the 65th outstanding call on one fd returns ELIMIT without touching the handler.
- *
- * The one case that wants attention is a kernel that never settles — an open() that never resolves
- * would hold a slot forever. The current code paths all settle through k.later, which runs the
- * finally branch on every outcome. If a future call forgets to settle it will leak the budget;
- * that is a defect that would also leak G_INFLIGHT, so it is a dispatch bug long before it is a
- * budget bug. Documented so it is not discovered twice.
- */
+/** The per-fd in-flight budget, charged BEFORE the handler runs and discharged at reply. It lives
+ *  on the DESCRIPTION, not on the FileTable row, so one fd at ELIMIT does not stop the other handle
+ *  of the same description. */
 function chargeFd(d) {
-  // FD_INFLIGHT_CAP, imported. This read `d.cap | 0 || 64` with the 64 written here as a
-  // literal — a second copy of an ABI constant on the kernel side of the boundary, which is
-  // the exact defect CLAUDE.md's one-source-of-truth rule names. Nothing sets `d.cap`, so a
-  // per-description override is kept as the hook it was meant to be and the fallback is now
-  // the declaration.
   if ((d.inflight | 0) >= (d.cap | 0 || FD_INFLIGHT_CAP)) return -ELIMIT_ERRNO;
   d.inflight = (d.inflight | 0) + 1;
   return 0;
@@ -81,22 +52,8 @@ function dischargeFd(d) {
   d.inflight = Math.max(0, (d.inflight | 0) - 1);
 }
 
-/**
- * THE ONE PATH-ARGUMENT READER, and it exists because of a measured refusal rather than a style
- * preference.
- *
- * `TextDecoder.decode` REFUSES a view backed by a SharedArrayBuffer — "The provided ArrayBufferView
- * value must not be shared" — and every path argument arrives in the calling process's SAB. M2 hits
- * this on every path call, so the copy into a private buffer is written once here instead of being
- * rediscovered per call site. `new Uint8Array(view)` allocates a fresh non-shared buffer and copies,
- * which is what makes the decode legal.
- *
- * It also enforces the three things docs/ABI.md says about a path argument — UTF-8, no NUL,
- * absolute or CWD-relative — and the component ceiling, because a 300-character component must be
- * ENAMETOOLONG rather than a name the VFS stores and no `readdir` consumer can handle.
- *
- * @returns {string|number} the path, or -errno.
- */
+/** The one path-argument reader; returns the path, or -errno. `TextDecoder.decode` REFUSES a view
+ *  backed by a SharedArrayBuffer, so the copy into a fresh buffer makes the decode legal. */
 const DECODER = new TextDecoder("utf-8", { fatal: false });
 
 function readPath(p) {
@@ -123,19 +80,11 @@ function readTwoPaths(p) {
   return [first, second];
 }
 
-/**
- * THE CREDENTIAL, BUILT PER CALL (constraint 29).
- *
- * It is not state on the VFS and it is not state here: it is read off the calling slot at the
- * moment of the call and handed to the VFS as an argument. Hold it anywhere and every process
- * shares one identity and the mode bits are decoration — which is exactly what the predecessor's
- * single `this.uid` did.
- */
+/** The credential, built per call and handed to the VFS as an argument (constraint 29). */
 export function credOf(p) {
   return { uid: p.uid, gid: p.gid };
 }
 
-/** Write `bytes` into the caller's byte region and record the reply length. */
 function replyBytes(p, bytes) {
   if (bytes.length > MAX_INLINE) return -EOVERFLOW;
   p.bytes.set(bytes, DATA_OFF);
@@ -150,14 +99,9 @@ const DIRENT_TYPE = { [FILE]: DT_REG, [DIR]: DT_DIR, [LINK]: DT_LNK };
 function writeStat(p, info, dev = 0) {
   const record = new Uint8Array(FILESTAT_BYTES);
   encodeFilestat(new DataView(record.buffer), 0, {
-    // THE MOUNT'S DEVICE NUMBER, which until M3 was a literal zero. It is what makes the mount
-    // table observable from userland: two files on two mounts report two devices, and `st_dev`
-    // plus `st_ino` is how POSIX says to tell two files apart. src/fs/mounts.mjs numbers from 1
-    // so a zero here means nobody set it rather than "the root volume".
+    // src/fs/mounts.mjs numbers devices from 1, so a zero here means nobody set it.
     dev: info.dev !== undefined ? info.dev : dev,
     ino: info.ino,
-    // The type bits go in with the permission bits, which is POSIX's own packing and the reason
-    // the 10k-file proof can assert "every mode bit intact" against one word.
     mode: (TYPE_BITS[info.type] ?? 0) | (info.mode & 0o7777),
     nlink: info.nlink,
     uid: info.uid,
@@ -171,41 +115,24 @@ function writeStat(p, info, dev = 0) {
 }
 
 /**
- * A metadata mutation: decide in the VFS, then journal.
- *
- * ORDERING, and why it differs from the data path. A metadata op is applied in memory by the VFS
- * method and appended to the journal immediately after. There is no data to order it against, and
- * a crash between the two loses the op AND the in-memory table it was applied to — the renderer
- * dies as one thing. The append is NOT flushed: constraint 23's flush points are fsync, snapshot
- * and idle, and a flush per `mkdir` would make the filesystem 50x slower for durability nobody
- * asked for.
- *
- * `freed` is the inode whose last link went. Its blobs are reclaimed after the op is on the
- * journal, never before: a blob deleted ahead of the record that unlinks it is a file that
- * reappears after replay with nothing behind it.
+ * A metadata mutation: decide in the VFS, then journal. The append is NOT flushed — constraint 23's
+ * flush points are fsync, snapshot and idle. `freed`, the inode whose last link went, is reclaimed
+ * AFTER the op is journalled: a blob deleted ahead of the record that unlinks it reappears after
+ * replay with nothing behind it.
  */
 function metaOp(p, k, path, decide) {
   if (!k.store || !k.store.vfs) return -EIO;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  // THE READ-ONLY TEST IS THE MOUNT'S, not the volume's, and this is the one place it is made for
-  // the eight metadata mutations. The volume's own verdict (constraint 28) reaches here as the
-  // root mount's MNT_RO flag, so a read-only volume and a read-only `/usr` refuse identically
-  // instead of through two different tests that could disagree.
   if (mountReadOnly(k, at.mount)) return -EROFS;
-  // A generated filesystem journals nothing: there is no durable state to record an op against.
-  // Its own mutation methods throw, so this returns the errno and never reaches `k.store.journal`
-  // with a record the store has no volume for.
   let op;
   try {
     op = decide(at.mount.fs, at.rel, credOf(p));
   } catch (error) {
     return errnoOfFsError(error);
   }
-  // A MOUNT WITH NO DURABLE STATE HAS NOTHING TO JOURNAL. The op was applied in memory by the
-  // filesystem's own method and that is the whole of it — a tmpfs mkdir is complete when it
-  // returns. Journaling it would append a record describing the OPFS volume, where it did not
-  // happen, and replay would then invent a directory on the wrong filesystem.
+  // A mount with no durable state has nothing to journal: journaling a tmpfs mkdir would append a
+  // record describing the OPFS volume, and replay would invent the directory there.
   if (!at.mount.durable) return 0;
   // `null` is a legal no-op: rename of a name onto itself. POSIX says that succeeds.
   if (op === null) return 0;
@@ -232,21 +159,10 @@ function metaRead(p, k, path, read) {
 }
 
 /**
- * A PROCESS-SUPPLIED PATH TO THE FILESYSTEM THAT OWNS IT. The one place the mount table is read.
- *
- * Two steps, in this order and not the other: the path is made absolute against the process's cwd
- * FIRST, then the mount is resolved. Resolving the mount against a relative path would ask which
- * filesystem owns `../x`, a question with no answer.
- *
- * The cwd join is lexical (`normalize`, not resolution), which is `cd -L` and what every shell
- * does for its own working directory. It differs from resolution exactly when a symlink is
- * involved — see src/fs/vfs.mjs `normalize`.
- *
- * WHAT THIS DOES NOT DO, stated because the gap is invisible otherwise: a symlink is resolved
- * INSIDE the filesystem that holds it, so a symlink on the OPFS volume pointing into `/proc`
- * resolves against the OPFS volume and reaches ENOENT. Cross-mount symlink traversal needs the
- * walk itself to consult the mount table at every component, which this does not. Nothing in M3
- * crosses a mount by symlink; a milestone that needs it has to move the join into the walk.
+ * A process-supplied path to the filesystem that owns it; the one place the mount table is read.
+ * The path is made absolute against the cwd FIRST, then the mount is resolved: the other order asks
+ * which filesystem owns `../x`. A symlink is resolved INSIDE the filesystem holding it, so one on
+ * the OPFS volume pointing into `/proc` reaches ENOENT — cross-mount traversal is not implemented.
  */
 export function resolveMount(p, k, path) {
   const table = k.mounts;
@@ -258,74 +174,42 @@ export function resolveMount(p, k, path) {
   } catch (error) {
     return errnoOfFsError(error);
   }
-  // THE ROOT MOUNT GETS THE PATH AS GIVEN, with `..` intact, because it is the only filesystem
-  // that resolves `..` properly: `src/fs/vfs.mjs`'s walk takes each `..` against the real parent
-  // and follows symlinks first, which is what makes `/a/link-to-b/../c` land in b's parent and
-  // `stat("/missing/../x")` an ENOENT.
-  //
-  // `MountTable.resolve` normalizes LEXICALLY to pick the mount, and it has to: without walking
-  // the tree there is no other way to know which subtree a `..` lands in. Handing that normalized
-  // string on to the VFS was a regression — it popped `..` textually, so a `..` through a
-  // nonexistent or non-directory component stopped failing and a `..` through a symlink resolved
-  // against the name instead of the target. The generated mounts and the tmpfs have no symlinks,
-  // so for them the lexical answer IS the answer.
+  // THE ROOT MOUNT GETS THE PATH AS GIVEN, with `..` intact, because it is the only filesystem that
+  // resolves `..` against the real parent and follows symlinks first — which is what makes
+  // `stat("/missing/../x")` an ENOENT. `MountTable.resolve` must normalize LEXICALLY to pick the
+  // mount, and handing that string on pops `..` textually and loses both. The other mounts have no
+  // symlinks, so for them the lexical answer IS the answer.
   if (at.mount.path === "/") return { mount: at.mount, rel: abs };
   return at;
 }
 
-/** A process-supplied path, made absolute against the caller's cwd. NOT normalized: see
- *  `resolveMount` for why the root mount must see `..` as the caller wrote it. */
+/** Absolute against the caller's cwd. NOT normalized: see `resolveMount`. */
 function absoluteOf(p, path) {
   return isAbsolute(path) ? path : joinPath(p.cwd || "/", path);
 }
 
-/**
- * Whether a mount refuses a write RIGHT NOW.
- *
- * The mount row's flag is set once, at boot, from the volume's mount verdict. That is right for
- * every mount whose read-only-ness cannot change — a generated filesystem, a provider — and WRONG
- * for the OPFS volume, which `src/kernel/store.mjs` demotes to read-only at runtime after a failed
- * snapshot (constraint 28: it reports and refuses rather than reseeding).
- *
- * The bug that produced: after a demotion the frozen flag still read false, so `metaOp` ran
- * `decide()`, the VFS APPLIED the op to the in-memory inode table, and only then did the journal
- * refuse with -EROFS. The caller was told its `mkdir` failed while `stat` showed the directory for
- * the rest of the session, and it was gone after a reload. The flag is a boot-time fact; the
- * store's verdict is the live one, so the durable mount asks the store.
- */
+/** Whether a mount refuses a write RIGHT NOW. The row's flag is a boot-time fact and WRONG for the
+ *  OPFS volume, which `src/kernel/store.mjs` demotes at runtime after a failed snapshot
+ *  (constraint 28), so a durable mount asks the store instead. */
 function mountReadOnly(k, mount) {
   if (mount.durable) return !!(k.store && k.store.readOnly);
   return mount.readOnly;
 }
 
 /**
- * A PARKED call. `null` from an ops row means "not answered now; the kind holds a record and will
- * reply to it when an event unblocks it" — a pipe read with no data, a pipe write with no space.
+ * A PARKED call: `null` from an ops row means the kind holds a record and will reply when an event
+ * unblocks it. It MUST be tested before the thenable check and before any numeric use, because
+ * `null >= 0` is true and `null | 0` is 0 — a parked read would answer 0, which on a pipe is EOF.
  *
- * `null` MUST be tested before the thenable check and before any numeric use, because `null >= 0`
- * is true and `null | 0` is 0: left to fall through, a parked read answered the caller with 0,
- * which on a pipe means EOF. A reader that was supposed to wait would have seen end-of-file.
- *
- * THE PER-FD BUDGET IS RELEASED AT THE PARK, and that is a decision rather than an oversight. The
- * budget (FD_INFLIGHT_CAP) bounds outstanding kernel I/O per description, and `chargeFd`'s own
- * comment names "a kernel that never settles would hold a slot forever" as its hazard — a parked
- * pipe read is exactly that, by design and indefinitely. What bounds parked records instead is
- * the process table: a process has one futex word and one outstanding call, so a pipe can hold at
- * most one record per process and processes are capped by constraint 17. Holding the charge would
- * instead make the 65th blocking reader on a shared pipe get ENOBUFS, which is a different and
- * undocumented contract.
+ * The per-fd budget is RELEASED at the park: a park is indefinite, and holding the charge would
+ * refuse the 65th blocking reader on a shared pipe. Parked records are bounded instead by one
+ * outstanding call per process, and processes by constraint 17.
  */
 function isParked(r) {
   return r === null;
 }
 
-/**
- * A directory read, dispatched from an fd rather than a path.
- *
- * `metaRead`'s sibling: same error translation, same dispatch-thread answer, but the filesystem
- * comes from the description because `readdir` never sees a path. Separate rather than a flag on
- * `metaRead`, which would be an abstraction needing a parameter to tell its callers apart.
- */
+/** `metaRead`'s sibling for an fd: `readdir` never sees a path, so there is no mount to resolve. */
 function dirRead(p, k, d, read) {
   if (!k.store || !k.store.vfs) return -EIO;
   try {
@@ -335,14 +219,8 @@ function dirRead(p, k, d, read) {
   }
 }
 
-/**
- * `rename` and `link`: two paths that must land on ONE mount.
- *
- * EXDEV is POSIX's own answer and the honest one. A rename across mounts is a copy plus an unlink,
- * which is a different operation with different failure modes and no atomicity — and the VFS's
- * rename is a metadata edit that could not express it anyway. Refusing it is what `mv` expects;
- * `mv` falls back to copy-and-delete when it sees EXDEV.
- */
+/** `rename` and `link`: two paths that must land on ONE mount, else EXDEV. The VFS's rename is a
+ *  metadata edit and could not express a cross-mount copy-plus-unlink. */
 function twoPathOp(p, k, paths, decide) {
   if (!k.store || !k.store.vfs) return -EIO;
   const a = resolveMount(p, k, paths[0]);
@@ -353,24 +231,11 @@ function twoPathOp(p, k, paths, decide) {
   return metaOp(p, k, paths[1], (fs, rel, cred) => decide(fs, a.rel, b.rel, cred));
 }
 
-/**
- * The HANDLERS map, keyed by syscall NAME (not by number). The dispatch table is derived from
- * this plus SYS_NAME at boot; a missing name is a panic at boot, not a syscall that silently
- * returns -ENOSYS at runtime. That is what makes item (f)'s "every declared call has a handler"
- * assertion both cheap and load-bearing.
- */
 const HANDLERS = {};
 
 HANDLERS.getpid = (p) => p.pid;
 HANDLERS.getppid = (p) => p.ppid;
-/**
- * getpgid(pid) — THE TARGET's group, not the caller's.
- *
- * This ignored its argument and always returned `p.pgid`, so a shell could not ask which group it
- * had just put a pipeline into. Latent until M4: with no pgid inheritance every process was its
- * own group, so the caller's answer was indistinguishable from the target's for every pid that
- * existed. 0 means self, which is POSIX.
- */
+/** getpgid(pid) — THE TARGET's group, not the caller's. 0 means self. */
 HANDLERS.getpgid = (p, k) => {
   const pid = p.ctl[A0] | 0;
   if (pid === 0 || pid === p.pid) return p.pgid;
@@ -403,20 +268,8 @@ HANDLERS.write = (p, k) => {
   return r;
 };
 
-/**
- * open(flags, mode), with the path in the byte region. docs/ABI.md's own signature.
- *
- * M0a's `open` was this call with the VFS missing underneath it: a flat OPFS name, no flags, no
- * resolution, no permission check. It keeps its syscall number — a second "open" would be two
- * renderers of one fact — and the bench that measured raw handle cost through it now measures the
- * same handle cost through the real path, which is a more representative mix rather than a
- * different one.
- *
- * CONSTRAINT 24 IS SATISFIED HERE AND NOWHERE ELSE: the path is resolved to an inode ONCE, in the
- * kernel, and what the process gets back is an fd. `getDirectoryHandle` is 85 us per component, so
- * a four-component walk per call would be 340 us — 23 syscalls — and the whole fd-based shape of
- * the ABI exists to pay it once.
- */
+/** open(flags, mode), with the path in the byte region. Constraint 24 is satisfied here and nowhere
+ *  else: the path is resolved to an inode ONCE, in the kernel, and the process gets back an fd. */
 HANDLERS.open = (p, k) => {
   if (!k.store || !k.store.vfs) return -EIO;
   const path = readPath(p);
@@ -429,14 +282,8 @@ HANDLERS.open = (p, k) => {
   const wantR = access === O_RDONLY || access === O_RDWR;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  // The MOUNT's read-only flag, not the volume's. Same rule as metaOp: one test, so a read-only
-  // volume and a read-only mount refuse identically.
-  //
-  // A CHARACTER DEVICE IS THE ONE EXCEPTION, and it is an exception to a conflation rather than to
-  // the rule. `/dev` is mounted MNT_RO because its TREE cannot change — no file can be created,
-  // renamed or unlinked there. Writing to `/dev/console` changes no tree: it puts bytes in a
-  // kernel object. The flag answers "can the directory structure change", and a device write is
-  // not that question. O_CREAT is still refused, because a mount with no `mknod` cannot make one.
+  // A CHARACTER DEVICE IS THE ONE EXCEPTION to the mount's read-only flag: `/dev` is MNT_RO because
+  // its TREE cannot change, and writing to `/dev/console` changes no tree. O_CREAT is still denied.
   const chardev = at.mount.fs.chardevAt ? at.mount.fs.chardevAt(at.rel) : null;
   if (((flags & O_CREAT) || (wantW && !chardev)) && mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
@@ -452,14 +299,7 @@ HANDLERS.open = (p, k) => {
   } catch (error) {
     return errnoOfFsError(error);
   }
-  // A GENERATED FILE IS INSTALLED HERE AND ANSWERS ON THE DISPATCH THREAD. There is no journal to
-  // append, no blob to open and no I/O worker to wait for, so routing it through `k.later` would
-  // buy a round trip and nothing else. The bytes were produced by `openDecision` and are the
-  // snapshot this fd will keep reading — see src/kernel/synth.mjs for why open-time and not
-  // read-time.
-  // A TMPFS DESCRIPTION. Like the generated case it answers on the dispatch thread — no journal,
-  // no blob, nothing to await — but it is WRITABLE and it does NOT snapshot: two descriptions on
-  // one tmpfs inode must see each other's writes, as two on one real file do.
+  // A tmpfs description is answered on the dispatch thread: no journal, no blob, nothing to await.
   if (decision.tmpfs) {
     const d = {
       kind: F_TMP,
@@ -481,28 +321,18 @@ HANDLERS.open = (p, k) => {
         return errnoOfFsError(error);
       }
     }
-    // O_APPEND IS NOT A SEEK AT OPEN. This set `d.pos` to the size here and was the exact defect
-    // recorded ~60 lines below for the OPFS path: two `>>` descriptions on one file both start at
-    // the same end, both write there, and both are told they wrote — measured there as eight bytes
-    // acknowledged, the file 12 bytes long, and the first writer's four gone. The offset has to be
-    // resolved PER WRITE, which `files.mjs`'s F_TMP `write` now does from `d.flags`.
+    // O_APPEND IS NOT A SEEK AT OPEN: the offset is resolved per write from `d.flags`. Setting
+    // `d.pos` to the size here makes two `>>` descriptions share an end offset and both overwrite.
     return p.fds.add(d);
   }
-  // A CHARACTER DEVICE: the description is a kernel OBJECT, not bytes. M4a's `/dev/console` is
-  // the only one, and `src/kernel/console.mjs`'s header says why it exists and when it goes.
-  //
-  // -ENXIO FOR A NAME WITH NO DEVICE BEHIND IT. The node exists in `/dev` whether or not the page
-  // ever attached a window, because the mount table is static at boot (constraint 78) and the
-  // window is not. ENOENT would be a lie — the file is there — and 0 bytes would be worse: a
-  // relay would read EOF and report a clean exit from a terminal that was never connected.
+  // A character device: the description is a kernel OBJECT, not bytes. The node exists in `/dev`
+  // whether or not a window was attached, because the mount table is static at boot
+  // (constraint 78), so a name with no device behind it is -ENXIO and not ENOENT.
   if (decision.chardev) {
     const d = k.chardev(decision.chardev, flags, decision);
     if (typeof d === "number") return d;
     const fd = p.fds.add(d);
-    // UNDONE ON FAILURE, or the device counts an open the caller was never told about. `fds.add`
-    // answers -EMFILE once the process holds OPEN_MAX descriptions, and the count only ever comes
-    // back down through a `close` on an fd that does not exist. `pipe2` and `pty_open` both undo
-    // their end counts the same way and say so; this arm is the one that did not.
+    // Undone on failure, or the device counts an open the caller was never told about.
     if (fd < 0) KIND_OPS[d.kind].close(d);
     return fd;
   }
@@ -517,8 +347,7 @@ HANDLERS.open = (p, k) => {
       pos: 0,
       bytes: decision.bytes,
       info: decision.info,
-      // The filesystem this description came from, so `readdir` can ask the right one. F_FILE
-      // descriptions leave it undefined and readdir falls back to the OPFS VFS.
+      // So `readdir` can ask the right one; F_FILE leaves it undefined and falls back to the VFS.
       fs: at.mount.fs,
       rel: decision.rel,
       inflight: 0,
@@ -536,12 +365,8 @@ HANDLERS.open = (p, k) => {
     d.refs = 1;
     d.flags = flags;
     if ((flags & O_TRUNC) && wantW && d.type === FILE) {
-      // POSIX TRUNCATES AS PART OF `open`, so the commit belongs here. Staged and left
-      // uncommitted, the truncation was invisible to every other description until the truncating
-      // fd synced or closed: a concurrent `stat` reported the old size and a concurrent read
-      // returned the old bytes, both from a file the caller had already been told was empty.
-      // `truncateFd` answers 0 without staging anything when the file is already that length, so
-      // the common `> file` idiom costs no generation and no record.
+      // POSIX truncates as part of `open`, so the commit belongs here: left uncommitted, a
+      // concurrent `stat` reports the old size of a file the caller was told was empty.
       const t = await k.store.truncateFd(d, 0);
       if (t < 0) {
         await k.store.closeFd(d);
@@ -549,31 +374,18 @@ HANDLERS.open = (p, k) => {
       }
       const c = await k.store.fsyncFd(d);
       if (c < 0) {
-        // THE STAGED TRUNCATION GOES WITH THE FAILED OPEN, and it has to be discarded EXPLICITLY.
-        // A refused commit keeps its staged generation now, so that a caller retrying -EBUSY can
-        // still publish bytes `pwrite` acknowledged — but this caller is about to be told its
-        // `open` failed, and `closeFd` commits whatever is staged. Without this the file would be
-        // truncated by the cleanup of an `open` that returned an errno.
+        // The staged truncation goes with the failed open and must be discarded EXPLICITLY:
+        // `closeFd` commits whatever is staged.
         await k.store.dropStaging(d);
         await k.store.closeFd(d);
         return c;
       }
     }
-    // O_APPEND IS NOT A SEEK HERE, and this is where it used to be one: `d.pos = endFd(d)`, once,
-    // at open. POSIX sets the offset to the end of the file atomically BEFORE EACH WRITE, and the
-    // flag is recorded on the description above so `writeFd` can do exactly that under the inode's
-    // lock (src/kernel/store.mjs `writeHeld`). Seeking here instead cost the first of two `>>`
-    // writers its bytes, with every call returning success. The initial offset of an O_APPEND
-    // description is 0, which is also POSIX and is what a read through an O_RDWR|O_APPEND fd needs.
+    // O_APPEND is resolved per write (src/kernel/store.mjs `writeHeld`), so the offset here is 0.
     const fd = p.fds.add(d);
     if (fd < 0) {
-      // THE SYNC ACCESS HANDLE GOES WITH THE FAILED OPEN. `openFd` has already taken one, and
-      // `createSyncAccessHandle` is AN EXCLUSIVE LOCK PER FILE — so returning -EMFILE without
-      // closing it left the file unopenable by anything, by any process, for the lifetime of the
-      // page. An errno the caller can retry became permanent data loss on one file.
-      //
-      // `closeFd` commits whatever is staged, and nothing is: either the O_TRUNC arm above
-      // already synced, or no write has happened on this description at all.
+      // The sync access handle goes with the failed open. `createSyncAccessHandle` is AN EXCLUSIVE
+      // LOCK PER FILE, so not closing it leaves the file unopenable for the lifetime of the page.
       await k.store.closeFd(d);
       return fd;
     }
@@ -582,14 +394,8 @@ HANDLERS.open = (p, k) => {
   return PENDING;
 };
 
-/**
- * fsync, A SEPARATE SYSCALL FROM write (constraint 23), and the one the I/O worker exists for.
- *
- * `flush()` is 260 us against a 5 us 4 KiB write, so flushing per write makes the VFS 50x slower
- * for durability nobody asked for — and it is SYNCHRONOUS, so inline it is 260 us of kernel thread
- * no other process can use. That is the stronger, latency argument for the same split
- * (constraint 58): `fsync` is the call to get off the dispatch thread, `open` already was.
- */
+/** fsync, a separate syscall from write (constraint 23), and the one the I/O worker exists for:
+ *  `flush()` is SYNCHRONOUS, so inline it holds the kernel thread (constraint 58). */
 HANDLERS.fsync = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
@@ -606,8 +412,7 @@ HANDLERS.fsync = (p, k) => {
   return r;
 };
 
-/** close(fd). The last reference runs the kind's close op, which for F_FILE commits a staged
- *  generation and releases the handle — so it returns a promise and goes through settle(). */
+/** close(fd). The last reference runs the kind's close op, which for F_FILE returns a promise. */
 HANDLERS.close = (p, k) => {
   const fd = p.ctl[A0] | 0;
   if (!p.fds.get(fd)) return -EBADF;
@@ -632,8 +437,7 @@ HANDLERS.read = (p, k) => {
   if (r && typeof r.then === "function") {
     k.later(p, () => r.then((n) => {
       dischargeFd(d);
-      // The bytes are already in the caller's own SAB — the I/O worker read straight into it, so
-      // there is no copy here. RLEN is the count.
+      // The I/O worker read straight into the caller's SAB; RLEN is the count.
       if (n >= 0) p.rlen = n;
       return n;
     }, (e) => {
@@ -647,23 +451,14 @@ HANDLERS.read = (p, k) => {
   return r;
 };
 
-/**
- * pread/pwrite: the same two ops at an explicit offset, so the description's cursor is NOT touched.
- * The offset is an (lo, hi) pair; a description with no offset is ESPIPE.
- *
- * The offset travels as an ARGUMENT all the way down. Writing it into `d.pos` and restoring it
- * afterwards was the first version and it was wrong: every op here awaits, so a positional call
- * would be interleaved by any concurrent call on the same fd and each would see the other's
- * position. That is the whole reason `pread` exists.
- */
+/** pread/pwrite: the same two ops at an explicit (lo, hi) offset, which the description's cursor
+ *  never sees. The offset travels as an ARGUMENT all the way down, because every op here awaits and
+ *  a saved-and-restored cursor would be interleaved by a concurrent call on the same fd. */
 function atOffset(p, k, which) {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  // A generated file is seekable, so `pread` is legal on it and ESPIPE would be the wrong refusal.
-  // THE LINE BELOW IS THE REFUSAL and is load-bearing, which an earlier comment here denied: it
-  // claimed the ops table would answer -ENOSYS, but unlike `HANDLERS.write` this function never
-  // tests `ops.write` before calling it, so deleting the guard on the strength of that comment
-  // would turn `pwrite` on a /proc fd into a TypeError escaping the dispatcher.
+  // LOAD-BEARING: unlike `HANDLERS.write` this never tests `ops.write` before calling it, so
+  // without the kind guard `pwrite` on a /proc fd is a TypeError escaping the dispatcher.
   if (d.kind !== F_FILE && d.kind !== F_SYNTH && d.kind !== F_TMP) return -ESPIPE;
   if (d.kind === F_SYNTH && which === "write") return -EROFS;
   const length = p.ctl[A1] | 0;
@@ -677,8 +472,7 @@ function atOffset(p, k, which) {
     ? ops.read(d, p, DATA_OFF, length, offset)
     : ops.write(d, p.bytes, DATA_OFF, length, p, offset);
   if (isParked(r)) {
-    // No kind parks on a positional call today: a pipe has no position and answers ESPIPE above.
-    // Named rather than left to fall through, because `null` here would answer the caller 0.
+    // No kind parks on a positional call; named rather than left to fall through (see isParked).
     dischargeFd(d);
     return -EINVAL;
   }
@@ -701,18 +495,12 @@ function atOffset(p, k, which) {
 HANDLERS.pread = (p, k) => atOffset(p, k, "read");
 HANDLERS.pwrite = (p, k) => atOffset(p, k, "write");
 
-/**
- * seek. SEEK_SET and SEEK_CUR answer on the dispatch thread; SEEK_END does not.
- *
- * SEEK_END needs the file's current EXTENT, and a description holds no size — so for a description
- * with no staged generation that is a read of the blob, in the I/O worker. The split is not a
- * special case: SEEK_END is the only whence whose answer depends on durable state at all.
- */
+/** seek. SEEK_SET and SEEK_CUR answer on the dispatch thread; SEEK_END needs the file's current
+ *  extent, which a description does not hold. */
 const seekTo = (p, d, next) => {
   if (!Number.isSafeInteger(next) || next < 0) return -EINVAL;
   d.pos = next;
-  // docs/ABI.md: r0 and r1 together are an i64 return. The error sentinel is r1 === -1, which a
-  // real offset cannot reach before 2^63.
+  // r0 and r1 together are an i64 return; the error sentinel is r1 === -1 (docs/ABI.md).
   const [lo, hi] = packI64(next);
   p.r1 = hi;
   return lo;
@@ -729,10 +517,8 @@ HANDLERS.seek = (p, k) => {
   if (whence !== SEEK_END) return -EINVAL;
   // A generated file's extent is the snapshot it already holds, so SEEK_END needs no round trip.
   if (d.kind === F_SYNTH) return seekTo(p, d, d.bytes.length + offset);
-  // A tmpfs extent is known synchronously: the Map holds it — but ONLY for a file. A directory
-  // has no blob entry, so asking its size threw FsError out of a handler the dispatcher does not
-  // wrap, and `open("/tmp", O_DIRECTORY)` then `seek(fd, 0, SEEK_END)` faulted the kernel. A
-  // directory is not seekable to its end; EISDIR is what POSIX says and what `read` already says.
+  // A tmpfs extent is known synchronously, but ONLY for a file: a directory has no blob entry and
+  // asking its size throws FsError out of a handler the dispatcher does not wrap.
   if (d.kind === F_TMP) {
     if (d.type !== FILE) return -EISDIR;
     try {
@@ -741,8 +527,7 @@ HANDLERS.seek = (p, k) => {
       return errnoOfFsError(error);
     }
   }
-  // `d` is captured, not re-resolved from the fd: the description is what the cursor belongs to,
-  // and dup/dup2 mean the fd and the description are not the same thing.
+  // `d` is captured, not re-resolved: the cursor belongs to the description, which dup/dup2 alias.
   k.later(p, async () => {
     const end = await k.store.endFd(d);
     if (end < 0) return end;
@@ -751,25 +536,15 @@ HANDLERS.seek = (p, k) => {
   return PENDING;
 };
 
-/**
- * fstat on an fd. It reads the blob, so it answers through later() rather than on the dispatch
- * thread.
- *
- * THE COST IS A ROUND TRIP AND IT BUYS THE ONE THING fstat IS FOR. A description holds no size,
- * and the size it must report includes an append written into the committed generation and not
- * yet published — bytes `pwrite` has already returned a count for. Measured against the alternative
- * of reporting the committed size alone, which is what a synchronous fstat could answer: that
- * reports 8 for a file a successful 4-byte `pwrite` at offset 8 just made 12 bytes long.
- */
+/** fstat on an fd. It reads the blob, so it answers through later(): the committed size alone — all
+ *  a synchronous fstat could answer — reports 8 for a file a successful 4-byte `pwrite` at offset 8
+ *  just made 12 bytes long. */
 HANDLERS.fstat = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  // A generated file answers from the description: its size is the snapshot's length, which is
-  // final, so there is nothing to ask storage about.
+  // A generated file's size is the snapshot's length, which is final.
   if (d.kind === F_SYNTH) return writeStat(p, { ...d.info, size: d.bytes.length }, d.dev);
-  // A tmpfs answers from its own table, which is authoritative and synchronous. `fstat` must
-  // report the CURRENT size and not the one recorded at open: another description may have
-  // written since, and that is the case fstat exists for.
+  // A tmpfs answers from its own table; the CURRENT size, not the one recorded at open.
   if (d.kind === F_TMP) {
     try {
       return writeStat(p, { ...d.fs.vfs.fstat(d.ino), dev: d.dev }, d.dev);
@@ -790,8 +565,7 @@ HANDLERS.fstat = (p, k) => {
 HANDLERS.ftruncate = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  // The size is parsed BEFORE any kind branch, so a bad argument is EINVAL for every kind rather
-  // than for whichever ones happen to read it first.
+  // The size is parsed BEFORE any kind branch, so a bad argument is EINVAL for every kind.
   const size = Number(unpackI64(p.ctl[A1], p.ctl[A2]));
   if (!Number.isSafeInteger(size) || size < 0) return -EINVAL;
   if (d.kind === F_TMP) {
@@ -808,11 +582,9 @@ HANDLERS.ftruncate = (p, k) => {
 HANDLERS.dup = (p) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
-  // THE REFERENCE IS TAKEN ONLY IF AN FD IS. `refs` was raised BEFORE `add`, so a table already
-  // at OPEN_MAX answered -EMFILE with the count left permanently one high — and the kind's
-  // `close` op fires only when the LAST reference goes, so it never fired at all. A pipe whose
-  // writer count never drops leaves its reader parked on an EOF that cannot arrive, which is the
-  // deadlock constraint 92 records. `dup2` already orders it this way, inside `install`.
+  // THE REFERENCE IS TAKEN ONLY IF AN FD IS. Raised before `add`, a table at OPEN_MAX answers
+  // -EMFILE with the count permanently one high, so the kind's `close` never fires and a pipe whose
+  // writer count never drops leaves its reader parked on an EOF that cannot arrive (constraint 92).
   const fd = p.fds.add(d);
   if (fd < 0) return fd;
   d.refs += 1;
@@ -824,15 +596,12 @@ HANDLERS.dup2 = (p, k) => {
   const to = p.ctl[A1] | 0;
   if (!d) return -EBADF;
   if (to < 0) return -EBADF;
-  // THE CEILING, CHECKED BEFORE THE CLOSE. An unbounded target grew the fd array without limit,
-  // and `spawn`'s inheritance loop and teardown's sweep then walk its whole length on the kernel
-  // thread. Refused first, so a rejected dup2 does not close the caller's existing fd on the way
-  // out. See OPEN_MAX.
+  // THE CEILING, CHECKED BEFORE THE CLOSE, so a rejected dup2 does not close the caller's existing
+  // fd on the way out. See OPEN_MAX.
   if (to >= OPEN_MAX) return -EMFILE;
   if (to === (p.ctl[A0] | 0)) return to;
-  // The close of the fd being replaced may commit a staged generation, so it returns a promise and
-  // dup2 must WAIT for it. Returning before it settled would let the caller write through the new
-  // fd while the old description's commit was still in flight against the same inode.
+  // The close of the fd being replaced may commit a staged generation, so dup2 must WAIT for it:
+  // returning first would let the caller write through the new fd while that commit was in flight.
   const closing = p.fds.close(to);
   const install = () => {
     d.refs += 1;
@@ -845,8 +614,6 @@ HANDLERS.dup2 = (p, k) => {
   }
   return install();
 };
-
-/* --------------------------- the path group --------------------------- */
 
 HANDLERS.mkdir = (p, k) => {
   const path = readPath(p);
@@ -875,9 +642,7 @@ HANDLERS.rename = (p, k) => {
 HANDLERS.symlink = (p, k) => {
   const paths = readTwoPaths(p);
   if (typeof paths === "number") return paths;
-  // (target, linkpath), which is symlink(2)'s order and the order `ln -s` prints. ONLY THE
-  // LINKPATH IS RESOLVED: the target is stored as the bytes the caller gave, never interpreted
-  // here, because a symlink's target is resolved when it is followed and may not exist yet.
+  // (target, linkpath). ONLY THE LINKPATH IS RESOLVED: a target may not exist yet.
   return metaOp(p, k, paths[1], (fs, rel, cred) => fs.symlink(cred, paths[0], rel));
 };
 
@@ -906,12 +671,8 @@ HANDLERS.truncate = (p, k) => {
   const size = Number(unpackI64(p.ctl[A0], p.ctl[A1]));
   if (!Number.isSafeInteger(size) || size < 0) return -EINVAL;
   if (!k.store || !k.store.vfs) return -EIO;
-  // THE FOURTH CHOKE POINT, and the one that was missed. `truncate` resolves its own path rather
-  // than going through metaOp or metaRead, so it needed the mount lookup adding by hand — and
-  // without it a `truncate("/proc/1/status")` resolved against the OPFS volume and came back
-  // ENOENT, which says "no such file" about a file the caller had just read. Measured by
-  // bench/m3-fs/program.mjs's `readonly` mode, which asserts every mutation's errno separately
-  // for exactly this reason: a single "it refused" would have passed.
+  // `truncate` resolves its own path rather than going through metaOp, so the mount lookup is made
+  // here by hand: without it `truncate("/proc/1/status")` answers ENOENT about a readable file.
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
   if (mountReadOnly(k, at.mount)) return -EROFS;
@@ -921,12 +682,10 @@ HANDLERS.truncate = (p, k) => {
   } catch (error) {
     return errnoOfFsError(error);
   }
-  // A generated filesystem cannot reach here: `openDecision` with wantW throws on every one of
-  // them. Asserted rather than assumed, because the three lines below hand the decision to the
-  // blob store and a synthetic decision has no blob.
+  // A generated filesystem cannot reach here — `openDecision` with wantW throws on all of them —
+  // but the lines below hand the decision to the blob store, and a synthetic decision has no blob.
   if (decision.synth) return -EROFS;
-  // A path truncate is an open, a truncate and a close. Expressed as those three rather than as a
-  // fourth way to reach a blob, so the COW rule has one implementation.
+  // A path truncate is an open, a truncate and a close, so the COW rule has one implementation.
   k.later(p, async () => {
     const d = await k.store.openFd(decision);
     if (typeof d === "number") return d;
@@ -940,21 +699,13 @@ HANDLERS.truncate = (p, k) => {
   return PENDING;
 };
 
-/**
- * A stat record, with the file's size rendered by the ONE thing that renders it.
- *
- * `store.sizeOf` answers synchronously for a directory, a symlink, or a file no description holds
- * — which is every `stat` the 10,000-file proof takes — and asks the blob otherwise, because an
- * append written into the committed generation is in the file and the metadata does not name it
- * yet. Answering from the metadata alone here is what let `stat` and `fstat` disagree about one
- * file by four bytes that a `pwrite` had already returned a count for.
- */
+/** A stat record, with the size rendered by the ONE thing that renders it. An append in the
+ *  committed generation is in the file before the metadata names it, so answering from the metadata
+ *  alone makes `stat` and `fstat` disagree by those bytes. */
 function statRecord(p, k, info, mount) {
   const dev = mount ? mount.dev : 0;
-  // A GENERATED FILESYSTEM'S SIZE IS ALREADY FINAL. `store.sizeOf` resolves an inode against the
-  // blob store's handle rows, and a generated inode is a hash of a path that names no blob — so
-  // asking it would either miss and report the metadata size or, worse, collide with a real
-  // inode's row and report another file's length.
+  // A generated filesystem's size is already final. `store.sizeOf` resolves an inode against the
+  // blob store's handle rows, where a generated inode could collide with a real one's row.
   if (mount && mount.fs !== k.store.vfs) return writeStat(p, info, dev);
   const sized = k.store.sizeOf(info);
   if (sized && typeof sized.then === "function") {
@@ -992,20 +743,16 @@ HANDLERS.readlink = (p, k) => {
 
 /**
  * readdir(fd, cookie) -> packed {u64 ino, u8 type, u8 nlen, u16 pad, char[]} records, next cookie
- * in r1. docs/ABI.md's shape with the pad made explicit, and each record padded to a 4-byte
- * boundary so the next u64 is aligned.
+ * in r1 (docs/ABI.md), each record padded to a 4-byte boundary so the next u64 is aligned.
  *
- * The cookie is an INDEX into the directory's entry list, which is the honest thing it can be for
- * an insertion-ordered Map: it is stable while the directory is not mutated and a caller that
- * concurrently unlinks gets a shifted iteration, exactly as a real `readdir` does.
+ * The cookie is an INDEX into the directory's entry list, so a caller that concurrently unlinks
+ * gets a shifted iteration.
  */
 HANDLERS.readdir = (p, k) => {
   const d = p.fds.get(p.ctl[A0]);
   if (!d) return -EBADF;
   if (d.type !== DIR) return -ENOTDIR;
   const cookie = p.ctl[A1] | 0;
-  // Resolved from the DESCRIPTION, not from a path: readdir takes an fd, so there is no path to
-  // resolve a mount against, and the mount it came from is recorded on the description at open.
   return dirRead(p, k, d, () => {
     const entries = (d.kind === F_SYNTH || d.kind === F_TMP)
       ? d.fs.listRel(d.rel) : k.store.vfs.listIno(d.ino);
@@ -1028,9 +775,8 @@ HANDLERS.readdir = (p, k) => {
       out.push(record);
       used += size;
     }
-    // A single entry too large for the byte region would loop a caller forever on the same
-    // cookie. MAX_INLINE is 65,404 B and NAME_MAX is 255, so it cannot happen — asserted rather
-    // than assumed, because the consequence is a hang and not an error.
+    // A single entry too large for the byte region would loop a caller forever on one cookie.
+    // MAX_INLINE against NAME_MAX makes it impossible; asserted because the consequence is a hang.
     if (!out.length && index < entries.length) return -EOVERFLOW;
     const packed = new Uint8Array(used);
     let at = 0;
@@ -1043,15 +789,9 @@ HANDLERS.readdir = (p, k) => {
   });
 };
 
-/* --------------------------- M4b: the pty, termios, and poll --------------------------- */
-
-/**
- * pty_open() -> master fd in r0, SLAVE FD IN r1.
- *
- * The same two-fds-from-one-call shape as `pipe2`, and for the same reason r1 carries the second.
- * The opener's process group becomes the pty's FOREGROUND GROUP, which is where the line
- * discipline sends SIGINT. A shell moves it per pipeline with `ioctl(TIOCSPGRP)`.
- */
+/** pty_open() -> master fd in r0, slave fd in r1. The OPENER'S PROCESS GROUP becomes the pty's
+ *  foreground group — where the line discipline sends SIGINT — not its pid, because a shell opens
+ *  the pty and then puts each pipeline in its own group with `ioctl(TIOCSPGRP)`. */
 HANDLERS.pty_open = (p) => {
   const pty = new Pty();
   const master = { kind: F_PTY_M, refs: 1, flags: O_RDWR, pty, inflight: 0 };
@@ -1066,15 +806,12 @@ HANDLERS.pty_open = (p) => {
   }
   pty.masters = 1;
   pty.slaves = 1;
-  // The opener's group, not its pid: a shell opens the pty and then puts each pipeline in its own
-  // group, so the initial foreground group is whatever the opener belongs to.
   pty.fgPgid = p.pgid;
   p.r1 = sfd;
   return mfd;
 };
 
-/** The pty behind an fd, or a negative errno. ENOTTY is the POSIX answer for "not a terminal",
- *  and it is what makes `isatty()` expressible without a second call. */
+/** The pty behind an fd, or a negative errno; ENOTTY is what makes `isatty()` expressible. */
 function ptyOf(p, fd) {
   const d = p.fds.get(fd);
   if (!d) return -EBADF;
@@ -1094,8 +831,8 @@ HANDLERS.tty_set = (p) => {
   const d = ptyOf(p, p.ctl[A0]);
   if (typeof d === "number") return d;
   const length = Atomics.load(p.ctl, LEN_I32);
-  // EXACTLY the record size. A short buffer would decode reserved words out of whatever the SAB
-  // last held, and a caller that sent half a termios would silently change flags it never set.
+  // EXACTLY the record size: a short buffer would decode reserved words out of whatever the SAB
+  // last held, and silently change flags the caller never set.
   if (length !== TERMIOS_BYTES) return -EINVAL;
   const view = new DataView(
     p.bytes.buffer, p.bytes.byteOffset + DATA_OFF, TERMIOS_BYTES);
@@ -1110,14 +847,8 @@ HANDLERS.tty_winsize_get = (p) => {
   return replyBytes(p, record);
 };
 
-/**
- * tty_winsize_set(fd, rows, cols). docs/ABI.md: a set on the MASTER raises SIGWINCH on the
- * slave's foreground pgrp.
- *
- * Taken from the registers rather than the byte region, which is the signature docs/ABI.md
- * publishes — `tty_winsize_set(fd, rows, cols)`. The pixel fields are not in that signature and
- * are preserved rather than zeroed, so a caller that set them through nothing is not surprised.
- */
+/** tty_winsize_set(fd, rows, cols) — docs/ABI.md: a set on the MASTER raises SIGWINCH on the
+ *  slave's foreground pgrp. The pixel fields are not in that signature and are preserved. */
 HANDLERS.tty_winsize_set = (p) => {
   const d = ptyOf(p, p.ctl[A0]);
   if (typeof d === "number") return d;
@@ -1128,14 +859,7 @@ HANDLERS.tty_winsize_set = (p) => {
   return d.pty.setWinsize({ rows, cols, xpixel: had.xpixel, ypixel: had.ypixel });
 };
 
-/**
- * ioctl(fd, request, byteregion) — TWO REQUESTS, the foreground process group.
- *
- * The request space is otherwise unimplemented and answers -EINVAL, which is the honest state of
- * a call this kernel does not serve. These two exist because POSIX carries `tcgetpgrp`/`tcsetpgrp`
- * through `ioctl`, and inventing a syscall for a fact `ioctl` already names would be new ABI
- * surface for nothing. M5's shell needs `tcsetpgrp` to move the foreground group per pipeline.
- */
+/** ioctl(fd, request, arg) — the two foreground-process-group requests only; docs/ABI.md. */
 HANDLERS.ioctl = (p, k) => {
   const d = ptyOf(p, p.ctl[A0]);
   if (typeof d === "number") return d;
@@ -1144,9 +868,8 @@ HANDLERS.ioctl = (p, k) => {
   if (request !== TIOCSPGRP) return -EINVAL;
   const pgid = p.ctl[A2] | 0;
   if (pgid < 0) return -EINVAL;
-  // THE GROUP MUST EXIST AND SHARE THIS SESSION. Otherwise a process could point a terminal's
-  // foreground group at a group in another session and have Ctrl-C delivered across it — and 0
-  // would mean "nobody", which the discipline treats as "drop the signal" rather than broadcast.
+  // THE GROUP MUST EXIST AND SHARE THIS SESSION, or a process could point a terminal's foreground
+  // group at a group in another session and have Ctrl-C delivered across it.
   if (pgid !== 0) {
     const members = k.table.pgidMembers(pgid);
     if (!members.length) return -ESRCH;
@@ -1156,17 +879,12 @@ HANDLERS.ioctl = (p, k) => {
   return 0;
 };
 
-/* --------------------------------------- poll ----------------------------------------- */
-
 /**
- * The parked `poll` calls. Constraint 42: "`poll()` MUST be the single wait primitive over fds",
- * because a process has one futex word and one outstanding call — so one window plus a pipe
- * cannot otherwise wake it.
+ * The parked `poll` calls. Constraint 42: `poll()` is the single wait primitive over fds, because a
+ * process has one futex word and one outstanding call.
  *
- * ONE LIST, re-evaluated when anything replies, rather than a waiter list per pollable object.
- * A process has one outstanding call, so this list is at most one entry per process and is
- * bounded by constraint 17's cap; re-evaluating it is O(processes polling), which is
- * O(interested) in constraint 18's sense and not O(every process).
+ * ONE LIST, re-evaluated when anything replies, rather than a waiter list per pollable object: at
+ * most one entry per process, bounded by constraint 17, so a scan is O(interested) (constraint 18).
  */
 const pollWaiters = [];
 let inPollWake = false;
@@ -1178,8 +896,7 @@ function pollOne(p, fd, events) {
   let revents = 0;
   if (d.kind === F_PIPE_R) {
     if (d.pipe.length > 0) revents |= POLLIN;
-    // A pipe with no writer left is readable: the read returns 0, and EOF is a readable event
-    // rather than a condition a poller should sleep through.
+    // A pipe with no writer left is readable: the read returns 0, and EOF is a readable event.
     if (d.pipe.writers === 0) revents |= POLLIN | POLLHUP;
   } else if (d.kind === F_PIPE_W) {
     if (d.pipe.free > 0) revents |= POLLOUT;
@@ -1187,29 +904,20 @@ function pollOne(p, fd, events) {
   } else if (d.kind === F_TTY || d.kind === F_PTY_M) {
     const isMaster = d.kind === F_PTY_M;
     if (d.pty.readable(isMaster)) revents |= POLLIN;
-    // ASK THE PTY. This was an unconditional POLLOUT on the claim that "neither direction of a
-    // pty ever refuses a write", which is false for the SLAVE once its 16 KiB output ring fills:
-    // a poll-then-write loop then span, told it could write and refused every time. The master
-    // is genuinely always writable — a terminal does not block the typist — and `writable` is
-    // where that asymmetry lives.
+    // ASK THE PTY: the SLAVE refuses a write once its output ring fills, so an unconditional
+    // POLLOUT spins a poll-then-write loop. The master is always writable.
     if (d.pty.writable(isMaster)) revents |= POLLOUT;
     if (isMaster ? d.pty.slaves === 0 : d.pty.masters === 0) revents |= POLLHUP;
   } else if (d.kind === F_WIN) {
-    // THE ROW THAT MAKES A WINDOW WAITABLE ALONGSIDE A PTY. `docs/designs/REVIEW-FINDINGS.md`
-    // finding 1: without it a terminal process must park on one of the two and go deaf to the
-    // other. Constraint 42.
+    // The row that makes a window waitable alongside a pty (constraint 42).
     if (d.console.readable()) revents |= POLLIN;
     if (d.console.writable()) revents |= POLLOUT;
-    // The window was destroyed. Reported whether or not it was asked for, as POLLHUP always is:
-    // a caller cannot mask away the news that its window is gone.
     if (d.console.hungUp()) revents |= POLLHUP;
   } else {
-    // A regular file, a generated file, a tmpfs file and the sink are always ready: their reads
-    // and writes never park, so a poller must not sleep on one.
+    // A regular, generated or tmpfs file and the sink never park, so a poller must not sleep here.
     revents |= POLLIN | POLLOUT;
   }
-  // POLLERR, POLLHUP and POLLNVAL are reported whether or not they were asked for, which is
-  // POSIX: a caller cannot mask away the news that its fd is broken.
+  // POLLERR, POLLHUP and POLLNVAL are reported whether or not they were asked for.
   return revents & (events | POLLERR | POLLHUP | POLLNVAL);
 }
 
@@ -1233,21 +941,17 @@ function pollPublish(p, entries) {
   p.rlen = entries.length * POLLFD_BYTES;
 }
 
-/**
- * Re-evaluate every parked `poll`. Called from `reply`, which is the one funnel every state change
- * that could make an fd ready passes through.
- *
- * REENTRANCY IS GUARDED: this calls `reply` itself, and without the flag a woken poller would
- * re-enter the scan from inside its own reply.
- */
+/** Re-evaluate every parked `poll`. Called from `reply`, the one funnel every state change that
+ *  could make an fd ready passes through. REENTRANCY IS GUARDED: this calls `reply` itself, and a
+ *  woken poller would otherwise re-enter the scan from inside its own reply. */
 export function pollWake(k) {
   if (inPollWake || pollWaiters.length === 0) return;
   inPollWake = true;
   try {
     for (let i = pollWaiters.length - 1; i >= 0; i -= 1) {
       const w = pollWaiters[i];
-      // The same sequence guard every parked record in this kernel uses: a call already answered
-      // by an interrupt, a teardown or a panic must not be answered again.
+      // The sequence guard: a call already answered by an interrupt, a teardown or a panic must
+      // not be answered again.
       if (!w.slot.ctl || w.slot.seq !== w.seq) {
         pollWaiters.splice(i, 1);
         continue;
@@ -1283,11 +987,8 @@ HANDLERS.poll = (p, k) => {
     // A poll over no fds is a sleep. Honoured rather than refused, which is POSIX.
     if (timeout === 0) return 0;
     if (timeout < 0) {
-      // INFINITE, which is what a negative timeout means everywhere else in this call. It read
-      // `timeout < 0 ? 0 : timeout`, so a caller asking to block until a signal arrived was
-      // answered 0 IMMEDIATELY — a busy-wait in place of a park, and the one shape where a
-      // program spins the kernel by doing exactly what POSIX says. Parked with an empty set: no
-      // fd can ever make it ready, so only a signal or teardown ends it, which is the contract.
+      // INFINITE. Parked with an empty set: no fd can ever make it ready, so only a signal or a
+      // teardown ends it.
       pollWaiters.push({ slot: p, seq: p.seq, entries: [] });
       return PENDING;
     }
@@ -1316,7 +1017,7 @@ HANDLERS.poll = (p, k) => {
     return 0;
   }
   // PARK. The record carries the whole set, so whichever fd becomes ready first answers the one
-  // call — which is the thing a single futex word could not otherwise do (constraint 42).
+  // call (constraint 42).
   const waiter = { slot: p, seq: p.seq, entries };
   pollWaiters.push(waiter);
   if (timeout > 0) {
@@ -1327,13 +1028,10 @@ HANDLERS.poll = (p, k) => {
       if (at < 0) return;                       // already answered by a wake
       if (!p.ctl || p.seq !== seqAtDispatch) { pollWaiters.splice(at, 1); return; }
       pollWaiters.splice(at, 1);
-      // RESCAN BEFORE ANSWERING, rather than republishing the revents the last scan left. The
-      // wake is hooked on `reply` (constraint 109), so any readiness that arrives WITHOUT a reply
-      // is invisible until something rescans — teardown's fd sweep was exactly that case. A
-      // timeout that answered 0 while an fd was already readable is a lost wake reported as
-      // "nothing became ready", and the caller cannot tell the two apart.
-      // `k.pollReevaluates` is false only under the `no-poll-wake` control, which removes
-      // re-evaluation wherever it happens — see the getter in src/kernel/kernel.mjs.
+      // RESCAN BEFORE ANSWERING, rather than republishing the last scan's revents. The wake is
+      // hooked on `reply` (constraint 109), so readiness arriving WITHOUT a reply — teardown's fd
+      // sweep — is invisible until something rescans. `k.pollReevaluates` is false only under the
+      // `no-poll-wake` control (src/kernel/kernel.mjs).
       const ready = k.pollReevaluates ? pollScan(p, entries) : 0;
       pollPublish(p, entries);
       k.reply(p, ready, 0, ST_RETURN, entries.length * POLLFD_BYTES);
@@ -1342,36 +1040,22 @@ HANDLERS.poll = (p, k) => {
   return PENDING;
 };
 
-/**
- * pipe2(flags) -> read fd in r0, WRITE FD IN r1.
- *
- * Two fds from one call, which is why `r1` carries the second: docs/ABI.md's IPC group specifies
- * exactly this shape. `p.r1` is the reply scratch word, cleared per dispatch, so a handler that
- * sets it and returns a number gets both published by `finish`.
- *
- * The two descriptions share one `Pipe` and each counts itself on it. The SLOT is recorded on each
- * description because the pipe replies to parked calls itself and needs the process to reply to —
- * and `dup2` into another process is impossible, so a description's slot cannot go stale while the
- * description lives.
- */
+/** pipe2(flags) -> read fd in r0, write fd in r1 (docs/ABI.md). The two descriptions share one
+ *  `Pipe` and each counts itself on it. */
 HANDLERS.pipe2 = (p, k) => {
   const flags = p.ctl[A0] | 0;
-  // No flags are implemented. O_NONBLOCK and O_CLOEXEC are the two POSIX defines, and both are
-  // real behaviour this does not have: refusing an unknown flag is the honest answer and keeps a
-  // caller from assuming non-blocking semantics it will not get.
+  // No flags are implemented; refusing them keeps a caller from assuming O_NONBLOCK semantics.
   if (flags !== 0) return -EINVAL;
   const pipe = new Pipe();
-  // NO SLOT ON THE DESCRIPTION. A description is shared — `dup` aliases it and a spawned child
-  // inherits it — so there is no one process it belongs to. The ops rows are handed the CALLING
-  // process on every call, which is the only correct answer.
+  // No slot on the description: `dup` aliases it and a child inherits it, so no one process owns
+  // it. The ops rows are handed the CALLING process on every call.
   const rd = { kind: F_PIPE_R, refs: 1, flags: O_RDONLY, pipe, inflight: 0 };
   const wr = { kind: F_PIPE_W, refs: 1, flags: O_WRONLY, pipe, inflight: 0 };
   const rfd = p.fds.add(rd);
   if (rfd < 0) return rfd;
   const wfd = p.fds.add(wr);
   if (wfd < 0) {
-    // The read end is already installed, so a failure here must undo it or the caller leaks an fd
-    // it was never told about.
+    // The read end is already installed, so a failure here must undo it.
     p.fds.close(rfd);
     return wfd;
   }
@@ -1384,18 +1068,12 @@ HANDLERS.pipe2 = (p, k) => {
 /**
  * statfs: [u64 blocks][u64 bfree][u64 files][u64 ffree][u32 bsize][u32 namemax], 40 bytes.
  *
- * The block size is 1 — OPFS has no block device under it, and inventing a 4 KiB one would make
- * `df` print a number that is not a measurement of anything. `blocks` and `bfree` are therefore
- * bytes, and the quota is whatever the browser reported at boot.
+ * The block size is 1 — OPFS has no block device under it — so `blocks` and `bfree` are BYTES.
  */
 HANDLERS.statfs = (p, k) => {
   if (!k.store || !k.store.vfs) return -EIO;
-  // THE PATH IS OPTIONAL, and that is a compatibility decision rather than a loose interface.
-  // docs/ABI.md lists `statfs` in the path group, but the libos stub has always called it with an
-  // empty byte region and means "this filesystem" — so an absent path is the root mount, and a
-  // path names the mount that owns it. Making the path mandatory would break `statfs()` as every
-  // existing caller spells it; ignoring the path would make `statfs("/proc")` report the OPFS
-  // volume's numbers, which is the whole thing a mount table exists to stop.
+  // THE PATH IS OPTIONAL (docs/ABI.md): an absent one is the root mount, and a path names the
+  // mount that owns it.
   const supplied = Atomics.load(p.ctl, LEN_I32) > 0;
   let mount;
   if (supplied) {
@@ -1411,11 +1089,8 @@ HANDLERS.statfs = (p, k) => {
   const record = new Uint8Array(40);
   const dv = new DataView(record.buffer);
   if (mount.fs !== k.store.vfs) {
-    // A generated filesystem has no blocks and no quota. Zeros, because inventing a size would
-    // make `df` print a number that measures nothing — the same reason the block size below is 1.
-    // EVERY FIELD FROM THE FILESYSTEM, including `bsize` and `namemax`. Hardcoding those two here
-    // meant a filesystem that declared a block size could not publish it — one fact with two
-    // renderers, and the kernel's copy winning over the only object that knows the answer.
+    // EVERY FIELD COMES FROM THE FILESYSTEM, including `bsize` and `namemax`: hardcoding those
+    // here means a filesystem that declares a block size cannot publish it.
     const s = mount.fs.statfs();
     dv.setBigUint64(0, BigInt(s.blocks), true);
     dv.setBigUint64(8, BigInt(s.bfree), true);
@@ -1437,22 +1112,10 @@ HANDLERS.statfs = (p, k) => {
 };
 
 /**
- * chdir(path). M5's one new call, and the shell is why: `cd`.
+ * chdir(path). THE STORED VALUE IS LEXICALLY NORMALIZED AND ABSOLUTE, which is `cd -L`.
  *
- * THE STORED VALUE IS LEXICALLY NORMALIZED AND ABSOLUTE, which is `cd -L` and what every shell
- * does for its own working directory. It differs from resolution exactly when a symlink is
- * involved, and the alternative — storing the resolved path — would make `cd dir/..` land
- * somewhere the user did not type. `resolveMount`'s own comment carries the same rule for the
- * same reason.
- *
- * THE DIRECTORY MUST EXIST AND BE SEARCHABLE AT THE MOMENT OF THE CALL. `wantX` on a directory is
- * POSIX's search permission, and it goes through the filesystem's own `openDecision` so the mode
- * bits keep one interpreter — the same route `SYS_spawn`'s execute check takes.
- *
- * NOTHING IS PINNED. A later `rmdir` of the current directory succeeds and the cwd becomes a path
- * that resolves to nothing, exactly as it does on Linux with an unlinked cwd; the next relative
- * path then answers ENOENT. Holding a reference would mean a process could keep a directory alive
- * by sitting in it, which is state outside the process table — constraint 15's own rule.
+ * NOTHING IS PINNED: a later `rmdir` of the cwd succeeds and the next relative path answers ENOENT,
+ * because a held reference would be state outside the process table (constraint 15).
  */
 HANDLERS.chdir = (p, k) => {
   if (!k.store || !k.store.vfs) return -EIO;
@@ -1460,19 +1123,13 @@ HANDLERS.chdir = (p, k) => {
   if (typeof path === "number") return path;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  /* THE TYPE FIRST, THEN THE PERMISSION, and the order is a fix. Asking for `wantX` in one call
-   * made the VFS check the execute bit on whatever was there — so `chdir("/tmp/notes.txt")` on a
-   * 0o644 file answered EACCES ("Permission denied") and the `-ENOTDIR` below was DEAD for every
-   * non-executable file, while the same call on `/proc/1/status` answered ENOTDIR because the
-   * generated filesystem tests the type itself. One operation, two answers, chosen by mount — the
-   * family constraint 82 records. A shell printing "Permission denied" for `cd somefile` sends a
-   * reader looking at mode bits. */
+  /* THE TYPE FIRST, THEN THE PERMISSION. Asking for `wantX` in one call makes the VFS check the
+   * execute bit on whatever is there, so `chdir("/tmp/notes.txt")` answers EACCES and the -ENOTDIR
+   * below goes dead — while `/proc/1/status` answers ENOTDIR (constraint 82). */
   try {
     const typed = at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true });
     if (typed.type !== DIR) return -ENOTDIR;
-    // The SEARCH permission, POSIX's name for the execute bit on a directory, through the
-    // filesystem that owns the mode bits. Second call, same path, and it is the only way to keep
-    // one interpreter of those bits while answering ENOTDIR first.
+    // The search permission: second call, same path, so ENOTDIR can answer first.
     at.mount.fs.openDecision(credOf(p), at.rel, { dirOk: true, wantX: true });
   } catch (error) {
     return errnoOfFsError(error);
@@ -1484,23 +1141,17 @@ HANDLERS.chdir = (p, k) => {
 HANDLERS.clock_nanosleep = (p, k) => {
   const ns = unpackI64(p.ctl[A0], p.ctl[A1]);
   if (ns < 0n) return -EINVAL;
-  if (p.ctl[A2] !== 0) return -ENOSYS;   // no TIMER_ABSTIME at M0/M1
+  if (p.ctl[A2] !== 0) return -ENOSYS;   // no TIMER_ABSTIME
   k.setTimer(p, Number(ns / 1000000n));
   return PENDING;
 };
 
-/**
- * M1 process-lifecycle handlers. They run on the kernel's thread, so they are synchronous and
- * return a value directly — no settle(), no PENDING. The one exception is waitpid, which parks
- * on a child that has not exited yet.
- */
+/** The process-lifecycle handlers run on the kernel's thread and return a value directly. The one
+ *  exception is waitpid, which parks on a child that has not exited. */
 HANDLERS.exit = (p, k) => {
-  // The kernel is the only thing that can record WHY a process left (item (c)). A clean exit
-  // writes STAT_EXITED with the caller's code; a signal kill writes STAT_KILLED later, from the
-  // kill path.
+  // Only the kernel records WHY a process left: STAT_EXITED here, STAT_KILLED from the kill path.
   k.reap(p, STAT_EXITED, p.ctl[A0] & 0xff);
-  // Nothing returns from here: the reply is produced by reap() answering any outstanding
-  // waitpid parent, not by this handler. The caller is already gone.
+  // The reply is produced by reap() answering any outstanding waitpid parent; the caller is gone.
   return PENDING;
 };
 
@@ -1526,8 +1177,6 @@ HANDLERS.setpgid = (p, k) => {
   const pgid = (p.ctl[A1] | 0) || pid;
   const target = k.table.get(pid);
   if (!target) return -ESRCH;
-  // POSIX-shaped: a process may set its own pgid or its child's, and it cannot reach across a
-  // session boundary. M1 keeps the rule minimal because M4 is where the line discipline uses it.
   if (target.pid !== p.pid && target.ppid !== p.pid) return -EPERM;
   if (target.sid !== p.sid) return -EPERM;
   target.pgid = pgid;
@@ -1535,9 +1184,8 @@ HANDLERS.setpgid = (p, k) => {
 };
 
 HANDLERS.setsid = (p) => {
-  // A session leader cannot become the leader of a second session. Everything else is an
-  // identity reshuffle: sid := pgid := pid, and the slot records itself as the leader so a
-  // future SIGHUP sweep can find it in O(interested) (item (b)).
+  // A session leader cannot lead a second session. Everything else is an identity reshuffle, and
+  // the slot records itself as the leader so a SIGHUP sweep can find it in O(interested).
   if (p.sidLeader) return -EPERM;
   p.sid = p.pid;
   p.pgid = p.pid;
@@ -1552,45 +1200,32 @@ HANDLERS.waitpid = (p, k) => {
   const flags = p.ctl[A1] | 0;
   const found = k.firstZombieChild(p, askedPid);
   if (found) return k.reapForParent(p, found);
-  // No child is ready. WNOHANG makes that -ECHILD-style but POSIX says 0 for "nothing to wait on
-  // yet"; M1 returns -ECHILD when no matching child exists at all, and 0 (with r1=0) under
-  // WNOHANG when there are matching children but none has exited. That split is what lets a
-  // shell's wait loop distinguish "all my kids are gone" from "give me a sec".
+  // -ECHILD when no matching child exists at all; 0 under WNOHANG when matching children exist but
+  // none has exited. That split lets a shell's wait loop tell the two apart.
   const hasChild = k.hasChild(p, askedPid);
   if (!hasChild) return -ECHILD;
   if (flags & WNOHANG) return 0;
-  // Park. The parent is parked in Atomics.wait and will be woken by reap() answering with the
-  // right (pid, status). This reuses the SEQ/RESPONSE machinery via later/reply — no separate
-  // queue, which is the point of being able to reply out of order.
+  // Park. reap() wakes the parent with the right (pid, status) through later/reply.
   k.parkParent(p, askedPid);
   return PENDING;
 };
 
 HANDLERS.spawn = (p, k) => {
-  // M1's spawn is in-kernel. The caller supplies the program URL and optional argv/envp via the
-  // byte region as a NUL-separated list; M1 keeps it to the shape every M2+ caller will give it,
-  // and the concrete argv parsing waits for M2's VFS. For now a spawn with no payload gets no
-  // argv, and that is what the four proofs exercise.
+  // The program path resolves through the mount table and the bytes come out of the mount: a
+  // process-supplied string never becomes a request origin (constraint 123).
   const r = k.spawnChild(p);
   return r;
 };
 
 HANDLERS.perform = (p) => {
-  // The escape hatch (item (f)). Reserved slot with no implementation yet: any caller gets
-  // -ENOSYS, and the slot is held so a future opcode added here does not need a syscall-number
-  // churn. A handler that answered 0 would be the wrong shape: a program's `if (r == 0)` would
-  // think the call did something.
+  // The reserved escape hatch: -ENOSYS until an opcode is added, so a syscall number does not churn
+  // to get one. Answering 0 would make a program's `if (r == 0)` think the call did something.
   return -ENOSYS;
 };
 
-/**
- * Derive the dispatch table at boot and assert every declared call has a handler.
- *
- * ONE ASSERTION, LOAD-BEARING: an entry added to SYS_NAME without a handler in HANDLERS panics
- * at boot rather than being discovered when some test program calls it and gets -ENOSYS. The
- * reverse — a handler with no SYS_NAME entry — is a dead branch; we flag it too so additions
- * stay paired. Item (f) requires exactly this.
- */
+/** Derive the dispatch table at boot and assert every declared call has a handler: a SYS_NAME entry
+ *  without one panics at boot rather than answering -ENOSYS at runtime, and a handler with no
+ *  SYS_NAME entry is a dead branch. */
 export function buildCalls(k) {
   const table = new Array(NSYS);
   for (let nr = 0; nr < NSYS; nr += 1) {
@@ -1599,8 +1234,6 @@ export function buildCalls(k) {
     if (!h) throw new Error(`calls.mjs: SYS_NAME[${nr}]=${name} has no handler`);
     table[nr] = (p) => h(p, k);
   }
-  // Catch extras. A handler we never dispatch is a defect in file form and the comment above
-  // is the only witness to it otherwise.
   for (const name of Object.keys(HANDLERS)) {
     if (!SYS_NAME.includes(name)) {
       throw new Error(`calls.mjs: HANDLERS.${name} has no SYS_NAME entry`);
@@ -1615,11 +1248,8 @@ function spinUs(us) {
   while (performance.now() < until) { /* occupying the kernel thread is the point */ }
 }
 
-/**
- * The kernel-stall control (M0's negative control). A boot-time wrapper per row, so the headline
- * path contains no control branch at all and "your flag perturbed the measurement" is not
- * available as an objection.
- */
+/** The kernel-stall control (M0's negative control). A boot-time wrapper per row, so the headline
+ *  path contains no control branch. */
 export function installStall(table, us) {
   for (let nr = 0; nr < table.length; nr += 1) {
     const inner = table[nr];

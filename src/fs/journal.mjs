@@ -1,11 +1,6 @@
 // The journal record codec. PURE over byte arrays: no OPFS, no SAB, no Worker, nothing async.
-//
-// That purity is the whole point of M2a and it is a standing constraint, not a convenience. The
-// journal replay path is a parser over bytes that may be torn mid-write, which is exactly a fuzz
-// target — and it is only a fuzz target while it can run in plain Node in milliseconds. A codec
-// that reaches for a FileSystemSyncAccessHandle inside the parse path stops being fuzzable and
-// quietly becomes a second implementation maintained beside the real one. All I/O is at the edges,
-// in src/kernel/; everything here takes and returns byte arrays.
+// Replay is a parser over bytes that may be torn mid-write, and it is a fuzz target only while it
+// runs in plain Node in milliseconds. All I/O stays at the edges, in src/kernel/.
 //
 // Record layout, little-endian:
 //
@@ -15,9 +10,8 @@
 //   u32  crc        CRC-32 over [MAGIC .. payload end), with this field read as zero
 //   u8[] payload
 //
-// The CRC covers the HEADER as well as the payload, so a flipped length or a flipped seq is
-// caught. Covering only the payload would let a corrupt length through, and a corrupt length is
-// the field a parser is most dangerous about trusting.
+// The CRC covers the HEADER as well as the payload, so a flipped length or seq is caught. Covering
+// only the payload lets a corrupt length through — the field a parser is most dangerous trusting.
 
 import { crc32 } from "./crc32.mjs";
 
@@ -35,7 +29,7 @@ const OFF_CRC = 16;
 // 20..23 reserved, written zero, covered by the CRC so a future field cannot be silently ignored.
 const OFF_RESERVED = 20;
 
-/** Why a record was refused. A reason, never a bare false: replay reports which tear it found. */
+/** A reason, never a bare false: replay reports which tear it found. */
 export const REFUSE = Object.freeze({
   SHORT_HEADER: "short-header",
   BAD_MAGIC: "bad-magic",
@@ -45,7 +39,6 @@ export const REFUSE = Object.freeze({
   BAD_RESERVED: "bad-reserved",
 });
 
-/** Encode one record. Returns a fresh Uint8Array of HEADER_BYTES + payload.length. */
 export function encodeRecord(seq, payload) {
   if (payload.length > MAX_PAYLOAD) {
     throw new RangeError(`journal payload ${payload.length} exceeds MAX_PAYLOAD ${MAX_PAYLOAD}`);
@@ -64,14 +57,10 @@ export function encodeRecord(seq, payload) {
 }
 
 /**
- * Decode one record at `off`.
- *
  * @returns {{ok: true, seq: bigint, payload: Uint8Array, size: number}}
  *        | {{ok: false, why: string, at: number}}
  *
- * Never throws on malformed input and never allocates on the strength of an unvalidated length.
- * Both are properties the fuzzer checks, because a parser that throws is a parser whose caller
- * decides what a tear means, and that decision belongs here.
+ * Never throws on malformed input, and never allocates on the strength of an unvalidated length.
  */
 export function decodeRecord(bytes, off = 0, opts = {}) {
   const checkCrc = opts.checkCrc !== false;
@@ -100,15 +89,9 @@ export function decodeRecord(bytes, off = 0, opts = {}) {
   return { ok: true, seq, payload: bytes.subarray(off + HEADER_BYTES, off + size), size };
 }
 
-/**
- * Replay a journal. Stops at the first record it will not accept and REPORTS the discarded tail
- * rather than reseeding — constraint 28: a snapshot that fails validation mounts read-only and
- * surfaces the failure, because webxp reset on a bad image and that is silent data loss presented
- * as success.
- *
- * A sequence gap also stops replay: records after a missing one are not "later records", they are
- * records whose predecessor is gone, and applying them would build state nobody wrote.
- */
+/** Stops at the first record it will not accept and reports the discarded tail rather than
+ *  reseeding (constraint 28). A sequence GAP also stops it: applying records whose predecessor is
+ *  missing would build state nobody wrote. */
 export function replay(bytes, opts = {}) {
   const records = [];
   let off = 0;

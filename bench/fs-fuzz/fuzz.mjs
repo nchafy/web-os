@@ -1,22 +1,19 @@
 // M2a's fuzz target: journal replay over torn and bit-flipped bytes, in plain Node.
 //
-// M2's negative control tests ONE hand-truncated journal. This tests ten thousand, and the ones it
-// finds are the tears a hand-written case does not think of. It runs here rather than in a browser
-// because the codec is pure over byte arrays (src/fs/journal.mjs) — which is the property M2a
-// exists to establish and to keep.
+// M2's negative control tests one hand-truncated journal; this tests ten thousand. It runs under
+// Node rather than in a browser because the codec is pure over byte arrays (src/fs/journal.mjs),
+// which is the property M2a exists to establish and to keep.
 //
 // Two failure modes, and they are not the same thing:
 //
-//   CRASH            replay threw, or allocated on an unvalidated length, or did not terminate.
-//                    A parser whose caller must catch is a parser that has not decided what a
-//                    tear means.
-//   SILENT ACCEPTANCE  replay returned a record that was NOT one of the records encoded. This is
-//                    the dangerous one: a filesystem that accepts a corrupt record has applied
-//                    state nobody wrote, and constraint 28 is explicit that the alternative to
-//                    reporting a bad image is silent data loss presented as success.
+//   crash              replay threw, allocated on an unvalidated length, or did not terminate. A
+//                      parser whose caller must catch has not decided what a tear means.
+//   silent acceptance  replay returned a record that was not one of the records encoded: a
+//                      filesystem that accepts a corrupt record has applied state nobody wrote,
+//                      and constraint 28 names that as silent data loss presented as success.
 //
-// Deterministic: the seed is a CLI argument and the PRNG is here, so a finding is reproducible by
-// seed rather than by luck. `Math.random` would make a failure unreportable.
+// The seed is a CLI argument and the PRNG is here, so a finding is reproducible by seed.
+// `Math.random` would make a failure unreportable.
 
 import { encodeRecord, replay, HEADER_BYTES } from "../../src/fs/journal.mjs";
 import { crc32SelfTest } from "../../src/fs/crc32.mjs";

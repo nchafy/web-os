@@ -1,27 +1,23 @@
 // M6's process program: the bypass, attempted for real against the kernel's own volume.
 //
 // MILESTONES.md M6's proof is "a program containing the bypass snippet fails, and /proc shows it
-// faulted", and its control is "skip the stripping; the same program must succeed". Four modes,
-// each spawned BY THE PAGE so the page can choose its uid — a child inherits its parent's
-// credential and `SYS_spawn` carries no uid field, which is deliberate (constraint 29).
+// faulted", and its control is "skip the stripping; the same program must succeed". Each mode is
+// spawned by the page so the page can choose its uid — a child inherits its parent's credential
+// and `SYS_spawn` carries no uid field (constraint 29).
 //
 //   p_victim   uid 0: write a file no unprivileged process may touch. Reports its inode.
 //   p_attack   uid 1000: every binding constraint 41 names, every scheme the loader takes, and
-//              the headline — open the kernel's blob BY INODE through ambient OPFS and write it.
-//              RETURNS its rows rather than throwing, because a faulted process has no result and
-//              the detail is the point of this mode.
-//   p_verify   uid 0: read the victim back THROUGH THE SYSCALL CHANNEL. Are the kernel's bytes
-//              still the kernel's? Then unlink it, so a second run does not meet the first's
-//              tampered file.
+//              the headline — open the kernel's blob by inode through ambient OPFS and write it.
+//              Returns its rows rather than throwing: a faulted process has no result, and the
+//              detail is the point of this mode.
+//   p_verify   uid 0: read the victim back through the syscall channel, then unlink it so a second
+//              run does not meet the first's tampered file.
 //   p_procfault uid 0: what /proc says about a pid that faulted — `state`, `exitkind`,
 //              `exitvalue`. Run on an already-live process, because the answer expires with the
 //              terminate quarantine (constraint 14).
+//   p_show     the realm printed to stdout, for a person at a shell.
 //   p_fault    uid 1000: MILESTONES.md's own shape — the bypass snippet with no try/catch. It
-//              must FAULT with the lockdown and must SUCCEED without it.
-//
-// WHY THE TWO ATTACKERS ARE SEPARATE MODES. A program that faults produces no result, so a single
-// program could not both demonstrate the fault and report what refused it. `p_attack` carries the
-// evidence; `p_fault` is the proof in MILESTONES.md's words, and it is four lines.
+//              must fault with the lockdown and must succeed without it.
 
 import {
   E, O_CREAT, O_RDONLY, O_TRUNC, O_WRONLY,
@@ -30,42 +26,31 @@ import {
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
-/** The victim's contents, and what a successful bypass replaces them with. THE SAME LENGTH, on
- *  purpose: a file's length is inode metadata the kernel holds in memory, so a longer tamper would
- *  be read back truncated and a shorter one padded — either of which would muddle "the bytes
- *  changed" with "the bytes changed by this much". */
+/** The victim's contents, and what a successful bypass replaces them with. The same length on
+ *  purpose: a file's length is inode metadata the kernel holds in memory, so a longer tamper reads
+ *  back truncated and a shorter one padded, muddling "the bytes changed" with "by how much". */
 export const VICTIM_BYTES = "KERNEL-OWNED-SECRET\n";
 export const TAMPER_BYTES = "TAMPERED-BY-PROCESS\n";
 
-/** The OPFS names the kernel's volume uses. Written here as the ATTACKER sees them — it does not
- *  import the kernel's constants, because a process cannot import kernel code; it guesses the
- *  layout, which is exactly what an attacker does, and the guess is right (constraint 26). */
+/** The OPFS names the kernel's volume uses, as the attacker sees them: a process cannot import
+ *  kernel code, so it guesses the layout, and the guess is right (constraint 26). */
 const BLOB_DIR = "blobs";
 
 /**
- * A `data:` module, as a specifier NO SCANNER CAN SEE, and built this way for two reasons.
- *
- * The honest one: constraint 139's open case is a computed `import(expr)`, and
- * a half-computed one is only half computed — the kernel's linker extracts every string
- * literal that follows `import(` and compares it to its allowlist, so it SEES `"da"` and refuses
- * the file. Measured: typing this program at the shell answered ENOEXEC, because the loader was
- * doing exactly what constraint 139 says it does. Assembling the URL away from the call site is
- * what makes the specifier genuinely invisible, which is the thing the policy has to stop.
- *
- * The practical one: with the literal gone, this program loads through the filesystem, so it can
- * be spawned by the shell and not only by the page.
+ * A `data:` module, as a specifier no scanner can see. The kernel's linker extracts every string
+ * literal that follows `import(` and compares it to its allowlist (constraint 139), so a
+ * half-computed specifier is seen and the file refused with ENOEXEC. Assembling the URL away from
+ * the call site makes it genuinely invisible, which is what the policy has to stop — and with the
+ * literal gone this program loads through the filesystem, so the shell can spawn it too.
  */
 const DATA_MODULE = ["da", "ta:text/javascript,export const V = 'data: evaluated in a process'"]
   .join("");
 
 /**
- * THE REFUSAL'S OWN NAME, from inside the realm that was refused.
- *
- * A thrown `TypeError: Failed to fetch dynamically imported module` reads the same whether a
- * policy refused the load or nothing was listening at the other end, so the throw cannot
- * attribute the refusal. A `securitypolicyviolation` event can: it names the blocked URI and the
- * directive that blocked it. Registered at module scope, before any attempt, because the event
- * fires on the realm and not on the call.
+ * A thrown `TypeError: Failed to fetch dynamically imported module` reads the same whether a policy
+ * refused the load or nothing was listening, so the throw cannot attribute the refusal. A
+ * `securitypolicyviolation` event names the blocked URI and the directive. Registered at module
+ * scope, before any attempt, because the event fires on the realm and not on the call.
  */
 const violations = [];
 self.addEventListener("securitypolicyviolation", (e) => {
@@ -90,8 +75,6 @@ async function attempt(fn) {
   }
 }
 
-/* ----------------------------------- p_victim -------------------------------------------- */
-
 function pVictim(env, path) {
   const fd = env.fs.open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o600);
   if (fd < 0) return { ok: false, why: `open(${path}) is ${env.std.errnoName(fd)}` };
@@ -99,10 +82,10 @@ function pVictim(env, path) {
   const wrote = env.fs.write(fd, bytes);
   const synced = env.fs.fsync(fd);
   const st = env.fs.fstat(fd);
-  // CLOSED BEFORE THE ATTACKER RUNS, and that is not tidiness. OPFS gives one exclusive sync
-  // access handle per file (src/kernel/iocore.mjs): with the kernel still holding it, the
-  // attacker's `createSyncAccessHandle` would throw NoModificationAllowedError and the control
-  // would report a refusal the lockdown had nothing to do with.
+  // Closed before the attacker runs. OPFS gives one exclusive sync access handle per file
+  // (src/kernel/iocore.mjs): with the kernel still holding it, the attacker's
+  // `createSyncAccessHandle` throws NoModificationAllowedError and the control reports a refusal
+  // the lockdown had nothing to do with.
   const closed = env.fs.close(fd);
   return {
     ok: wrote === bytes.length && synced === 0 && closed === 0 && typeof st === "object",
@@ -117,15 +100,12 @@ function pVictim(env, path) {
   };
 }
 
-/* ----------------------------------- p_attack -------------------------------------------- */
-
 /**
- * THE HEADLINE BYPASS: the kernel's volume, by inode, with no credential and no syscall.
- *
- * The blob directory is flat and named `<ino>.<gen>` (constraint 26), and the generation is not in
- * any stat record — so the attacker ENUMERATES the directory and matches on the inode it already
- * learned from `stat`. That enumeration is itself part of the finding: a process could list every
- * blob in the system without naming one.
+ * The headline bypass: the kernel's volume, by inode, with no credential and no syscall. The blob
+ * directory is flat and named `<ino>.<gen>` (constraint 26) and the generation is in no stat
+ * record, so the attacker enumerates the directory and matches on the inode it learned from
+ * `stat`. That enumeration is part of the finding: a process can list every blob without naming
+ * one.
  */
 async function tamperByInode(ino) {
   const root = await navigator.storage.getDirectory();
@@ -172,10 +152,9 @@ function nestedWorker() {
 async function pAttack(env, path, ino) {
   const rows = {};
 
-  // THE CREDENTIAL FIRST, as the baseline every other row is read against. This process is uid
-  // 1000 and the file is 0600 root-owned, so the syscall channel MUST refuse it — and if it did
-  // not, every row below would be measuring a system with no permissions rather than a realm with
-  // a hole in it.
+  // The baseline every other row is read against. This process is uid 1000 and the file is 0600
+  // root-owned, so the syscall channel must refuse it; if it did not, every row below would be
+  // measuring a system with no permissions rather than a realm with a hole in it.
   const fd = env.fs.open(path, O_WRONLY);
   rows.syscallRefused = fd === -E.EACCES
     ? ok(`open(${path}) is EACCES, as a uid-1000 process must be told`)
@@ -219,9 +198,9 @@ async function pAttack(env, path, ino) {
   rows.createObjectURL = await attempt(() => URL.createObjectURL(new Blob(["x"])).slice(0, 40));
   rows.nestedWorker = await attempt(nestedWorker);
 
-  // The loader's half. Each specifier is COMPUTED, so the kernel's linker could not have seen it
-  // even as a literal (constraint 139) — and `import` is not `fetch`, so the strip above does not
-  // touch these. The policy does.
+  // The loader's half. Each specifier is computed, so the kernel's linker cannot have seen it as a
+  // literal (constraint 139), and `import` is not `fetch`, so the strip does not touch these. The
+  // policy does.
   rows.importData = await attempt(async () =>
     (await import(DATA_MODULE)).V);
   rows.importBlob = await attempt(async () => {
@@ -233,18 +212,13 @@ async function pAttack(env, path, ino) {
   rows.newFunction = await attempt(() => new Function("return 2 + 2")());
 
   /**
-   * THE POSITIVE CONTROL, and the reason "everything refused" cannot pass for a working lockdown.
-   *
-   * COMPUTED FROM `self.location`, which is the WORKER's URL — `/src/libos/process.mjs` — and not
-   * the program's own blob. A bare `import("/src/abi.mjs")` does not work here and that is not the
-   * policy: a blob module has an opaque path, so a root-relative specifier has no base to resolve
-   * against (constraint 125) and the loader answers "Failed to resolve module specifier" before
-   * any policy is consulted. The static form at the top of this file is rewritten by the kernel's
-   * linker; a dynamic one is not.
-   *
-   * It is therefore also the honest statement of what the policy still permits: `'self'` means a
-   * program can dynamically import ANY same-origin module. That is residual exposure, recorded as
-   * such, and it is bounded by what the server serves rather than by what the kernel allows.
+   * The positive control: "everything refused" cannot pass for a working lockdown. Computed from
+   * `self.location`, the worker's URL, not the program's own blob — a bare `import("/src/abi.mjs")`
+   * fails for a reason that is not the policy, because a blob module has an opaque path, so a
+   * root-relative specifier has no base to resolve against (constraint 125) and the loader answers
+   * "Failed to resolve module specifier" first. The row is also what the policy still permits:
+   * `'self'` lets a program dynamically import any same-origin module, residual exposure bounded
+   * by what the server serves.
    */
   rows.allowedImport = await attempt(async () =>
     `${(await import(`${self.location.origin}/src/abi.mjs`)).ABI_FINGERPRINT}`);
@@ -276,15 +250,13 @@ function realmShape() {
   return present;
 }
 
-/* ----------------------------------- p_verify -------------------------------------------- */
-
 function pVerify(env, path, attackerPid) {
   const fd = env.fs.open(path, O_RDONLY);
   if (fd < 0) return { ok: false, why: `open(${path}) is ${env.std.errnoName(fd)}` };
   const got = env.std.slurpText(env, fd);
   env.fs.close(fd);
-  // Removed, so a second run of this check does not meet the previous run's tampered file. The
-  // unlink takes the blob with it, which is what makes the control repeatable.
+  // The unlink takes the blob with it, which is what makes the control repeatable: a second run
+  // would otherwise meet the previous run's tampered file.
   const unlinked = env.fs.unlink(path);
   return {
     ok: true,
@@ -297,18 +269,11 @@ function pVerify(env, path, attackerPid) {
   };
 }
 
-/* ----------------------------------- p_show ---------------------------------------------- */
-
 /**
- * The realm, printed to STDOUT, for a person at a shell.
- *
- * Every other mode here reports to the page, which is right for a check and useless at a prompt.
- * This one writes a table to fd 1, so `/bench/m6-realm/program.mjs p_show` at the live terminal
- * answers "is this shell actually inside M6's stripped realm?" from inside the realm itself,
- * rather than from a document that can only assert it.
- *
- * No tamper and no inode: this mode takes no arguments and writes nothing, so it is safe to type
- * anywhere. `p_attack` is the one that goes after the kernel's volume.
+ * The realm, printed to stdout, for a person at a shell. Every other mode reports to the page;
+ * this one writes a table to fd 1, so "is this shell inside M6's stripped realm?" is answered from
+ * inside the realm rather than from a document that can only assert it. Takes no arguments and
+ * writes nothing, so it is safe to type anywhere.
  */
 async function pShow(env) {
   const rows = [];
@@ -340,8 +305,8 @@ async function pShow(env) {
   for (const [name, said] of rows) {
     env.std.say(env, `  ${name.padEnd(width)}  ${said.slice(0, 96)}\n`);
   }
-  // THE POSITIVE CONTROL, printed with the rest: a realm where everything failed would look
-  // identical to a broken process. The syscall channel is the one thing that must still work.
+  // The positive control, printed with the rest: a realm where everything failed looks identical
+  // to a broken process. The syscall channel is the one thing that must still work.
   const st = env.fs.stat("/");
   env.std.say(env, `  ${"syscalls".padEnd(width)}  ${typeof st === "object"
     ? `REACHED  stat(/) answered mode ${(st.mode & 0o7777).toString(8)} — the channel is the way out`
@@ -353,30 +318,21 @@ async function pShow(env) {
   return { ok: reached.length === 0, reached, exit: reached.length ? 1 : 0 };
 }
 
-/* ----------------------------------- p_procfault ----------------------------------------- */
-
 /**
- * WHAT `/proc` SAYS ABOUT THE FAULTED PROCESS. MILESTONES.md M6 asks for "/proc shows it
- * faulted", and this is the form /proc can actually express it in.
- *
- * NOT "the directory is gone", and the first version of this check asserted exactly that and was
- * wrong: a reaped process is a ZOMBIE for the ~2 s terminate quarantine (constraint 14), so /proc
- * both can and should still show it — with `state: zombie` and the kind and value it died of. A
- * clause asserting absence would have been racing the quarantine and calling the kernel's correct
- * behaviour a failure.
- *
- * Separate from `p_verify` because that mode UNLINKS the victim, so calling it twice would answer
- * "the victim is missing" for a question about a process.
+ * MILESTONES.md M6 asks for "/proc shows it faulted", and this is the form /proc expresses it in:
+ * not absence. A reaped process is a zombie for the ~2 s terminate quarantine (constraint 14), so
+ * /proc still shows it, with `state: zombie` and the kind and value it died of. A clause asserting
+ * absence races the quarantine and calls the kernel's correct behaviour a failure. Separate from
+ * `p_verify` because that mode unlinks the victim.
  */
 function pProcFault(env, pid) {
   const text = env.std.readFileText(env, `/proc/${pid}/status`);
   if (typeof text !== "string") {
     /**
-     * ENOENT IS NOT A FAILED PROOF, IT IS AN UNTAKEN MEASUREMENT, and the two must not be
-     * reported as one thing. A reaped process leaves the table when the ~2.2 s quarantine expires
-     * (constraint 14), so a read that arrives late finds nothing — which says nothing at all
-     * about whether the process faulted. `expired` is what the page turns into an unmeasurable
-     * check rather than a red one; any other errno is a real failure and keeps `ok: false`.
+     * ENOENT is an untaken measurement, not a failed proof. A reaped process leaves the table when
+     * the ~2.2 s quarantine expires (constraint 14), so a late read finds nothing and says nothing
+     * about whether the process faulted. The page turns `expired` into an unmeasurable check
+     * rather than a red one; any other errno is a real failure and keeps `ok: false`.
      */
     const errno = env.std.errnoName(text);
     return {
@@ -401,7 +357,7 @@ function pProcFault(env, pid) {
     exitKind: Number(field("exitkind")),
     exitValue: Number(field("exitvalue")),
     // SIGABRT is what the kernel reaps a faulted process with (src/kernel/kernel.mjs, constraint
-    // 140), and STAT_KILLED is 1. Both named in the row so the check asserts the SIGNAL and not
+    // 140), and STAT_KILLED is 1. Both named in the row so the check asserts the signal and not
     // merely that something non-zero happened.
     wantKind: 1,
     wantValue: 6,
@@ -409,16 +365,12 @@ function pProcFault(env, pid) {
   };
 }
 
-/* ----------------------------------- p_fault --------------------------------------------- */
-
 /**
- * MILESTONES.md M6's proof, in its own words: "a program containing the bypass snippet".
- *
- * NO try/catch, DELIBERATELY. With the realm stripped, `navigator.storage` is not there and this
- * throws a TypeError the libos reports as this process's fault (constraint 140), so the process
- * dies and `/proc` loses it. Without the strip it RESOLVES, the program returns a result, and
- * nothing faults — which is the control, and the reason this mode holds nothing else: anything
- * else in here would be a second reason the row could move.
+ * MILESTONES.md M6's proof, in its own words: "a program containing the bypass snippet". No
+ * try/catch. With the realm stripped, `navigator.storage` is absent and this throws a TypeError
+ * the libos reports as this process's fault (constraint 140); without the strip it resolves and
+ * nothing faults, which is the control. The mode holds nothing else because anything else would
+ * be a second reason the row could move.
  */
 async function pFault(env) {
   const root = await navigator.storage.getDirectory();
@@ -427,19 +379,14 @@ async function pFault(env) {
   return { ok: true, bypassed: true, names: names.slice(0, 8) };
 }
 
-/* ----------------------------------- entry ----------------------------------------------- */
-
 export async function run(env, go) {
   const given = (env.argv && env.argv.length ? env.argv : (go && go.argv) || []);
   /**
-   * TWO ARGV SHAPES, because this program has two callers and they disagree by convention.
-   *
-   * The page spawns it with `cfg.argv = [mode, …]`, which is every bench orchestrator's own
-   * convention. A SHELL passes POSIX argv, where argv[0] is the program NAME
-   * (`src/bin/true.mjs` states the contract) — so `/bench/m6-realm/program.mjs p_show` arrives as
-   * `["/bench/m6-realm/program.mjs", "p_show"]` and reading argv[0] as the mode would answer
-   * "unknown mode" to a perfectly correct command line. Detected on the shape rather than
-   * configured: argv[0] naming this file is a program name, not a mode.
+   * Two argv shapes, because this program's two callers disagree by convention. The page spawns it
+   * with `cfg.argv = [mode, …]`; a shell passes POSIX argv, where argv[0] is the program name
+   * (`src/bin/true.mjs` states the contract), so reading argv[0] as the mode answers "unknown
+   * mode" to a correct command line. Detected on the shape: argv[0] naming this file is a program
+   * name, not a mode.
    */
   const argv = /(^\/|\.mjs$)/.test(String(given[0] || "")) ? given.slice(1) : given;
   const mode = String(argv[0] || "noop");
@@ -457,9 +404,9 @@ export async function run(env, go) {
       default: out = { ok: false, why: `unknown mode ${mode}` };
     }
   } catch (error) {
-    // p_fault is the one mode that MUST NOT be caught here: its throw is the proof. Every other
-    // mode reports its own failure, because a fault carries no result and the page would wait out
-    // its timeout for one that can never come.
+    // p_fault must not be caught here: its throw is the proof. Every other mode reports its own
+    // failure, because a fault carries no result and the page would wait out its timeout for one
+    // that can never come.
     if (mode === "p_fault") throw error;
     out = { ok: false, why: `${mode} threw: ${(error && error.stack) || error}` };
   }

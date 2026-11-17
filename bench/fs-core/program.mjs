@@ -1,7 +1,6 @@
 // M2's process program. Every byte of every proof goes through a real syscall from inside a real
-// process worker — CLAUDE.md's rule that a change is exercised through the artifact a user
-// touches, and the only way to exercise constraint 15 at all: this program holds nothing but
-// integers and the functions the libos handed it.
+// process worker, and this program holds nothing but integers and the functions the libos handed
+// it (constraint 15).
 //
 // Modes, chosen by argv[0]:
 //
@@ -34,9 +33,8 @@
 // see rather than being told. A verifier handed the expected bytes by the writer compares two
 // copies of the same mistake.
 
-// From src/abi.mjs, the one declaration both sides import. The kernel's loader resolves this
-// specifier against the program's own URL, so the process gets the SAME instance its libos stub
-// holds rather than a second copy (src/kernel/kernel.mjs, the program loader).
+// The kernel's loader resolves this specifier against the program's own URL, so the process gets
+// the same instance its libos stub holds rather than a second copy (src/kernel/kernel.mjs).
 import {
   O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_DIRECTORY,
   O_APPEND, SEEK_SET, SEEK_CUR, SEEK_END, S_IFMT, S_IFREG, NAME_MAX, E,
@@ -59,18 +57,15 @@ function modeFor(i) {
 }
 
 /**
- * CONSTRAINT 29'S GROUP ARM, as two fixtures and one byte.
+ * Constraint 29's group arm, as two fixtures and one byte. Every other file in this bench is owned
+ * by the credential that opens it, so the owner arm answers first and deleting the group arm from
+ * the VFS changes no result. These two are owned by a uid no process here runs as, and they are
+ * checked in both directions: a fixture that only ever sees the group bits grant cannot tell the
+ * group arm from a fallthrough to `other`.
  *
- * The group bits are a THIRD of the mode word and nothing else in this bench reaches them: every
- * other file here is owned by the credential that opens it, so the owner arm answers first and
- * deleting the group arm from the VFS changes no result. These two files are owned by a uid no
- * process in this bench runs as, so the owner arm cannot answer — and they are checked in BOTH
- * directions, because a fixture that only ever sees the group bits GRANT cannot tell the group arm
- * from a fallthrough to `other`.
- *
- *   grp-grant  mode 0040 — group may read, owner and other may not. Must OPEN.
+ *   grp-grant  mode 0040 — group may read, owner and other may not. Must open.
  *   grp-deny   mode 0004 — other may read, group may not. Must be refused, and a fallthrough to
- *              `other` is exactly what would let it through.
+ *              `other` is what would let it through.
  */
 export const GROUP_GRANT = "/d/2/grp-grant";
 export const GROUP_DENY = "/d/2/grp-deny";
@@ -80,8 +75,8 @@ const GROUP_STRANGER_UID = 2000;
 const GROUP_BYTE = 7;
 
 function pathFor(i) {
-  // Two levels, so path resolution is actually exercised: a flat namespace would never walk a
-  // component and constraint 24's whole point is that a walk costs one resolution, not N.
+  // Two levels, so path resolution is exercised: a flat namespace would never walk a component,
+  // and constraint 24's point is that a walk costs one resolution, not N.
   return `/d/${i % 16}/f${i}`;
 }
 
@@ -137,14 +132,9 @@ export function run(env, go) {
 }
 
 /**
- * THE DIRECTORY TREE, created and given away BY ROOT. Its own mode, because of what the first run
- * of this bench measured.
- *
- * A uid-1000 process cannot `mkdir` in a root directory that is 0755 and owned by uid 0, and
- * `mkfiles` got -EACCES on all seventeen of them. That is the permission check WORKING — constraint
- * 29's mode bits doing exactly what they exist for — so the fix is a setup step that runs as root
- * and hands the tree to the user, which is what a real system does at install time. A bench that
- * ran everything as root would have passed and proved nothing about the credential.
+ * The directory tree, created and given away by root, because a uid-1000 process cannot `mkdir` in
+ * a root directory that is 0755 and owned by uid 0 — constraint 29's mode bits doing what they
+ * exist for. A bench that ran everything as root would pass and prove nothing about the credential.
  */
 function setup(env, owner) {
   const fs = env.fs;
@@ -213,12 +203,9 @@ function mkfiles(env, n) {
   return { ok: errors.length === 0 && written === n, n, written, bytes, errors };
 }
 
-/**
- * Reopen every file and compare BOTH halves: the bytes and the mode word.
- *
- * The expected value is recomputed from the index here. A verifier told what to expect by the
- * writer would compare two copies of one mistake and pass.
- */
+/** Reopen every file and compare both halves, the bytes and the mode word. The expected value is
+ *  recomputed from the index here: a verifier told what to expect by the writer would compare two
+ *  copies of one mistake and pass. */
 function verify(env, n) {
   const fs = env.fs;
   const errors = [];
@@ -276,15 +263,13 @@ function verify(env, n) {
 }
 
 /**
- * CONSTRAINT 47'S CASE, the holder half. Open the file, read it, and DO NOT CLOSE.
+ * Constraint 47's case, the holder half: open the file, read it, and do not close. A sync access
+ * handle is an exclusive lock per file, so without the per-inode refcount beneath the fd table the
+ * `reader` process below gets NoModificationAllowedError and `cat notes.txt | wc -l` fails while an
+ * editor has the file open.
  *
- * A sync access handle is an exclusive lock per file, so without the per-inode refcount beneath the
- * fd table the `reader` process below would get NoModificationAllowedError and `cat notes.txt |
- * wc -l` would fail while an editor had the file open.
- *
- * The fd is left open on purpose. It is released by the process exiting, which is the kernel's
- * teardown path (M1 item (d)) closing every fd — a process cannot be trusted to do it, because
- * `terminate()` runs no cleanup.
+ * The fd is released by the process exiting, which is the kernel's teardown path (M1 item (d))
+ * closing every fd. A process cannot be trusted to do it: `terminate()` runs no cleanup.
  */
 function hold(env, path) {
   const fs = env.fs;
@@ -294,8 +279,8 @@ function hold(env, path) {
   if (typeof st === "number") return { ok: false, at: "fstat", errno: -st };
   const got = fs.readAll(fd, Number(st.size));
   if (typeof got === "number") return { ok: false, at: "read", errno: -got };
-  // Kept so a later `go` can read through THE SAME description. `hreread` is what makes the
-  // held fd's view of a swing observable at all.
+  // Kept so a later `go` can read through the same description: `hreread` is what makes the held
+  // fd's view of a swing observable at all.
   keptFd = fd;
   keptSize = Number(st.size);
   return {
@@ -306,13 +291,11 @@ function hold(env, path) {
 }
 
 /**
- * Read again through the fd `hold` kept, after somebody else swung the inode.
- *
- * THE CLAUSE A STALE READ FAILS. A held description is not a snapshot: POSIX has two fds on one
- * file sharing the file, so this must come back with the NEW generation's bytes. Against a
- * description that cached its generation and its size at open, this returned the superseded
- * generation's bytes while `fstat` on the same fd reported the new size — stat and read
- * disagreeing on one descriptor with no error on either.
+ * Read again through the fd `hold` kept, after somebody else swung the inode — the clause a stale
+ * read fails. A held description is not a snapshot: POSIX has two fds on one file sharing the file,
+ * so this must come back with the new generation's bytes. A description that cached its generation
+ * and size at open returns the superseded bytes while `fstat` on the same fd reports the new size,
+ * with no error on either call.
  */
 function hreread(env) {
   const fs = env.fs;
@@ -334,13 +317,9 @@ function reader(env, path) {
   return { ...hold(env, path), second: true };
 }
 
-/**
- * The copy-on-write path: rewrite a file from offset 0.
- *
- * This is the write that must NOT mutate the blob the metadata points at. The bytes below the
- * committed size are being replaced, so the kernel copies up to a new generation, writes there,
- * flushes it, journals the swing and only then publishes it.
- */
+/** The copy-on-write path: the write that must not mutate the blob the metadata points at. The
+ *  bytes below the committed size are being replaced, so the kernel copies up to a new generation,
+ *  writes there, flushes it, journals the swing and only then publishes it. */
 function overwrite(env, path) {
   const fs = env.fs;
   const fd = fs.open(path, O_RDWR);
@@ -364,15 +343,10 @@ function overwrite(env, path) {
 }
 
 /**
- * THE REST OF THE ABI, exercised once each.
- *
- * It exists because the three headline proofs reach twelve of the thirty-nine syscalls, and a call
- * the suite never issues is a call nobody has shown works — `pread` not touching the cursor, `dup`
- * sharing a description, `readdir`'s cookie, `truncate`'s copy-up, `rename`'s directory bookkeeping.
- * Each row names the call and says what it saw, so a failure points at one line.
- *
- * It runs as the OWNING uid, under a directory `setup` handed over, so nothing here passes by
- * being root.
+ * The rest of the ABI, exercised once each. The three headline proofs reach twelve of the
+ * thirty-nine syscalls, and a call the suite never issues is a call nobody has shown works. Each
+ * row names the call and says what it saw, so a failure points at one line. It runs as the owning
+ * uid, under a directory `setup` handed over, so nothing here passes by being root.
  */
 function apicheck(env) {
   const fs = env.fs;
@@ -382,7 +356,6 @@ function apicheck(env) {
   const made = fs.mkdir(dir, 0o755);
   ok("mkdir", made === 0 || made === -E.EEXIST, made);
 
-  // A file with a known pattern, written through the cursor.
   const path = `${dir}/f`;
   const body = new Uint8Array(64);
   for (let i = 0; i < body.length; i += 1) body[i] = i;
@@ -392,14 +365,13 @@ function apicheck(env) {
   ok("write", fs.write(fd, body) === body.length);
   ok("fsync", fs.fsync(fd) === 0);
 
-  // seek, all three whences.
   ok("seek SEEK_SET", fs.seek(fd, 8, SEEK_SET) === 8);
   ok("seek SEEK_CUR", fs.seek(fd, 4, SEEK_CUR) === 12);
   ok("seek SEEK_END", fs.seek(fd, 0, SEEK_END) === body.length);
   ok("seek before zero is EINVAL", fs.seek(fd, -1, SEEK_SET) === -E.EINVAL);
 
-  // pread MUST NOT move the cursor. That is the whole reason it exists, and the first version of
-  // the kernel's implementation moved it and put it back across an await.
+  // pread must not move the cursor, which is the whole reason it exists. An implementation that
+  // moves it and puts it back across an await does not satisfy this.
   const at = fs.seek(fd, 10, SEEK_SET);
   const into = new Uint8Array(8);
   const n = fs.pread(fd, into, 32, 8);
@@ -407,7 +379,6 @@ function apicheck(env) {
     { n, first: into[0], last: into[7] });
   ok("pread left the cursor alone", fs.seek(fd, 0, SEEK_CUR) === at, { at });
 
-  // pwrite, likewise.
   const stamp = new Uint8Array([0xde, 0xad]);
   ok("pwrite writes at the offset", fs.pwrite(fd, stamp, 40) === 2);
   ok("pwrite left the cursor alone", fs.seek(fd, 0, SEEK_CUR) === at);
@@ -415,7 +386,6 @@ function apicheck(env) {
   fs.pread(fd, back, 40, 2);
   ok("pwrite landed", back[0] === 0xde && back[1] === 0xad, [...back]);
 
-  // dup shares the description, so a seek through one fd moves the other.
   const dup = fs.dup(fd);
   ok("dup", dup >= 0 && dup !== fd, { fd, dup });
   fs.seek(dup, 3, SEEK_SET);
@@ -434,12 +404,10 @@ function apicheck(env) {
     { first: head[0], last: head[15] });
   ok("close", fs.close(fd) === 0);
 
-  // stat after close reads the committed metadata.
   const after = fs.stat(path);
   ok("stat after close", typeof after !== "number" && Number(after.size) === 16,
     typeof after === "number" ? after : Number(after.size));
 
-  // Links, symlinks and readlink.
   ok("link", fs.link(path, `${dir}/hard`) === 0);
   const linked = fs.stat(`${dir}/hard`);
   ok("a hard link is the same inode",
@@ -455,7 +423,6 @@ function apicheck(env) {
   ok("lstat describes the link",
     typeof itself !== "number" && (itself.mode & S_IFMT) !== S_IFREG);
 
-  // readdir, through the cookie.
   const dfd = fs.open(dir, O_RDONLY | O_DIRECTORY);
   ok("open a directory", dfd >= 0, dfd);
   const names = [];
@@ -476,7 +443,6 @@ function apicheck(env) {
       && names.includes("soft"), names);
   if (dfd >= 0) ok("close a directory", fs.close(dfd) === 0);
 
-  // rename, then unlink and rmdir.
   ok("rename", fs.rename(`${dir}/hard`, `${dir}/moved`) === 0);
   ok("the old name is gone", fs.stat(`${dir}/hard`) === -E.ENOENT);
   ok("the new name is there", typeof fs.stat(`${dir}/moved`) !== "number");
@@ -506,9 +472,8 @@ function apicheck(env) {
   ok("mkdir in the root as a non-root uid is EACCES", fs.mkdir("/nope", 0o755) === -E.EACCES);
   ok("chown away from one's own uid is EPERM", fs.chown(path, 0, 0) === -E.EPERM);
 
-  // CONSTRAINT 29'S GROUP ARM, both directions. Without these two rows a third of the mode word
-  // is decoration: every other file here is owned by the credential that opens it, so deleting
-  // the group arm from the VFS changes no other result in this bench.
+  // Constraint 29's group arm, both directions. Without these two rows a third of the mode word is
+  // decoration — see GROUP_GRANT above.
   const granted = fs.open(GROUP_GRANT, O_RDONLY);
   ok("the group bits GRANT where neither owner nor other does", granted >= 0,
     { fd: granted, file: GROUP_GRANT });
@@ -522,9 +487,8 @@ function apicheck(env) {
   }
   const refused = fs.open(GROUP_DENY, O_RDONLY);
   if (refused >= 0) fs.close(refused);
-  // THE DIRECTION THAT CATCHES A FALLTHROUGH. `other` has the read bit on this file and the group
-  // does not, so a #may() that stopped consulting the group arm would answer from `other` and
-  // let this through.
+  // The direction that catches a fallthrough: `other` has the read bit on this file and the group
+  // does not, so a #may() that stopped consulting the group arm would answer from `other`.
   ok("the group bits DENY where other would grant", refused === -E.EACCES,
     { errno: -refused, file: GROUP_DENY });
 
@@ -533,12 +497,10 @@ function apicheck(env) {
 }
 
 /**
- * One path's mode word.
- *
- * Its own mode because proof (b) needs it: with the CRC removed, a flipped digit inside a journal
- * record's mode field is accepted and APPLIED, and the only way to say so is to read the
- * permission back through `stat` after the mount. A report that said "the record was accepted"
- * would be a claim about the parser; this is a claim about the user's file.
+ * One path's mode word. Proof (b) needs it: with the CRC removed, a flipped digit inside a journal
+ * record's mode field is accepted and applied, and the only way to say so is to read the permission
+ * back through `stat` after the mount. "The record was accepted" would be a claim about the parser;
+ * this is a claim about the user's file.
  */
 function statmode(env, path) {
   const st = env.fs.stat(path);
@@ -550,8 +512,7 @@ function statmode(env, path) {
 function modebits(env) {
   const fs = env.fs;
   const rows = [];
-  // Under /d/0, which `setup` gave to this uid. A uid-1000 process cannot mkdir in a 0755 root
-  // owned by uid 0, and should not be able to.
+  // Under /d/0, which `setup` gave to this uid: a uid-1000 process cannot mkdir in a 0755 root.
   const dir = fs.mkdir("/d/0/modes", 0o755);
   if (dir < 0 && dir !== -E.EEXIST) return { ok: false, at: "mkdir", errno: -dir };
   for (let i = 0; i < 10; i += 1) {
@@ -580,92 +541,80 @@ function modebits(env) {
 }
 
 /**
- * PROOF (d)'S PLAN, in one place because three parties read it: writer A, writer B, and the
- * verifier that reopens the file afterwards. A verifier handed its expectations by the writer
- * compares two copies of one mistake, so nothing here is passed between processes — each derives
- * the whole layout from this object and from `bytesFor`.
+ * Proof (d)'s plan, in one place because three parties read it: writer A, writer B, and the
+ * verifier. Nothing here is passed between processes — each derives the layout from this object and
+ * from `bytesFor`, because a verifier handed its expectations by the writer compares two copies of
+ * one mistake.
  *
- * Both writers write AT THE SIZE THEY SAW AT OPEN. That is the configuration constraint 47
- * creates and the one copy-on-write has to survive: A's range is an append past the committed
- * size, so it lands in place; B's range then starts `aLen` bytes BELOW the size A published, so
- * it must copy up. `bLen < aLen` on purpose — B overwrites only the head of A's range, so A's
- * tail is a byte range that exists only if B's commit published a size taken from the inode
- * rather than from B's own stale snapshot.
+ * Both writers write at the size they saw at open, which is the configuration constraint 47 creates
+ * and copy-on-write has to survive: A's range is an append past the committed size, so it lands in
+ * place; B's range then starts `aLen` bytes below the size A published, so it must copy up.
+ * `bLen < aLen` on purpose — B overwrites only the head of A's range, so A's tail is a byte range
+ * that exists only if B's commit published a size taken from the inode rather than from B's own
+ * stale snapshot.
  */
 export const TWO_WRITERS = Object.freeze({
   index: 1, aLen: 32, aByte: 0xa1, bLen: 8, bByte: 0xb2,
 });
 
 /**
- * THE PENDING PROOF'S EXTRA WRITE, which is the state proof (d) cannot reach.
+ * The pending proof's extra write, which is the state proof (d) cannot reach: both of proof (d)'s
+ * writers are clean when they write, so every decision either makes is made from a current base.
+ * This covers a description made dirty by an append that staged no generation — one write, no
+ * fsync, far past the committed size — while another description commits underneath it.
  *
- * Both of proof (d)'s writers are CLEAN when they write, so every decision either of them makes
- * is made from a base that happens to be current. The state that is not covered is a description
- * made dirty by an append that STAGED NO GENERATION — one write, no fsync, far past the committed
- * size — while another description commits underneath it. That one state produced three distinct
- * failures: a write below another description's published size landing in the committed
- * generation in place, an ftruncate returning committed bytes as zeroes under a blob length fsck
- * could not fault, and a journalled commit the writer itself refused, which bricked the next
- * mount read-only.
- *
- * `off` is far past the committed size ON PURPOSE: it makes the file sparse, so the gap must read
- * back as zeroes and the append's own bytes must be at `off` and nowhere else. A write adjacent
- * to the committed size could not tell a carried append from an off-by-one.
+ * `off` is far past the committed size on purpose: it makes the file sparse, so the gap must read
+ * back as zeroes and the append's bytes must be at `off` and nowhere else. A write adjacent to the
+ * committed size could not tell a carried append from an off-by-one.
  */
 export const PENDING_APPEND = Object.freeze({ off: 100, len: 4, byte: 0xc3 });
 
 /**
- * THE ORPHANED GENERATION, as one byte and one length.
+ * The orphaned generation, as one byte and one length. Declared here and imported by the page that
+ * injects it and by the program that reads the file back: the clause's value is that a byte found
+ * in a grown range is traced to the thing that put it there, and two copies of this value is a
+ * check that can pass against the wrong byte.
  *
- * Declared here and imported by the page that injects it AND by the program that reads the file
- * back, because the whole value of the clause is that the byte found in a grown range is traced
- * to the thing that put it there. Two copies of this value is a check that can pass against the
- * wrong byte.
- *
- * `gen` is 2 because every file the bench writes is committed at generation 1, so 2 is exactly
- * the name a crash between a copy-up and its commit leaves behind. `bytes` is far larger than
- * any file here so the reused blob's tail cannot be mistaken for a short read.
+ * `gen` is 2 because every file the bench writes is committed at generation 1, so 2 is the name a
+ * crash between a copy-up and its commit leaves behind. `bytes` is far larger than any file here so
+ * the reused blob's tail cannot be mistaken for a short read.
  */
 export const ORPHANED = Object.freeze({ gen: 2, byte: 0xee, bytes: 1000 });
 
 /**
- * O_APPEND'S FIXTURE: a base, and one range per appending description.
+ * O_APPEND's fixture: a base, and one range per appending description.
  *
- * THE BASE IS NON-EMPTY ON PURPOSE. Both appends on an empty file would land at 0 whether the
- * offset is re-read per write or taken once at open, so the first byte of the file would be the
- * same either way and the clause would pass against the defect. With eight bytes under them the
- * two implementations differ in the file's LENGTH — 16 against 12 — and in which writer's bytes
- * are missing.
+ * The base is non-empty on purpose. Both appends on an empty file land at 0 whether the offset is
+ * re-read per write or taken once at open, so the clause would pass against the defect. With eight
+ * bytes under them the two implementations differ in the file's length — 16 against 12 — and in
+ * which writer's bytes are missing.
  *
- * `aByte` and `bByte` differ so the SURVIVOR can be named. A clause that only counted bytes would
+ * `aByte` and `bByte` differ so the survivor can be named: a clause that only counted bytes would
  * pass with both writers' ranges holding one writer's data.
  */
 export const APPEND_PAIR = Object.freeze({
   base: 8, baseByte: 0x51, len: 4, aByte: 0xa0, bByte: 0xb0,
 });
 
-/**
- * The fd this process keeps between `go`s, and the size the file published when it was opened.
- *
- * TWO INTEGERS, which is the whole of what constraint 15 permits a process to hold: no handle, no
- * buffer, nothing whose release depends on this worker running shutdown code. The kernel's fd
- * table holds the description; `terminate()` is still a legal SIGKILL.
- */
+/** The fd this process keeps between `go`s, and the size the file published at open. Two integers
+ *  is the whole of what constraint 15 permits a process to hold: nothing whose release depends on
+ *  this worker running shutdown code, because `terminate()` is a legal SIGKILL. */
 let keptFd = -1;
 let keptSize = -1;
 
 /**
- * TWO O_APPEND DESCRIPTIONS ON ONE FILE, in one process, with no race to arrange.
+ * Two O_APPEND descriptions on one file, in one process, with no race to arrange. `>>` is the
+ * caller this is for.
  *
- * `>>` is the caller this is for, and M5's shell is where it arrives. POSIX sets an O_APPEND
- * description's offset to the end of the file atomically BEFORE EACH WRITE, so two of them on one
- * file cannot write over each other however they interleave — and read once at open, they always
- * do: both get the same end, both write there, and `write` returns the full count and `fsync`
- * returns 0 to both. Measured against that code: eight bytes acknowledged, the file 12 bytes long
- * with the first writer's four gone, and an explicit fsck reporting the volume clean.
+ * POSIX sets an O_APPEND description's offset to the end of the file atomically before each write,
+ * so two of them cannot write over each other however they interleave. Read once at open they
+ * always do: both get the same end, both write there, and `write` returns the full count and
+ * `fsync` returns 0 to both. Measured against such an implementation: eight bytes acknowledged, the
+ * file 12 bytes long with the first writer's four gone, and an explicit fsck reporting the volume
+ * clean.
  *
- * FOUR CALLS AND NO CONCURRENCY. The file is read back through a FRESH description, because the
- * writers' own `fstat` is not the question — what another reader finds is.
+ * The file is read back through a fresh description: the writers' own `fstat` is not the question,
+ * what another reader finds is.
  */
 function appendpair(env, path) {
   const fs = env.fs;
@@ -720,8 +669,8 @@ function wopen(env, path) {
   return { ok: true, fd, size: keptSize };
 }
 
-/** One writer's range, written at the size this process saw at open. NOT fsynced: the commit is
- *  `wsync`, so a proof that needs to observe the state BETWEEN the write and the commit can. */
+/** One writer's range, written at the size this process saw at open. Not fsynced: the commit is
+ *  `wsync`, so a proof can observe the state between the write and the commit. */
 function wput(env, which) {
   const fs = env.fs;
   if (keptFd < 0) return { ok: false, why: "no fd was kept; wopen must run first" };
@@ -748,16 +697,14 @@ function wsync(env) {
 }
 
 /**
- * THE APPEND THAT STAGES NOTHING, and it is deliberately not fsynced.
+ * The append that stages nothing, deliberately not fsynced. One pwrite far past the committed size:
+ * the COW rule permits it to land in the generation the inode already points at, because the
+ * committed `size` does not name those bytes, so this description is now dirty and owns no
+ * generation — the state the pending proof is about.
  *
- * One pwrite far past the committed size. The COW rule permits it to land in the generation the
- * inode already points at, because the committed `size` does not name those bytes — so this
- * description is now DIRTY and owns NO generation, which is the state the pending proof is about.
- *
- * `fdSize` is what THIS description sees afterwards, and it must already include the appended
- * bytes: a caller that wrote and then fstat'ed its own fd must not be told its bytes are not
- * there. The other half of the append exception is not visible from here — whether a FRESH
- * description still sees the committed size — so the page takes that reading separately. Without
+ * `fdSize` is what this description sees afterwards, and it must already include the appended
+ * bytes. The other half of the append exception — whether a fresh description still sees the
+ * committed size — is not visible from here, so the page takes that reading separately. Without
  * both halves this step could have committed something and proved nothing.
  */
 function wpend(env) {
@@ -777,13 +724,11 @@ function wpend(env) {
 }
 
 /**
- * A write BELOW the committed size, then fsync.
- *
- * The shape that stages a new generation and SWINGS the inode onto it, which is what leaves
- * another description's outstanding append one generation behind. That is the state in which a
- * commit record names a superseded generation and the VFS refuses it — so this step is what makes
- * the refusal reachable at all, and it must be a WRITE rather than a truncate because a truncate
- * would also move the size and make the refusal ambiguous.
+ * A write below the committed size, then fsync: the shape that stages a new generation and swings
+ * the inode onto it, leaving another description's outstanding append one generation behind. That
+ * is the state in which a commit record names a superseded generation and the VFS refuses it, so
+ * this step is what makes the refusal reachable. It must be a write rather than a truncate: a
+ * truncate would also move the size and make the refusal ambiguous.
  */
 function wbelow(env) {
   const fs = env.fs;
@@ -800,11 +745,10 @@ function wbelow(env) {
 
 /**
  * Grow a file with `ftruncate`, commit it, and read the grown range back through a fresh
- * description. POSIX requires zeroes there.
- *
- * `foreignBytes` counts the orphaned generation's filler instead, which is what a staging floor
- * that cannot see an uncommitted blob publishes: the floor hands that generation's name out a
- * second time, the truncate opens the orphan, and its bytes become the file's.
+ * description. POSIX requires zeroes there. `foreignBytes` counts the orphaned generation's filler
+ * instead, which is what a staging floor that cannot see an uncommitted blob publishes: the floor
+ * hands that generation's name out a second time, the truncate opens the orphan, and its bytes
+ * become the file's.
  */
 function wgrow(env, path) {
   const fs = env.fs;
@@ -842,13 +786,11 @@ function wgrow(env, path) {
 }
 
 /**
- * THE DROP PROOF'S ACKNOWLEDGED APPEND, adjacent to the committed size.
- *
- * `off` is the file's own size, so this writes at exactly the boundary the COW rule splits on —
- * which is the shape the ordinary `>> file` does and the shape `dropclose` found the loss in.
- * `PENDING_APPEND` is sparse on purpose and could not have found this one: a sparse append's
- * offset is far enough out that a copy length taken from the wrong view is obviously wrong, while
- * an adjacent one is off by exactly the bytes nobody counted.
+ * The drop proof's acknowledged append, adjacent to the committed size: it writes at exactly the
+ * boundary the COW rule splits on, which is the shape an ordinary `>> file` has. `PENDING_APPEND`
+ * is sparse and cannot reach this case — a sparse append's offset is far enough out that a copy
+ * length taken from the wrong view is obviously wrong, while an adjacent one is off by exactly the
+ * bytes nobody counted.
  */
 export const DROP_APPEND = Object.freeze({ len: 4, byte: 0xc3 });
 
@@ -856,46 +798,42 @@ export const DROP_APPEND = Object.freeze({ len: 4, byte: 0xc3 });
 export const DROP_GROW = 64;
 
 /**
- * THE COMPARE-AND-SWAP PROOF'S THREE BYTE VALUES AND ONE LENGTH.
- *
- * Three distinct values because the scenarios have three writers' ranges to tell apart, and
- * telling them apart IS the proof: a revert leaves the wrong one of them at an offset, never a
- * missing byte. `len` is shorter than the seeded file so a write at 0 and a write at `len` are
- * both strictly inside the committed size, which is what makes both of them stage a copy-up.
+ * The compare-and-swap proof's three byte values and one length. Three distinct values because the
+ * scenarios have three writers' ranges to tell apart, and telling them apart is the proof: a revert
+ * leaves the wrong one of them at an offset, never a missing byte. `len` is shorter than the seeded
+ * file so a write at 0 and a write at `len` are both strictly inside the committed size, which is
+ * what makes both stage a copy-up.
  */
 export const CAS = Object.freeze({
   len: 4, belowByte: 0xd1, tailByte: 0xd2, thirdByte: 0xd3,
 });
 
 /**
- * How far past a file's end the CAS proof's reads ASK for.
- *
- * A read that only ever asks for `fstat`'s answer cannot catch a resurrection: the two numbers
- * come from the same place. Asking for more and getting exactly `fstat`'s answer back is the
- * clause — and 32 is the number of slack bytes `www/m2.html` plants, so the `slack` scenario asks
- * for precisely the bytes that are physically there and must still not get them.
+ * How far past a file's end the CAS proof's reads ask for. A read that only ever asks for `fstat`'s
+ * answer cannot catch a resurrection: the two numbers come from the same place. Asking for more and
+ * getting exactly `fstat`'s answer back is the clause — and 32 is the number of slack bytes
+ * `www/m2.html` plants, so the `slack` scenario asks for precisely the bytes that are physically
+ * there and must still not get them.
  */
 export const CAS_SLACK = 32;
 
 /**
- * How many write-and-fsync rounds each of the two contending writers takes.
+ * How many write-and-fsync rounds each of the two contending writers takes. The race has to happen
+ * rather than be hoped for: at one round apiece the two processes' syscalls can serialise by luck,
+ * and sixteen reaches the bounded retry but neither of the two states this number has to produce.
  *
- * The race has to happen rather than be hoped for: at one round apiece the two processes' syscalls
- * can serialise by luck. Sixteen was enough to make a commit lose its base, so the bounded retry
- * was exercised; it was NOT enough to reach either of the two states this number now has to
- * produce. Measured at 200 rounds per writer and not at 16: 13 of 200 fsyncs exhausted their
- * attempts and were refused under -EBUSY, and two concurrent journal appends collided on one
- * sequence number — 443 records with a duplicated 59, a remount that came up read-only and 37,409
- * bytes of discarded tail. Both are what `casretry` below is pointed at, so the number is theirs.
+ * Measured at 200 rounds per writer: 13 of 200 fsyncs exhausted their attempts and were refused
+ * under -EBUSY, and two concurrent journal appends collided on one sequence number — 443 records
+ * with a duplicated 59, a remount that came up read-only, 37,409 bytes of discarded tail. Both are
+ * what `casretry` below is pointed at.
  */
 export const CAS_ROUNDS = 200;
 
 /**
- * An ACKNOWLEDGED append at the committed size, not fsynced.
- *
- * Two readings come back and both are the acknowledgement: `pwrite`'s own return value, and this
- * description's `fstat` afterwards. A caller told four bytes were written and then told the file
- * is the old length has been lied to once already, before any close.
+ * An acknowledged append at the committed size, not fsynced. Two readings come back and both are
+ * the acknowledgement: `pwrite`'s return value, and this description's `fstat` afterwards. A caller
+ * told four bytes were written and then told the file is the old length has been lied to once
+ * already, before any close.
  */
 function wtail(env) {
   const fs = env.fs;
@@ -910,7 +848,7 @@ function wtail(env) {
   };
 }
 
-/** Grow the file with `ftruncate` and DO NOT commit: a staged generation nothing has published. */
+/** Grow the file with `ftruncate` and do not commit: a staged generation nothing has published. */
 function wstage(env) {
   const fs = env.fs;
   if (keptFd < 0) return { ok: false, why: "no fd was kept; wopen must run first" };
@@ -924,12 +862,10 @@ function wstage(env) {
 }
 
 /**
- * Close the kept fd and REPORT WHAT CLOSE RETURNED.
- *
- * The return value is the whole point of the mode. `close()` answering 0 after a commit it could
- * not publish is a loss the caller is never told about, on the ordinary path of write-then-exit:
- * no crash, no privilege, and an fsck that comes back clean afterwards because the blob length
- * matches the size the metadata published.
+ * Close the kept fd and report what close returned, which is the whole point of the mode.
+ * `close()` answering 0 after a commit it could not publish is a loss the caller is never told
+ * about, on the ordinary path of write-then-exit: no crash, no privilege, and an fsck that comes
+ * back clean because the blob length matches the size the metadata published.
  */
 function wclose(env) {
   const fs = env.fs;
@@ -939,7 +875,7 @@ function wclose(env) {
   return { ok: true, close: c, errno: c < 0 ? -c : 0 };
 }
 
-/** `unlink` a path while THIS process still holds a description on it, and report every call made
+/** `unlink` a path while this process still holds a description on it, and report every call made
  *  on the fd afterwards. S1's clauses read off this one row. */
 function wunlink(env, path) {
   const fs = env.fs;
@@ -956,19 +892,17 @@ function wunlink(env, path) {
     ok: true, unlink: u,
     read: r, write: w, fsync: s, ftruncate: t,
     fstat: typeof st === "number" ? st : Number(st.size),
-    // Every operation refused, and every one of them under the SAME name. A mix of working reads
-    // and failing writes is the one outcome S1 rules out.
+    // Every operation refused, and every one under the same name. A mix of working reads and
+    // failing writes is the one outcome S1 rules out.
     errnos: [r, w, s, t, typeof st === "number" ? st : 0].filter((x) => x < 0).map((x) => -x),
   };
 }
 
 /**
- * The drop proof's verifier: a FRESH description over the finished file.
- *
- * Both ranges are recomputed here from `bytesFor`, `TWO_WRITERS` and `DROP_APPEND` rather than
- * handed over by either writer. `tailOk` is the clause the loss moved: the appending description's
- * four acknowledged bytes are either in the file or they are gone, and `close()` returned 0 either
- * way against the old code.
+ * The drop proof's verifier: a fresh description over the finished file. Both ranges are recomputed
+ * here from `bytesFor`, `TWO_WRITERS` and `DROP_APPEND` rather than handed over by either writer.
+ * `tailOk` is the clause the loss moves — the appending description's four acknowledged bytes are
+ * either in the file or gone, and `close()` can return 0 either way.
  */
 function dcheck(env, path) {
   const fs = env.fs;
@@ -993,9 +927,9 @@ function dcheck(env, path) {
   };
 }
 
-/** A metadata op, and a test for one. Issued AFTER a commit the VFS refused: its journal record
- *  sits past the refused commit's position, so a volume that journalled a record its own VFS
- *  rejected discards this one at replay — a directory that had already returned success. */
+/** A metadata op, issued after a commit the VFS refused: its journal record sits past the refused
+ *  commit's position, so a volume that journalled a record its own VFS rejected discards this one
+ *  at replay — a directory that had already returned success. */
 function wmkdir(env, path) {
   const r = env.fs.mkdir(path, 0o755);
   return { ok: r === 0, errno: r < 0 ? -r : 0, path };
@@ -1006,8 +940,8 @@ function wstat(env, path) {
   return { ok: typeof st !== "number", errno: typeof st === "number" ? -st : 0, path };
 }
 
-/** One writer's range, written at the size this process saw at open and then FSYNCED, so the
- *  bytes are committed before the other writer is let near the inode. */
+/** One writer's range, written at the size this process saw at open and then fsynced, so the bytes
+ *  are committed before the other writer is let near the inode. */
 function wwrite(env, which) {
   const put = wput(env, which);
   if (!put.ok) return put;
@@ -1017,24 +951,15 @@ function wwrite(env, which) {
 }
 
 /**
- * A FRESH description's view of the file, taken BETWEEN a writer's write and its commit.
+ * The compare-and-swap's scenarios, each one two descriptions over one inode.
  *
- * The question it answers is the one copy-on-write exists for: with the second writer's bytes
- * written but not committed, does the generation the metadata names still hold the FIRST writer's
- * fsynced bytes? `atS` is the byte that answers it — the first writer's value means the committed
- * generation was left alone, the second writer's means committed bytes were overwritten in place
- * under intact metadata.
- */
-/**
- * THE COMPARE-AND-SWAP'S SCENARIOS, each one two descriptions over one inode.
- *
- * Both descriptions live in THIS process, which is not where the defect lives: the same shapes were
- * measured across two processes and behaved identically, because a description is kernel-side
- * either way and the race is between two commits rather than between two agents. One process keeps
- * the scenario in one call, so the interleaving is the program's rather than the page's.
+ * Both descriptions live in this process, which is not where the defect lives: the same shapes
+ * measured across two processes behave identically, because a description is kernel-side either way
+ * and the race is between two commits rather than between two agents. One process keeps the
+ * scenario in one call, so the interleaving is the program's rather than the page's.
  *
  * Every byte either description was told it wrote has to be in the file at the end. That is the
- * clause, and it is POSIX's: `pwrite` returned a count and `fsync` returned 0 to BOTH of them.
+ * clause, and it is POSIX's: `pwrite` returned a count and `fsync` returned 0 to both.
  */
 function cas(env, spec) {
   const fs = env.fs;
@@ -1047,7 +972,7 @@ function cas(env, spec) {
     const st = fs.fstat(fd);
     if (typeof st === "number") { fs.close(fd); return { err: -st }; }
     const size = Number(st.size);
-    // ASKED FOR MORE THAN THE FILE HOLDS, deliberately: a read past the end must stop at the end.
+    // Deliberately asks for more than the file holds: a read past the end must stop at the end.
     // `readAll` returns what it got, so `bytes.length` is where the file really stops and a
     // resurrection of uncommitted slack shows up as a longer answer than `fstat` gave.
     const got = fs.readAll(fd, size + CAS_SLACK);
@@ -1092,8 +1017,8 @@ function cas(env, spec) {
     row.w2 = fs.pwrite(fd2, new Uint8Array(CAS.len).fill(CAS.tailByte), S);
     row.fsync2 = fs.fsync(fd2);
     if (which === "m4") {
-      // WHAT A DIRTY DESCRIPTION REPORTS once the file has grown underneath it. Its own staged
-      // generation does not hold fd2's bytes; the FILE does, and `pwrite` returned their count.
+      // What a dirty description reports once the file has grown underneath it. Its own staged
+      // generation does not hold fd2's bytes; the file does, and `pwrite` returned their count.
       const mid = fs.fstat(fd1);
       row.dirtyFdSize = typeof mid === "number" ? -mid : Number(mid.size);
       row.wantDirtyFdSize = S + CAS.len;
@@ -1127,9 +1052,8 @@ function cas(env, spec) {
   }
 
   if (which === "read") {
-    // The file as a fresh description finds it, every offset the scenarios write to reported by
-    // name. The page recomputes what each one should be from `CAS` and `TWO_WRITERS`, so a changed
-    // constant cannot make a clause pass.
+    // Every offset the scenarios write to, reported by name. The page recomputes what each should
+    // be from `CAS` and `TWO_WRITERS`, so a changed constant cannot make a clause pass.
     const end = read(path);
     if (end.err) return { ok: false, at: "read", errno: end.err };
     const S = bytesFor(TWO_WRITERS.index).length;
@@ -1144,16 +1068,15 @@ function cas(env, spec) {
   }
 
   if (which === "slackin" || which === "slackwide") {
-    // A WRITE INSIDE THE SLACK, which is the region an uncommitted append opens: above the
-    // published size, below how far the file's bytes now reach. It changes bytes in the generation
-    // the inode already points at and moves NO derived number — not the generation, not the
-    // extent — so a compare-and-swap stamped `(gen, end)` could not see it and another
-    // description's staged commit reverted it. Three calls, two descriptions, one process, no
-    // crash, every call returning success.
+    // A write inside the slack — the region an uncommitted append opens, above the published size
+    // and below how far the file's bytes now reach. It changes bytes in the generation the inode
+    // already points at and moves no derived number, neither the generation nor the extent, so a
+    // compare-and-swap stamped `(gen, end)` cannot see it and another description's staged commit
+    // reverts it. Three calls, two descriptions, one process, every call returning success.
     //
-    // `slackwide` IS THE BOUNDARY, and it is here because it is the case the old stamp COULD see:
-    // the same ordering with the patch one byte longer, so the extent moves. Both must keep the
-    // patch. If only the wide one does, the counter is not being bumped by an in-place write.
+    // `slackwide` is the boundary: the same ordering with the patch one byte longer, so the extent
+    // moves and a `(gen, end)` stamp can see it. Both must keep the patch. If only the wide one
+    // does, the counter is not being bumped by an in-place write.
     const fd1 = fs.open(path, O_RDWR);
     const fd2 = fs.open(path, O_RDWR);
     if (fd1 < 0 || fd2 < 0) return { ok: false, at: "open", fd1, fd2 };
@@ -1182,7 +1105,7 @@ function cas(env, spec) {
     row.everyCallSucceeded = row.w1 === CAS.len && row.w2 === CAS.len && row.w3 === patchLen
       && row.fsync1 === 0 && row.fsync2 === 0 && row.close1 === 0 && row.close2 === 0;
     row.belowKept = row.final.at0 === CAS.belowByte;
-    // THE WHOLE PATCH, not just its first byte: a revert that kept one byte and lost the rest is
+    // The whole patch, not just its first byte: a revert that kept one byte and lost the rest is
     // the same defect.
     let patchKept = end.bytes ? end.size === row.wantFinalSize : false;
     for (let b = S; patchKept && b < S + patchLen; b += 1) {
@@ -1196,11 +1119,11 @@ function cas(env, spec) {
   }
 
   if (which === "dirtytrunc") {
-    // WHERE ONE DESCRIPTION'S `read`, `fstat` AND `SEEK_END` CAN DISAGREE, which is what having two
-    // renderers of the same number costs. fd1 holds a staged generation copied from an 8-byte base;
-    // fd2 then publishes a SHORTER file. `read` clamped to the base the copy came FROM while
-    // `fstat` and `SEEK_END` read the extent NOW, so the same description reported a 4-byte file
-    // and then handed out 8 bytes, with no error on either call.
+    // Where one description's `read`, `fstat` and `SEEK_END` can disagree, which is what two
+    // renderers of the same number cost. fd1 holds a staged generation copied from an 8-byte base;
+    // fd2 then publishes a shorter file. A `read` clamped to the base the copy came from while
+    // `fstat` and `SEEK_END` read the extent now reports a 4-byte file and then hands out 8 bytes,
+    // with no error on either call.
     const fd1 = fs.open(path, O_RDWR);
     const fd2 = fs.open(path, O_RDWR);
     if (fd1 < 0 || fd2 < 0) return { ok: false, at: "open", fd1, fd2 };
@@ -1228,8 +1151,8 @@ function cas(env, spec) {
     row.wantFinalSize = CAS.len;
     row.everyCallSucceeded = row.w1 === CAS.len && row.t2 === 0 && row.fsync1 === 0
       && row.fsync2 === 0 && row.close1 === 0 && row.close2 === 0;
-    // THE CLAUSE: one description, one answer. A read that stops short of the size the same fd
-    // reports, or runs past it, is two renderers disagreeing.
+    // One description, one answer. A read that stops short of the size the same fd reports, or runs
+    // past it, is two renderers disagreeing.
     row.threeAgree = row.fdSize === CAS.len && row.seekEnd === CAS.len
       && row.readLen === row.fdSize;
     row.bothKept = row.final.size === row.wantFinalSize && row.final.at0 === CAS.belowByte
@@ -1248,7 +1171,7 @@ function cas(env, spec) {
     if (fd < 0) return { ok: false, at: "open", errno: -fd };
     const st = fs.fstat(fd);
     row.fdSize = typeof st === "number" ? -st : Number(st.size);
-    // THE READ COMES FIRST, from offset 0: `readAll` reads at the CURSOR, and `SEEK_END` below
+    // The read comes first, from offset 0: `readAll` reads at the cursor, and `SEEK_END` below
     // leaves the cursor at the end, where a read correctly returns nothing.
     const got = fs.readAll(fd, row.fdSize + CAS_SLACK);
     row.read = typeof got === "number" ? -got : got.length;
@@ -1267,12 +1190,11 @@ function cas(env, spec) {
 }
 
 /**
- * THE MERGE OF A STAGED GROW AND ANOTHER DESCRIPTION'S WRITE, range by range.
- *
- * C's `ftruncate` to `S + DROP_GROW` and E's write of `bLen` bytes at 0 were both acknowledged, so
- * all three ranges have an owner: E's bytes at the head, the seeded file's own bytes between there
- * and `S`, and ftruncate's zeroes above `S`. The middle range is what tells a real merge from a
- * truncate that re-grew a file somebody else had already replaced.
+ * The merge of a staged grow and another description's write, range by range. C's `ftruncate` to
+ * `S + DROP_GROW` and E's write of `bLen` bytes at 0 were both acknowledged, so all three ranges
+ * have an owner: E's bytes at the head, the seeded file's own bytes between there and `S`, and
+ * ftruncate's zeroes above `S`. The middle range tells a real merge from a truncate that re-grew a
+ * file somebody else had already replaced.
  */
 function gcheck(env, path) {
   const fs = env.fs;
@@ -1300,17 +1222,16 @@ function gcheck(env, path) {
 }
 
 /**
- * ONE OF THE TWO CONTENDING WRITERS: `CAS_ROUNDS` rounds of one write and one fsync.
+ * One of the two contending writers: `CAS_ROUNDS` rounds of one write and one fsync.
  *
- * `a` rewrites the same four bytes BELOW the committed size, so every round stages a copy-up and
+ * `a` rewrites the same four bytes below the committed size, so every round stages a copy-up and
  * swings. `b` appends four bytes at the end it saw at open, so every round publishes a size against
  * the generation the inode is on at that instant. Run at once, their syscalls interleave at the
  * kernel's own await points, and a commit that keeps losing its base runs out of attempts.
  *
- * EVERY ERRNO IS REPORTED, which is the clause: the ONLY refusal this is allowed to produce is the
- * bounded CAS's own -EBUSY. Measured value of that clause: the exhaustion path threw a
- * ReferenceError — the errno it meant to return was never imported — and the kernel's catch-all
- * turned it into -EIO, so a refusal arrived under a name that says nothing about what happened.
+ * Every errno is reported, which is the clause: the only refusal this is allowed to produce is the
+ * bounded CAS's own -EBUSY. A count of successes would hide a refusal arriving under any other
+ * name.
  */
 function casloop(env, spec) {
   const fs = env.fs;
@@ -1339,7 +1260,7 @@ function casloop(env, spec) {
   };
 }
 
-/** One byte of a file, through a FRESH description. The read-back `casretry` checks a claim of
+/** One byte of a file, through a fresh description. The read-back `casretry` checks a claim of
  *  durability against: a description of its own would answer out of its own staged generation. */
 function byteAt(env, path, at) {
   const fs = env.fs;
@@ -1353,20 +1274,19 @@ function byteAt(env, path, at) {
 }
 
 /**
- * THE CONTENDING WRITER THAT DOES THE RIGHT THING WITH -EBUSY: it retries the fsync.
+ * The contending writer that does the right thing with -EBUSY: it retries the fsync.
  *
- * A bounded compare-and-swap has one refusal to offer, and a caller's only correct response to it
- * is to ask again. The exhaustion arm used to free the staged generation first — so the retry found
- * nothing staged, took the "nothing to publish" arm and answered 0. The caller was told the data it
- * had just been refused was durable, and it was not there. Measured at 13 of 200 fsyncs with every
- * retry answering 0 (6.5%).
+ * A bounded compare-and-swap has one refusal to offer, and a caller's only correct response is to
+ * ask again. An exhaustion arm that frees the staged generation first leaves the retry nothing
+ * staged, so it takes the "nothing to publish" arm and answers 0 — the caller is told the data it
+ * was just refused is durable, and it is not there. Measured at 13 of 200 fsyncs with every retry
+ * answering 0 (6.5%).
  *
- * WHICH IS WHY EVERY ROUND WRITES A DISTINCT VALUE: the byte at offset 0 then names the round whose
- * commit actually landed, so a claim of durability can be CHECKED rather than counted. A fresh
- * description is what reads it back — this writer's own fd would answer out of its staged
- * generation, which is the thing in question.
+ * Every round therefore writes a distinct value: the byte at offset 0 names the round whose commit
+ * landed, so a claim of durability can be checked rather than counted. A fresh description reads it
+ * back, because this writer's own fd would answer out of its staged generation.
  *
- * `a` rewrites offset 0; `b` appends, which is what keeps moving the base `a` stages from.
+ * `a` rewrites offset 0; `b` appends, which keeps moving the base `a` stages from.
  */
 function casretry(env, spec) {
   const fs = env.fs;
@@ -1432,11 +1352,10 @@ function casretry(env, spec) {
 }
 
 /**
- * The contended file, byte by byte, against every value that has an owner.
- *
- * NO FOREIGN BYTE below the published size: each one is `a`'s value, `b`'s value, or the seeded
- * file's own byte at that offset. A zero where one of those belongs is a copy that carried the
- * wrong length, and a byte from neither writer is a generation from somewhere else.
+ * The contended file, byte by byte, against every value that has an owner. No foreign byte below
+ * the published size: each one is `a`'s value, `b`'s value, or the seeded file's own byte at that
+ * offset. A zero where one of those belongs is a copy that carried the wrong length, and a byte
+ * from neither writer is a generation from somewhere else.
  */
 function cascheck(env, path) {
   const fs = env.fs;
@@ -1465,10 +1384,10 @@ function cascheck(env, path) {
   };
 }
 
-/** One open, reported with its errno. Two processes run this against ONE path with no await
- *  between their `go` messages, so the two opens OVERLAP inside the kernel — which is the case
- *  constraint 47's refcount table could not arbitrate, because an open is not in the table until
- *  its handle exists. -EBUSY here is the kernel's own name for its own defect. */
+/** One open, reported with its errno. Two processes run this against one path with no await between
+ *  their `go` messages, so the two opens overlap inside the kernel — the case constraint 47's
+ *  refcount table cannot arbitrate, because an open is not in the table until its handle exists.
+ *  -EBUSY here is the kernel's own name for its own defect. */
 function casopen(env, path) {
   const fs = env.fs;
   const fd = fs.open(path, O_RDWR);
@@ -1479,6 +1398,11 @@ function casopen(env, path) {
   return { ok: size >= 0 && c === 0, size, close: c };
 }
 
+/** A fresh description's view of the file, taken between a writer's write and its commit: with the
+ *  second writer's bytes written but not committed, does the generation the metadata names still
+ *  hold the first writer's fsynced bytes? `atS` answers it — the first writer's value means the
+ *  committed generation was left alone, the second's means committed bytes were overwritten in
+ *  place under intact metadata. */
 function wpeek(env, path) {
   const fs = env.fs;
   const S = bytesFor(TWO_WRITERS.index).length;
@@ -1498,12 +1422,11 @@ function wpeek(env, path) {
 }
 
 /**
- * The pending proof's verifier: every byte of both writers, plus the sparse gap.
- *
- * Five ranges, each named, every expectation recomputed here from `TWO_WRITERS`,
- * `PENDING_APPEND` and `bytesFor` rather than handed over by a writer. The gap clause is what
- * separates "the append was carried" from "the append's offset happens to hold something": a
- * copy-up that carried the wrong length leaves foreign bytes or a short file there.
+ * The pending proof's verifier: every byte of both writers, plus the sparse gap. Five ranges, each
+ * named, every expectation recomputed here from `TWO_WRITERS`, `PENDING_APPEND` and `bytesFor`
+ * rather than handed over by a writer. The gap clause separates "the append was carried" from "the
+ * append's offset happens to hold something": a copy-up that carried the wrong length leaves
+ * foreign bytes or a short file there.
  */
 function pcheck(env, path) {
   const fs = env.fs;
@@ -1546,12 +1469,10 @@ function pcheck(env, path) {
 }
 
 /**
- * Reopen the file and report whether every committed byte of BOTH writers is there.
- *
- * Three ranges, each named: the original bytes below the first write, writer B's range, and the
- * tail of writer A's range that B did not cover. The last one is the clause that fails when a
- * commit publishes a size computed from a stale base — the bytes are still in a blob and no
- * length names them.
+ * Reopen the file and report whether every committed byte of both writers is there. Three ranges,
+ * each named: the original bytes below the first write, writer B's range, and the tail of writer
+ * A's range that B did not cover. The last is the clause that fails when a commit publishes a size
+ * computed from a stale base — the bytes are still in a blob and no length names them.
  */
 function wcheck(env, path) {
   const fs = env.fs;
@@ -1580,8 +1501,8 @@ function wcheck(env, path) {
     ok: size === want && prefixOk && bRangeOk && aTailOk,
     size, wantSize: want, read: got.length,
     prefixOk, bRangeOk, aTailOk,
-    // The bytes themselves at each boundary, so a failure says WHAT was there rather than only
-    // that something was not.
+    // The bytes at each boundary, so a failure says what was there and not only that something
+    // was not.
     atS: size > S ? got[S] : -1,
     atBEnd: size > S + TWO_WRITERS.bLen ? got[S + TWO_WRITERS.bLen] : -1,
     last: size > 0 ? got[size - 1] : -1,
@@ -1589,21 +1510,21 @@ function wcheck(env, path) {
 }
 
 /**
- * THE KILLED WRITER'S FIXTURE: one range, one contender, and a distinct value per round.
+ * The killed writer's fixture: one range, one contender, and a distinct value per round.
  *
- * `at` is `len`, so the victim's four bytes sit strictly BELOW the published size of the 8-byte
- * seeded file — which makes the write a copy-up with a recorded base — and strictly DISJOINT from
- * the contender's range at 0. Both halves matter: overlapping ranges would make a lost byte
+ * `at` is `len`, so the victim's four bytes sit strictly below the published size of the 8-byte
+ * seeded file — making the write a copy-up with a recorded base — and strictly disjoint from the
+ * contender's range at 0. Both halves matter: overlapping ranges would make a lost byte
  * indistinguishable from last-writer-wins, which is a legal outcome, while a write at or above the
- * published size would take the append arm and stage nothing at all.
+ * published size would take the append arm and stage nothing.
  *
- * A DISTINCT VALUE PER ROUND, because a round whose write vanished reads back as a SURVIVOR if the
+ * A distinct value per round, because a round whose write vanished reads back as a survivor if the
  * previous round left the same byte at the same offset. Twelve rounds, and 0x54 — the contender's
  * byte — is not among them.
  *
- * `hamRounds` is the contender's loop length. The victim's stage and its kill have to land INSIDE
- * that loop: the race is what is under test, and a contender that had already finished would leave
- * the teardown commit nothing to lose to.
+ * `hamRounds` is the contender's loop length. The victim's stage and its kill have to land inside
+ * that loop: a contender that had already finished would leave the teardown commit nothing to lose
+ * to.
  */
 export const KILLED = Object.freeze({
   len: 4, at: 4, hamByte: 0x54, rounds: 12, hamRounds: 200,
@@ -1611,11 +1532,10 @@ export const KILLED = Object.freeze({
 });
 
 /**
- * The victim: open, one acknowledged write below the published size, and then nothing.
- *
- * THE FD IS KEPT OPEN ON PURPOSE. The staged generation is live and uncommitted when the process
- * is killed, so the kernel's teardown is what closes the fd and `closeFd` is what commits — and
- * teardown cannot await the answer, which is the whole reason the note channel exists.
+ * The victim: open, one acknowledged write below the published size, and then nothing. The fd is
+ * kept open so the staged generation is live and uncommitted when the process is killed: the
+ * kernel's teardown closes the fd and `closeFd` commits, and teardown cannot await the answer,
+ * which is why the note channel exists.
  */
 function kstage(env, spec) {
   const fs = env.fs;
@@ -1632,10 +1552,10 @@ function kstage(env, spec) {
 /**
  * The contender: rewrite offset 0 below the published size and fsync, in a loop.
  *
- * EVERY ERRNO IS KEPT, per call and with its round number. These are calls on a LIVE fd of a
- * process nobody is killing, so every one of them must succeed: the -EBADF measured here came from
- * another operation closing a superseded handle while this one held its id across an await, and a
- * count of successes would have reported that as a smaller number rather than as a failure.
+ * Every errno is kept, per call and with its round number. These are calls on a live fd of a
+ * process nobody is killing, so every one must succeed — and a count of successes would report a
+ * failure as a smaller number rather than as a failure. The -EBADF measured here came from another
+ * operation closing a superseded handle while this one held its id across an await.
  */
 function kham(env, spec) {
   const fs = env.fs;
@@ -1661,7 +1581,7 @@ function kham(env, spec) {
     writeErrCount: writeErrs.length, syncErrCount: syncErrs.length };
 }
 
-/** What the file holds now, through a FRESH description: the size, the contender's byte and the
+/** What the file holds now, through a fresh description: the size, the contender's byte and the
  *  victim's. Neither writer is asked what it thinks it wrote. */
 function kread(env, path) {
   const fs = env.fs;

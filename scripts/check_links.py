@@ -28,11 +28,8 @@ AUTHORED = [
 #: reader to skim the line, and then a real forward reference hides in it.
 OWED = set()
 
-#: ONLY PATHS INSIDE BACKTICKS OR PARENTHESES. A bare path in prose is NOT checked, and that is a
-#: known blind spot rather than an oversight: the authored docs write every real path in backticks
-#: or as a markdown link, and widening this to bare words matched prose like "the src directory"
-#: and reported it as a missing file. If a bare path ever needs checking, the fix is to backtick it
-#: in the doc, not to loosen this.
+#: Only paths inside backticks or parentheses. A bare path in prose is a known blind spot:
+#: widening this matches prose like "the src directory". Backtick the path in the doc instead.
 PATH_RE = re.compile(
     r'[`(]((?:docs/|src/|bench/|scripts/|www/|mockups/|\.\./)[A-Za-z0-9_./\-]+'
     r'\.(?:md|py|mjs|html|json|txt))[`)]'
@@ -54,9 +51,7 @@ def main() -> int:
             target = m.group(1)
             if target in OWED:
                 continue
-            # COUNTED AFTER THE SKIPS, not before. Counting first made the headline statistic
-            # include references this never looked at, so "checked N path references" was an
-            # overstatement by exactly the number of things it declined to check.
+            # After the skips, so the reported count is references actually checked.
             checked += 1
             # References into the predecessor are to a SIBLING repository, not to this one.
             # They do not resolve from a fresh clone, or from inside a git worktree, and that

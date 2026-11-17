@@ -1,22 +1,18 @@
 // `/tmp`: a writable filesystem that lives in memory and does not survive a reload.
 //
-// IT REUSES THE VFS. A tmpfs needs mkdir, rmdir, unlink, rename, link, symlink, chmod, chown,
-// stat, lstat, readdir and open with O_CREAT/O_TRUNC/O_APPEND — which is the whole POSIX surface
-// `src/fs/vfs.mjs` already implements, correctly, over an in-memory inode table. Writing a second
-// one would be two renderers of one fact, and the second would be the one with the permission bug.
+// IT REUSES THE VFS. A tmpfs needs the whole POSIX metadata surface `src/fs/vfs.mjs` already
+// implements over an in-memory inode table; a second implementation would be two renderers of one
+// fact, and the second would be the one with the permission bug.
 //
-// What the VFS does NOT have is anywhere to put bytes: `openDecision` hands back a decision that
-// the OPFS store turns into a blob handle. So that is the whole of this file — a `Map` from inode
-// to bytes, and the generation bookkeeping to keep the VFS's own `size` honest.
+// What the VFS does NOT have is anywhere to put bytes. So that is the whole of this file — a `Map`
+// from inode to bytes, and the generation bookkeeping to keep the VFS's own `size` honest.
 //
-// WHY THERE IS NO JOURNAL. A tmpfs has no durable state, so there is nothing to recover and no
-// record to write. The mount table carries `durable: false` for it and `calls.mjs`'s `metaOp`
-// returns 0 without journalling — appending a record would describe the OPFS volume, where the op
-// did not happen, and replay would then invent a directory on the wrong filesystem.
+// NO JOURNAL. A tmpfs has no durable state, so the mount table carries `durable: false` and
+// `calls.mjs`'s `metaOp` returns 0 without journalling: a record would describe the OPFS volume,
+// where the op did not happen, and replay would invent a directory on the wrong filesystem.
 //
-// THE SIZE GOES THROUGH OP.COMMIT, not through a poke at `inode.size`. That op is the VFS's own
-// data operation and it carries the generation forward; reaching past it would put a second writer
-// on a field the VFS maintains.
+// THE SIZE GOES THROUGH OP.COMMIT, not a poke at `inode.size`. That op carries the generation
+// forward; reaching past it would put a second writer on a field the VFS maintains.
 
 import { NAME_MAX } from "../abi.mjs";
 import { VFS, FILE, DIR, OP, FsError } from "../fs/vfs.mjs";
@@ -24,17 +20,16 @@ import { VFS, FILE, DIR, OP, FsError } from "../fs/vfs.mjs";
 /**
  * A tmpfs. One VFS for the metadata, one Map for the bytes.
  *
- * `limit` is a byte ceiling, and it is here rather than left to the browser because a tmpfs with
- * no limit is a way for one process to exhaust the renderer's heap and take every other process
- * with it — the same reason constraint 17 caps the process table. ENOSPC is the POSIX answer.
+ * `limit` is a byte ceiling, here rather than left to the browser because a tmpfs with no limit is
+ * a way for one process to exhaust the renderer's heap and take every other process with it — the
+ * same reason constraint 17 caps the process table. ENOSPC is the POSIX answer.
  */
 export class TmpFS {
   constructor({ limit = 64 * 1024 * 1024, now = Date.now } = {}) {
     this.vfs = new VFS({ owner: { uid: 0, gid: 0 }, now });
-    // Mode 1777 with the sticky bit, which is what /tmp is everywhere: world-writable, and only
-    // the owner of a file may remove it. THE STICKY BIT IS STORED AND NOT ENFORCED — the VFS has
-    // no sticky rule — so it is honest about the mode and not about the protection. Said here
-    // because a reader who sees 1777 will assume the enforcement.
+    // Mode 1777, which is what /tmp is everywhere. THE STICKY BIT IS STORED AND NOT ENFORCED — the
+    // VFS has no sticky rule — so this is honest about the mode and not about the protection, and a
+    // reader who sees 1777 would otherwise assume the enforcement.
     this.vfs.chmod({ uid: 0, gid: 0 }, "/", 0o1777);
     this.blobs = new Map();
     this.limit = limit;
@@ -45,8 +40,6 @@ export class TmpFS {
   setDev(dev) {
     this.dev = dev | 0;
   }
-
-  /* ---- the read surface, delegated whole ------------------------------------------------ */
 
   stat(cred, rel) {
     return { ...this.vfs.stat(cred, rel), dev: this.dev };
@@ -62,7 +55,7 @@ export class TmpFS {
 
   listRel(rel) {
     // By PATH, not by inode: the kernel's readdir resolves a synthetic description through
-    // `d.fs.listRel(d.rel)`, and a tmpfs description records its path for the same reason.
+    // `d.fs.listRel(d.rel)`, so a tmpfs description records its path too.
     const info = this.vfs.stat({ uid: 0, gid: 0 }, rel);
     if (info.type !== DIR) throw new FsError("ENOTDIR", rel);
     return this.vfs.listIno(info.ino);
@@ -75,20 +68,18 @@ export class TmpFS {
       bfree: Math.max(0, this.limit - this.bytes),
       bavail: Math.max(0, this.limit - this.bytes),
       files: counted.inodes,
-      // Inodes are bounded by BYTES here, not by a separate table, so "free inodes" is however
-      // many an empty inode could still be allocated from the remaining space. Reporting 0 made
-      // `df -i` read as full on a filesystem that creates files freely.
+      // Inodes are bounded by BYTES here, not by a separate table, so "free inodes" is the
+      // remaining space. Reporting 0 would make `df -i` read as full on a filesystem that creates
+      // files freely.
       ffree: Math.max(0, this.limit - this.bytes),
       bsize: 1,
       namemax: NAME_MAX,
     };
   }
 
-  /* ---- the write surface, delegated whole ----------------------------------------------- */
-  //
-  // Each returns the VFS's op record, which `metaOp` would journal on a durable mount and discards
-  // on this one. They are listed rather than generated because a `for` loop over method names is
-  // harder to read than nine lines and would hide which calls a tmpfs actually serves.
+  // Each write call returns the VFS's op record, which `metaOp` would journal on a durable mount
+  // and discards on this one. Listed rather than generated, so which calls a tmpfs serves stays
+  // readable.
 
   mkdir(cred, rel, opts) {
     return this.vfs.mkdir(cred, rel, opts);
@@ -100,8 +91,8 @@ export class TmpFS {
 
   unlink(cred, rel) {
     const op = this.vfs.unlink(cred, rel);
-    // The bytes go when the last link does. `unlink` reports the freed inode in `op.freed`, which
-    // is the same field the OPFS store uses to reclaim blobs.
+    // The bytes go when the last link does. `op.freed` is the same field the OPFS store uses to
+    // reclaim blobs.
     if (op && op.freed) this.#drop(op.freed);
     return op;
   }
@@ -132,13 +123,9 @@ export class TmpFS {
     return this.vfs.utimes(cred, rel, atime, mtime);
   }
 
-  /* ---- open, and the bytes -------------------------------------------------------------- */
-
-  /**
-   * A tmpfs open. Returns a description-shaped object the kernel installs directly: there is no
-   * blob store to go through and nothing to await, so a `/tmp` read answers on the dispatch thread
-   * exactly as a generated file does.
-   */
+  /** A tmpfs open. Returns a description-shaped object the kernel installs directly: there is no
+   *  blob store to go through and nothing to await, so a `/tmp` read answers on the dispatch
+   *  thread exactly as a generated file does. */
   openDecision(cred, rel, opts = {}) {
     const decision = this.vfs.openDecision(cred, rel, opts);
     if (decision.type === FILE && !this.blobs.has(decision.ino)) {
@@ -159,15 +146,13 @@ export class TmpFS {
    * The bytes behind one inode, or ESTALE once its last link is gone.
    *
    * REACHABLE FROM USERLAND IN THREE SYSCALLS: open a `/tmp` file, write it, unlink it, then read
-   * the fd you still hold. An earlier comment here claimed this state meant a kernel bug and that
-   * was simply wrong — `unlink` frees the bytes as soon as the VFS reports the last link gone, and
-   * the VFS does not know file descriptions exist.
+   * the fd you still hold. `unlink` frees the bytes as soon as the VFS reports the last link gone,
+   * and the VFS does not know file descriptions exist.
    *
-   * ESTALE, and the same answer the OPFS store gives (`src/abi.mjs` ESTALE, `store.mjs` `resolve`).
-   * POSIX would keep the file alive until the last descriptor closed; M2 decided not to and to
-   * refuse CONSISTENTLY under one name instead, so a tmpfs that chose differently would make the
-   * behaviour of an unlinked open file depend on which mount it was on. Recorded as constraint 83
-   * rather than left as a surprise.
+   * ESTALE is the same answer the OPFS store gives (`src/abi.mjs` ESTALE, `store.mjs` `resolve`).
+   * POSIX would keep the file alive until the last descriptor closed; constraint 83 refuses under
+   * one name on every mount instead, so the behaviour of an unlinked open file does not depend on
+   * which mount it was on.
    */
   #bytesOf(ino) {
     const have = this.blobs.get(ino);
@@ -223,8 +208,7 @@ export class TmpFS {
     const next = end > have.length ? new Uint8Array(end) : new Uint8Array(have.length);
     next.set(have, 0);
     // A write past the end leaves a hole, and POSIX says a hole reads as zeroes — which a fresh
-    // Uint8Array already is, so the gap needs no filling and must not be left as whatever the
-    // allocator had.
+    // Uint8Array already is, so the gap needs no filling.
     next.set(src, at);
     this.#commit(ino, next);
     return src.length;

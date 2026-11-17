@@ -1,14 +1,8 @@
 // The superblock codec. PURE over byte arrays, for the same reason as the journal codec.
 //
-// Fields that are unavailable later, so they go in now even though nothing reads them yet:
-//
-//   generation   bumped on every snapshot write. Two alternating slots can both be valid, and
-//                then the question "which is newer" has no answer without this. M2 holds THREE
-//                copies rather than two, on Phantom's argument: against two slots, a bad write to
-//                the OLDER slot during a commit can leave zero valid copies.
-//   major/minor  a reader one step ahead of the writer must refuse rather than guess. Adding a
-//                version field to a format already holding user data is the change that cannot be
-//                made compatibly, which is why it is here before there is any data.
+// `generation` and `major`/`minor` are written though nothing reads them yet: adding a version
+// field to a format already holding user data is the change that cannot be made compatibly, and
+// without a generation "which slot is newer" has no answer.
 //
 // Layout, little-endian:
 //   u32 MAGIC 'WS1\0' · u16 major · u16 minor · u64 generation · u64 inodeCount
@@ -64,9 +58,9 @@ export function encodeSuperblock({ generation, inodeCount, nextIno }) {
 }
 
 /**
- * Decode a superblock. Never throws; a bad image is a REASON, because constraint 28 requires a
- * failed validation to mount read-only and surface the failure rather than reseed. webxp reseeded,
- * and that is silent data loss presented as success.
+ * Never throws; a bad image is a reason. Constraint 28 requires a failed validation to mount
+ * read-only and surface the failure rather than reseed, which is silent data loss presented as
+ * success.
  */
 export function decodeSuperblock(bytes, off = 0) {
   if (off + SUPER_BYTES > bytes.length) return { ok: false, why: SUPER_REFUSE.SHORT };
@@ -82,7 +76,7 @@ export function decodeSuperblock(bytes, off = 0) {
   new DataView(span.buffer).setUint32(OFF_CRC, 0, true);
   if (crc32(span) !== want) return { ok: false, why: SUPER_REFUSE.BAD_CRC };
   const major = dv.getUint16(off + OFF_MAJOR, true);
-  // A reader one step behind REFUSES rather than guessing at fields it does not know. Checked
+  // A reader one step behind refuses rather than guessing at fields it does not know. Checked
   // after the CRC, so "this image is from the future" is never reported about corrupt bytes.
   if (major > SUPER_MAJOR) {
     return { ok: false, why: SUPER_REFUSE.FUTURE_MAJOR, major, supports: SUPER_MAJOR };
@@ -98,9 +92,8 @@ export function decodeSuperblock(bytes, off = 0) {
 }
 
 /**
- * Pick the newest VALID superblock from the slots given. Returns the chosen slot's index and the
- * reason every rejected slot was rejected, so a degraded mount can say what it found rather than
- * only that it failed.
+ * Picks the newest valid slot, and reports why each rejected slot was rejected so a degraded mount
+ * can say what it found rather than only that it failed.
  *
  * Three slots, not two: against two alternating slots, a bad write to the older slot while
  * committing the newer one can leave zero valid copies.

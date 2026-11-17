@@ -93,11 +93,9 @@ FORBIDDEN = (
     "fetch(",
     "localStorage",
     "caches.",
-    # A CLOCK IS A CAPABILITY TOO, and leaving it off made the lint blind to the one breach that
-    # was actually present: `src/fs/vfs.mjs`'s constructor defaulted `now = Date.now`, and
-    # `src/fs/fsck.mjs` built a VFS without passing one -- so REPLAY read the wall clock and two
-    # runs over identical bytes produced different mtimes. A codec that is not a function of its
-    # input is not fuzzable, which is the whole premise of this gate.
+    # A clock and a random source are capabilities too: a codec that reads one is not a function
+    # of its input, so identical bytes stop producing identical results and nothing here is
+    # reproducible.
     "Date.now",
     "performance.now",
     "Math.random",
@@ -388,9 +386,8 @@ def main(argv: list[str] | None = None) -> int:
           f"{', '.join(lock_fired) or 'NOTHING'}"
           f"{' · MISSED ' + ', '.join(lock_missed) if lock_missed else ''}")
 
-    # EVERY SUBPROCESS'S EXIT STATUS IS A GATE. Only `json.loads` succeeding used to count as
-    # "it ran", so a script that printed its summary and then threw in a teardown path exited
-    # non-zero and this reported clean -- a gate over an interpreter that failed.
+    # A parsed summary is not proof the script ran: one that prints its summary and then fails
+    # still exits non-zero, so the status is gated too.
     exits: list[str] = []
 
     rc, host, err = run_node(HOSTTEST)
@@ -446,10 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     # clean run above was not evidence of anything.
     rc_nc, nocrc, err = run_node(FUZZ, "--seed", str(args.seed),
                                  "--cases", str(args.cases), "--no-crc")
-    # NO EXIT-STATUS GATE ON THIS ONE, and the reason is the control's job: with the CRC check
-    # removed the fuzzer MUST find silent acceptances, so it exits non-zero BY DESIGN -- measured
-    # at 2767 acceptances, exit 1. Gating on the status here reported the working control as a
-    # failure. What the control owes is asserted below, on the acceptance count itself.
+    # No status gate: with the CRC check removed the fuzzer must find silent acceptances, so it
+    # exits non-zero by design (2767, exit 1). What it owes is asserted on the count below.
     if nocrc is None:
         print(f"  control     COULD NOT RUN: {err}", file=sys.stderr)
         return 3

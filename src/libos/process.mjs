@@ -1,10 +1,9 @@
 // The process entry point. Receives the SAB, the globals SAB and the port, closes over all three
 // in MODULE SCOPE, and hands the program only {syscall, write, pid, argv, envp}.
 //
-// Constraint 15, enforced where a process could leak a releasable resource: nothing the program
-// receives is an object with a byteLength or a postMessage, so the program holds nothing whose
-// correctness depends on it running shutdown code — which is the invariant that makes
-// Worker.terminate() a legal SIGKILL. The bench enumerates the keys and asserts exactly that.
+// This module runs INSIDE a process: nothing here may acquire a capability the kernel did not hand
+// it. Constraint 15: nothing the program receives is an object with a byteLength or a postMessage,
+// which is the invariant that makes Worker.terminate() a legal SIGKILL.
 
 import { ABI_FINGERPRINT, SIG_BIT } from "../abi.mjs";
 import {
@@ -18,57 +17,31 @@ import {
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
 } from "./syscall.mjs";
-/**
- * M5. The two libraries a program in `/usr/bin` is handed.
- *
- * IMPORTED HERE SO A PROGRAM NEVER HAS TO. A program's image is a Blob URL whose static specifiers
- * the kernel rewrites against the document (src/kernel/exec.mjs), so a module no process had
- * already imported would be fetched once PER SPAWNED PROCESS — the herd `src/kernel/kernel.mjs`
- * measured losing 6 of 480 connections to. These two are in this module's own graph, so a
- * program receives them through `env` and imports nothing, and a pipeline of three processes costs
- * no extra request at all.
- *
- * Both are function-only and hold no state, so the constraint-15 seam the bench enumerates still
- * shows nothing with a `byteLength` or a `postMessage`.
- */
+/** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
+ *  A module no process had already imported would be fetched once PER SPAWNED PROCESS — the herd
+ *  src/kernel/kernel.mjs measured losing 6 of 480 connections to. */
 import * as std from "./std.mjs";
 import * as shlex from "./shlex.mjs";
 /** M6. The realm strip, run before any program text is evaluated. Constraints 41 and 53. */
 import { lockdown } from "./lockdown.mjs";
 
-/**
- * M2's file API, as ONE object on `env.fs`.
- *
- * Grouped rather than spread across nineteen more keys because constraint 15's seam is asserted by
- * enumerating what a program was handed: every value here is a function, so the enumeration still
- * shows nothing with a byteLength or a postMessage, and a reader checking that claim has one
- * object to look at rather than nineteen rows.
- */
+/** M2's file API, as one object on `env.fs`. Grouped rather than spread across nineteen more keys
+ *  because constraint 15's seam is asserted by ENUMERATING what a program was handed: every value
+ *  here is a function. `PROC`, `TTY`, `STD` and `SHLEX` below are grouped for the same reason. */
 const FS = Object.freeze({
   open, close, read, pread, pwrite, readAll, write, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, link: linkAt,
   rename, readlink, readdir, statfs, dup, dup2, chdir,
 });
 
-/**
- * M4's process and IPC calls, as ONE object on `env.proc`.
- *
- * Grouped for the reason `FS` is: constraint 15's seam is asserted by enumerating what a program
- * was handed, and every value here is a function — so the enumeration still shows nothing with a
- * byteLength or a postMessage. `spawn` + `pipe2` + `setpgid` is the whole of process creation
- * here; there is no `fork` (constraint 20).
- */
+/** M4's process and IPC calls, on `env.proc`. `spawn` + `pipe2` + `setpgid` is the whole of process
+ *  creation; there is no `fork` (constraint 20). */
 const PROC = Object.freeze({
   pipe2, spawn, waitpid, kill, sigaction, setpgid, setsid, getpgid, getppid, exit,
   nanosleep,
 });
 
-/**
- * M4b's terminal and wait calls, as ONE object on `env.tty`.
- *
- * Grouped for the reason `FS` and `PROC` are: constraint 15's seam is asserted by enumerating what
- * a program was handed, and every value here is a function.
- */
+/** M4b's terminal and wait calls, on `env.tty`. */
 const TTY = Object.freeze({
   ptyOpen, get: ttyGet, set: ttySet,
   winsizeGet: ttyWinsizeGet, winsizeSet: ttyWinsizeSet,
@@ -76,14 +49,8 @@ const TTY = Object.freeze({
   poll,
 });
 
-/**
- * M5's two libraries, frozen once at module load.
- *
- * A module namespace object is already non-writable per property, but it is not frozen and a
- * program could still add to it — and every program this worker ever runs sees the same object.
- * `Object.freeze` over a shallow copy is what makes `env.std` the same thing for the second
- * program as for the first.
- */
+/** M5's two libraries. A module namespace object is non-writable per property but NOT frozen, so a
+ *  program could add to the object every later program in this worker then sees. */
 const STD = Object.freeze({ ...std });
 const SHLEX = Object.freeze({ ...shlex });
 
@@ -97,35 +64,21 @@ let pid = 0;
 let myIndex = 0;
 let program = null;
 let clock = null;
-/**
- * M6's report on this realm: what was stripped, what the platform did not expose, and whether the
- * control skipped the strip. Carried in `ready` and in every result for the same reason `clock`
- * is — a property of the process worker the page cannot otherwise see, and a check that could only
- * assert "the call failed" could not tell a stripped realm from a broken one.
- */
+/** M6's report on this realm. Carried in `ready` and in every result, because a check that could
+ *  only assert "the call failed" cannot tell a stripped realm from a broken one. */
 let realm = null;
-/**
- * THE PROCESS'S OWN argv, from its spawn. A process's arguments belong to the process, not to a
- * broadcast: a page driving several DIFFERENT programs against one kernel would otherwise have to
- * send one `go` per program and every process would read the last one's arguments.
- *
- * `go.argv` still wins where it is given, because M0's and M1's benches pass argv that way and a
- * change that broke them would be a change to a milestone that is already proved.
- */
+/** The process's own argv, from its spawn: a page driving several different programs against one
+ *  kernel would otherwise have every process read the last `go`'s arguments. `go.argv` still wins
+ *  where it is given, which is how M0's and M1's benches pass argv. */
 let myArgv = [];
 
-/**
- * The clock's quantum, measured in THIS process in THIS run: the smallest non-zero delta over n
- * reads. A quoted quantum is a different run's quantum, and the cross-agent equal-tick-rate
- * assumption is detected rather than trusted — the bench asserts every process agrees.
- *
- * The same loop yields the noise floor: an empty region timed through the same code path. Chrome
- * clamps performance.now() to 5 us BECAUSE the context is cross-origin isolated; without
- * COOP/COEP it is 100 us, at which most of a ~14 us region times as zero.
- */
+/** The clock's quantum, measured in THIS process in THIS run: the smallest non-zero delta over n
+ *  reads. The same loop yields the noise floor. Chrome clamps performance.now() to 5 us BECAUSE
+ *  the context is cross-origin isolated; without COOP/COEP it is 100 us, at which most of a ~14 us
+ *  region times as zero. */
 function measureClock(n) {
-  // Online, with no array: 200,000 Float64s per process is 1.6 MB and 205 MB across a full
-  // table, and the allocation would land in the thing being measured.
+  // Online, with no array: 200,000 Float64s per process is 1.6 MB and 205 MB across a full table,
+  // and the allocation would land in the thing being measured.
   let smallest = Infinity;
   let zeros = 0;
   let total = 0;
@@ -154,21 +107,10 @@ function panic(why) {
   port.postMessage({ t: "fault", pid, why: String(why) });
 }
 
-/**
- * A FAULT IS REPORTED AND THE EVENT IS CANCELLED. Both halves, and the second one is the fix.
- *
- * An `onerror` handler that does not cancel the event leaves the runtime to "report the exception",
- * which for a dedicated worker RE-FIRES it at the `Worker` object in the parent — and the parent
- * here is the kernel, whose `worker.onerror` used to call `panic`. So a program containing
- * `setTimeout(() => { throw new Error("x") })` took the WHOLE SYSTEM down: `G_KSTATE` went
- * K_PANIC and every live process was told through its own SAB that the kernel was dead.
- *
- * That wiring predates M5. What M5 changed is that a process now chooses its own program text, so
- * it needed no cooperation from the page. Returning true is how an `onerror` handler cancels;
- * `preventDefault` is the same thing for the rejection event, which has no return-value form.
- * The kernel's side is the other half (src/kernel/kernel.mjs): a process worker's error is that
- * PROCESS's fault and is reaped as one.
- */
+/** A fault is reported AND the event is cancelled. An uncancelled `onerror` re-fires the exception
+ *  at the `Worker` object in the parent — here, the kernel — so a program whose `setTimeout` throws
+ *  takes the whole system to K_PANIC. Returning true cancels; `preventDefault` is the rejection
+ *  event's form, which has no return-value one. */
 self.onerror = (e) => {
   panic(`process onerror: ${e.message ?? e}`);
   return true;
@@ -182,8 +124,6 @@ let exiting = false;
 /** True while a `go` is in flight. One program at a time per process; see `onCommand`. */
 let running = false;
 
-/** M0's signal hook: count, and honour the SIGKILL bit by stopping. M1 replaces the body with
- *  handler dispatch; the seam is here so M1's negative control has something to remove. */
 function onsignal(bits) {
   if (bits & SIG_BIT(9)) exiting = true;
 }
@@ -202,36 +142,24 @@ self.onmessage = async (ev) => {
       clock = measureClock((m.cfg && m.cfg.clockReads) || 200000);
       initSyscall({ ctl, u8, g, port, pid, quantumMs: clock.quantumMs, onsignal,
         noSigpend: !!(m.cfg && m.cfg.noSigpend) });
-      // The program's own commands arrive on the port, the same channel its syscalls leave by.
       port.onmessage = (e) => onCommand(e.data);
-      // THE IMAGE THE KERNEL LOADED, never a path this process goes and gets. A process that
-      // fetches its own program text needs a network it must not have (constraint 41 deletes
-      // `fetch` and `importScripts` from this realm), and sixteen of them importing one URL at
-      // once lost connections to the server about one run in five. The check on the scheme is
-      // here because the alternative is that regression coming back as an intermittent fault
-      // rather than as a refusal naming itself.
+      // The image the kernel loaded, never a path this process goes and gets: fetching its own
+      // program text needs a network a process must not have (constraint 41). Checked on the
+      // scheme, so the regression returns as a refusal naming itself, not an intermittent fault.
       if (!String(m.image).startsWith("blob:")) {
         throw new Error(`process ${pid}: program image ${m.image} is not a kernel-loaded blob`);
       }
-      /**
-       * M6. THE REALM IS STRIPPED HERE, and the line below is why this line is here.
-       *
-       * `import(m.image)` evaluates the program's module body, so anything after it is after the
-       * program has already run — and a program's first statement would hold a reference to
-       * whatever this was going to delete. Constraints 41 and 53.
-       *
-       * It throws when a binding survives, and the catch below faults the process: a realm that
-       * could not be stripped must not evaluate program text (src/libos/lockdown.mjs). The
-       * `noLockdown` cfg flag is M6's negative control, which the kernel refuses to pass without a
-       * bench boot (src/kernel/kernel.mjs) — the same discipline as every other control hook.
-       */
+      /* THE REALM IS STRIPPED BEFORE ANY PROGRAM TEXT IS EVALUATED (constraints 41 and 53): the
+       * `import` below evaluates the program's module body, so a strip after it runs too late.
+       * `lockdown` throws when a binding survives and the catch below faults the process — a realm
+       * that cannot be stripped must not evaluate program text. `noLockdown` is M6's negative
+       * control, which the kernel refuses to pass without a bench boot. */
       realm = (m.cfg && m.cfg.noLockdown)
         ? { skipped: true, stripped: [], absent: [], remaining: [], where: {} }
         : { skipped: false, ...lockdown() };
       program = await import(m.image);
-      // Phase 2 of spawn. The kernel marks RUNNING on this, and it can only arrive because the
-      // kernel returned to its event loop after posting init — a kernel that spawned and then
-      // parked would never read it.
+      // Phase 2 of spawn: the kernel marks RUNNING on this, so it only arrives once the kernel is
+      // back in its event loop — one that spawned and parked never reads it.
       port.postMessage({
         t: "ready",
         pid,
@@ -249,35 +177,16 @@ self.onmessage = async (ev) => {
   panic(`unexpected kernel message ${m && m.t}`);
 };
 
-/**
- * A PROGRAM'S `run` MAY BE ASYNC, and this function is async because of it.
- *
- * M6 is why. Every binding constraint 41 takes away is promise-shaped — `navigator.storage`,
- * `caches`, `import(expr)` — so a program that demonstrates the hole cannot finish inside one
- * synchronous turn, and `{ ...promise }` spreads to `{}`: the result would have arrived EMPTY,
- * with nothing anywhere saying why. Awaiting a non-thenable is a no-op, so a synchronous program
- * is unaffected except for one microtask between its return and its result, which is after the
- * program has finished and inside no measurement.
- *
- * The throw still lands in the same place. `await` inside `try` carries a rejection to the catch
- * below, so a program that returns a rejected promise faults exactly as one that threw — which
- * `p_fault` in `bench/m6-realm/program.mjs` depends on, and which would silently have become "no
- * result, no fault, and a page waiting out its timeout" had this stayed synchronous.
- */
+/** A program's `run` may be async, and this function is async because of it: every binding
+ *  constraint 41 takes away is promise-shaped, so a program that demonstrates the hole cannot
+ *  finish inside one synchronous turn and `{ ...promise }` would spread to `{}`. `await` inside
+ *  `try` carries a rejection to the catch below, so a rejected promise faults exactly as a throw. */
 async function onCommand(m) {
   if (!m || m.t !== "go") return;
-  /**
-   * ONE `go` AT A TIME, AND A SECOND ONE IS A FAULT.
-   *
-   * The synchronous version held this by construction: `run` returned before the next message
-   * task could be delivered. An async `run` suspends, so a second `go` arriving meanwhile would
-   * start a CONCURRENT run in the same realm and post a second result — and the kernel satisfies
-   * `results.length >= goCount` at the first, so the page reads one batch and the extra result is
-   * orphaned in its pending queue. Nothing in the suite issues two, which is exactly why this is
-   * a guard and not a queue: the invariant is unchanged, and a caller that breaks it now gets a
-   * fault naming the invariant instead of a second result nobody reads. Found by an adversarial
-   * review of the async change (constraint 197).
-   */
+  /* One `go` at a time, and a second one is a fault (constraint 197). An async `run` suspends, so a
+   * second `go` would start a concurrent run in the same realm and post a second result that the
+   * kernel's `results.length >= goCount` orphans. A guard and not a queue, so a caller that breaks
+   * the invariant gets a fault naming it. */
   if (running) {
     panic(`process ${pid}: a second go arrived while a program was still running. One go per `
       + "process at a time; the result of the first would have been overtaken");
@@ -292,9 +201,7 @@ async function onCommand(m) {
       fs: FS,
       proc: PROC,
       tty: TTY,
-      // M5. Frozen, so one program cannot leave a monkey-patched helper behind for the next —
-      // these are MODULE objects shared by every program this worker runs, which a per-spawn
-      // object would not be.
+      // Frozen: these are MODULE objects shared by every program this worker runs.
       std: STD,
       shlex: SHLEX,
       pid, index: myIndex, argv: m.argv || myArgv, envp: m.envp || {},
@@ -310,8 +217,7 @@ async function onCommand(m) {
         abiFingerprint: ABI_FINGERPRINT,
         isolated: self.crossOriginIsolated === true,
         exiting,
-        // The constraint-15 seam, as a measurement rather than an assertion: these are the keys
-        // the program was handed, for the bench to assert none is a transferable object.
+        // The constraint-15 seam as a measurement, for the bench to assert none is transferable.
         envKeys: Object.keys(env),
         envKinds: Object.keys(env).map((k) => {
           const v = env[k];
@@ -324,9 +230,8 @@ async function onCommand(m) {
   } catch (error) {
     panic(error && error.stack);
   } finally {
-    // CLEARED EVEN WHEN THE PROGRAM FAULTED, so a worker that survives a caught throw can be
-    // given another program — which `www/m6.html` relies on: it runs a second mode on a live
-    // process to read `/proc` inside the terminate quarantine.
+    // Cleared even when the program faulted, so a worker that survives a caught throw can be
+    // given another program.
     running = false;
   }
 }

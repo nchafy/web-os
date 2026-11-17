@@ -1,44 +1,20 @@
 // `true`: succeed, saying nothing.
 //
-// ======================================================================================
-// THE PROGRAM CONTRACT, stated once, here, because this is the smallest program that has it.
+// The program contract, stated here because this is the smallest program that has it. A program in
+// `/usr/bin` is an ES module exporting `run(env, go)`.
 //
-// A program in `/usr/bin` is an ES module exporting `run(env, go)`:
+// 1. It receives `env`: `argv` (POSIX-shaped — `argv[0]` is the program name, arguments are
+//    `argv.slice(1)`), `fs` (src/libos/syscall.mjs), `proc`, `tty`, `std` (src/libos/std.mjs),
+//    `shlex` (src/libos/shlex.mjs; only `sh` uses it), `pid`.
+// 2. It returns `{exit: code}`; nothing means exit 0. The kernel reaps on the result and takes
+//    `data.exit` as the status (src/kernel/kernel.mjs `onProcessMessage`). `run` may be async —
+//    the libos awaits it (src/libos/process.mjs) and a rejection faults the process.
+// 3. It writes to fd 1, errors to fd 2, and reads fd 0.
+// 4. It may import nothing but `/src/abi.mjs`, which src/libos/process.mjs has already put in the
+//    module map; any other specifier is a network fetch per spawned process.
 //
-//   env.argv      argv, POSIX-shaped: argv[0] IS THE PROGRAM NAME and the arguments are
-//                 argv.slice(1). `src/bin/sh.mjs` passes it that way, and a program must not
-//                 assume otherwise — the bench orchestrators under `bench/` use argv[0] as a mode
-//                 instead, which is their own convention and not this one.
-//   env.fs        open/read/write/close/stat/readdir/...  (src/libos/syscall.mjs)
-//   env.proc      spawn/waitpid/kill/setpgid/exit/pipe2
-//   env.tty       pty_open, termios, winsize, poll
-//   env.std       the program support library (src/libos/std.mjs)
-//   env.shlex     the shell's language (src/libos/shlex.mjs); only `sh` uses it
-//   env.pid       this process's pid
-//
-// fd 0 is standard input, 1 is standard output, 2 is standard error.
-//
-// RETURNING `{exit: code}` IS HOW A PROGRAM EXITS. The kernel reaps a process-spawned child on
-// its result and takes `data.exit` as the status (src/kernel/kernel.mjs `onProcessMessage`), so
-// the return value is the exit code and `env.proc.exit(n)` is the same thing said earlier.
-// Returning nothing is exit 0.
-//
-// `run` MAY BE ASYNC. The libos awaits it (src/libos/process.mjs), and a rejected promise faults
-// the process exactly as a throw does. Every program in this directory is synchronous and should
-// stay that way — a syscall blocks in `Atomics.wait` and needs no await — but M6's realm probe
-// cannot be, because every capability it asks about is promise-shaped.
-//
-// A PROGRAM MAY NOT IMPORT ANYTHING EXCEPT `/src/abi.mjs`. The kernel rewrites absolute
-// specifiers against the document, so `/src/abi.mjs` comes out of the module map
-// `src/libos/process.mjs` already populated; any other module would be a network fetch per
-// spawned process. Everything else arrives through `env`.
-//
-// WHY `src/bin/` EXISTS AT ALL — a departure from CLAUDE.md's src/kernel | src/libos | src/wm
-// layout, recorded where the reader meets it. These are not the kernel (unprivileged), not the
-// libos (they are not linked into every process) and not the window manager. They are the
-// contents of a filesystem directory, and `src/kernel/providerfs.mjs` maps them into `/usr/bin`
-// row by row.
-// ======================================================================================
+// `src/bin/` is a departure from CLAUDE.md's kernel | libos | wm layout: these are the contents of
+// a filesystem directory, which `src/kernel/providerfs.mjs` maps into `/usr/bin` row by row.
 
 export function run() {
   return { exit: 0 };
