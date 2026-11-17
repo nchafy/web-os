@@ -233,7 +233,10 @@ export function linkProgram(text, base) {
   return { code, resolved: found.length, unlinkable: "" };
 }
 
-const DECODER = new TextDecoder("utf-8", { fatal: false });
+/** `fatal` so a file that is not UTF-8 is -ENOEXEC here rather than U+FFFD inside the child.
+ *  With `fatal: false` the decoder never throws, so the ENOEXEC arm below could not be reached
+ *  and a non-UTF-8 file with an execute bit faulted at module load having issued no syscall. */
+const DECODER = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * The exec loader.
