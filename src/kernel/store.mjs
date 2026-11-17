@@ -426,7 +426,7 @@ export class Store {
     // without paying for it at boot is NOT built here.
     const blobs = this.cfg.sweepBlobs ? await this.blobListing() : null;
 
-    const report = fsck({ slots, journal, blobs, checkCrc: !this.cfg.noCrc });
+    const report = fsck({ slots, journal, blobs, checkCrc: !this.cfg.noCrc, now: Date.now });
     this.report = jsonSafe({ ...report, vfs: undefined, lock });
     this.report.lock = lock;
 
@@ -465,7 +465,7 @@ export class Store {
       this.mode = verdict;
       if (verdict === MOUNT_RO) {
         this.vfs = report.mountable === MOUNT_FRESH
-          ? new VFS({ owner: { uid: 0, gid: 0 } }) : report.vfs;
+          ? new VFS({ owner: { uid: 0, gid: 0 }, now: Date.now }) : report.vfs;
       }
       return this.report;
     }
@@ -478,7 +478,10 @@ export class Store {
     }
 
     if (report.mountable === MOUNT_FRESH) {
-      this.vfs = new VFS({ owner: { uid: 0, gid: 0 } });
+      // THE CLOCK IS PASSED FROM HERE, not defaulted inside src/fs/. The storage edge is the
+      // layer that has a clock; a codec that reaches for one stops being a total function over
+      // its input, and scripts/fsfuzz.py lints for exactly that.
+      this.vfs = new VFS({ owner: { uid: 0, gid: 0 }, now: Date.now });
       this.mode = MOUNT_FRESH;
       // The appender's invariant needs its base before the first record can be written. A fresh
       // volume starts at 0; the arm below resumes from what replay accepted.
@@ -604,7 +607,7 @@ export class Store {
     for (const name of SUPER_SLOTS) slots.push(await this.readWhole(name));
     const journal = await this.readWhole(JOURNAL_NAME);
     const blobs = await this.blobListing();
-    const report = fsck({ slots, journal, blobs, checkCrc: !this.cfg.noCrc });
+    const report = fsck({ slots, journal, blobs, checkCrc: !this.cfg.noCrc, now: Date.now });
     const out = jsonSafe({ ...report, vfs: undefined });
     out.inodes = report.vfs ? report.vfs.stats() : null;
     return out;

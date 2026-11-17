@@ -246,10 +246,21 @@ export class VFS {
    *        argument. This is the root directory's owner and nothing else.
    * @param {() => number} [options.now] Milliseconds. Injectable so replay is exact and a host
    *        test is deterministic: every op carries the timestamp it was written with.
+   *
+   *        NO DEFAULT CLOCK, and that is the point. This used to default to `Date.now`, and
+   *        `src/fs/fsck.mjs` builds a VFS without passing one — so the REPLAY path read the wall
+   *        clock, and two `fsck` runs over identical bytes produced different mtimes for any op
+   *        whose `t` was missing. A parse path that is not a function of its input is not
+   *        fuzzable, which is the premise `scripts/fsfuzz.py` rests on. Omitting it now yields a
+   *        clock that REFUSES, so a replayed op with no timestamp is a named error instead of
+   *        a silently invented one, and the capability lives at the edges that have it.
    * @param {boolean} [options.empty] Build with NO root inode, for `parse` to fill.
    */
-  constructor({ owner = { uid: 0, gid: 0 }, now = Date.now, empty = false } = {}) {
-    this.now = now;
+  constructor({ owner = { uid: 0, gid: 0 }, now = undefined, empty = false } = {}) {
+    this.now = now ?? (() => {
+      throw new FsError("EIO", "<clock>",
+        "an op carries no timestamp and this VFS was built without a clock");
+    });
     this.inodes = new Map();
     this.nextIno = ROOT_INO;
     this.rootIno = ROOT_INO;
