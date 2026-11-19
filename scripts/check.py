@@ -628,6 +628,10 @@ class Control:
     #: A SERVER switch rather than a query parameter, because a policy is a response header — the
     #: same shape as `no-isolation`, and for the same reason.
     NO_CSP = "no-csp"
+    #: A MOUNTPOINT IS A REAL DIRECTORY ON THE VOLUME BENEATH IT, and it was not. Reported by a
+    #: reader who typed `ls /` and got nothing; `cd /usr/..` answered ENOENT on the same cause
+    #: (constraint 238).
+    NO_MOUNTPOINTS = "no-mountpoints"
     ONCE = "once"
 
 
@@ -661,6 +665,7 @@ CONTROL_RUNS = {
     Control.NO_CASCADE: ("no-cascade",),
     Control.NO_LOCKDOWN: ("no-lockdown",),
     Control.NO_CSP: ("no-csp",),
+    Control.NO_MOUNTPOINTS: ("no-mountpoints",),
 }
 
 
@@ -2674,6 +2679,7 @@ M5_LABELS = (
     "kernel isolated",
     "the kernel raised no error",
     "the mounts the programs live on are there",
+    "every mountpoint exists as a directory on the volume beneath it",
     "no program crossed the wire for a process",
     # THE HEADLINE PROOF.
     "pipeline ok",
@@ -3312,6 +3318,13 @@ _PTY_DETACH_FAILS = (
 #: only asserted the call would hold under `no-lockdown`, because the policy refuses `fetch` at
 #: the network while the process still HOLDS the binding - and constraint 41 is about what a
 #: process can reach, not only about what the renderer will send.
+#: What A WORLD WITH NO MOUNTPOINTS must break: exactly the report that names them, and nothing
+#: else. Every program still RESOLVES — the mount table never needed the directory — so m5's whole
+#: pipeline is a different subject and must hold.
+_NO_MOUNTPOINTS_FAILS = (
+    "every mountpoint exists as a directory on the volume beneath it",
+)
+
 M6_LABELS = (
     "cell reported",
     "page isolated",
@@ -4022,6 +4035,31 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "the one it was given",
             failed=_NO_CASCADE_FAILS,
             held=held_rest(M7_LABELS, _NO_CASCADE_FAILS),
+        )},
+    ),
+    "no-mountpoints": NegativeControl(
+        name="no-mountpoints",
+        why="no_mountpoints=1: no mountpoint is created as a directory on the volume beneath it "
+            "(the cfg.noMountpoints hook, refused without a bench boot). THE WORLD A READER "
+            "REPORTED. The mount table resolves by longest component prefix, so every path call "
+            "still works - and the volume underneath has no entry for `/usr`, `/proc`, `/dev` or "
+            "`/tmp`.\n"
+            "WHAT MUST BREAK: the mountpoint report, which is the only place this is visible "
+            "without typing. The two symptoms a person meets are `ls /` printing NOTHING and `cd "
+            "/usr/..` answering ENOENT, and `bench/shell-reports/repro.py` is where those are "
+            "driven at a real prompt.\n"
+            "WHAT MUST HOLD: everything else in m5 - the whole pipeline, the trace, and every "
+            "program that resolves through the mount table. Nothing about EXECUTING a program "
+            "depends on its mountpoint being visible from the directory above it, and a control "
+            "that moved those too could not tell the two apart.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_mountpoints", "1"),),
+        expects={"m5": Expect(
+            Outcome.FAIL,
+            why="the mountpoints must stop existing on the volume beneath them",
+            failed=_NO_MOUNTPOINTS_FAILS,
+            held=held_rest(M5_LABELS, _NO_MOUNTPOINTS_FAILS),
         )},
     ),
     "no-draw": NegativeControl(
@@ -7394,7 +7432,8 @@ def check_m4b(env: Env) -> None:
 @check(
     name="m5",
     milestone="m5",
-    controls=(Control.INVERT, Control.NO_ISOLATION, Control.SPAWN_SELF),
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.SPAWN_SELF,
+              Control.NO_MOUNTPOINTS),
     labels=M5_LABELS,
     requires_isolation=True,
     root=Root.REPO,
@@ -7475,6 +7514,21 @@ def check_m5(env: Env) -> None:
         bool(usr.get("ok")) and (usr.get("entries") or 0) >= 11
         and bool(bench.get("ok")) and "/usr" in (mounts.get("rows") or []),
         {"rows": mounts.get("rows"), "usr": usr, "bench": bench})
+    # ---- AND EVERY MOUNTPOINT IS A DIRECTORY ON THE VOLUME BENEATH IT ------------------
+    #
+    # REPORTED BY A READER WHO TYPED `ls /` AND GOT NOTHING. The mount table resolves by longest
+    # component prefix, so `/usr` worked without existing anywhere - and the volume underneath had
+    # no entry for it, so the root listing was EMPTY and `cd /usr/..` answered ENOENT on a `/usr`
+    # that every other path call could reach. Both symptoms are one cause (constraint 238).
+    #
+    # THE SET IS NAMED, not counted: a count passes while the one mountpoint a reader cd's into is
+    # the missing one.
+    points = {row.get("path"): row for row in (mounts.get("mountpoints") or [])}
+    env.expect_that(
+        "every mountpoint exists as a directory on the volume beneath it",
+        set(points) >= {"/proc", "/dev", "/tmp", "/usr", "/bench"}
+        and not [r for r in points.values() if r.get("why")],
+        {"mountpoints": mounts.get("mountpoints")})
     # THE EXEC LOADER HAS NO `fetches` FIELD because src/kernel/exec.mjs contains no fetch to
     # count. What is asserted here is the state the counters are in on a kernel that has just
     # booted and run nothing: a loader that had been to the network for a process would have to

@@ -29,10 +29,19 @@ const SHELL = "/usr/bin/sh";
  *  event, so this is only how long the loop can be asleep while its deadline passes. */
 const POLL_MS = 250;
 
-/** The wall-clock ceiling on a whole session, overridable with `--ceiling`. A stopped terminal
- *  raises no error — a parked `poll` and a thinking shell are both legitimate — so the relay
- *  carries its own deadline and reports with its counters attached. */
-const CEILING_MS = 30000;
+/**
+ * How long the relay may be IDLE before it closes, overridable with `--ceiling`.
+ *
+ * IDLE AND NOT TOTAL, which is the fix for a real complaint: a terminal a person opened by typing
+ * `term &` died after 30 seconds. Every page spawns its own terminal with `--ceiling 3600000`, so
+ * the only caller left on the default was a HUMAN — and the default was sized for a check.
+ *
+ * The reason a deadline exists at all survives the change: a stopped terminal raises no error, a
+ * parked `poll` and a thinking shell are both legitimate, so the relay carries its own deadline and
+ * reports with its counters attached. A STOPPED relay has no wakes, so it still reports; a relay
+ * being used is never stopped (constraint 239).
+ */
+const CEILING_MS = 1800000;
 
 /** One read's buffer. The region is MAX_INLINE, so a bigger one could never be filled. */
 const CHUNK = Math.min(MAX_INLINE, 8192);
@@ -160,13 +169,23 @@ export function run(env) {
 
   const buf = new Uint8Array(CHUNK);
   let why = "";
+  /**
+   * When the relay last had something to do. The deadline is measured from here.
+   *
+   * SET NOW AND NOT AT `t0`, because everything above it — the window, the pty, the shell — is the
+   * relay STARTING and not the relay idling. Measured against `t0` a `--ceiling 4000` terminal
+   * exited before its own window appeared, since opening a pty and spawning `sh` takes longer than
+   * that and produces no wake while it happens.
+   */
+  let lastWake = performance.now();
   /** Whether the shell has already been reaped by its own exit, so the hangup below is not owed. */
   let shellGone = false;
 
   // Every exit from this loop names itself in `why`, or the reason for stopping is not reportable.
   for (;;) {
-    if (performance.now() - t0 > ceiling) {
-      why = `ceiling ${ceiling} ms reached with the session still open`;
+    // SINCE THE LAST WAKE, not since the start: see `CEILING_MS`.
+    if (performance.now() - lastWake > ceiling) {
+      why = `idle for ${ceiling} ms with the session still open`;
       break;
     }
     account.polls += 1;
@@ -179,7 +198,10 @@ export function run(env) {
       why = `poll: ${env.std.errnoName(r)}`;
       break;
     }
-    if (r.nready > 0) account.wakes += 1;
+    if (r.nready > 0) {
+      account.wakes += 1;
+      lastWake = performance.now();
+    }
     const conRev = r.fds[0].revents;
     const mstRev = r.fds[1].revents;
 

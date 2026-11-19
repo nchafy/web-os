@@ -2245,3 +2245,53 @@ one was verified against the code before it was acted on, and every one became a
     checks, and was reported as verified for as long as it existed. A control must move a NAMED
     subset, and the empty set is not one. The harness refuses it and says to give the probe a case
     the mutation breaks.
+
+## Two bugs a reader found by USING the desktop
+
+Neither was caught by 494 passing expectations, and the reason is the same for both: every check
+reaches the filesystem and the terminal through the page's supervisor path, and a person reaches
+them by typing. `bench/shell-reports/repro.py` types.
+
+238. **A MOUNTPOINT MUST BE A REAL DIRECTORY ON THE VOLUME BENEATH IT, and it was not.** The mount
+    table resolves by longest component prefix (`src/fs/mounts.mjs`), so `/usr` worked without
+    existing anywhere. Two things asked the volume underneath about it, and both are what a person
+    types first:
+
+    | | |
+    | --- | --- |
+    | `ls /` | the root volume has no entry for `/usr`, `/proc`, `/dev`, `/tmp` or `/bench`, so the listing is EMPTY. Everything is there and nothing is visible |
+    | `cd /usr/..` | normalizes to `/`, which is the root mount — and `resolveMount` hands the root volume the path WITH the `..` intact, deliberately, because it is the only filesystem that resolves `..` against a real parent and follows symlinks first. So the volume resolves `/usr/..` and answers ENOENT on `/usr` |
+
+    **ONE FIX FOR BOTH SYMPTOMS, which is the shape of the right one**: the kernel creates each
+    mountpoint as a directory (mode 0o555) before mounting over it, and the mount table stops being
+    a second, invisible namespace. Done at boot and not in a fresh volume's image, because a volume
+    seeded before this change exists and constraint 28 forbids reseeding it.
+
+    A READ-ONLY VOLUME CANNOT BE GIVEN ONE, so the mount still happens and the gap is REPORTED in
+    `win-state`'s `mountpoints`. `scripts/check.py --negative no-mountpoints` is the world the
+    reader met: m5 goes red on exactly one expectation and the other 38 — the whole pipeline, every
+    program the mount table resolves — HOLD, because nothing about executing a program depends on
+    its mountpoint being visible from the directory above it.
+239. **`term`'s CEILING BOUNDS IDLE TIME, NOT THE SESSION.** A second terminal opened by typing
+    `term &` died after 30 seconds. Every page spawns its own terminal with `--ceiling 3600000`, so
+    the only caller left on the 30-second default was a HUMAN — and that default was sized for a
+    check.
+
+    The reason a deadline exists survives the change: a stopped relay raises no error, since a
+    parked `poll` and a thinking shell are both legitimate, so the relay carries its own deadline
+    and reports with its counters attached. A STOPPED relay has no wakes and still reports; a relay
+    being used is never stopped. The default is 30 minutes of silence.
+
+    **AND THE CLOCK STARTS AFTER SETUP, NOT AT ENTRY.** Measured against the program's start, a
+    `--ceiling 4000` terminal exited before its own window appeared: opening a pty and spawning
+    `sh` takes longer than that and produces no wake while it happens. That is the kind of edge a
+    small bound finds and a 30-minute one hides.
+
+    **BOTH EDGES ARE CHECKED**, which a threshold on a continuous input owes: busy past the
+    deadline must live (34 s of typing against it), and idle past it must exit (16 s of silence
+    against an explicit 8 s). Without the second, "it survives being used" also describes a
+    deadline that was simply deleted.
+
+    **AND THE DESKTOP SAYS SO.** `term &` is in the hint block of every live page now, because a
+    capability nobody is told about is one nobody has: the complaint was not only that a second
+    terminal died, it was that there was no way to watch one program from another.

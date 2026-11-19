@@ -40,7 +40,14 @@ const out = document.getElementById('log')
 const say = (s) => { out.textContent += s + '\n' }
 const params = new URLSearchParams(location.search)
 
-const CFG = { spawnSelf: params.get('spawn_self') === '1' }
+const CFG = {
+  spawnSelf: params.get('spawn_self') === '1',
+  /* `?no_mountpoints=1`: no mountpoint is created as a directory on the volume beneath it, which
+   * is the world a reader reported — `ls /` prints nothing and `cd /usr/..` is ENOENT. Every
+   * program still resolves, which is why it is THIS check that carries the control: the pipeline
+   * must hold while the namespace a person sees falls apart. */
+  noMountpoints: params.get('no_mountpoints') === '1',
+}
 
 Object.assign(globalThis.M5, { isolated: self.crossOriginIsolated === true })
 
@@ -192,12 +199,17 @@ async function main () {
   say('M5: the shell and ten programs' + (CFG.spawnSelf ? '  [CONTROL: spawn_self]' : ''))
   const boot = { bench: 1 }
   if (CFG.spawnSelf) boot.spawnSelf = true
+  if (CFG.noMountpoints) boot.noMountpoints = true
   const P = globalThis.M5.proofs
 
   /* ---- the mounts the programs live on -------------------------------------------------- */
   const st = await readState(boot)
   globalThis.M5.mounts = {
     rows: (st.rows || []).map((r) => r.path),
+    // WHETHER EACH MOUNTPOINT EXISTS AS A DIRECTORY on the volume beneath it. Carried because a
+    // missing one is invisible in every other field here: the mount still works and the parent's
+    // listing silently omits it (constraint 238).
+    mountpoints: st.mountpoints,
     usr: st.usr, bench: st.bench, exec: st.exec,
   }
   say('mounts: ' + globalThis.M5.mounts.rows.join(' ') +

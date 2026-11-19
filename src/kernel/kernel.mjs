@@ -56,6 +56,10 @@ let ioWhy = "";
 let STORE = null;
 let QUOTA = null;
 let mountReport = null;
+/** Whether each mountpoint exists as a DIRECTORY on the volume beneath it. Published because a
+ *  missing one is invisible in every other report: the mount still works and the parent's listing
+ *  silently omits it (constraint 238). */
+let mountpointReport = [];
 let table = null;
 /** `trace` and `mounts` are null before boot, so every use of them is guarded. */
 /**
@@ -891,6 +895,7 @@ function m3State() {
       }))
       : [],
     usr: usrReport,
+    mountpoints: [...mountpointReport],
     bench: benchReport,
     exec: EXEC ? EXEC.stats() : null,
     trace: trace ? trace.stats() : null,
@@ -1395,6 +1400,67 @@ async function handle(m) {
           // The volume's own read-only verdict (constraint 28): the write paths test this flag.
           flags: STORE.readOnly ? MNT_RO : 0,
         });
+        /**
+         * A MOUNTPOINT IS A REAL DIRECTORY ON THE VOLUME BENEATH IT, and it was not.
+         *
+         * The mount table short-circuits resolution by longest component prefix, so `/usr` worked
+         * without existing anywhere — until something asked the volume underneath about it. Two
+         * things did, and both are what a person types first:
+         *
+         *   `ls /`        the root volume has no entry for `/usr`, `/proc`, `/dev` or `/tmp`, so
+         *                 the listing is EMPTY. Everything is there and nothing is visible.
+         *   `cd /usr/..`  normalizes to `/`, which is the root mount — and `resolveMount` hands the
+         *                 root volume the path WITH the `..` intact, deliberately, because it is
+         *                 the only filesystem that resolves `..` against a real parent. So the
+         *                 volume resolves `/usr/..` and answers ENOENT on `/usr`.
+         *
+         * Making the directory fixes both at once, which is the shape of the right fix: the mount
+         * table stops being a second, invisible namespace. Done HERE and not in a fresh volume's
+         * image, because a volume seeded before this change exists and constraint 28 forbids
+         * reseeding it. Mode 0o555: a mountpoint is not a place to put files.
+         *
+         * A READ-ONLY VOLUME CANNOT BE GIVEN ONE, so the mount still happens and the gap is
+         * REPORTED rather than silently tolerated (constraint 238).
+         */
+        mountpointReport = [];
+        const mountpoints = mountpointReport;
+        const ensureMountpoint = async (where) => {
+          const cred = { uid: 0, gid: 0 };
+          if (STORE.vfs.exists(cred, where)) {
+            mountpoints.push({ path: where, made: false });
+            return;
+          }
+          if (STORE.readOnly) {
+            mountpoints.push({ path: where, made: false, why: "the volume is read-only" });
+            return;
+          }
+          try {
+            const op = STORE.vfs.mkdir(cred, where, { mode: 0o555 });
+            // `freed` is stripped exactly as `metaOp` strips it: it is an instruction to the
+            // store, not a field of the record, and journalling it would write a record no
+            // replay understands.
+            const { freed, ...record } = op || {};
+            const r = op === null ? 0 : await STORE.journal(record);
+            if (r >= 0 && freed) await STORE.freeInode(freed);
+            mountpoints.push(r < 0
+              ? { path: where, made: false, why: `journal errno ${-r}` }
+              : { path: where, made: true });
+          } catch (error) {
+            mountpoints.push({ path: where, made: false, why: String(error && error.message) });
+          }
+        };
+        /* THE NEGATIVE CONTROL, boot-gated on bench=1: no mountpoint is created, which is the
+         * world a reader reported. The mounts still work, so what breaks is only what a person
+         * sees - an empty `ls /` and a `..` that cannot be resolved out of a mount. */
+        if (cfg.noMountpoints) {
+          if (cfg.bench !== 1) throw new Error("noMountpoints requires bench=1");
+          mountpointReport.push({ path: "*", made: false, why: "cfg.noMountpoints" });
+        } else {
+          for (const where of ["/proc", "/dev", "/tmp", "/usr", "/bench"]) {
+            await ensureMountpoint(where);
+          }
+        }
+
         if (cfg.procCache && cfg.bench !== 1) throw new Error("procCache requires bench=1");
         const procFs = makeProcFS({
           table: () => table,
