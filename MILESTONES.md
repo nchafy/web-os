@@ -1628,6 +1628,8 @@ scripts/check.py --negative no-owner-chain   m9 fail:  3 red, 29 intact
 scripts/check.py --negative no-modal         m9 fail: 11 red, 21 intact
 node bench/m9-modal/probe.mjs          58 host checks (the stack, the chain, the walk)
 bench/m9-modal/controls.py             5 mutations, each scored on which checks move
+bench/m9-modal/shell.py                `editor` typed at a REAL prompt, its X clicked
+bench/m9-modal/shell.py --clean        ...and the SAME click on a clean buffer, which closes
 ```
 
 ### The kernel owns the stack, and that is the structural half
@@ -1655,6 +1657,13 @@ system}` is the SCOPE; SerenityOS's `WindowMode` is the BEHAVIOUR. `MILESTONES.m
 correction said both were needed, and the editor is the proof: it opens a **palette** that is
 `RENDER_ABOVE` and blocks nothing, and a **dialog** that is `BLOCKING`. Both are "owned by that
 window" and nothing else about them is the same (constraint 227).
+
+**AND IT WAS RUN FROM A REAL PROMPT, NOT SPAWNED BY URL.** `bench/m9-modal/shell.py` types
+`editor` at the desktop's prompt, types into the window, clicks the real close box, and reads the
+frames back: 3 frames become 4, the dialog sits at depth 3 over an editor at depth 1, and the editor
+is still there. **`--clean` is its negative control and it is the SAME CLICK** — nothing typed, so a
+clean buffer closes at once and 3 frames become 1. Without that run, "the window is still there"
+would also be what a close box that does nothing looks like.
 
 **THE MILESTONE IS A PROGRAM YOU CAN RUN.** From the live desktop at the bottom of `www/m9.html`:
 `editor` opens a window you type in, with its tool palette above it. Press the X and **it does not

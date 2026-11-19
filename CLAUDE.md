@@ -328,6 +328,7 @@ node bench/m7-win/probe.mjs        # M7's window table and one window, under nod
 node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec
 node bench/m9-modal/probe.mjs     # M9's stack, owner chain and blocker walk
 bench/m9-modal/controls.py        # five mutations of the modality rules, scored
+bench/m9-modal/shell.py           # type `editor` at a REAL prompt and press its X; --clean inverts it
 bench/m8-surface/controls.py      # five mutations of the accounting, scored on which checks move
 bench/m8-surface/probe.py         # WHY the surface is kernel-owned, as a measurement (219)
 bench/m7-win/firefox.py --page m8 # M8 in a second engine; read the PNG it writes
