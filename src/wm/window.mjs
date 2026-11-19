@@ -63,6 +63,10 @@ export class Win {
     this.closed = false;
     /** 0 responding, 1 greyed caption, 2 End Process offered. Written only by `setHealth`. */
     this.health = 0;
+    /** Whether the kernel's last order said something blocks this window, and whether this window
+     *  is the one blocking everything. Written only by `setBlocked`. */
+    this.blocked = false;
+    this.systemModal = false;
     this.#build();
     this.apply();
   }
@@ -148,6 +152,10 @@ export class Win {
   #startDrag(event) {
     if (event.button !== 0) return;
     if (event.target.closest("button")) return;
+    // A BLOCKED WINDOW DOES NOT MOVE. The drag is page-side from end to end, so without this the
+    // kernel's suppression covered the client area and not the frame: a window behind a modal could
+    // not be typed into or raised, and could still be dragged around under it (constraint 233).
+    if (this.blocked) return;
     // A second pointer re-enters here while a gesture is live, so the one in flight is ended
     // first: each gesture's listeners answer only to their own pointer id, so leaving them
     // attached leaks three per re-entry for the window's lifetime.
@@ -201,6 +209,8 @@ export class Win {
   }
 
   #barKey(event) {
+    // The keyboard route to the same gesture, so it takes the same refusal.
+    if (this.blocked) return;
     const step = event.shiftKey ? 1 : KEY_STEP;
     const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step],
       ArrowDown: [0, step] }[event.key];
@@ -223,7 +233,27 @@ export class Win {
     this.el.classList.toggle("is-not-responding", this.health > 0);
     this.el.dataset.health = String(this.health);
     // Only at the second threshold: a window quiet for a second is usually just busy.
-    this.endBtn.hidden = this.health < 2;
+    this.endBtn.hidden = this.health < 2 && !this.systemModal;
+  }
+
+  /**
+   * What the kernel's order said about this window: whether something blocks it, and whether IT
+   * blocks everything.
+   *
+   * THE SECOND FLAG IS THE ESCAPE HATCH. A system-modal blocker needs no privilege to set, so any
+   * program in `/usr/bin` can freeze every other window; and the documented recovery — End Process
+   * at 5,000 ms — is driven by UNCOLLECTED events, so a process that keeps reading its own queue
+   * never goes stale and the windows it blocked get nothing queued either. No button appeared
+   * anywhere and the only way out was closing the tab. End Process is offered on the blocker's own
+   * frame for as long as it holds that scope, so the hatch exists without a capability system
+   * (constraint 236).
+   */
+  setBlocked({ blocked, systemModal }) {
+    this.blocked = blocked === true;
+    this.systemModal = systemModal === true;
+    this.el.dataset.blocked = this.blocked ? "1" : "0";
+    this.el.classList.toggle("is-blocked", this.blocked);
+    this.setHealth(this.health);
   }
 
   setTitle(text) {

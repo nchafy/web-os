@@ -202,11 +202,34 @@ async function pStacking (boot) {
     ev.stackWithPalette = (withPalette.wins || {}).stack
     ev.paletteMode = ((withPalette.windows || []).find((w) => w.id === ev.paletteWin) || {})
 
+    /* ---- A WINDOW CREATED AFTER A CLICK IS ON TOP OF IT ------------------------------------
+     *
+     * MEASURED HERE BECAUSE THE PAGE IS THE ONLY PLACE IT IS VISIBLE. `create` put the new id on
+     * the kernel's stack and posted no order, so the kernel was right and the screen was wrong:
+     * `winhost` assigns a `z-index` only when it RENDERS an order, so a window that had been
+     * raised carried one and a window created afterwards carried none — and the new window painted
+     * behind it. The raises above have just given three windows a `z-index`, which is exactly the
+     * state that made it visible (constraint 230).
+     */
+    const late = await spawnProgram(s.k, WINOPEN, ['winopen', '-n', '1', '-c', '40000'])
+    ev.latePid = late.pid
+    const lateUp = await until(() => s.host.frames.size >= 4, 20000)
+    ev.lateMs = Math.round(lateUp)
+    const lateFrame = [...s.host.frames.values()].find((e) => e.id > ev.paletteWin)
+    ev.lateWin = lateFrame ? lateFrame.id : 0
+    const withLate = await s.winState()
+    ev.stackWithLate = (withLate.wins || {}).stack
+    ev.zWithLate = s.host.report().zIndex
+    ev.lateDepth = lateFrame ? Number(lateFrame.win.el.dataset.depth) : -1
+
     // TYPE, so the buffer is dirty and the close will ask rather than just close.
     typeSynthetic(editor.term.el, 'hello')
     await until(() => /hello/.test(editor.term.screen()), 5000)
 
-    // THE X, which under M9 asks and does not act.
+    // THE X, which under M9 asks and does not act. The count is taken FIRST and compared, not
+    // written as a number: a literal 4 here went stale the moment this proof opened one more
+    // window, and a stale literal fails as a defect rather than as an edit.
+    ev.framesBeforeDialog = s.host.frames.size
     editor.win.closeBtn.click()
     const asked = await until(() => !!frameByTitle(s.host, 'Save changes'), 10000)
     ev.dialogMs = Math.round(asked)
@@ -274,6 +297,65 @@ async function pStacking (boot) {
     ev.editorPending = editorRow.pending
     ev.editorQueuedEver = editorRow.queued
 
+    /* ---- AND IT DOES NOT MOVE EITHER ------------------------------------------------------
+     *
+     * THE FRAME IS THE OTHER HALF OF SUPPRESSION. A drag and an arrow-key move are handled
+     * page-side from end to end and never reach `feed`, so "input to a blocked window is
+     * suppressed" was false for the gesture a user tries first: the editor could be dragged around
+     * under its own dialog, and its `pointerup` posted a geometry the kernel accepted. The kernel
+     * sends the blocked SET with the order and the frame honours it (constraint 233).
+     *
+     * The ARROW-KEY route is driven here with a real `keydown` on the real title bar, because that
+     * handler is page-side and a real event is the only honest way to reach it. The POINTER route
+     * is driven by `scripts/check.py` with a real mouse, which this page cannot synthesize.
+     */
+    ev.blockedSet = s.host.report().blocked
+    ev.frameBlocked = s.host.report().frameBlocked
+    const boxBefore = { ...editor.win.box }
+    editor.win.barEl.focus()
+    for (let i = 0; i < 4; i += 1) {
+      editor.win.barEl.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'ArrowRight', bubbles: true, cancelable: true,
+      }))
+    }
+    await until(() => false, 300)
+    ev.boxBefore = boxBefore
+    ev.boxAfterKeys = { ...editor.win.box }
+    ev.keyMoveRefused = boxBefore.x === editor.win.box.x && boxBefore.y === editor.win.box.y
+    // AND THE SAME KEYS MOVE A WINDOW THAT IS NOT BLOCKED, which is what makes the clause above
+    // about the suppression rather than about a key route that never worked.
+    const freeBox = { ...stranger.win.box }
+    stranger.win.barEl.focus()
+    stranger.win.barEl.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', bubbles: true, cancelable: true,
+    }))
+    await until(() => false, 200)
+    ev.freeMoved = stranger.win.box.x !== freeBox.x
+
+    /* ---- AND THE POINTER ROUTE, WITH A REAL MOUSE -----------------------------------------
+     *
+     * A SECOND HANDED-OFF GESTURE, for the reason the click above is one: `#startDrag` calls
+     * `setPointerCapture`, and a pointer id this page invented is not one the browser is tracking
+     * — so a page-synthesized drag tests a path a person never takes. The coordinates are
+     * published because only the page knows them: the frame is positioned by the clamp.
+     */
+    const dragBar = editor.win.barEl.getBoundingClientRect()
+    globalThis.M9.drag = {
+      x: Math.round(dragBar.left + dragBar.width / 3),
+      y: Math.round(dragBar.top + dragBar.height / 2),
+      dx: 120, dy: 60,
+    }
+    ev.boxBeforeDrag = { ...editor.win.box }
+    globalThis.M9.phase = 'await-drag'
+    const dragDeclared = await until(() => globalThis.M9.driver2 === 'check', DRIVER_WAIT_MS)
+    ev.dragDrivenBy = dragDeclared < 0 ? 'page' : 'check'
+    if (dragDeclared >= 0) await until(() => globalThis.M9.dragDone === true, REAL_INPUT_WAIT_MS)
+    await until(() => false, 300)
+    ev.boxAfterDrag = { ...editor.win.box }
+    ev.dragRefused = ev.boxBeforeDrag.x === ev.boxAfterDrag.x
+      && ev.boxBeforeDrag.y === ev.boxAfterDrag.y
+    globalThis.M9.phase = 'dragged'
+
     // ---- AND THE STRANGER'S WINDOW IS NOT BLOCKED ----------------------------------------
     //
     // A window-modal dialog affects its OWNER. If raising an unrelated process's window were
@@ -296,7 +378,7 @@ async function pStacking (boot) {
         && ev.paletteMode.mode === WMODE_RENDER_ABOVE
         && ev.paletteMode.scope === WMODAL_NONE,
       'the X asked instead of acting, and the dialog appeared': asked >= 0
-        && ev.framesWithDialog === 4,
+        && ev.framesWithDialog === ev.framesBeforeDialog + 1,
       'the dialog is BLOCKING at window scope': ev.modal.mode === WMODE_BLOCKING
         && ev.modal.scope === WMODAL_WINDOW,
       'and it sits above the window that owns it': top(ev.stackWithDialog) === ev.dialogWin,
@@ -314,6 +396,14 @@ async function pStacking (boot) {
         JSON.stringify(ev.stack),
       'while an unrelated process\'s window still raises': raised >= 0
         && top(ev.stackEnd) === ev.strangerWin,
+      /* A WINDOW CREATED AFTER THREE RAISES IS ON TOP, AND THE PAGE RENDERED THAT. Two readings,
+       * because the kernel's order was RIGHT while the screen was wrong: the page learns an order
+       * only when it is sent one, and `create` sent none (constraint 230). */
+      'a window created after a raise goes on top': ev.lateMs >= 0
+        && top(ev.stackWithLate) === ev.lateWin,
+      'and the page rendered it above the window that was clicked':
+        (ev.zWithLate[ev.lateWin] || 0) > (ev.zWithLate[ev.strangerWin] || 0)
+        && ev.lateDepth === (ev.stackWithLate || []).length - 1,
     }
     ev.clauses = clauses
     ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
@@ -324,13 +414,31 @@ async function pStacking (boot) {
       editorWin: ev.editorWin, suppressed: ev.suppressed, queued: ev.editorKeysSeen,
       screenUnchanged: ev.screenUnchanged, before, after: editor.term.screen(),
       pending: ev.editorPending, queuedEver: ev.editorQueuedEver,
+      blockedSet: ev.blockedSet, frameBlocked: ev.frameBlocked,
+      boxBefore: ev.boxBefore, boxAfterKeys: ev.boxAfterKeys, freeMoved: ev.freeMoved,
       clauses: {
         'typing into the blocked window changed nothing on its screen': ev.screenUnchanged,
         'because the kernel suppressed the keys, and counted them': (ev.suppressed || 0) >= 3,
         'and nothing is left queued for it either': (ev.editorPending || 0) === 0,
+        // THE FRAME TOO. Suppression that stops at the client area leaves the window draggable
+        // under its own modal, which is the gesture a user tries first (constraint 233).
+        'the kernel named it blocked, and the frame carries that':
+          (ev.blockedSet || []).includes(ev.editorWin)
+          && (ev.frameBlocked || []).includes(ev.editorWin),
+        'so arrow keys on its title bar do not move it': ev.keyMoveRefused,
+        'and the same keys DO move a window that is not blocked': ev.freeMoved,
+        // THE POINTER ROUTE NEEDS A REAL MOUSE, so an unattended page cannot measure it and says
+        // so rather than passing. `null` is "not measured" everywhere in this file.
+        'and a REAL mouse drag on its title bar moves it nowhere':
+          ev.dragDrivenBy === 'page' ? null : ev.dragRefused,
       },
     }
     sup.failed = Object.keys(sup.clauses).filter((k) => sup.clauses[k] === false)
+    sup.notMeasured = Object.keys(sup.clauses).filter((k) => sup.clauses[k] === null)
+    sup.dragDrivenBy = ev.dragDrivenBy
+    sup.boxBeforeDrag = ev.boxBeforeDrag
+    sup.boxAfterDrag = ev.boxAfterDrag
+    sup.dragRefused = ev.dragRefused
     globalThis.M9.proofs.suppress = { ok: sup.failed.length === 0, evidence: sup }
     return s
   } finally {
@@ -449,6 +557,38 @@ async function pScope (boot) {
     ev.siblingSuppressed = ((rows.windows || []).find((w) => w.id === ev.scratchWin) || {})
       .suppressed
 
+    /* ---- SYSTEM SCOPE, AND THE WAY OUT OF IT ----------------------------------------------
+     *
+     * ANY PROGRAM CAN TAKE SYSTEM SCOPE. There is no capability to gate it on and no privileged
+     * caller to gate it to, so the honest answer is not to pretend otherwise but to guarantee the
+     * ESCAPE. The documented recovery was End Process at 5,000 ms — and that is driven by
+     * UNCOLLECTED events, so a process that keeps reading its own queue never goes stale, and the
+     * windows it froze get nothing queued either. No button appeared anywhere and the only way out
+     * was closing the tab. End Process is offered on a system-modal blocker's own frame for as long
+     * as it holds that scope (constraint 236).
+     */
+    /* THE WAIT IS FOR THE FRAME AND THEN FOR THE SCOPE, and the first version waited for
+     * neither: "the editor is blocked" was ALREADY TRUE from the app-modal dialog, so `until`
+     * returned at once and everything below read a window that did not exist yet. A wait whose
+     * condition already holds measures nothing (constraint 214's shape). */
+    const framesBefore = s.host.frames.size
+    const sys = await spawnProgram(s.k, WINOPEN, ['winopen', '-S', '-n', '1', '-c', '40000'])
+    ev.sysPid = sys.pid
+    const appeared = await until(() => s.host.frames.size > framesBefore, 20000)
+    const sysFrame = [...s.host.frames.values()].sort((x, y) => y.id - x.id)[0]
+    ev.sysWin = sysFrame ? sysFrame.id : 0
+    // AND THEN FOR THE SCOPE TO BE IN FORCE: the dialog that is already up blocks a window-scoped
+    // set, so what says SYSTEM scope arrived is the DIALOG being blocked by something outside it.
+    const froze = appeared < 0 ? -1
+      : await until(() => (s.host.report().blocked || []).includes(ev.dialogWin), 20000)
+    ev.sysMs = Math.round(froze)
+    ev.sysBlocked = s.host.report().blocked
+    ev.endOffered = s.host.report().endOffered
+    const sysState = await s.winState()
+    ev.sysHealth = sysFrame ? Number(sysFrame.win.el.dataset.health) : -1
+    ev.lateGeoms = (sysState.wins || {}).lateGeoms
+    ev.lateRaises = (sysState.wins || {}).lateRaises
+
     const top = (list) => (list || [])[(list || []).length - 1]
     const clauses = {
       'the dialog is BLOCKING at APP scope': ev.modal.mode === WMODE_BLOCKING
@@ -460,6 +600,19 @@ async function pScope (boot) {
       'the order still has the dialog on top': top(ev.stack) === ev.dialogWin,
       'and the sibling\'s input is suppressed as well': ev.siblingScreenUnchanged === true
         && (ev.siblingSuppressed || 0) > 0,
+      // SYSTEM SCOPE REACHES ANOTHER PROCESS'S WINDOWS, which is what distinguishes it.
+      'a system-modal window from another process blocks these too': ev.sysMs >= 0
+        && (ev.sysBlocked || []).includes(ev.dialogWin)
+        && (ev.sysBlocked || []).includes(ev.editorWin),
+      /* AND END PROCESS IS OFFERED ON IT, WITH NO STALENESS. `health === 0` is asserted beside it
+       * on purpose: it is what says the hatch does not depend on the detector, which cannot fire
+       * for a process that keeps reading its own queue (constraint 236). */
+      'and End Process is offered on it at once, while it is still responsive':
+        (ev.endOffered || []).includes(ev.sysWin) && ev.sysHealth === 0,
+      // TWO RACES, TWO COUNTERS. A click and a geometry report can each cross a destroy in the
+      // page's queue, and one number for both diagnoses neither (constraint 235).
+      'the two page races are counted apart': typeof ev.lateGeoms === 'number'
+        && typeof ev.lateRaises === 'number',
     }
     ev.clauses = clauses
     ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
@@ -504,9 +657,14 @@ async function liveDesktop (boot) {
   say('                     y saves, n discards, Esc keeps editing. While the dialog is up,')
   say('                     click the editor\'s title bar — it will not come up, and the dialog')
   say('                     flashes. Type into it — nothing arrives.')
+  say('                     and it will not DRAG either — suppression covers the frame, not just')
+  say('                     the inside of it.')
   say('  editor -a          the same, APP-modal: it blocks the editor\'s second window too')
   say('  winopen -n 1       an unrelated process\'s window, which a window-modal dialog does')
   say('                     NOT block. Click it while the editor is blocked: it raises.')
+  say('  winopen -S         SYSTEM-modal: every other window freezes. No privilege is needed to')
+  say('                     do that, so the escape hatch is the point — End Process appears on')
+  say('                     its own frame at once, and killing it gives the desktop back.')
   say('  cat /proc/$$/win/* every window as a file, with its scope, mode and suppressed count')
   return s
 }

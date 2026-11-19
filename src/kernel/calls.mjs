@@ -979,18 +979,11 @@ HANDLERS.win_set = (p, k) => {
   if (what === WIN_SET_MODAL) {
     const scope = p.ctl[A2] | 0;
     const mode = p.ctl[A3] | 0;
-    // BOTH AXES OR NEITHER, and both bounded: an out-of-range value would be stored and then
-    // compared against nothing, so a window would be "modal" in a way no rule covers.
-    if (scope < 0 || scope > WMODAL_MAX || mode < 0 || mode > WMODE_MAX) return -EINVAL;
-    /* A WINDOW WITH NO OWNER MAY NOT BE WINDOW- OR APP-MODAL. Both scopes are defined by walking
-     * the owner chain, so without an owner there is nothing to block — and a window that claimed
-     * to be modal and blocked nothing is worse than a refusal, because the program believes it. */
-    if ((scope === 1 || scope === 2) && d.win.owner === 0) return -EINVAL;
-    d.win.scope = scope;
-    d.win.mode = mode;
-    // THE STACK IS RE-EVALUATED, not merely recorded: a window that has just become
-    // RENDER_ABOVE or BLOCKING must get above its owner now rather than at the next click.
-    k.wins.raise(d.win);
+    // BOTH AXES OR NEITHER, and the rules live in `WinMgr.setModal` — the file that NAMES the
+    // scopes. The bounds and the ownerless refusal were spelled out here as `scope === 1 || scope
+    // === 2`, which is the enum's order copied into a second place (constraint 234).
+    const set = k.wins.setModal(d.win, scope, mode);
+    if (set < 0) return set;
     k.post({ t: "win-modal", win: d.win.id, scope, mode });
     return 0;
   }

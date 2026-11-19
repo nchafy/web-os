@@ -74,6 +74,9 @@ let mounts = null;
 /** Frame reports that arrived after their window was destroyed. A race the page cannot avoid —
  *  see the `win-geom` case — so it is counted here and published in `win-state`. */
 let lateGeoms = 0;
+/** Clicks that arrived after their window was destroyed. The same race in the other direction, and
+ *  a SEPARATE number because the two diagnose different things. */
+let lateRaises = 0;
 
 /** M7. The window table. Built at boot and never null: a kernel with no windows is a kernel with
  *  an empty table, which is a state `win_create` can change — unlike M4a's single console, which
@@ -1763,7 +1766,10 @@ async function handle(m) {
        * A raise for a window that is gone is a RACE and not an error, for the reason `win-geom`'s
        * is: the click and the destroy can cross in the page's own queue. */
       const toRaise = WINDOWS.get(m.win | 0);
-      if (!toRaise || toRaise.destroyed) { lateGeoms += 1; return; }
+      // ITS OWN COUNTER. `lateGeoms` is published as the number that tells a page reporting
+      // geometry for windows that never existed from a benign race, and a click crossing a destroy
+      // is a different race: one counter for two facts cannot answer either (constraint 235).
+      if (!toRaise || toRaise.destroyed) { lateRaises += 1; return; }
       WINDOWS.raise(toRaise);
       return;
     }
@@ -1772,7 +1778,7 @@ async function handle(m) {
         t: "win-state",
         windows: WINDOWS.live().map((w) => w.report()),
         all: [...WINDOWS.byId.values()].map((w) => w.report()),
-        wins: { ...WINDOWS.report(), lateGeoms },
+        wins: { ...WINDOWS.report(), lateGeoms, lateRaises },
       });
       return;
     case "trace-read":

@@ -24,6 +24,7 @@ import { Surface } from "./surface.mjs";
 import {
   WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
+  WMODAL_SYSTEM, WMODE_BLOCKING,
 } from "../abi.mjs";
 
 /** Cell metrics, measured once per host from a real rendered glyph rather than assumed: the cell
@@ -73,6 +74,9 @@ export class WinHost {
      *  and the DOM is only what this file did with it. */
     this.order = [];
     this.lastBlocked = null;
+    /** Which windows the KERNEL says are blocked, as of its last order. The page computes nothing
+     *  here; it renders a set it was handed, for the reason it renders an order it was handed. */
+    this.blockedSet = new Set();
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -402,6 +406,10 @@ export class WinHost {
     const ids = Array.isArray(m.ids) ? m.ids : [];
     this.order = [...ids];
     this.stats.stacks += 1;
+    // WHICH WINDOWS ARE BLOCKED TRAVELS WITH THE ORDER, so the page never computes it: suppression
+    // has to reach the frame's own chrome, which is drag and arrow-key moves, and those are
+    // page-side from end to end (constraint 233).
+    this.blockedSet = new Set((Array.isArray(m.blocked) ? m.blocked : []).map((id) => id | 0));
     ids.forEach((id, at) => {
       const entry = this.get(id);
       if (!entry) return;
@@ -410,6 +418,25 @@ export class WinHost {
       entry.win.el.style.zIndex = String(at + 1);
       entry.win.el.dataset.depth = String(at);
     });
+    this.#applyBlocked();
+  }
+
+  /**
+   * Write the kernel's blocked set onto the frames.
+   *
+   * CALLED FROM TWO PLACES because the facts arrive in two messages and in this order: `win_set`
+   * re-evaluates the stack, so `win-stack` is posted BEFORE the `win-modal` that says what the
+   * window became. Applying only on the order would read a stale mode and never offer the
+   * system-modal escape hatch.
+   */
+  #applyBlocked() {
+    const blocked = this.blockedSet || new Set();
+    for (const [id, entry] of this.frames) {
+      entry.win.setBlocked({
+        blocked: blocked.has(id),
+        systemModal: entry.mode === WMODE_BLOCKING && entry.scope === WMODAL_SYSTEM,
+      });
+    }
   }
 
   /** A raise the kernel refused, with the window that refused it. FLASHED AND NOT SWALLOWED: a
@@ -438,6 +465,7 @@ export class WinHost {
     entry.mode = m.mode | 0;
     entry.win.el.dataset.modalScope = String(m.scope | 0);
     entry.win.el.dataset.windowMode = String(m.mode | 0);
+    this.#applyBlocked();
   }
 
   /** Every surface's own report, keyed by winid. What a check reads to ask how many ops the page
@@ -469,6 +497,12 @@ export class WinHost {
       keyCounts: this.keyCounts(),
       order: [...this.order],
       lastBlocked: this.lastBlocked,
+      // The blocked set as the KERNEL sent it, and as the FRAMES now carry it. Two readings of one
+      // fact on purpose: the second is what a drag actually consults, so a check that read only the
+      // first would pass against a frame this file never marked.
+      blocked: [...this.blockedSet],
+      frameBlocked: [...this.frames].filter(([, e]) => e.win.blocked).map(([id]) => id),
+      endOffered: [...this.frames].filter(([, e]) => !e.win.endBtn.hidden).map(([id]) => id),
       // What the DOM actually has, so a check can compare the kernel's order against the page's
       // rendering of it rather than trusting that this file applied it.
       zIndex: Object.fromEntries([...this.frames].map(

@@ -3071,11 +3071,18 @@ M9_LABELS = (
     "and the blocker it named is the dialog",
     "so the order did not change at all",
     "while an unrelated process's window still raises",
-    # INPUT SUPPRESSION, which is what makes a modal a modal rather than a stacking rule.
+    "a window created after a raise goes on top",
+    "and the page rendered it above the window that was clicked",
+    # INPUT SUPPRESSION, which is what makes a modal a modal rather than a stacking rule - and it
+    # has to reach the FRAME, because a drag and an arrow-key move never reach the kernel at all.
     "suppress ok",
     "typing into the blocked window changed nothing on its screen",
     "because the kernel suppressed the keys, and counted them",
     "and nothing is left queued for it either",
+    "the kernel named it blocked, and the frame carries that",
+    "so arrow keys on its title bar do not move it",
+    "and the same keys DO move a window that is not blocked",
+    "and a REAL mouse drag on its title bar moves it nowhere",
     # THE CLOSE IS A REQUEST. Constraint 44's other half: "without a close-request event, unsaved
     # work is discarded silently".
     "refuse ok",
@@ -3089,6 +3096,10 @@ M9_LABELS = (
     "the dialog is BLOCKING at APP scope",
     "raising a SIBLING window of the same process was refused",
     "and the sibling's input is suppressed as well",
+    # SYSTEM SCOPE NEEDS NO PRIVILEGE, so what is asserted is the ESCAPE from it.
+    "a system-modal window from another process blocks these too",
+    "and End Process is offered on it at once, while it is still responsive",
+    "the two page races are counted apart",
     "verdict is ok",
     "document COOP",
     "document COEP",
@@ -3169,6 +3180,18 @@ _NO_MODAL_FAILS = (
     "scope ok",
     "raising a SIBLING window of the same process was refused",
     "and the sibling's input is suppressed as well",
+    # AND THE FRAME GOES WITH IT: with nothing blocking, the kernel's blocked set is empty, so the
+    # frame is never marked and the drag and the arrow keys MOVE THE WINDOW - which is the clause
+    # that says those two are coupled to the modality and not to a disabled handler.
+    "the kernel named it blocked, and the frame carries that",
+    "so arrow keys on its title bar do not move it",
+    "and a REAL mouse drag on its title bar moves it nowhere",
+    # A system-modal window blocks nothing either, so the ENFORCEMENT clause moves.
+    "a system-modal window from another process blocks these too",
+    # BUT THE ESCAPE HATCH IS DECLARED TO HOLD, and the control is what made that explicit. End
+    # Process is offered because the window HOLDS system scope, which is a fact about what the
+    # program asked for — not about whether the kernel is enforcing it. A hatch that disappeared
+    # when the modality path broke would be a hatch that fails in the one world it is for.
     "verdict is ok",
 )
 
@@ -8341,8 +8364,26 @@ def check_m9(env: Env) -> None:
                       button="left", buttons=1, clickCount=1)
         env.page.call("Input.dispatchMouseEvent", type="mouseReleased", x=at["x"], y=at["y"],
                       button="left", buttons=0, clickCount=1)
+        # ---- THE SECOND GESTURE: a REAL DRAG on a window a modal is blocking --------------
+        #
+        # A drag and an arrow-key move are handled page-side from end to end, so the kernel's
+        # suppression covered the client area and not the frame: the editor could be dragged around
+        # under its own dialog. `#startDrag` calls `setPointerCapture`, so a pointer id the page
+        # invented is not a path a person takes - hence a real mouse, from here.
+        env.settle("globalThis.M9 && (globalThis.M9.phase === 'await-drag'"
+                   " || globalThis.M9.state === 'done' ? 1 : 0)",
+                   timeout=120.0, what="www/m9.html reaching the await-drag phase")
+        where = env.page.evaluate("JSON.stringify(globalThis.M9.drag || null)")
+        if not where or where == "null":
+            env.unmeasurable(
+                "www/m9.html asked for a drag on the blocked window and published no coordinates")
+        d = json.loads(where)
+        env.page.evaluate("globalThis.M9.driver2 = 'check'")
+        mouse_drag(env.page, {"x": d["x"], "y": d["y"]},
+                   {"x": d["x"] + d["dx"], "y": d["y"] + d["dy"]})
+        env.page.evaluate("globalThis.M9.dragDone = true")
         env.settle(M9_DONE, timeout=240.0,
-                   what="globalThis.M9.state reaching done after the click was sent")
+                   what="globalThis.M9.state reaching done after the click and drag were sent")
 
     got = env.read(READ_M9, M9_SHAPE)
 
@@ -8398,9 +8439,14 @@ def check_m9(env: Env) -> None:
                     and pal.get("scope") == cfg.get("WMODAL_NONE"),
                     {"rodeMs": a.get("rodeMs"), "stack": a.get("stackWithPalette"),
                      "palette": pal})
+    # THE COUNT IS COMPARED AGAINST THE COUNT BEFORE, not against a literal: a 4 written here
+    # went stale the moment this proof opened one more window, and a stale literal reports as a
+    # defect rather than as an edit.
     env.expect_that("the X asked instead of acting, and the dialog appeared",
-                    a.get("dialogMs", -1) >= 0 and a.get("framesWithDialog") == 4,
-                    {"dialogMs": a.get("dialogMs"), "frames": a.get("framesWithDialog")})
+                    a.get("dialogMs", -1) >= 0
+                    and a.get("framesWithDialog") == (a.get("framesBeforeDialog") or 0) + 1,
+                    {"dialogMs": a.get("dialogMs"), "frames": a.get("framesWithDialog"),
+                     "before": a.get("framesBeforeDialog")})
     # THE TWO AXES, read out of the kernel's own report and compared against the numbers the page
     # imported from `src/abi.mjs` - a value written here as well would be one fact in two places.
     env.expect_that("the dialog is BLOCKING at window scope",
@@ -8435,6 +8481,21 @@ def check_m9(env: Env) -> None:
                     a.get("strangerRaisedMs", -1) >= 0
                     and (a.get("stackEnd") or [None])[-1] == a.get("strangerWin"),
                     {"stackEnd": a.get("stackEnd"), "stranger": a.get("strangerWin")})
+    # A WINDOW CREATED AFTER A CLICK IS ON TOP OF IT, in the kernel AND on the screen. `create`
+    # grew the kernel's stack and posted no order, so the kernel was right and the page never
+    # heard: a window that had been raised carried a `z-index` and a window created afterwards
+    # carried none, and the new one painted BEHIND it (constraint 230).
+    zlate = a.get("zWithLate") or {}
+    env.expect_that("a window created after a raise goes on top",
+                    a.get("lateMs", -1) >= 0
+                    and (a.get("stackWithLate") or [None])[-1] == a.get("lateWin"),
+                    {"stack": a.get("stackWithLate"), "late": a.get("lateWin")})
+    env.expect_that("and the page rendered it above the window that was clicked",
+                    (zlate.get(str(a.get("lateWin"))) or 0)
+                    > (zlate.get(str(a.get("strangerWin"))) or 0)
+                    and a.get("lateDepth") == len(a.get("stackWithLate") or []) - 1,
+                    {"zIndex": zlate, "late": a.get("lateWin"),
+                     "depth": a.get("lateDepth"), "stack": a.get("stackWithLate")})
 
     # ---- PROOF 2: input to a blocked window is suppressed ---------------------------------
     b = ev("suppress")
@@ -8449,6 +8510,28 @@ def check_m9(env: Env) -> None:
     env.expect_that("and nothing is left queued for it either",
                     (b.get("pending") or 0) == 0,
                     {"pending": b.get("pending"), "queuedEver": b.get("queuedEver")})
+    # ---- AND THE FRAME, which is the other half of suppression ---------------------------
+    #
+    # A drag and an arrow-key move never reach `feed`, so "input to a blocked window is suppressed"
+    # was false for the gesture a user tries first: the editor could be dragged around under its
+    # own dialog and its `pointerup` posted a geometry the kernel accepted (constraint 233). TWO
+    # READINGS of the blocked set, because the one a drag consults is the FRAME's.
+    env.expect_that("the kernel named it blocked, and the frame carries that",
+                    a.get("editorWin") in (b.get("blockedSet") or [])
+                    and a.get("editorWin") in (b.get("frameBlocked") or []),
+                    {"kernel": b.get("blockedSet"), "frames": b.get("frameBlocked"),
+                     "editor": a.get("editorWin")})
+    env.expect_that("so arrow keys on its title bar do not move it",
+                    b.get("boxBefore") == b.get("boxAfterKeys"),
+                    {"before": b.get("boxBefore"), "after": b.get("boxAfterKeys")})
+    # THE NEGATIVE CONTROL INSIDE THE PROOF: the same keys on a window nothing blocks MUST move it,
+    # or this would pass against a key route that never worked.
+    env.expect_that("and the same keys DO move a window that is not blocked",
+                    b.get("freeMoved") is True, {"freeMoved": b.get("freeMoved")})
+    env.expect_that("and a REAL mouse drag on its title bar moves it nowhere",
+                    b.get("dragDrivenBy") == "check" and b.get("dragRefused") is True,
+                    {"drivenBy": b.get("dragDrivenBy"), "before": b.get("boxBeforeDrag"),
+                     "after": b.get("boxAfterDrag")})
 
     # ---- PROOF 3: the close is a request -------------------------------------------------
     c = ev("refuse")
@@ -8492,6 +8575,33 @@ def check_m9(env: Env) -> None:
                     and (d.get("siblingSuppressed") or 0) > 0,
                     {"unchanged": d.get("siblingScreenUnchanged"),
                      "suppressed": d.get("siblingSuppressed")})
+    # ---- SYSTEM SCOPE, AND THE WAY OUT OF IT ---------------------------------------------
+    #
+    # ANY PROGRAM CAN TAKE SYSTEM SCOPE: there is no capability to gate it on and no privileged
+    # caller to gate it to. So the guarantee is the ESCAPE, and the escape that was documented did
+    # not exist for this case - End Process is driven by UNCOLLECTED events, and a process that
+    # keeps reading its own queue never goes stale while the windows it froze get nothing queued
+    # either. `health == 0` is asserted BESIDE the button, because that is the clause that says the
+    # hatch does not depend on the detector (constraint 236).
+    # THE DIALOG IS THE WINDOW THAT TELLS THE SCOPES APART. The app-modal dialog already blocks
+    # the editor and its sibling, so asserting those says nothing about SYSTEM scope; the dialog
+    # itself is blocked by nothing until a window outside its own subtree claims everything.
+    env.expect_that("a system-modal window from another process blocks these too",
+                    d.get("sysMs", -1) >= 0
+                    and d.get("dialogWin") in (d.get("sysBlocked") or [])
+                    and d.get("editorWin") in (d.get("sysBlocked") or []),
+                    {"blocked": d.get("sysBlocked"), "dialog": d.get("dialogWin"),
+                     "editor": d.get("editorWin")})
+    env.expect_that("and End Process is offered on it at once, while it is still responsive",
+                    d.get("sysWin") in (d.get("endOffered") or [])
+                    and d.get("sysHealth") == 0,
+                    {"endOffered": d.get("endOffered"), "sysWin": d.get("sysWin"),
+                     "health": d.get("sysHealth")})
+    # TWO RACES, TWO COUNTERS. A click and a geometry report can each cross a destroy in the page's
+    # own queue, and one number for both diagnoses neither (constraint 235).
+    env.expect_that("the two page races are counted apart",
+                    isinstance(d.get("lateGeoms"), int) and isinstance(d.get("lateRaises"), int),
+                    {"lateGeoms": d.get("lateGeoms"), "lateRaises": d.get("lateRaises")})
 
     env.expect("verdict is ok", got["verdict"], "ok")
 

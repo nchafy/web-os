@@ -50,7 +50,12 @@ const postsOf = (t) => posts.filter((m) => m.t === t);
  *  mutation under test made no post, and a harness that dies on the failure it is testing for
  *  reports nothing instead of the failure. `bench/m9-modal/controls.py --only backwards-subtree`
  *  is exactly that case, and it killed this probe until this existed. */
-const postAt = (t, i = 0) => postsOf(t)[i] || { t: "<no post>", win: null, by: null, ids: null };
+const postAt = (t, i = 0) => {
+  const all = postsOf(t);
+  // A negative index counts from the end, because "the LATEST order" is what most of these ask
+  // about and `at(-1)` on an empty list must reach the fallback rather than throw.
+  return all.at(i) || { t: "<no post>", win: null, by: null, ids: null, blocked: null };
+};
 /** A blocker's id, or null. Same reason: `blockingFor(...)` may answer null under a mutation and
  *  `.id` on null is a dead probe. */
 const blockerOf = (mgr, win) => {
@@ -106,9 +111,14 @@ const modal = (mgr, pid, spec, scope, mode) => {
     mgr.subtree(app).map((w) => w.id), [app.id, dialog.id, tip.id]);
   // THE APP A MODALITY IS ABOUT IS THE OWNER'S, NOT THE DIALOG'S. A picker's dialog must block the
   // app that asked for it, which is a different process from the picker.
-  check("the app of an owned window is its ROOT owner's process", mgr.appOf(dialog), 10);
+  check("the app of an owned window is its OWNER's process", mgr.appOf(dialog), 10);
   check("and of an unowned one, its own", mgr.appOf(app), 10);
-  check("even two levels down", mgr.appOf(tip), 10);
+  /* THE OWNER'S AND NOT THE ROOT'S, and depth 1 cannot tell those apart — which is why this read
+   * the root for a while and every fixture agreed with it. The tooltip's owner is the PICKER's
+   * dialog, so a modality on the tooltip is about the PICKER (99). Answering 10 freezes the app
+   * that does not own the window the modal is attached to, and leaves the window that does own it
+   * working (constraint 229). */
+  check("two levels down it is the OWNER's process, not the root's", mgr.appOf(tip), 99);
   // A CYCLE CANNOT HANG THE WALK. Two processes build the chain and neither sees the whole of it,
   // so the guard is not optional.
   app.owner = tip.id;
@@ -159,6 +169,104 @@ const modal = (mgr, pid, spec, scope, mode) => {
   save.mode = WMODE_BLOCKING;
   save.scope = WMODAL_NONE;
   check("and a blocking window with no scope blocks nothing", mgr.blockingFor(editor), null);
+}
+
+// ---- A NEW WINDOW IS ON TOP, AND THE PAGE IS TOLD -------------------------------------------
+//
+// `create` pushed the new id onto the stack and posted nothing. The kernel's order was right and
+// the page never heard it — and since the page assigns a `z-index` ONLY when it renders an order, a
+// window that had been clicked carried one and a window created afterwards carried none, so the new
+// window painted BEHIND it (constraint 230).
+//
+// THE OLD PROBE COULD NOT SEE THIS: it called `reset()` after its creates, so the posts that were
+// missing had already been thrown away. The order of the two posts is asserted too, because the
+// page resolves an order into frames it must already know about.
+{
+  const mgr = new WinMgr();
+  reset();
+  const first = mgr.create(1, { title: "first" });
+  check("creating a window posts the order", postsOf("win-stack").length, 1);
+  check("and the window first", postAt("win-create").win, first.id);
+  checkThat("in that order",
+    posts.findIndex((p) => p.t === "win-create") < posts.findIndex((p) => p.t === "win-stack"),
+    posts.map((p) => p.t));
+  const second = mgr.create(1, { title: "second" });
+  check("a second create posts the order again", postsOf("win-stack").length, 2);
+  check("with the new window on top", postAt("win-stack", -1).ids, [first.id, second.id]);
+  check("and nothing is blocked", postAt("win-stack", -1).blocked, []);
+}
+
+// ---- A PASSIVE WINDOW NEVER TAKES THE STACK -------------------------------------------------
+//
+// `src/abi.mjs` defines PASSIVE as "raised WITH its owner and never above a sibling", and only the
+// rider half of that was implemented. A click lands on a tooltip's frame like any other and the
+// page posts `win-raise` for it, so a passive window raised directly went to the top of the GLOBAL
+// stack — above its owner's siblings and above other processes' windows (constraint 232).
+{
+  const mgr = new WinMgr();
+  const owner = mgr.create(1, { title: "owner" });
+  const sibling = mgr.create(1, { title: "sibling" });
+  const stranger = mgr.create(2, { title: "stranger" });
+  const tip = modal(mgr, 1, { title: "tip", owner: owner.id }, WMODAL_NONE, WMODE_PASSIVE);
+  mgr.raise(sibling);
+  mgr.raise(stranger);
+  check("a sibling and a stranger are above the owner",
+    mgr.stack.slice(-2), [sibling.id, stranger.id]);
+  reset();
+  check("raising a PASSIVE window answers 0", mgr.raise(tip), 0);
+  // ITS OWNER CAME UP AND IT RODE ALONG, which is the whole definition: the pair moves, and the
+  // tooltip is directly above the window it belongs to and nowhere else.
+  check("its owner came up with it", mgr.stack.slice(-2), [owner.id, tip.id]);
+  checkThat("so it is not above a stranger on its own",
+    mgr.stack.indexOf(tip.id) === mgr.stack.indexOf(owner.id) + 1, mgr.stack);
+  // AND A MODELESS CHILD IS NOT REDIRECTED, so the rule is about the mode and not about having an
+  // owner at all.
+  const pane = modal(mgr, 1, { title: "pane", owner: owner.id }, WMODAL_NONE, WMODE_MODELESS);
+  mgr.raise(stranger);
+  check("a MODELESS owned window raises itself", mgr.raise(pane), 0);
+  check("and goes on top alone", mgr.stack[mgr.stack.length - 1], pane.id);
+}
+
+// ---- APP SCOPE DOWN A THREE-PROCESS CHAIN ---------------------------------------------------
+//
+// THE CHECK THAT WOULD HAVE CAUGHT IT. Every other fixture here owns at depth 1, where "the owner's
+// process" and "the root's process" are the same number, so `appOf` could read the chain from the
+// wrong end and all 58 assertions agreed with it. Three processes, two levels:
+//
+//   pane (pid 10) ── owns ──▶ doc (pid 20) ── owns ──▶ ask (pid 30, APP + BLOCKING)
+//
+// `ask` is attached to `doc`, so the app it is about is pid 20. Reading the root instead freezes
+// pid 10 — a process that owns none of the windows in question — and leaves `doc`, which `ask` is
+// modal OVER, typable and raisable above it (constraint 229).
+{
+  const mgr = new WinMgr();
+  const pane = mgr.create(10, { title: "pane" });
+  const paneTwo = mgr.create(10, { title: "pane two" });
+  const doc = mgr.create(20, { title: "doc", owner: pane.id });
+  const docTwo = mgr.create(20, { title: "doc two" });
+  const ask = modal(mgr, 30, { title: "ask", owner: doc.id }, WMODAL_APP, WMODE_BLOCKING);
+
+  check("an app-modal dialog blocks the window it is attached to",
+    blockerOf(mgr, doc), ask.id);
+  check("and that window's process sibling", blockerOf(mgr, docTwo), ask.id);
+  // AND NOT THE ROOT'S PROCESS. This is the half that was wrong: pid 10 was frozen instead.
+  check("and NOT the root owner's window", mgr.blockingFor(pane), null);
+  check("nor the root owner's sibling", mgr.blockingFor(paneTwo), null);
+  check("the app it is about is its owner's", mgr.appOf(ask), 20);
+  /* AND THE BLOCKED SET TRAVELS WITH THE ORDER. The page needs it because a drag and an arrow-key
+   * move are page-side from end to end, so suppression that lives only in `feed` covers the client
+   * area and not the frame — a blocked window could still be dragged around under its modal
+   * (constraint 233). It is computed kernel-side so the page decides nothing. */
+  reset();
+  mgr.postStack();
+  check("the order carries who is blocked",
+    [...postAt("win-stack").blocked].sort((x, y) => x - y), [doc.id, docTwo.id]);
+  checkThat("and the modal itself is not in it",
+    !postAt("win-stack").blocked.includes(ask.id), postAt("win-stack").blocked);
+  // AND THE REFUSAL FOLLOWS, because a blocker that names the wrong process refuses the wrong
+  // raise — which is what a user would actually hit.
+  check("a raise of the attached window is refused", mgr.raise(doc) && mgr.raise(doc).id, ask.id);
+  check("and a raise of the root owner's window is granted", mgr.raise(pane), 0);
 }
 
 // ---- the topmost blocker is the one reported ------------------------------------------------

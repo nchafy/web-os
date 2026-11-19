@@ -2160,3 +2160,88 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     clause now asserts that the PROGRAM is what acts — by the ids `win_destroy` returns — and the
     cross-process case, where another process's call takes your window down, is where the notice is
     still asserted.
+
+## M9's critic — nine findings, nine fixes
+
+An independent critic read M9 with none of this author's context and reported nine findings. Every
+one was verified against the code before it was acted on, and every one became a check.
+
+229. **`appOf` READ THE OWNER CHAIN FROM THE WRONG END, so an APP-modal dialog froze a process it
+    had no relationship with.** `ancestors()` is NEAREST-FIRST, so the owner is `[0]` and the root
+    is the last element; `appOf` took the last. At depth 1 those are the same number, and every
+    fixture owned at depth 1.
+
+    With `pane` (pid 10) owning `doc` (pid 20) owning an APP-modal `ask` (pid 30): the dialog
+    blocked pid 10 — which owns neither of the windows in question — and left `doc`, the window it
+    is modal OVER, typable and raisable above it. `bench/m9-modal/probe.mjs` carries the
+    three-process chain now, and `bench/m9-modal/controls.py --only app-scope-is-own-pid` is its
+    mutation.
+230. **A NEW WINDOW WENT ON THE KERNEL'S STACK AND THE PAGE WAS NEVER TOLD, so it painted behind a
+    window that had been clicked.** `create` pushed the id and posted only `win-create`. The
+    kernel's order was RIGHT, which is the hard version of this bug: `src/wm/winhost.mjs` assigns a
+    `z-index` only when it RENDERS an order, so a window that had been raised carried one and a
+    window created afterwards carried none — and `z-index: auto` loses to any number.
+
+    Reproduced by hand on `www/m7.html?live=1`: click a window, then `winopen`, and the new window
+    is underneath. `win-create` is posted first and the order second, because the page resolves an
+    order into frames it must already know about.
+231. **`blockingFor` RAN THE WHOLE TABLE WALK PER POINTER SAMPLE.** `feed` asks it on every key and
+    pointer event, and a drag streams moves while the button is down — so a `paint` stroke on a
+    desktop with no modal anywhere ran `live()`, and `subtree()` with its quadratic membership
+    test, per motion sample. Constraint 18 requires a sweep to be O(interested), and with nothing
+    blocking the interested set is empty. `anyBlocking()` is a `for` over `byId` with an early
+    return.
+
+    **AND IT MUST NOT BE A CACHE.** The first version was an epoch counter bumped by `create`,
+    `destroyTree` and `setModal`; it answered stale for every caller that writes `mode` directly,
+    which the host probe does — twelve assertions about suppression went green against a kernel
+    suppressing nothing. A derived value is recomputed from its source. The cost this is about was
+    the subtree walk, never the mode test.
+232. **A PASSIVE WINDOW RAISED DIRECTLY TOOK THE GLOBAL STACK.** `src/abi.mjs` defines PASSIVE as
+    "raised WITH its owner and never above a sibling", and only the RIDER half was implemented. A
+    click lands on a tooltip's frame like any other and the page posts `win-raise` for it, so a
+    status bubble ended up above its owner's siblings and above other processes' windows. A raise
+    of a passive window is redirected to the nearest ancestor that is not passive, and the tooltip
+    comes up as the rider it is. With no such ancestor there is nothing to take the stack from, so
+    it raises itself.
+233. **SUPPRESSION COVERED THE CLIENT AREA AND NOT THE FRAME, so a blocked window could still be
+    dragged around under its own modal.** A drag and an arrow-key move are handled page-side from
+    end to end (`src/wm/window.mjs`) and never reach `feed`, and the `pointerup` posted a geometry
+    the kernel accepted. That is the gesture a user tries first.
+
+    The kernel computes the blocked set and sends it WITH the order, for the reason it sends the
+    whole order rather than a "raise this one": the page renders a set it was handed and decides
+    nothing. `#startDrag` and `#barKey` both refuse. The proof drives a REAL mouse drag and real
+    arrow keys and reads the geometry back, and asserts the same keys DO move a window that nothing
+    blocks — without that half it would pass against a key route that never worked.
+234. **THE OWNERLESS-MODAL GUARD TESTED `scope === 1 || scope === 2`**, which is the enum's ORDER
+    copied into a second file. `selfTest` asserts only that the scope set is dense from 0, so
+    reordering it would leave that line silently guarding the wrong two scopes: an ownerless window
+    would become APP-modal — blocking by a chain that is not there — and a legitimate SYSTEM-modal
+    would be refused EINVAL. The guard moved into `WinMgr.setModal`, the file that names the
+    scopes, and `calls.mjs` calls it.
+235. **ONE COUNTER CARRIED TWO RACES.** A geometry report for a destroyed window and a CLICK for a
+    destroyed window are both races the page cannot avoid, and both incremented `lateGeoms` — which
+    is published as the number that tells a benign race from a page reporting geometry for windows
+    that never existed. One number for two facts diagnoses neither. `lateRaises` is its own field.
+236. **SYSTEM SCOPE NEEDS NO PRIVILEGE, AND THE DOCUMENTED ESCAPE DID NOT EXIST FOR IT.** Any
+    program in `/usr/bin` can take `WMODAL_SYSTEM` + `WMODE_BLOCKING` and freeze every other
+    window. Constraint 228 promised the recovery that was already there — End Process at 5,000 ms —
+    and that is driven by UNCOLLECTED events: a process that keeps reading its own queue never goes
+    stale, and the windows it froze get nothing queued either. No button appeared anywhere and the
+    only way out was closing the tab.
+
+    **The gate is not the fix, because there is nothing to gate on**: no capability system exists
+    and the privileged management interface is M14's. So the GUARANTEE is the escape. End Process
+    is offered on a system-modal blocker's own frame for as long as it holds that scope, whatever
+    its health. `winopen -S` takes the scope so a reader can try it.
+
+    **AND THE HATCH IS DECLARED NOT TO DEPEND ON ENFORCEMENT.** `--negative no-modal` breaks the
+    blocking path, and the button must still appear: it is keyed to the scope the program ASKED
+    for. A hatch that vanished when the modality path broke would fail in the one world it is for.
+237. **AN EMPTY `moves` TUPLE SCORED AS A PASS.** `bench/m9-modal/controls.py` compared declared
+    against moved by set difference, so a mutation declaring nothing had no missing and no extra
+    and printed `ok` — which is how `app-scope-is-own-pid` broke the APP-scope rule, moved zero
+    checks, and was reported as verified for as long as it existed. A control must move a NAMED
+    subset, and the empty set is not one. The harness refuses it and says to give the probe a case
+    the mutation breaks.

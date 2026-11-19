@@ -24,6 +24,7 @@
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, keyBytesOf,
+  WMODAL_SYSTEM, WMODE_BLOCKING,
 } from "/src/abi.mjs";
 
 const NAME = "winopen";
@@ -78,7 +79,7 @@ function unInterrupted(call) {
 
 export function run(env) {
   const argv = (env.argv || []).map(String);
-  const { flags, operands, bad, why: badWhy } = env.std.getopt(argv.slice(1), "n:O:c:op");
+  const { flags, operands, bad, why: badWhy } = env.std.getopt(argv.slice(1), "n:O:c:opS");
   if (bad) return env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE);
   // The refusal is the program's: `Number("banana")` is NaN, which compares false against every
   // bound and so would behave like `-n 0`.
@@ -100,6 +101,12 @@ export function run(env) {
       env.std.EXIT_USAGE);
   }
   const wantPipe = flags.p === true;
+  /** `-S` MAKES THE FIRST WINDOW SYSTEM-MODAL AND BLOCKING, which freezes every window outside it.
+   *  It is here to be RUN: a scope that needs no privilege to take is easier to believe in when a
+   *  reader can take it, and the escape hatch it proves - End Process offered on the blocker's own
+   *  frame, whether or not it has gone stale - is the answer to "what if a program does this"
+   *  (constraint 236). Without that hatch the only recovery is closing the tab. */
+  const systemModal = flags.S === true;
   const label = operands.length ? operands[0] : NAME;
   const t0 = performance.now();
 
@@ -130,6 +137,13 @@ export function run(env) {
     env.std.say(env, `win ${r.win} on fd ${r.fd}`
       + (spec.owner ? ` owned by win ${spec.owner}` : "")
       + `  /proc/${env.pid}/win/${r.win}\n`);
+  }
+
+  if (systemModal && made.length) {
+    const r = env.win.setModal(made[0].fd, WMODAL_SYSTEM, WMODE_BLOCKING);
+    if (r < 0) return env.std.complainErrno(env, NAME, "win_set MODAL", r);
+    env.std.say(env, `win ${made[0].win} is SYSTEM-modal and BLOCKING: every other window is `
+      + "frozen. End Process on its own frame is the way out.\n");
   }
 
   let pipeRead = -1;

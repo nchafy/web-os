@@ -488,10 +488,38 @@ export class WinMgr {
    *
    *  THE OWNER'S AND NOT ITS OWN, and that is the whole point of a broker: a picker's dialog is
    *  owned by the REQUESTING app's window and runs in the picker's process, and it is the app that
-   *  must be blocked. Measured against the plan in `docs/research/08-hobbyist-os-survey.md`. */
+   *  must be blocked. Measured against the plan in `docs/research/08-hobbyist-os-survey.md`.
+   *
+   *  `ancestors()` IS NEAREST-FIRST, so the owner is `[0]` and the ROOT is the last element. This
+   *  read the last one for a while, which is the same mistake as reading the chain backwards: a
+   *  dialog three deep blocked the process at the top of the chain and left its own owner typable
+   *  and raisable over itself (constraint 229). Depth-1 chains cannot tell the two apart, and every
+   *  fixture was depth 1. */
   appOf(win) {
     const chain = this.ancestors(win);
-    return chain.length ? chain[chain.length - 1].pid : win.pid;
+    return chain.length ? chain[0].pid : win.pid;
+  }
+
+  /**
+   * IS ANYTHING BLOCKING AT ALL? Read from the table on every call.
+   *
+   * WHY IT EXISTS: `feed` asks `blockingFor` on EVERY key and pointer event, and a pointer drag
+   * streams moves while the button is down — so a `paint` stroke on a desktop with no modal in it
+   * ran the whole table walk, including `subtree`'s quadratic membership test and two array
+   * allocations per candidate, on every motion sample. Constraint 18 requires a sweep to be
+   * O(interested), and with nothing blocking the interested set is empty (constraint 231).
+   *
+   * NO CACHE, AND THE FIRST VERSION HAD ONE. An epoch counter bumped by `create`, `destroyTree`
+   * and `setModal` answered stale for every caller that writes `mode` directly — which the host
+   * probe does, so twelve assertions about suppression went green against a kernel that was
+   * suppressing nothing. A `for` over `byId` with an early return allocates nothing and cannot be
+   * stale; the cost this is about was the subtree walk, not the mode test.
+   */
+  anyBlocking() {
+    for (const w of this.byId.values()) {
+      if (!w.destroyed && w.mode === WMODE_BLOCKING) return true;
+    }
+    return false;
   }
 
   /**
@@ -504,6 +532,7 @@ export class WinMgr {
    */
   blockingFor(win) {
     if (!modalBlocks) return null;
+    if (!this.anyBlocking()) return null;
     let found = null;
     let foundAt = -1;
     for (const b of this.live()) {
@@ -543,9 +572,22 @@ export class WinMgr {
    * owner chain a dialog sits behind the window that owns it". A raise moves the window and then
    * puts every PASSIVE, RENDER_ABOVE or BLOCKING descendant above it, in creation order — so
    * clicking the document brings its save dialog along rather than burying it.
+   *
+   * A PASSIVE WINDOW IS NEVER THE SUBJECT: `src/abi.mjs` defines it as "never takes the stack from
+   * its owner … raised WITH its owner and never above a sibling", and only the RIDER half of that
+   * was implemented. A click lands on a tooltip's frame like any other, and the page posts
+   * `win-raise` for it — so a passive window raised directly went to the top of the GLOBAL stack,
+   * above its owner's siblings and above other processes' windows, which is the one thing its own
+   * definition forbids. The raise is redirected to the nearest ancestor that is not passive, and
+   * the tooltip comes up as the rider it is (constraint 232). With no such ancestor there is
+   * nothing to take the stack from, so it raises itself.
    */
   raise(win) {
     if (win.destroyed) return null;
+    if (win.mode === WMODE_PASSIVE) {
+      const up = this.ancestors(win).find((a) => a.mode !== WMODE_PASSIVE);
+      if (up) return this.raise(up);
+    }
     const blocker = this.blockingFor(win);
     if (blocker) {
       this.stats.blocked += 1;
@@ -565,10 +607,49 @@ export class WinMgr {
     return 0;
   }
 
-  /** The order, bottom first, as the page must render it. */
+  /**
+   * Set a window's TWO AXES, or a negative errno.
+   *
+   * THE GUARD LIVES HERE, in the file that names the scopes. `calls.mjs` tested `scope === 1 ||
+   * scope === 2` against the two that need an owner, which is the enum's ORDER copied into a second
+   * place — and `selfTest` only asserts the scope set is dense from 0, so reordering it would leave
+   * that line silently guarding the wrong two: an ownerless window would become APP-modal, blocking
+   * by a chain that is not there, and a legitimate SYSTEM-modal would be refused (constraint 234).
+   *
+   * THE STACK IS RE-EVALUATED, not merely recorded: a window that has just become RENDER_ABOVE or
+   * BLOCKING must get above its owner now rather than at the next click.
+   */
+  setModal(win, scope, mode) {
+    if (scope < 0 || scope > WMODAL_MAX || mode < 0 || mode > WMODE_MAX) return -EINVAL;
+    /* A WINDOW WITH NO OWNER MAY NOT BE WINDOW- OR APP-MODAL. Both scopes are defined by walking
+     * the owner chain, so without an owner there is nothing to block — and a window that claimed to
+     * be modal and blocked nothing is worse than a refusal, because the program believes it. */
+    if ((scope === WMODAL_WINDOW || scope === WMODAL_APP) && win.owner === 0) return -EINVAL;
+    win.scope = scope;
+    win.mode = mode;
+    this.raise(win);
+    return 0;
+  }
+
+  /**
+   * The order, bottom first, as the page must render it — AND WHICH WINDOWS ARE BLOCKED.
+   *
+   * THE BLOCKED SET TRAVELS WITH THE ORDER because suppression has to cover the FRAME and not only
+   * the client area. A drag and an arrow-key move are handled entirely page-side (`src/wm/window.
+   * mjs`), so "input to a blocked window is suppressed" was false for exactly the gesture a user
+   * tries first: with a save dialog up, the editor could still be dragged around under it, and its
+   * `pointerup` posted a geometry the kernel accepted (constraint 233).
+   *
+   * It is computed HERE and not asked for per event, so the page never decides it and the two sides
+   * cannot disagree — the same reason the whole order is posted rather than a "raise this one".
+   * `anyBlocking()` makes it free when nothing is modal, which is the ordinary case.
+   */
   postStack() {
     this.stats.stacks += 1;
-    K.post({ t: "win-stack", ids: [...this.stack] });
+    const blocked = this.anyBlocking()
+      ? this.live().filter((w) => this.blockingFor(w)).map((w) => w.id)
+      : [];
+    K.post({ t: "win-stack", ids: [...this.stack], blocked });
   }
 
   /** Where a window sits, from the bottom. -1 for one that is not stacked. */
@@ -686,8 +767,11 @@ export class WinMgr {
     const win = new Window(id, pid, spec);
     this.byId.set(id, win);
     if (ownerId !== 0) this.get(ownerId).children.push(id);
-    // A NEW WINDOW IS ON TOP, which is what a dialog appearing means. The post goes out below,
-    // after the page has been told the window exists.
+    // A NEW WINDOW IS ON TOP, which is what a dialog appearing means — and the ORDER must go out
+    // with it. It did not for a while: the stack grew kernel-side and the page was never told, so
+    // the new frame got no `z-index` while an earlier, clicked window had one, and the new window
+    // painted BEHIND it (constraint 230). The `win-create` post goes first, because the page
+    // resolves an order into frames it already knows about.
     this.stats.created += 1;
     this.stack.push(id);
     K.post({
@@ -698,6 +782,7 @@ export class WinMgr {
       owner: win.owner,
       x: win.box.x, y: win.box.y, w: win.box.w, h: win.box.h,
     });
+    this.postStack();
     return win;
   }
 

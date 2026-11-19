@@ -68,6 +68,10 @@ MUTATIONS = {
             "and its own child is still free",
             "and still not its own child",
             "nothing was queued",
+            # AND THE THREE-PROCESS CHAIN, which is the same exclusion read at depth 2.
+            "an app-modal dialog blocks the window it is attached to",
+            "a raise of the attached window is refused",
+            "the order carries who is blocked",
         ),
     ),
     "app-scope-is-own-pid": dict(
@@ -76,10 +80,69 @@ MUTATIONS = {
             "window, so it is the APP that must be blocked. With this mutation a broker blocks "
             "itself and leaves the app it was asked to block running - and because this probe's "
             "fixture has the dialog in the owner's own process for the window-scope cases, the "
-            "clause that moves is the CROSS-PROCESS one.",
+            "clause that moves is the CROSS-PROCESS one.\n\n"
+            "THIS CONTROL MOVED NOTHING AND WAS SCORED AS A PASS. Every fixture owned at depth 1 "
+            "and in one process, so asking the dialog's pid gave the same answer as asking its "
+            "owner's for all 58 checks. The probe now carries a THREE-PROCESS chain, which is "
+            "also the fixture that caught `appOf` reading the chain from the wrong end.",
         needle="""      else if (b.scope === WMODAL_APP) blocks = this.appOf(b) === win.pid;""",
         replacement="""      else if (b.scope === WMODAL_APP) blocks = b.pid === win.pid;""",
-        moves=(),
+        moves=(
+            "an app-modal dialog blocks the window it is attached to",
+            "and that window's process sibling",
+            "a raise of the attached window is refused",
+            "the order carries who is blocked",
+        ),
+    ),
+    "silent-create": dict(
+        why="a new window goes on the stack and the page is never told the order. The kernel is "
+            "RIGHT and the screen is wrong, which is the hardest version of this bug to see: the "
+            "page assigns a `z-index` only when it renders an order, so a window that had been "
+            "clicked carries one and a window created after it carries none - and the new window "
+            "paints BEHIND it. The old probe reset its post log after the creates, so the missing "
+            "post had already been thrown away before anything looked.",
+        needle="""    });
+    this.postStack();
+    return win;
+  }""",
+        replacement="""    });
+    return win;
+  }""",
+        moves=(
+            "creating a window posts the order",
+            "in that order",
+            "a second create posts the order again",
+            "with the new window on top",
+            "and nothing is blocked",
+        ),
+    ),
+    "passive-takes-stack": dict(
+        why="a PASSIVE window raised directly goes to the top of the GLOBAL stack. `src/abi.mjs` "
+            "defines it as 'raised WITH its owner and never above a sibling', and a click lands "
+            "on a tooltip's frame like any other - so without the redirect a status bubble ends "
+            "up above its owner's siblings and above other processes' windows.",
+        needle="""    if (win.mode === WMODE_PASSIVE) {
+      const up = this.ancestors(win).find((a) => a.mode !== WMODE_PASSIVE);
+      if (up) return this.raise(up);
+    }""",
+        replacement="""    if (win.mode === WMODE_PASSIVE && win.id < 0) return null;""",
+        moves=(
+            "its owner came up with it",
+            "so it is not above a stranger on its own",
+        ),
+    ),
+    "no-blocked-set": dict(
+        why="the order goes out without the blocked set. Suppression then covers the client area "
+            "and not the frame: a drag and an arrow-key move are page-side from end to end, so a "
+            "window behind a modal cannot be typed into or raised and can still be dragged "
+            "around under it.",
+        needle="""    const blocked = this.anyBlocking()
+      ? this.live().filter((w) => this.blockingFor(w)).map((w) => w.id)
+      : [];""",
+        replacement="""    const blocked = [];""",
+        moves=(
+            "the order carries who is blocked",
+        ),
     ),
     "no-riders": dict(
         why="a raise moves the window alone, which is `PLAN.md` section 5's own control for M9 - "
@@ -91,6 +154,10 @@ MUTATIONS = {
         replacement="""    const riders = [];""",
         moves=(
             "and its palette and tooltip ride above it",
+            # A PASSIVE WINDOW'S REDIRECT RAISES ITS OWNER AND THE TOOLTIP RIDES BACK UP, so with
+            # no riders the pair comes apart - which is the same defect this control is about.
+            "its owner came up with it",
+            "so it is not above a stranger on its own",
             # "and it follows the stack" is DECLARED NOT TO MOVE and it took a run to see why: the
             # window being raised moves either way, and that clause is about the topmost BLOCKER
             # following the stack, not about its riders.
@@ -167,6 +234,17 @@ def main(argv=None) -> int:
                 print("no mutation named %r; have %s" % (name, ", ".join(MUTATIONS)))
                 return 2
             spec = MUTATIONS[name]
+            # AN EMPTY `moves` IS A MIS-SCORE, NOT A PASS. `want` and `moved` were compared by set
+            # difference, so a mutation declaring nothing had no missing and no extra and printed
+            # `ok` — which is how `app-scope-is-own-pid` broke the APP-scope rule, moved zero
+            # checks, and was reported as verified for as long as it existed. A control must move a
+            # NAMED subset (CLAUDE.md), and the empty set is not one (constraint 237).
+            if not spec["moves"]:
+                problems.append("%s: declares no checks to move, so it cannot verify anything. "
+                                "Give the probe a case this mutation breaks, or delete it." % name)
+                print("%-22s MIS-SCORED (declares nothing to move)" % name)
+                print()
+                continue
             if spec["needle"] not in original:
                 problems.append("%s: its needle is not in the subject any more, so the mutation "
                                 "was never applied. The anchor moved; re-point it." % name)
