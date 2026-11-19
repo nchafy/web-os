@@ -55,10 +55,10 @@ in `MILESTONES.md` with its actual cost and what it changed in the plan. Current
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 11 checks, 429 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 39, m6 31 |
-| `scripts/check.py --negative win-first-fd` | M7's first control — a parked `poll` evaluates only the FIRST fd of its set. 6 red, 33 intact, and the real keystroke into window A must still arrive |
-| `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 28 intact, and every poll and `/proc` label must hold |
-| `node bench/m7-win/probe.mjs` | 123 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
+| `scripts/check.py` | the suite — 11 checks, 432 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 42, m6 31 |
+| `scripts/check.py --negative win-first-fd` | M7's first control — a parked `poll` evaluates only the FIRST fd of its set. 6 red, 36 intact, and the real keystroke into window A must still arrive |
+| `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 31 intact, and every poll and `/proc` label must hold |
+| `node bench/m7-win/probe.mjs` | 128 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
 | `bench/m7-win/controls.py` | 5 mutations of `wins.mjs`, scored on WHICH checks move. One is a DECLARED CRASH (`no-floor`), because a torn record must make a program fail loudly rather than decode as noise |
 | `bench/m7-win/drive.py` | the fast loop: open `www/m7.html` in a real Chrome and print its own evidence, clause by clause. `--live` leaves the desktop open; `--page m4a` drives that one |
 | `bench/kernel-churn/probe.py --drop` | the program fetch dropped at the TRANSPORT, which panicked the kernel before constraint 212. Every kernel must still boot AND one must report a transport retry |
@@ -291,6 +291,11 @@ are deleted (constraint 211). `docs/ABI.md` §"The window group, as M7 built it"
   every fd had woken it once, and the page's own geometry report had already made all three ready
   before a key was pressed (constraint 214). Ask what the system does on its own before writing an
   exit condition.
+- **A `const` declared below `main()` is in its temporal dead zone when the page runs.** These
+  pages call `main()` while the module is still evaluating, so a timeout constant declared beside
+  the function that reads it threw `Cannot access 'BOOT_WAIT_MS' before initialization` on EVERY
+  run — deterministic, and found in one run because the page reports its own reason. Declare page
+  constants above the `main()` call, where the others are.
 - **`scripts/check.py` is not the fast loop for a window milestone.** `bench/m7-win/drive.py`
   prints the page's clauses in two seconds of reading; the check prints a verdict. Both were
   needed, and the probe + `controls.py` caught three weak assertions the browser never would.

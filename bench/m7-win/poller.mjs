@@ -134,6 +134,11 @@ export function run(env) {
   const bump = (fd) => { account.wokeBy[fd] = (account.wokeBy[fd] || 0) + 1; };
   const seen = (fd, text) => { account.keysSeen[fd] = (account.keysSeen[fd] || "") + text; };
   let pipeOpen = true;
+  /** The window fds still in the poll set. A DESTROYED WINDOW LEAVES IT: `readable()` is true for
+   *  ever once a window is gone, so an fd left in the set makes `poll` answer immediately on every
+   *  turn and the loop spins at renderer speed — which starves the kernel it shares a renderer
+   *  with, the defect `bench/m7-win/wedge.mjs` chose `nanosleep` to avoid. */
+  const open = new Set([a.fd, b.fd]);
 
   for (;;) {
     /* EVERY FD MUST HAVE DELIVERED WHAT IT IS FOR — a key on each window, and bytes or end of
@@ -152,7 +157,11 @@ export function run(env) {
         + `${JSON.stringify(account.wokeBy)}`;
       break;
     }
-    const set = [{ fd: a.fd, events: POLLIN }, { fd: b.fd, events: POLLIN }];
+    if (open.size === 0) {
+      account.why = "every window of this process is gone";
+      break;
+    }
+    const set = [...open].map((fd) => ({ fd, events: POLLIN }));
     if (pipeOpen) set.push({ fd: pipe.rfd, events: POLLIN });
     account.polls += 1;
     const r = unInterrupted(() => env.tty.poll(set, POLL_MS));
@@ -187,12 +196,19 @@ export function run(env) {
         if (row.revents & (POLLHUP | POLLERR | POLLNVAL)) {
           account.why = `fd ${row.fd} hung up`;
           bump(row.fd);
+          // OUT OF THE SET, not merely noted: see `open`.
+          env.fs.close(row.fd);
+          open.delete(row.fd);
         }
         continue;
       }
       const evs = env.win.read(row.fd);
       if (typeof evs === "number") {
-        if (evs === -EHOSTGONE) { account.why = `fd ${row.fd} is gone`; }
+        if (evs === -EHOSTGONE) {
+          account.why = `fd ${row.fd} is gone`;
+          env.fs.close(row.fd);
+          open.delete(row.fd);
+        }
         continue;
       }
       bump(row.fd);
@@ -249,8 +265,7 @@ export function run(env) {
     ? env.std.errnoName(absent) : "READABLE";
 
   note(account.why);
-  env.win.destroy(a.fd);
-  env.win.destroy(b.fd);
+  for (const fd of open) env.win.destroy(fd);
   if (pipeOpen) env.fs.close(pipe.rfd);
   env.proc.waitpid(child, 0);
   if (other > 0) {

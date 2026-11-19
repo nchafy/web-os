@@ -43,7 +43,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import cdp  # noqa: E402
-from serve import Handler  # noqa: E402
+from serve import Handler, Server  # noqa: E402
 
 
 #: The path that never answers. A request for it is accepted and then simply held, which is the
@@ -106,7 +106,8 @@ def serving():
     headers and the dotfile refusal are the ones the rest of the harness uses."""
     import functools
     handler = functools.partial(_Stalling, directory=str(ROOT))
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    # `serve.Server` carries the listen backlog these pages need; see constraint 212.
+    httpd = Server(("127.0.0.1", 0), handler)
     httpd._drop_lock = threading.Lock()
     httpd._dropped = 0
     port = httpd.server_address[1]

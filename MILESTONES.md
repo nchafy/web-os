@@ -32,7 +32,7 @@ checks is a wish.
 | M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 22 expectations, 1 control (26 before M7 took the detector's four) |
 | M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
-| M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 39 expectations, 2 controls, 123 host checks, 5 mutations |
+| M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
 | **M8** | **The window surface** | 3 | | ⬜ **next (option A)** |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
 | M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
@@ -1331,15 +1331,15 @@ M6 ships no document policy on purpose (200).
 
 **ACCEPT.** One process opens two windows and a pipe and `poll()` wakes it for each in turn — the
 milestone's own proof, in `PLAN.md` §5's words — with a REAL browser keystroke arriving on the fd
-it was typed into. 39 expectations over five fresh kernels in 17.4 s. The suite is 11 checks and
-429 expectations, all green.
+it was typed into. 42 expectations over six fresh kernels in 17.8 s. The suite is 11 checks and
+432 expectations, all green.
 
 ```
-scripts/check.py                       11 checks, 429 expectations (m7: 39)
-scripts/check.py --only m7 --prove-failure   39 inverted, all failed
-scripts/check.py --negative win-first-fd     m7 fail:  6 red, 33 intact
-scripts/check.py --negative no-cascade       m7 fail: 11 red, 28 intact
-node bench/m7-win/probe.mjs            123 host checks (the window table, no browser)
+scripts/check.py                       11 checks, 432 expectations (m7: 42)
+scripts/check.py --only m7 --prove-failure   42 inverted, all failed
+scripts/check.py --negative win-first-fd     m7 fail:  6 red, 36 intact
+scripts/check.py --negative no-cascade       m7 fail: 11 red, 31 intact
+node bench/m7-win/probe.mjs            128 host checks (the window table, no browser)
 bench/m7-win/controls.py               5 mutations, each scored on which checks move
 bench/kernel-churn/probe.py --drop     the program fetch, dropped at the transport
 bench/m7-win/drive.py                  the page in a real Chrome, with its evidence printed
@@ -1430,6 +1430,29 @@ One mutation also returned a RESULT rather than a failure: making the whole-reco
 `free <= 0` moved nothing, because the ring's capacity is a whole number of records and every push
 and shift is whole, so the two tests are the same test. The guard is kept as the statement of that
 invariant and `src/kernel/wins.mjs` says so where it sits.
+
+### One critic, then six fixes, and the worst was the milestone's own event
+
+M7 went build → independent attack → fix, as every milestone here has. The critic was given the
+diff and the acceptance criteria and not the author's account of them. **All six findings were
+reproduced against the code before being acted on, and all six are fixed.** The first is the one
+that mattered:
+
+| | what it was |
+|---|---|
+| 217 | **`WEV_CLOSE` could never be read.** `destroy()` cleared the event ring before queueing its own notice, and the page posts `win-in [WEV_CLOSE]` then `win-gone` as two messages — so the close record was wiped two messages later and `src/bin/term.mjs`'s arm for it was dead code. **Nothing in the page or the suite asserted it**, which is why there is now a sixth proof that clicks the real close box |
+| — | **`WinMgr.sweep()` had no caller**, so `byId` grew without bound: every created-and-destroyed window kept its 4 KiB ring for ever and the per-heartbeat `sample()` walked all of it — constraint 18 failing by accumulation. `destroyTree` and `F_WIN.close` sweep now, which covers both orders |
+| — | **The four `win-*` page handlers dereferenced the window table with no guard**, and `handle()` turns a throw into a panic — so a page message before `boot` killed the kernel. The console they replaced guarded explicitly, and `windowSample()` still did |
+| — | **`win-geom` was not in the page's UNSOLICITED set**, so every frame report — on create, on every pointerup, on every title-bar keyup — sat in `pending` for ever. Exactly the leak the comment beside it warns about |
+| — | **`bench/m7-win/poller.mjs` hot-spun on `-EHOSTGONE`**: a destroyed window is readable for ever, so an fd left in the poll set made `poll` answer immediately on every turn and the loop span at renderer speed with no pacing — the defect `wedge.mjs` chose `nanosleep` to avoid |
+| 210 | **Half of the "(Starting…)" state was still here** — the parameter, the field, the caption branch, the class, the dataset flag and the CSS rule — in a commit that cites a constraint to delete it |
+
+**Then the sixth proof's own run found the rest of constraint 212.** With the page at six kernels,
+a run lost BOTH attempts at a program fetch in the same instant: the retry was immediate, and the
+server's listen backlog was `socketserver`'s default of five against a burst of six. `serve.Server`
+raises it to 128 and the retry waits 60 ms; `scripts/check.py` and `bench/kernel-churn/probe.py`
+build their servers from that one class now. What remains is Chrome's own worker startup, and the
+page retries that once and says so (constraint 218).
 
 ### What is not done
 

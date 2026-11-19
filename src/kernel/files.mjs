@@ -275,7 +275,12 @@ registerKind(F_WIN, {
   close(d) {
     d.win.close();
     // WINS is injected, not imported: files.mjs is imported by the kernel that owns the manager.
-    if (d.win.opens <= 0 && WINS) WINS.destroyTree(d.win.id);
+    if (!WINS) return 0;
+    if (d.win.opens <= 0) WINS.destroyTree(d.win.id);
+    // THE SWEEP IS HERE AS WELL AS IN `destroyTree`, because the two events can arrive in either
+    // order: a window destroyed while an fd is still open keeps its row until this close, and a
+    // row nobody can reach is one more the heartbeat sweep walks (constraint 18).
+    WINS.sweep();
     return 0;
   },
 });

@@ -1891,6 +1891,39 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     connection "would reject the fetch and `spawn` would already answer -ENOEXEC without any
     deadline, so a control built on a reset would prove nothing". The spawn did not answer
     -ENOEXEC; it took the kernel down.
+
+    **AND THE RETRY ALONE WAS NOT ENOUGH, which took two more measurements.** A run then lost BOTH
+    attempts in the same instant, because the retry was immediate and hit the same condition. Two
+    things were wrong and both are fixed:
+
+    - **The listen backlog was five**, `socketserver`'s default. One page boots six kernels, a
+      `/usr` mount is fifteen ranged GETs, and Chrome opens up to six connections per origin at
+      once — so a SYN arriving while five are queued is REFUSED, which is what `fetch` reports as
+      `TypeError: Failed to fetch`. `serve.Server` sets it to 128, and `scripts/check.py` and
+      `bench/kernel-churn/probe.py` now build their servers from that class instead of from
+      `ThreadingHTTPServer` directly, so there is one definition of it.
+    - **The retry had no backoff.** 60 ms now — long enough for a listen queue to drain, short
+      enough that a spawn still answers well inside the 5 s deadline.
+217. **A DESTROYED WINDOW KEEPS ITS QUEUE, AND THE FIRST VERSION DID NOT — WHICH MADE `WEV_CLOSE`
+    UNREACHABLE.** `destroy()` cleared the event ring and then queued its own `WEV_DESTROYED`
+    notice. The page's X button posts `win-in [WEV_CLOSE]` and then `win-gone` as two messages, and
+    the kernel serves them in order — so the close record was queued and wiped two messages later.
+    A relay parked in `poll` rather than in `read` never saw it, `src/bin/term.mjs`'s arm for it
+    was dead code, and the keystrokes typed just before the window closed went with it. **Found by
+    an independent critic; nothing in `www/m7.html` or `scripts/check.py` would have caught it**,
+    which is why M7 has a sixth proof that clicks the real close box and asserts the process was
+    told. The queue is kept, the notice is appended, and room for the notice is made by dropping
+    the OLDEST — the one place constraint 213's rule is inverted, because the record naming the
+    window that went is the one a reader cannot do without.
+218. **A WORKER THAT NEVER STARTS GETS ONE RETRY FROM THE PAGE, counted and reported.** A Worker
+    that will not start fires an error with an empty message (constraint 207), and "the residual
+    `up` stall is Chrome's worker startup under load" (constraint 155). `www/m7.html` boots six
+    kernels in seventeen seconds — the most of any page but `www/m4b.html` — and it cost about one
+    run in seven: `kernel worker: undefined`, a BROKEN check and nothing to fix. The page retries
+    ONCE with a fresh worker, increments `globalThis.M7.bootRetries` and says which attempt failed
+    and why; five consecutive `--prove-failure` runs are clean. Same shape as `docs/DECISIONS.md`
+    D21 and for the same reason: a silent retry turns a measurable platform limit into a page that
+    is mysteriously slow sometimes. It covers ONLY a worker that never reached `up`.
 213. **A WINDOW'S EVENT QUEUE IS BOUNDED PER FD, THE NEWEST IS DROPPED, AND THE COUNT IS
     PUBLISHED.** `WIN_EVENT_CAP` = 256 records = 4 KiB, the same order as the pty's input queue it
     sits beside. This is M1's item (e) — a fixed budget with a defined overflow, charged against

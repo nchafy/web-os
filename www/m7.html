@@ -97,6 +97,13 @@ const WEDGE = '/bench/m7-win/wedge.mjs'
 const DRIVER_WAIT_MS = 2500
 const REAL_KEY_WAIT_MS = 60000
 
+/** How long one kernel boot may take before it is retried. DECLARED UP HERE WITH THE OTHER
+ *  TIMEOUTS, and not beside the function that reads it, because `main()` is called while this
+ *  module is still evaluating — so a `const` declared further down is in its temporal dead zone
+ *  when the first kernel boots, and every run failed with
+ *  `Cannot access 'BOOT_WAIT_MS' before initialization`. */
+const BOOT_WAIT_MS = 12000
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /** REAP EVERY PROCESS BEFORE TERMINATING THE KERNEL THAT OWNS THEM. Terminating the kernel worker
@@ -141,10 +148,12 @@ async function until (what, ms = 5000, step = 25) {
 
 Object.assign(globalThis.M7, { isolated: self.crossOriginIsolated === true })
 globalThis.M7.proofs = {
-  poll_many: null, procwin: null, cascade: null, crossproc: null, health: null,
+  poll_many: null, procwin: null, cascade: null, crossproc: null, close: null, health: null,
 }
 /** The program-fetch counters, summed over every kernel this page shuts down. See `shutdown`. */
 globalThis.M7.fetches = { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 }
+/** How many kernel boots had to be retried because the WORKER never started. See `bootKernel`. */
+globalThis.M7.bootRetries = 0
 
 if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
   globalThis.M7.state = 'aborted'
@@ -167,7 +176,12 @@ class KernelFail extends Error {}
  *  session's keystrokes and cells arrive in the hundreds and `pending` only shrinks when something
  *  expects that exact kind. `win-geom` and `win-state` are replies and stay queueable. */
 const UNSOLICITED = new Set(
-  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed'])
+  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed',
+    // `win-geom` IS AN EVENT TOO, and leaving it out was a leak: the kernel posts one for every
+    // frame the host reports — on create, on every pointerup, on every title-bar keyup — and
+    // nothing ever expects that kind, so every one of them sat in `pending` for ever. `win-state`
+    // is the only window reply, because something asks for it by name.
+    'win-geom'])
 
 function kernelBoot (cfg) {
   const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
@@ -224,6 +238,44 @@ function kernelBoot (cfg) {
 }
 
 /**
+ * Boot a kernel, and RETRY ONCE if its worker never starts.
+ *
+ * THE RESIDUAL THIS EXISTS FOR IS NAMED IN THE REPOSITORY ALREADY: a Worker that will not start
+ * fires an error event with an EMPTY message, no filename and line 0 (constraint 207), and
+ * "the residual `up` stall is Chrome's worker startup under load, it is not ours" (constraint 155).
+ * This page boots six kernels in seventeen seconds, which is the most of any page but
+ * `www/m4b.html`, and it cost about one run in seven: `kernel worker: undefined`, and a check that
+ * reported BROKEN with nothing to fix.
+ *
+ * SO IT IS BOUNDED, COUNTED AND REPORTED, which is the shape `docs/DECISIONS.md` D21 settled for
+ * the program fetch: one retry, a fresh worker, `globalThis.M7.bootRetries` incremented and a note
+ * saying which attempt failed and why. A silent retry would turn a measurable platform limit into
+ * a page that is mysteriously slow sometimes.
+ *
+ * It is NOT a remedy for a kernel that boots and then misbehaves: the retry only covers a worker
+ * that never reached `up`, and anything after that is the kernel's own business.
+ */
+async function bootKernel (cfg) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const k = kernelBoot(cfg)
+    try {
+      await k.expect('up', BOOT_WAIT_MS)
+      return k
+    } catch (e) {
+      k.worker.terminate()
+      globalThis.M7.bootRetries += 1
+      const why = 'kernel boot attempt ' + (attempt + 1) + ' did not reach `up`: ' + e.message
+      globalThis.M7.notes.push(why)
+      // The FIRST failure is a retry; the second is the answer. A page that retried for ever
+      // would hide a kernel that cannot start at all.
+      if (attempt === 1) throw new Error(why + ' (retried once)')
+      say(why + ' — retrying once')
+    }
+  }
+  throw new Error('unreachable')
+}
+
+/**
  * A kernel with a window host attached. THE HOST IS THE PAGE'S WHOLE WINDOW HALF: it builds a
  * frame when the kernel says a process created a window, and it is the one route from a browser
  * event into that window's event queue (`src/wm/winhost.mjs`).
@@ -233,8 +285,7 @@ function kernelBoot (cfg) {
  * changed.
  */
 async function bootHost (boot) {
-  const k = kernelBoot(boot)
-  await k.expect('up', 30000)
+  const k = await bootKernel(boot)
   // THE MOUNT REPORT, FIRST. `/usr` is where `sh`, `term` and `winopen` live, so a refused mount
   // is a desktop that cannot start — reported at boot rather than as a window that never appears.
   k.post({ t: 'm3-state' })
@@ -608,6 +659,50 @@ async function pCrossproc (boot) {
 }
 
 /* --------------------------------------------------------------------------------------------
+   PROOF 6: the X button delivers WEV_CLOSE to the process.
+
+   THIS SECTION IS A FIX'S CHECK. `Window.destroy` cleared the event queue before queueing its own
+   destroy notice, and the page posts `win-in [WEV_CLOSE]` and then `win-gone` as two messages — so
+   the close record was queued and wiped two messages later, and no process could ever see it. An
+   independent critic found it; nothing in this page or in `scripts/check.py` would have.
+   -------------------------------------------------------------------------------------------- */
+
+async function pClose (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, WINOPEN, ['winopen', '-n', '1', '-c', '15000'])
+    ev.pid = pid
+    await until(() => s.host.frames.size >= 1, 20000)
+    const [w] = [...s.host.frames.values()]
+    ev.win = w.id
+    // A REAL CLICK ON THE REAL CLOSE BOX, through the button's own handler — not a page message,
+    // so the whole path is exercised: the widget's `onClose`, the two posts it makes, and the
+    // order the kernel serves them in.
+    w.win.closeBtn.click()
+    const goneMs = await until(() => s.host.frames.size === 0, 15000)
+    ev.goneMs = Math.round(goneMs)
+    ev.framesAfter = s.host.frames.size
+    const result = await resultOf(s, pid, 30000)
+    ev.result = result
+    ev.closes = result.closes
+    ev.destroyedSeen = result.destroyedSeen
+    const clauses = {
+      'the X button delivers WEV_CLOSE to the process': (result.closes || 0) > 0,
+      'and the destroy notice arrives as well, not instead':
+        (result.destroyedSeen || 0) > 0,
+      'and the frame goes': ev.framesAfter === 0 && goneMs >= 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
    PROOF 5: the not-responding detector, BOTH EDGES.
    -------------------------------------------------------------------------------------------- */
 
@@ -779,6 +874,12 @@ async function main () {
     JSON.stringify(x.ownerCascade))
   if (x.failed.length) say('  cross-process FAILED: ' + x.failed.join('; '))
 
+  P.close = await pClose(boot)
+  const cl = P.close.evidence
+  say('close: the X on win ' + cl.win + ' delivered ' + cl.closes + ' close event(s) and ' +
+    cl.destroyedSeen + ' destroy notice(s) before the frame went')
+  if (cl.failed.length) say('  close FAILED: ' + cl.failed.join('; '))
+
   P.health = await pHealth(boot)
   const h = P.health.evidence
   say('health: grey at ' + h.greyMs + ' ms, End Process at ' + h.endMs + ' ms, cleared ' +
@@ -805,6 +906,10 @@ async function main () {
   const f = globalThis.M7.fetches
   say('program fetches: ' + f.fetches + ' over ' + f.kernels + ' kernels, ' + f.retries +
     ' retried (' + f.timeouts + ' deadline, ' + f.transport + ' transport)')
+  if (globalThis.M7.bootRetries) {
+    say('kernel boots retried: ' + globalThis.M7.bootRetries +
+      ' (a worker that never started — constraint 207)')
+  }
   say('verdict ' + globalThis.M7.verdict + ' in ' + Math.round(globalThis.M7.ms) + ' ms')
   /* AND THEN A DESKTOP YOU CAN ACTUALLY USE. Every proof above is a FIXTURE — it builds a kernel,
    * measures one property and tears both down — so when they have all finished the page would show

@@ -18,7 +18,6 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
   cursor:move; flex:0 0 auto }
 .window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
 .is-not-responding .window-title { background:#3a3030; color:#bbb }
-.is-starting .window-title { background:#2a2f38; color:#8a93a0 }
 .title-buttons { display:flex; gap:4px }
 .title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
   cursor:pointer }
@@ -149,7 +148,12 @@ class KernelFail extends Error {}
 /** Every `win-*` message that is an EVENT rather than a reply. `win-geom` and `win-state` are
  *  replies and stay queueable. */
 const UNSOLICITED = new Set(
-  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed'])
+  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed',
+    // `win-geom` IS AN EVENT TOO, and leaving it out was a leak: the kernel posts one for every
+    // frame the host reports — on create, on every pointerup, on every title-bar keyup — and
+    // nothing ever expects that kind, so every one of them sat in `pending` for ever. `win-state`
+    // is the only window reply, because something asks for it by name.
+    'win-geom'])
 
 function kernelBoot (cfg) {
   const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })

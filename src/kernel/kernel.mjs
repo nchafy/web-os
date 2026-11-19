@@ -450,6 +450,13 @@ let programFetchRetries = 0;
 const PROGRAM_FETCH_MS = 5000;
 const PROGRAM_FETCH_TRIES = 2;
 
+/** How long to wait before the retry. AN IMMEDIATE RETRY HITS THE SAME CONDITION, and that was
+ *  measured: a page taking ~75 ranged GETs through one local server lost both attempts at a
+ *  program fetch to a refused connection in the same instant, and the kernel panicked anyway.
+ *  60 ms is long enough for a listen queue to drain and short enough that a spawn still answers
+ *  well inside `PROGRAM_FETCH_MS`. Constraint 212. */
+const PROGRAM_RETRY_BACKOFF_MS = 60;
+
 /** A STATIC import or `export ... from` specifier, and only a path-shaped one: a bare specifier has
  *  no resolution in a worker without an import map. The quote must follow `from` or `import`
  *  directly, which keeps prose out of the match. */
@@ -461,7 +468,10 @@ const STATIC_SPECIFIER = /(\bfrom\s*|\bimport\s*)(["'])(\.{0,2}\/[^"']*)\2/g;
 async function programText(url) {
   let last = null;
   for (let attempt = 0; attempt < PROGRAM_FETCH_TRIES; attempt += 1) {
-    if (attempt > 0) programFetchRetries += 1;
+    if (attempt > 0) {
+      programFetchRetries += 1;
+      await new Promise((resolve) => setTimeout(resolve, PROGRAM_RETRY_BACKOFF_MS));
+    }
     const control = new AbortController();
     const timer = setTimeout(() => control.abort(), PROGRAM_FETCH_MS);
     try {
@@ -1668,6 +1678,23 @@ async function handle(m) {
      *
      * There is no `win-attach`: a window is created BY A PROCESS, through `win_create`, which is
      * the whole of what M7 changed. The page builds a frame when the kernel tells it to. */
+    case "win-in":
+    case "win-geom":
+    case "win-gone":
+    case "win-state":
+      /* THE ONE GUARD FOR ALL FOUR. `WINDOWS` is built in the `boot` case, and `handle()` turns a
+       * throw into a `panic` — so a page that posted any of these before awaiting `up` killed the
+       * kernel with a TypeError instead of being told what it did wrong. The console these
+       * replaced guarded the same way, and `windowSample()` still does. */
+      if (!WINDOWS) {
+        post({ t: "error", why: `${m.t} before boot: this kernel has no window table yet` });
+        return;
+      }
+      break;
+    default:
+      break;
+  }
+  switch (m.t) {
     case "win-in": {
       // One message may carry several events: a paste is many keys, and a post per event would
       // cost a structured clone each.

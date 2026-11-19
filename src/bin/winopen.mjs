@@ -153,7 +153,7 @@ export function run(env) {
     // DESTROY NOTICES AND HANGUPS, counted apart from `events`: a window being taken down under
     // this process is the one thing an owner chain does to it, and `events` includes the geometry
     // the page reports the instant it builds a frame.
-    destroyedSeen: 0, hangups: 0, resizes: 0,
+    destroyedSeen: 0, hangups: 0, resizes: 0, closes: 0,
   };
   for (;;) {
     if (held.size === 0) { account.why = "every window is gone"; break; }
@@ -228,6 +228,11 @@ export function run(env) {
             }
           }
           if (ev.type === WEV_RESIZE) account.resizes += 1;
+          // THE CLOSE REQUEST, COUNTED. M7 delivers it and the frame still goes (M9 owns the
+          // refusal), so the only way to know it arrived at all is to count it here — and it did
+          // NOT arrive until an independent critic found that `destroy` cleared the queue the
+          // page had just put it in.
+          if (ev.type === WEV_CLOSE) account.closes += 1;
           if (ev.type === WEV_DESTROYED) {
             account.destroyedSeen += 1;
             env.fs.close(row.fd);

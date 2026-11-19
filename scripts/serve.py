@@ -114,6 +114,24 @@ class _Limited:
         self._fp.close()
 
 
+class Server(ThreadingHTTPServer):
+    """`ThreadingHTTPServer` with a LISTEN BACKLOG THIS PROJECT'S PAGES ACTUALLY NEED.
+
+    `socketserver`'s default is 5. One page here boots six kernels; a `/usr` mount is fifteen
+    ranged GETs and Chrome opens up to six connections per origin at once, so a SYN arriving while
+    five are already queued is refused — and `fetch` reports a refused connection as
+    `TypeError: Failed to fetch`, with no status to tell it from anything else. Before the kernel
+    retried a transport failure that took the whole kernel down (constraint 212); after, it cost a
+    retry, and two consecutive refusals still took it down.
+
+    128 is the conventional ceiling and costs nothing: a backlog is a queue length, not an
+    allocation. `scripts/check.py` and `bench/kernel-churn/probe.py` build their own servers from
+    this class, so they inherit it.
+    """
+
+    request_queue_size = 128
+
+
 class Handler(SimpleHTTPRequestHandler):
     isolate = True
     #: M6. False omits the process realm's policy, to prove a check that needs it fails without
@@ -335,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Loopback only. Nothing here is meant to be reachable from another machine.
     try:
-        ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+        Server(("127.0.0.1", args.port), Handler).serve_forever()
     except KeyboardInterrupt:
         return 0
     return 0

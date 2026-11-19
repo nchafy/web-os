@@ -147,7 +147,7 @@ if str(HERE) not in sys.path:
 import cdp  # noqa: E402  - scripts/ is sys.path[0] when this file is the entry point
 from cdp import CDPError, Session  # noqa: E402
 from serve import (  # noqa: E402
-    ISOLATION_HEADERS, PROCESS_REALM_CSP, PROCESS_REALM_PREFIX, Handler,
+    ISOLATION_HEADERS, PROCESS_REALM_CSP, PROCESS_REALM_PREFIX, Handler, Server,
 )
 
 #: Pinned to the machine every figure in docs/CONSTRAINTS.md was measured on: dpr 2, desktop.
@@ -377,7 +377,10 @@ def serve(root, *, canonical=None, port: int = 0, isolate: bool = True, csp: boo
     lock = threading.Lock()
     handler = functools.partial(
         _recording_handler(isolate, log, lock, csp), directory=str(root))
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    # `serve.Server` AND NOT `ThreadingHTTPServer`: the listen backlog is the one thing these
+    # pages outgrow, and a 5-deep queue refuses a connection that `fetch` reports as
+    # `TypeError: Failed to fetch` (constraint 212). One definition, in serve.py.
+    httpd = Server(("127.0.0.1", port), handler)
     bound = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -2795,6 +2798,11 @@ M7_LABELS = (
     "and the kernel has no live window left",
     "and the other process is told on its own fd",
     "and both frames went",
+    # The X button, and the fix whose absence an independent critic found: the close request
+    # was queued by the page and wiped by `destroy` two messages later.
+    "close ok",
+    "the X button delivers WEV_CLOSE to the process",
+    "and the destroy notice arrives as well, not instead",
     # The not-responding detector, which moved here from `m4a` with the window ABI.
     "health ok",
     "the window worked before its process stopped reading",
@@ -2839,6 +2847,7 @@ READ_M7 = """(() => {
     procwin: one(P.procwin),
     cascade: one(P.cascade),
     crossproc: one(P.crossproc),
+    close: one(P.close),
     health: one(P.health),
   }
 })()"""
@@ -2851,12 +2860,13 @@ M7_SHAPE = {
     "procwin": (dict, type(None)),
     "cascade": (dict, type(None)),
     "crossproc": (dict, type(None)),
+    "close": (dict, type(None)),
     "health": (dict, type(None)),
 }
 
 #: What EVALUATING ONLY THE FIRST FD OF A POLL SET must break, and only this.
 #:
-#: Measured under the control on Chrome 157: exactly these six red, the other thirty-three intact.
+#: Measured under the control on Chrome 157: exactly these six red, the other thirty-six intact.
 #: Window A still wakes the poller, the real keystroke still reaches it, `/proc/<pid>/win` still
 #: lists both windows, the cascade still cascades, and the detector still greys and clears — the
 #: wedge polls a ONE-fd set, so first-fd-only cannot touch it.
@@ -2876,7 +2886,7 @@ _WIN_FIRST_FD_FAILS = (
 
 #: What A DESTROY THAT DOES NOT CASCADE must break.
 #:
-#: Eleven red, twenty-eight intact. Both cascade sections go, including the cross-process one — a
+#: Eleven red, thirty-one intact. Both cascade sections go, including the cross-process one — a
 #: child in another process is destroyed by the same walk — and so does the clause that asserts
 #: each program exited BECAUSE ITS WINDOWS WENT: a program that ran to its own ceiling still exits
 #: 0, so the exit status alone cannot tell the two apart.
@@ -3674,7 +3684,7 @@ CONTROLS: Dict[str, NegativeControl] = {
             "key translation, `/proc/<pid>/win` still lists both windows with the fds that reach "
             "them, the destroy cascade still cascades across a process boundary, and both edges "
             "of the not-responding detector still fire — the wedge polls a ONE-fd set, so "
-            "first-fd-only cannot touch it. Thirty-three of thirty-nine labels.",
+            "first-fd-only cannot touch it. Thirty-six of forty-two labels.",
         serve_kwargs={},
         fixture=None,
         query=(("win_first_fd", "1"),),
@@ -3700,7 +3710,7 @@ CONTROLS: Dict[str, NegativeControl] = {
             "alone cannot tell the two apart.\n"
             "WHAT MUST HOLD: every poll label, including the real keystroke; every `/proc/<pid>/"
             "win` label; and both edges of the detector. The cascade is a property of "
-            "`win_destroy` and has nothing to do with waiting on an fd. Twenty-eight of thirty-nine.",
+            "`win_destroy` and has nothing to do with waiting on an fd. Thirty-one of forty-two.",
         serve_kwargs={},
         fixture=None,
         query=(("no_cascade", "1"),),
@@ -7464,9 +7474,9 @@ def check_m4a(env: Env) -> None:
          "makes unreachable.\n"
          "negative control: --negative win-first-fd makes a parked `poll` evaluate only the FIRST "
          "fd of its set - `PLAN.md` §5's own words, 'the two-window case must hang'. Six labels "
-         "red and thirty-three intact, including the real keystroke into window A and both edges of "
+         "red and thirty-six intact, including the real keystroke into window A and both edges of "
          "the detector. --negative no-cascade destroys a parent without its children: eleven red, "
-         "twenty-eight intact, including every poll and `/proc` label. --negative no-isolation must "
+         "thirty-one intact, including every poll and `/proc` label. --negative no-isolation must "
          "come out BROKEN: no SAB, so no kernel and no windows.",
 )
 def check_m7(env: Env) -> None:
@@ -7514,7 +7524,7 @@ def check_m7(env: Env) -> None:
     if got["state"] != "done":
         env.unmeasurable("www/m7.html never reached a terminal state (state=%r)" % got["state"])
 
-    sections = ("poll_many", "procwin", "cascade", "crossproc", "health")
+    sections = ("poll_many", "procwin", "cascade", "crossproc", "close", "health")
     env.expect_that(
         "cell reported",
         all(got[name] is not None for name in sections),
@@ -7639,6 +7649,22 @@ def check_m7(env: Env) -> None:
                     {"childResult": x.get("childResult")})
     env.expect_that("and both frames went", x.get("framesAtCascade") == 0,
                     {"frames": x.get("framesAtCascade"), "goneMs": x.get("goneMs")})
+
+    # ---- PROOF 6: the X button delivers the close request --------------------------------
+    #
+    # A FIX'S CHECK. `Window.destroy` cleared the event queue before queueing its own notice, and
+    # the page posts `win-in [WEV_CLOSE]` and then `win-gone` as two messages, so the close record
+    # was wiped before any process could read it. Nothing asserted it until the critic said so.
+    cl = ev("close")
+    env.expect_that("close ok", section_ok("close"), cl)
+    env.expect_that("the X button delivers WEV_CLOSE to the process",
+                    (cl.get("closes") or 0) > 0,
+                    {"closes": cl.get("closes"), "result": cl.get("result")})
+    # AS WELL AS, NOT INSTEAD OF: the destroy notice is the other record, and keeping the queue is
+    # what lets both arrive.
+    env.expect_that("and the destroy notice arrives as well, not instead",
+                    (cl.get("destroyedSeen") or 0) > 0,
+                    {"destroyedSeen": cl.get("destroyedSeen"), "win": cl.get("win")})
 
     # ---- PROOF 5: the not-responding detector, both edges ---------------------------------
     h = ev("health")

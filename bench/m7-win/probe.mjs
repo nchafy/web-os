@@ -173,22 +173,41 @@ const key = (text) => ({ type: WEV_KEY, ...packKeyBytes(new TextEncoder().encode
   check("and really posts nothing", posts.length, 1);
 }
 
-// ---- destroy: the last record says why ---------------------------------------------------
+// ---- destroy: the queue is kept, and the LAST record says why ----------------------------
+//
+// THE FIRST VERSION OF THIS SECTION ASSERTED THE OPPOSITE, and the opposite was a defect an
+// independent critic found: `destroy` cleared the ring before queueing its notice, and the page
+// posts `win-in [WEV_CLOSE]` and then `win-gone` as two messages — so a close event, whose entire
+// purpose is to be read, was queued and wiped two messages later, and `src/bin/term.mjs`'s arm
+// for it could never run. Events already queued are real events.
 {
   const w = lone();
   const r = makeSlot();
   const into = new Uint8Array(WEV_BYTES * 4);
   reset();
   w.push(key("a"));
+  w.push({ type: WEV_CLOSE });
   w.destroy();
   const n = w.readEvents(r, r.seq, into, 0, into.length);
-  // THE QUEUE IS DISCARDED AND ONE RECORD REPLACES IT. A keystroke typed into a window that is
-  // gone is not worth delivering; the reason the window went is.
-  check("a destroyed window has exactly one record left", n, WEV_BYTES);
-  const ev = first(into, n);
+  check("a destroyed window keeps what was queued, plus the notice", n, WEV_BYTES * 3);
+  const got = decode(into, n);
+  check("in the order they arrived", got.map((e) => e.type), [WEV_KEY, WEV_CLOSE, WEV_DESTROYED]);
+  check("and the close event survives the destroy", keyText(got[0]), "a");
+  const ev = got[2] || { type: -1, a: -1 };
   check("and it is WEV_DESTROYED", ev.type, WEV_DESTROYED);
   check("naming the window that went", ev.a, 1);
   check("the next read is -EHOSTGONE", w.readEvents(r, r.seq, into, 0, into.length), -EHOSTGONE);
+  // AND THE NOTICE IS NEVER THE ONE DROPPED. `push` drops the NEWEST when the ring is full
+  // (constraint 213) and `destroy` inverts that for exactly one record: a reader cannot do
+  // without the record that says which window went.
+  const full = lone();
+  for (let i = 0; i < WIN_EVENT_CAP; i += 1) full.push(key("x"));
+  full.destroy();
+  const lastInto = new Uint8Array(WEV_BYTES * WIN_EVENT_CAP);
+  const all = decode(lastInto, full.readEvents(makeSlot(), 1, lastInto, 0, lastInto.length));
+  check("a full queue still gets its destroy notice, by dropping the oldest",
+    (all[all.length - 1] || {}).type, WEV_DESTROYED);
+  check("and the drop is counted", full.report().dropped, 1);
   check("and it is counted", w.report().goneReads, 1);
   check("a write refuses too", w.writeCells(new Uint8Array([65])), -EHOSTGONE);
   check("and that is counted", w.report().goneWrites, 1);
@@ -291,7 +310,11 @@ const key = (text) => ({ type: WEV_KEY, ...packKeyBytes(new TextEncoder().encode
   clock = 50000 + END_PROCESS_MS + 1;
   check("the wedged window reports level 2", w.sample(), 2);
   w.destroy();
+  // THE CLOCK, NOT THE QUEUE. The events are still there for a reader; what must stop is the age
+  // the detector reports, because a window that is gone is not a window that is slow.
   check("after destroy nothing is stale", w.staleMs(), 0);
+  checkThat("while the events queued before it are still readable",
+    w.report().pending >= 1, w.report())
   // A destroyed window reports NO transition at all, because the page has already been told the
   // frame is gone: a level change for it would be a caption on nothing.
   check("and no further level is reported", w.sample(), -1);

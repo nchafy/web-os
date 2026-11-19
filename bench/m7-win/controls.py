@@ -94,18 +94,19 @@ MUTATIONS = {
             "never there, and the cross-process case — a parent in another process taking a child "
             "down — has no event at all.",
         needle="""    this.push(notice);
-    this.destroyed = true;""",
+    /* THE STALE CLOCK STOPS, EVEN THOUGH THE QUEUE DOES NOT.""",
         replacement="""    this.destroyed = true;
-    this.push(notice);""",
+    this.push(notice);
+    /* THE STALE CLOCK STOPS, EVEN THOUGH THE QUEUE DOES NOT.""",
         moves=(
-            "a destroyed window has exactly one record left",
-            "and it is WEV_DESTROYED",
-            "naming the window that went",
             # "the next read is -EHOSTGONE" HOLDS under this mutation and is DECLARED NOT TO
             # MOVE: a destroyed window refuses later reads either way. What this mutation takes
-            # away is the ONE record that says why, which is what the labels below assert. The
-            # count moves because the refusal now happens one read earlier.
-            "and it is counted",
+            # away is the ONE record that says why, which is what every label below asserts.
+            "a destroyed window keeps what was queued, plus the notice",
+            "in the order they arrived",
+            "and it is WEV_DESTROYED",
+            "naming the window that went",
+            "a full queue still gets its destroy notice, by dropping the oldest",
             "the first is answered with a record",
             "and the record is the destroy notice",
         ),

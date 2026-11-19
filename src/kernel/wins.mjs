@@ -237,16 +237,37 @@ export class Window {
     return 0;
   }
 
-  /** Destroy. The LAST record queued is WEV_DESTROYED, delivered to a parked reader if there is
-   *  one, so a process whose window was destroyed under it learns that rather than reading a bare
-   *  errno. Every read after the ring empties is -EHOSTGONE. */
+  /**
+   * Destroy. The LAST record queued is WEV_DESTROYED, delivered to a parked reader if there is
+   * one, so a process whose window was destroyed under it learns that rather than reading a bare
+   * errno. Every read after the ring empties is -EHOSTGONE.
+   *
+   * THE QUEUE IS KEPT, AND THE FIRST VERSION OF THIS CLEARED IT — which made `WEV_CLOSE`
+   * unreachable. The page's X button posts `win-in [WEV_CLOSE]` and then `win-gone`, and the
+   * kernel serves them in that order, so a close record was queued and wiped two messages later;
+   * a relay parked in `poll` rather than in `read` never saw it, and `src/bin/term.mjs`'s arm for
+   * it was dead code. Events already queued were real events, including the keystrokes typed just
+   * before the window closed, and a reader drains them before the -EHOSTGONE.
+   *
+   * ROOM FOR THE NOTICE IS MADE BY DROPPING THE OLDEST, and this is the one place that rule is
+   * inverted (`push` drops the newest — see constraint 213). The notice is the record a reader
+   * cannot do without: it names the window and it is the difference between "destroyed under me"
+   * and "there was never such a window".
+   */
   destroy() {
     if (this.destroyed) return 0;
     const notice = { type: WEV_DESTROYED, a: this.id };
-    // Order matters: `destroyed` goes up AFTER the notice, or `push` refuses its own last record.
-    this.events.clear();
-    this.unreadSince = 0;
+    if (this.events.free < WEV_BYTES) {
+      this.events.shift(new Uint8Array(WEV_BYTES), 0, WEV_BYTES);
+      this.stats.dropped += 1;
+    }
     this.push(notice);
+    /* THE STALE CLOCK STOPS, EVEN THOUGH THE QUEUE DOES NOT. They answer different questions: the
+     * queue holds events a reader is still owed, and the clock asks whether somebody who was
+     * supposed to be collecting them has stopped. A destroyed window is not a slow one — M4a's
+     * console grew `staleMs` against a window that no longer existed and captioned a frame that
+     * was gone, which is the regression `bench/m7-win/probe.mjs` keeps a section for. */
+    this.unreadSince = 0;
     this.destroyed = true;
     this.attached = false;
     const answered = this.waitingReaders.length;
@@ -413,6 +434,11 @@ export class WinMgr {
     }
     if (ids.length > 1) this.stats.cascaded += ids.length - 1;
     K.post({ t: "win-destroy", ids });
+    // AND DROP WHAT NOBODY CAN REACH, here rather than on a timer: a destroyed window whose last
+    // description has already gone is a row with no reader, and `sample()` walks every row on
+    // every heartbeat (constraint 18). `src/kernel/files.mjs`'s `F_WIN.close` sweeps too, which
+    // covers the other order — the fd closing after the window was destroyed.
+    this.sweep();
     return ids;
   }
 
