@@ -26,6 +26,9 @@
   .head h2 { margin:0; font-size:18px; }
   .tag { font-size:11px; padding:2px 7px; border-radius:9px; background:#d9e6f5; color:#2c5d8f; }
   .tag.none { background:#e6e9ed; color:#6b7c8f; }
+  .built { margin:0 0 10px; padding:7px 10px; border-left:3px solid #8f8;
+    background:#16211a; color:#cfe8d4; max-width:66ch; }
+  .built code { color:#9fd4a8; }
   .lede { color:var(--dim); max-width:66ch; margin:7px 0 16px; }
   .screen { border:1px solid #8fa4ba; border-radius:3px; overflow:hidden; position:relative;
             height:384px; background:#1b2b1b; box-shadow:0 2px 10px rgba(20,40,70,.16); }
@@ -102,7 +105,7 @@
  */
 const T = (s) => s.replace(/^\n/, '').replace(/\n\s*$/, '')
 const M = [
- { id:'M0', grp:'Spine', t:'Prove the channel', d:'1 d · no UI', tag:'no UI',
+ { id:'M0', built:'/www/m0.html', builtWhat:'the syscall sweep and its eight controls', grp:'Spine', t:'Prove the channel', d:'1 d · no UI', tag:'no UI',
   lede:'A kernel worker, N process workers, three syscalls. The deliverable is a number, and that number decides whether the project is viable at all.',
   screen:{kind:'noui',body:T(`
 $ bench/feasibility/run.py
@@ -124,7 +127,7 @@ $ bench/feasibility/run.py
   neg:'Insert a 2 ms synchronous stall in the kernel handler — p99 must blow past the bar.',
   warn:'Measured already on this machine: a nested-worker futex round trip is p50 10 µs / p95 25 / p99 30, max 840. See <code>bench/feasibility/</code>. What is unmeasured is contention, which is the whole point of M0.' },
 
- { id:'M1', grp:'Spine', t:'Processes, signals, kill', d:'4 d · no UI', tag:'no UI',
+ { id:'M1', built:'/www/m1.html', builtWhat:'a spinner dies on End Process', grp:'Spine', t:'Processes, signals, kill', d:'4 d · no UI', tag:'no UI',
   lede:'The headline capability: a process spinning in an infinite loop with no syscalls dies when you end it. Still nothing on screen.',
   screen:{kind:'noui',body:T(`
 $ scripts/check.py --only process
@@ -141,7 +144,7 @@ $ scripts/check.py --only process
   proof:'Four assertions. The subtle one: kill the kernel worker and every parked process returns <code>EIO</code> — <i>without</i> reloading the page, because a reload would hide the defect.',
   neg:'Remove the SIGPEND check at syscall entry. Ctrl-C must stop working.' },
 
- { id:'M2', grp:'Spine', t:'Filesystem on OPFS', d:'8 d · no UI', tag:'no UI',
+ { id:'M2', built:'/www/m2.html', builtWhat:'10,000 files across a reload', grp:'Spine', t:'Filesystem on OPFS', d:'8 d · no UI', tag:'no UI',
   lede:'The biggest milestone in the spine and the one where the most can silently go wrong. Journalled, with an fsck that refuses to reseed.',
   screen:{kind:'noui',body:T(`
 $ scripts/check.py --only fs
@@ -165,7 +168,7 @@ $ scripts/check.py --only fs
   proof:'10k files survive reload. A torn journal <b>reports its discarded tail</b> rather than reseeding. Two concurrent opens of one file both succeed.',
   neg:'Two stages. Drop the write ordering — fsck must report corruption. Then break the CRC check and confirm the torn-journal test <i>starts passing</i>; if it passes either way it was testing nothing.' },
 
- { id:'M3', grp:'Spine', t:'/proc, /dev, mounts', d:'2 d · no UI', tag:'no UI',
+ { id:'M3', built:'/www/m3.html', builtWhat:'/proc, /dev and the mount table, from a process', grp:'Spine', t:'/proc, /dev, mounts', d:'2 d · no UI', tag:'no UI',
   lede:'About 120 lines, and the clearest demonstration that a process is a first-class object. Also where /dev/trace lands — measured at 4 ns a record, so always-on tracing costs 0.03% of a syscall.',
   screen:{kind:'noui',body:T(`
 $ cat /proc/4/status
@@ -198,7 +201,7 @@ $ strace -p 2
   neg:'Serve a cached <code>/proc</code> listing instead of regenerating — the killed pid must linger and the check must fail.',
   warn:'The trace ring needs a dropped-record counter, displayed. A 1 MiB ring holds 32,768 records and wraps every 0.5 s at full syscall rate — a view that silently drops records shows a clean picture of a broken system.' },
 
- { id:'M4', grp:'Spine', t:'Pipes, pty, line discipline', d:'5 d · no UI', tag:'no UI',
+ { id:'M4', built:'/www/m4b.html', builtWhat:'the pty, the line discipline and poll', grp:'Spine', t:'Pipes, pty, line discipline', d:'5 d · no UI', tag:'no UI',
   lede:'The line discipline goes in the kernel, not the terminal widget — so Ctrl-C works when the UI is wedged, which is exactly when you need it.',
   screen:{kind:'noui',body:T(`
 $ scripts/check.py --only ipc
@@ -219,7 +222,7 @@ $ scripts/check.py --only ipc
   neg:'Stop delivering SIGPIPE — <code>yes | head -1</code> must hang forever.',
   warn:'Readers see EOF, writers see EPIPE. An earlier draft of the plan had this backwards, which would make <code>yes | head -1</code> either hang or report a spurious error.' },
 
- { id:'M4a', grp:'Spine', t:'The first window', d:'2 d · first pixels', tag:'first UI',
+ { id:'M4a', built:'/www/m4a.html', builtWhat:'a real keypress through a real pty', grp:'Spine', t:'The first window', d:'2 d · first pixels', tag:'first UI',
   lede:'Not in the original design. Added because 20 working days with nothing on screen is how solo projects die. Unstyled, special-cased, and M7 deletes it.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:38,y:30,w:430,h:250,title:'Terminal',body:T(`
@@ -231,7 +234,7 @@ user@web-os:~$ _`)}]},
   neg:'Detach the pty — the keystroke must not appear.',
   warn:'This window is special-cased, <b>not an ABI</b>. Write that in the code, or it quietly becomes the architecture.' },
 
- { id:'M5', grp:'Spine', t:'The shell and ten programs', d:'6 d', tag:'shell',
+ { id:'M5', built:'/www/m5.html', builtWhat:'`ls /usr/bin | grep c | wc -l` through three processes', grp:'Spine', t:'The shell and ten programs', d:'6 d', tag:'shell',
   lede:'Three real processes in one pipeline. The programs are mostly new code — webxp contributes about 230 lines across six of them, and kill and ps have no equivalent at all because it had no process table.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:38,y:24,w:470,h:300,title:'Terminal — /bin/sh',body:T(`
@@ -253,7 +256,7 @@ user@web-os:~$ _`)}]},
   neg:'Make <code>spawn</code> return the parent\'s pid — <code>ps</code> must show one process and the check must fail.',
   warn:'No fork. The real casualty is <code>f | g</code> with both sides shell functions: one Worker cannot run both and serialising deadlocks when the pipe buffer fills. Budget a second shell worker — constraint 20a.' },
 
- { id:'M6', grp:'Spine', t:'Neuter the process realm', d:'2 d', tag:'the boundary',
+ { id:'M6', built:'/www/m6.html', builtWhat:'the stripped realm, and the program that dies proving it', grp:'Spine', t:'Neuter the process realm', d:'2 d', tag:'the boundary',
   lede:'The finding that nearly killed the premise. A same-origin worker has ambient OPFS access, so a program can write the kernel\'s own blob store. Until this closes, the boundary is decorative.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:28,y:20,w:500,h:310,title:'Terminal — the exploit, before and after',body:T(`
@@ -278,7 +281,7 @@ State:  X (faulted: realm violation)`)}]},
   neg:'Skip the lockdown — the same program must <b>succeed</b>. If it does not, the check is testing nothing.',
   warn:'Hardening, not a security boundary. Same-origin is not a security boundary and never will be. Threat model is first-party only for v1.' },
 
- { id:'M7', grp:'Window half (A)', t:'A window is a file descriptor', d:'4 d', tag:'option A',
+ { id:'M7', built:'/www/m7.html', builtWhat:'six proofs, then a desktop: `winopen -n 2 -o`', grp:'Window half (A)', t:'A window is a file descriptor', d:'4 d', tag:'option A',
   lede:'Not a bare winid. A process has one futex word, so with a per-window poll a process holding two windows cannot wait on both. win_create returns an fd, and poll() becomes the single wait primitive for everything.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:26,y:18,w:300,h:170,title:'editor — notes.txt  (fd 4)',body:T(`
@@ -294,7 +297,7 @@ jumps over the lazy dog_`)},
   proof:'One process opens two windows and a pipe; <code>poll()</code> wakes it for each in turn.',
   neg:'Wake only on the first fd in the set — the two-window case must hang.' },
 
- { id:'M8', grp:'Window half (A)', t:'The surface', d:'3 d', tag:'option A',
+ { id:'M8', built:'/www/m8.html', builtWhat:'four proofs, then a desktop: `paint`, and draw with the mouse', grp:'Window half (A)', t:'The surface', d:'3 d', tag:'option A',
   lede:'win_create returns a winid and a transferred OffscreenCanvas. Without it there is no syscall that puts a pixel inside a window — and every app that is not the terminal is a beautiful frame around nothing.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:30,y:24,w:360,h:230,title:'paint — surface demo',
@@ -688,6 +691,9 @@ function show(i){
     <div class="head"><h2>${m.id} — ${m.t}</h2>
       <span class="tag ${m.tag==='no UI'?'none':''}">${m.tag}</span>
       <span class="tag none">${m.d}</span></div>
+    ${m.built ? `<p class="built"><b>BUILT.</b> This one is real — open
+      <code>${m.built}</code> under <code>scripts/serve.py</code>: ${m.builtWhat}. The picture
+      below is still the mockup, and the page is what to believe.</p>` : ''}
     <p class="lede">${m.lede}</p>
     ${screenHtml(m)}
     ${m.warn?`<div class="card neg" style="margin-top:14px"><h3>Watch out</h3>${m.warn}</div>`:''}
@@ -696,9 +702,11 @@ function show(i){
       <div><div class="card proof"><h3>Proof</h3>${m.proof}</div>
         <div class="card neg" style="margin-top:12px"><h3>Negative control</h3>${m.neg}</div></div>
     </div>
-    <p class="foot">Mockup, not a screenshot — none of this is built yet. Milestones, proofs and
-    negative controls come from <code>MILESTONES.md</code>; measured figures from
-    <code>docs/research/gap-04.md</code> and <code>bench/feasibility/results.json</code>.
+    <p class="foot">Mockup, not a screenshot. <b>M0 to M8 are built</b> — those carry a BUILT
+    line above with the page that proves them, and the page is what to believe; everything from
+    M9 on is still a drawing. Milestones, proofs and negative controls come from
+    <code>MILESTONES.md</code>; measured figures from <code>docs/research/gap-04.md</code> and
+    <code>bench/feasibility/results.json</code>.
     Five of the first six milestones have no user interface at all, which is the honest reason
     M4a exists.</p>`
   main.scrollTop=0
