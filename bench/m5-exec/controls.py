@@ -95,7 +95,11 @@ CONTROLS = {
         "its own accounting stays at zero loads while the CHILD's module loader fetches and "
         "evaluates remote code. `//example.invalid/p.mjs` resolves OFF-ORIGIN through `new URL`, "
         "measured, so the mutation puts a real off-origin specifier in a real program image.",
-        [("    if (!PROGRAM_IMPORTS.includes(specifier)) {", "    if (false) {")],
+        # RE-POINTED, and it was dead before this: the allowlist test became
+        # `f.specifier` when the scanner started carrying its findings as objects, so this
+        # control's anchor named a line that no longer existed and the harness refused to run it
+        # rather than reporting "nothing moved". That refusal is why it was caught at all.
+        [("    if (!PROGRAM_IMPORTS.includes(f.specifier)) {", "    if (false) {")],
         ("no_url ok", "and every import naming a host was refused by the linker",
          "verdict is ok"),
     ),

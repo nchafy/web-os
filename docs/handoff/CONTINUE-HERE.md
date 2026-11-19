@@ -6,8 +6,14 @@ tell you. Everything the repo settles, the repo settles.
 
 ## Where the work is
 
-**THE AUTHORITATIVE WORKTREE IS `.claude/worktrees/webos-impl`, ON BRANCH
-`worktree-webos-impl`.** Work there. It is the only branch that contains every commit in the
+**M7 LANDED ON BRANCH `m7-window`, IN `.claude/worktrees/m7-window`, on top of the cleaned
+history (`rewritten2` / `origin/webos-clean-history-v2`).** That is the tip: it contains the clean
+history and M7. Branch from it, or merge it into whatever you are calling authoritative, BEFORE
+writing anything on top — the constraint numbering alone makes a second fork expensive, and M7
+appended 210–216.
+
+**The note below is the older arrangement and is kept because its reasoning still applies.** THE
+AUTHORITATIVE WORKTREE WAS `.claude/worktrees/webos-impl`, ON BRANCH `worktree-webos-impl`. It is the only branch that contains every commit in the
 repository, and it is pushed.
 
 - **Why this needed saying.** Six worktrees existed on five branches and development had forked in
@@ -43,21 +49,27 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a and **M6**. The spine is COMPLETE; the next milestone is M7, the first of option A. Each has a record in
-`MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a, M6 and **M7**. The spine is COMPLETE and
+the window half has started; the next milestone is **M8, the window surface**. Each has a record
+in `MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 10 checks, 394 expectations. Measured 2026-11-16: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 26, m6 31 |
+| `scripts/check.py` | the suite — 11 checks, 429 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 39, m6 31 |
+| `scripts/check.py --negative win-first-fd` | M7's first control — a parked `poll` evaluates only the FIRST fd of its set. 6 red, 33 intact, and the real keystroke into window A must still arrive |
+| `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 28 intact, and every poll and `/proc` label must hold |
+| `node bench/m7-win/probe.mjs` | 123 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
+| `bench/m7-win/controls.py` | 5 mutations of `wins.mjs`, scored on WHICH checks move. One is a DECLARED CRASH (`no-floor`), because a torn record must make a program fail loudly rather than decode as noise |
+| `bench/m7-win/drive.py` | the fast loop: open `www/m7.html` in a real Chrome and print its own evidence, clause by clause. `--live` leaves the desktop open; `--page m4a` drives that one |
+| `bench/kernel-churn/probe.py --drop` | the program fetch dropped at the TRANSPORT, which panicked the kernel before constraint 212. Every kernel must still boot AND one must report a transport retry |
 | `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |
 | `scripts/check.py --negative no-lockdown` | M6's first control — the process realm is not stripped, so a uid-1000 process writes the kernel's blob by inode. 14 red, 17 intact, and every LOADER clause must hold |
 | `scripts/check.py --negative no-csp` | M6's second control — the process realm's policy is not served, so a computed `import(expr)` and `eval` work again. 8 red, 23 intact, and every REALM clause must hold |
 | `node bench/m6-realm/probe.mjs` | 25 host checks over the lockdown, including the ONE path no browser can reach: its refusal to evaluate program text when a binding survives |
 | `bench/m6-realm/controls.py` | 3 mutations of the lockdown, scored on WHICH checks move. `shallow` is the obvious mistake (own-property `delete` removes nothing here); `no-verify` is the dangerous one (a green report over an open realm) |
 | `bench/m6-realm/csp-probe.py` | WHERE a policy has to be delivered, as a measurement: four deliveries, its own second origin for the off-origin row. `--no-isolation` proves it refuses to report |
-| `node bench/m4a-console/probe.mjs` | 65 host checks over `/dev/console`: the queue, the parks, detach, and the detector's two edges. No browser |
 | `node bench/m4a-window/probe.mjs` | 29 host checks over the window's clamp — the one part of `src/wm/` whose failure is invisible on screen |
-| `node bench/m3-synth/probe.mjs` | 98 host checks over `/proc` and `/dev`, 13 of them `/dev/console`'s in the mount table |
+| `node bench/m3-synth/probe.mjs` | 90 host checks over `/proc` and `/dev`. It was 98 with `/dev/console`'s thirteen; M7 deleted the device and the mechanism, and what replaced them is the simpler rule that EVERY generated file refuses a write |
 | `scripts/check.py --prove-failure both` | inverts every expectation, and runs the no-isolation phase; must report failures |
 | `bench/m4b-pty/controls.py` | the pty's 5 mutation controls, each scored on WHICH labels move |
 | `bench/kernel-churn/probe.py` | how reliable is one kernel boot? `--n 60 --runs 6`; `--stall` proves the program-fetch deadline fires |
@@ -240,6 +252,48 @@ destroy its window in the same `finally`.
 was left copied rather than extracted because every page is a shipped milestone whose bytes
 `served_matches_disk` asserts, and a half-done extraction is worse than a whole duplication. The
 next page is the ninth copy; extract it then, and re-run every check.
+
+## What M7 built, and the four things it leaves M8
+
+**A window is a file description.** `win_create` (48) returns an fd in r0 and a winid in r1,
+`win_destroy` (49) returns the LIST of winids it destroyed, `win_set` (50) changes a field. The
+window's events are the fd's readable set, so `read(2)` and `poll(2)` are the only wait primitives
+and there is no `win_poll`. `/dev/console`, the chardev mechanism under it and the ENXIO it answered
+are deleted (constraint 211). `docs/ABI.md` §"The window group, as M7 built it" is the reference.
+
+1. **THE SURFACE IS M8's AND NOTHING HERE PRE-EMPTS IT.** A window currently shows what a process
+   `write`s to its fd, rendered by `src/wm/terminal.mjs` as text. `src/wm/winhost.mjs` builds that
+   widget per window in ONE place (`#create`), so a surface replaces that line and nothing else —
+   and `MILESTONES.md`'s ordering correction says to decide server-allocated versus transferred
+   `OffscreenCanvas` BEFORE M12's governor, because the governor cannot account what it did not
+   allocate.
+
+2. **`WEV_CLOSE` IS DELIVERED AND NOT ENFORCED, which is M9's job.** The page's X button posts the
+   event AND `win-gone`; the frame goes either way. `src/bin/term.mjs` says so where a reader meets
+   it. Do not let a program pretend to refuse before M9 makes the refusal real.
+
+3. **THE OWNER CHAIN ALREADY CROSSES PROCESSES, and that was deliberate.** `owner` may name a
+   window in another process, `win_destroy` cascades across the boundary, and the other process
+   learns on its own fd through the one `WEV_DESTROYED` record a destroyed window keeps. M9 adds
+   `modal` — which is a different axis from owner, per the ordering correction: SerenityOS's
+   enforced `WindowMode` describes BEHAVIOUR (`Modeless | Passive | RenderAbove | Blocking`) where
+   `modal ∈ {none, window, app, system}` describes SCOPE, and an owned window needs both.
+
+4. **THE EVENT RECORD IS FIXED WIDTH AND THE QUEUE IS BOUNDED PER FD.** 16 bytes, one codec in
+   `src/abi.mjs`, reads floored to whole records and -EINVAL for a buffer that cannot hold one.
+   `WIN_EVENT_CAP` = 256 records, the NEWEST dropped and counted, because the oldest is the one the
+   not-responding detector is measuring (constraint 213). A pointer event stream will be the first
+   thing to test that budget — add it as a type, not as a second queue.
+
+**Two traps, both paid for once:**
+
+- **A clause satisfiable by the system's own setup is not a proof.** The headline poller ran until
+  every fd had woken it once, and the page's own geometry report had already made all three ready
+  before a key was pressed (constraint 214). Ask what the system does on its own before writing an
+  exit condition.
+- **`scripts/check.py` is not the fast loop for a window milestone.** `bench/m7-win/drive.py`
+  prints the page's clauses in two seconds of reading; the check prints a verdict. Both were
+  needed, and the probe + `controls.py` caught three weak assertions the browser never would.
 
 ## What M6 changed that touches everything after it
 

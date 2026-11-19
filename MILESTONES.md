@@ -1136,7 +1136,8 @@ window milestone's business.
 **Gates.** `scripts/check.py --only m4a` (26 expectations, 6.4 s),
 `scripts/check.py --negative pty-detach` (6 red, 20 intact),
 `scripts/check.py --only m4a --negative no-isolation` (BROKEN: no SAB, so no kernel and no pty),
-`node bench/m4a-console/probe.mjs` (65 host checks over the device, no browser),
+65 host checks over the console device, no browser — M7 retired that probe with the
+device, and `bench/m7-win/probe.mjs` carries its two regressions forward —
 `node bench/m4a-window/probe.mjs` (29 host checks over the clamp; two mutations move 10 and 2
 labels and leave the rest) and
 `node bench/m3-synth/probe.mjs` (98 host checks, 13 of them `/dev/console`'s in the mount table).
@@ -1146,7 +1147,7 @@ checks now.** `detach` cleared the keystroke queue and left the stale clock runn
 DESTROYED window reported "(Not Responding)" — a caption on a frame that is gone. And `waitpid`
 came after the loop unconditionally, so the CEILING path — the one that exists to report a session
 that stopped — would have hung in the act of reporting it. The first is two labels in
-`bench/m4a-console/probe.mjs`, shown capable of failing by removing the one line that fixes it; the
+that probe, shown capable of failing by removing the one line that fixes it; the
 second is why `term` hangs up on its shell before waiting for it.
 
 **Then the operator ran it in a real browser and found six more.** All six were in the HARNESS or

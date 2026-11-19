@@ -44,7 +44,7 @@
       },
       "createObjectURL": {
         "ok": true,
-        "value": "blob:http://127.0.0.1:54997/d513d8f5-2fe"
+        "value": "blob:http://127.0.0.1:59525/2d11cbce-de8"
       },
       "nestedWorker": {
         "ok": true,
@@ -73,7 +73,7 @@
         },
         "sameOrigin": {
           "ok": true,
-          "value": "2111583449"
+          "value": "1991652624"
         }
       },
       "insideBlob": {
@@ -104,7 +104,7 @@
       },
       "xhr": {
         "ok": false,
-        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs'."
+        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs'."
       },
       "importScripts": {
         "ok": false,
@@ -128,7 +128,7 @@
       },
       "createObjectURL": {
         "ok": true,
-        "value": "blob:http://127.0.0.1:54997/6753a656-b36"
+        "value": "blob:http://127.0.0.1:59525/96f00603-3af"
       },
       "nestedWorker": {
         "ok": true,
@@ -153,26 +153,26 @@
         },
         "remote": {
           "ok": false,
-          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:54998/remote.mjs"
+          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:59526/remote.mjs"
         },
         "sameOrigin": {
           "ok": true,
-          "value": "2111583449"
+          "value": "1991652624"
         }
       },
       "insideBlob": {
         "ok": true,
-        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:54998/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
+        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:59526/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
       }
     },
     "violations": [
       {
-        "blockedURI": "http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs",
+        "blockedURI": "http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs",
         "directive": "connect-src",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs",
+        "blockedURI": "http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs",
         "directive": "connect-src",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
@@ -197,7 +197,7 @@
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54998/remote.mjs",
+        "blockedURI": "http://127.0.0.1:59526/remote.mjs",
         "directive": "script-src-elem",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
@@ -207,7 +207,7 @@
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54998/remote.mjs",
+        "blockedURI": "http://127.0.0.1:59526/remote.mjs",
         "directive": "script-src-elem",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       }
@@ -258,7 +258,7 @@
       },
       "createObjectURL": {
         "ok": true,
-        "value": "blob:http://127.0.0.1:54997/f9836b52-bd7"
+        "value": "blob:http://127.0.0.1:59525/d3c3a6fe-875"
       },
       "nestedWorker": {
         "ok": true,
@@ -287,7 +287,7 @@
         },
         "sameOrigin": {
           "ok": true,
-          "value": "2111583449"
+          "value": "1991652624"
         }
       },
       "insideBlob": {
@@ -318,7 +318,7 @@
       },
       "xhr": {
         "ok": false,
-        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs'."
+        "why": "NetworkError: Failed to execute 'send' on 'XMLHttpRequest': Failed to load 'http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs'."
       },
       "importScripts": {
         "ok": false,
@@ -342,7 +342,7 @@
       },
       "createObjectURL": {
         "ok": true,
-        "value": "blob:http://127.0.0.1:54997/637ceb71-f54"
+        "value": "blob:http://127.0.0.1:59525/5e9abf5b-3da"
       },
       "nestedWorker": {
         "ok": true,
@@ -367,26 +367,26 @@
         },
         "remote": {
           "ok": false,
-          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:54998/remote.mjs"
+          "why": "TypeError: Failed to fetch dynamically imported module: http://127.0.0.1:59526/remote.mjs"
         },
         "sameOrigin": {
           "ok": true,
-          "value": "2111583449"
+          "value": "1991652624"
         }
       },
       "insideBlob": {
         "ok": true,
-        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:54998/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
+        "value": "{\"data\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: data:text/javascript,export const V = 'data: from inside a program'\"},\"remote\":{\"ok\":false,\"why\":\"Failed to fetch dynamically imported module: http://127.0.0.1:59526/remote.mjs\"},\"evalInProgram\":{\"ok\":false,\"why\":\"Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not \"}}"
       }
     },
     "violations": [
       {
-        "blockedURI": "http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs",
+        "blockedURI": "http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs",
         "directive": "connect-src",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54997/bench/m6-realm/csp-dep.mjs",
+        "blockedURI": "http://127.0.0.1:59525/bench/m6-realm/csp-dep.mjs",
         "directive": "connect-src",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
@@ -411,7 +411,7 @@
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54998/remote.mjs",
+        "blockedURI": "http://127.0.0.1:59526/remote.mjs",
         "directive": "script-src-elem",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
@@ -421,7 +421,7 @@
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       },
       {
-        "blockedURI": "http://127.0.0.1:54998/remote.mjs",
+        "blockedURI": "http://127.0.0.1:59526/remote.mjs",
         "directive": "script-src-elem",
         "policy": "default-src 'none'; script-src 'self' blob:; connect-src 'none'"
       }

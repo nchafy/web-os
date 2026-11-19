@@ -42,7 +42,7 @@ check("/proc lists every live pid", proc.listRel("/").map((e) => e.name),
 check("/proc is a directory", proc.stat({}, "/").type, DIR);
 check("a pid directory is a directory", proc.stat({}, `/${a.pid}`).type, DIR);
 check("a pid directory lists its files", proc.listRel(`/${a.pid}`).map((e) => e.name),
-  ["status", "cmdline", "cwd", "fd"]);
+  ["status", "cmdline", "cwd", "fd", "win"]);
 
 // ---- PROOF 1, the half that is the actual subject: a killed pid VANISHES -----------------
 // Reaped, as waitpid does it. The directory must be gone on the very next read, because nothing
@@ -148,8 +148,10 @@ checkThat("a directory reports its entry count",
   proc.stat({}, "/").size === proc.listRel("/").length, proc.stat({}, "/").size);
 
 // ---- PROOF 3: /dev/trace, and the dropped counter ---------------------------------------
+// `console` WAS HERE AND IS NOT ANY MORE. M7 deleted `/dev/console` and the character-device
+// mechanism under it: a window is created by `win_create`, not opened by path (constraint 211).
 check("/dev lists its devices", dev.listRel("/").map((e) => e.name),
-  ["trace", "null", "zero", "console"]);
+  ["trace", "null", "zero"]);
 check("/dev/trace is read-only to a process", dev.stat({}, "/trace").mode, 0o444);
 check("/dev/null is writable in its mode bits", dev.stat({}, "/null").mode, 0o666);
 
@@ -192,37 +194,32 @@ checkThat("and says how many of them it showed", /^shown:\t256$/m.test(bigText),
 check("/dev refuses unlink with EROFS", code(() => dev.unlink({}, "/trace")), "EROFS");
 check("/dev refuses an unknown device with ENOENT", code(() => dev.stat({}, "/sda")), "ENOENT");
 
-// ---- M4a: /dev/console is a CHARACTER DEVICE and not a generated file --------------------
-//
-// The distinction is the whole of the addition: a generated file's `open` hands back BYTES, and a
-// device's hands back a name the kernel resolves to an object. Checked here because the SynthFS
-// half is pure and host-testable; the kernel half (-ENXIO with no window, F_WIN, poll) needs a
-// kernel and www/m4a.html drives it.
-const conDec = dev.openDecision({}, "/console", { wantR: true, wantW: true });
-check("/dev/console opens as a character device", conDec.chardev, "console");
-checkThat("and carries no bytes, because a device has none", conDec.bytes === undefined, conDec);
-checkThat("and is not marked synthetic", conDec.synth === undefined, conDec);
-// THE ONE THAT MATTERS, and the one that was wrong first: `/dev` is mounted MNT_RO and a generated
-// filesystem refuses `wantW` with EROFS, so the device arm has to come BEFORE that refusal or
-// every O_RDWR open of the console is EROFS. A terminal that cannot be written to is not a
-// terminal.
-check("/dev/console accepts a write-opening, unlike a generated file",
-  code(() => dev.openDecision({}, "/console", { wantW: true })), "<no throw>");
-check("while /dev/trace still refuses one with EROFS",
+/* ---- THE CHARACTER DEVICE IS GONE, AND SO ARE ITS THIRTEEN CHECKS -----------------------
+ *
+ * M4a's `/dev/console` was the only row `CHARDEVS` ever had — a name whose `open` handed back a
+ * kernel OBJECT rather than bytes, and the one thing on a read-only generated filesystem that
+ * could be opened for writing. M7 deleted it, and with no row left the mechanism had no caller:
+ * `SynthFS.chardevAt`, the `chardev` field on a node and the `chardev` branch in `open(2)` went
+ * with it (constraint 211). A window is created by `win_create` now; its queue, its parks and the
+ * not-responding detector are `bench/m7-win/probe.mjs`'s 123 host checks.
+ *
+ * What is asserted INSTEAD is the rule that is left, and it is simpler: EVERY generated file
+ * refuses a write, with no exception to keep ahead of the lookup.
+ */
+check("a generated filesystem refuses a write-opening with EROFS",
   code(() => dev.openDecision({}, "/trace", { wantW: true })), "EROFS");
-// A mount with no `mknod` cannot make a device, so O_CREAT is still refused.
-check("/dev/console refuses O_CREAT with EROFS",
-  code(() => dev.openDecision({}, "/console", { create: true })), "EROFS");
-check("/dev/console publishes no size", dev.stat({}, "/console").size, 0);
-check("/dev/console is readable and writable in its mode bits",
-  dev.stat({}, "/console").mode, 0o666);
-// `chardevAt` is what `open` asks BEFORE it decides a write is refused by the mount, so it must
-// answer from a declared set and never by running a generator. /proc has no devices at all.
-check("chardevAt names the device", dev.chardevAt("/console"), "console");
-check("chardevAt says nothing about a generated file", dev.chardevAt("/trace"), null);
-check("chardevAt says nothing about the root", dev.chardevAt("/"), null);
-check("chardevAt on a nested path is not a device", dev.chardevAt("/console/x"), null);
-check("/proc has no character devices", proc.chardevAt("/console"), null);
+check("and refuses O_CREAT with EROFS",
+  code(() => dev.openDecision({}, "/null", { create: true })), "EROFS");
+// THE REFUSAL STAYS AHEAD OF THE LOOKUP, which is what `/dev/console` used to be the exception
+// to: a write-open of a name that does not exist is EROFS before it is ENOENT.
+check("the refusal comes before the lookup, so a missing name is EROFS and not ENOENT",
+  code(() => dev.openDecision({}, "/nope", { wantW: true })), "EROFS");
+check("while a READ-opening of a missing name is ENOENT",
+  code(() => dev.openDecision({}, "/nope", { wantR: true })), "ENOENT");
+// And nothing on either generated filesystem claims to be a device any more.
+checkThat("no generated filesystem exposes a chardev lookup at all",
+  dev.chardevAt === undefined && proc.chardevAt === undefined,
+  { dev: typeof dev.chardevAt, proc: typeof proc.chardevAt });
 
 // ---- openDecision hands back a snapshot -------------------------------------------------
 const dec = proc.openDecision({}, `/${a.pid}/status`, {});

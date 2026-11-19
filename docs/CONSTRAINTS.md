@@ -1385,7 +1385,8 @@ Measured 2026-11-16 on Chrome 157.0.8103.52 / macOS 26.7.2 / Apple M2 Pro / 120 
     `Console.detach` cleared the keystroke queue and left `unreadSince` set, so `staleMs` kept
     growing against a window that no longer existed and the detector reported a DESTROYED window as
     not responding — a caption on a frame that is gone. Now two labels in
-    `bench/m4a-console/probe.mjs`, shown capable of failing by removing the single line that fixes
+    M4a's console probe (retired by M7; `bench/m7-win/probe.mjs` carries the
+    section), shown capable of failing by removing the single line that fixes
     it: exactly `after detach nothing is stale` and `and the level drops rather than latching at 2`
     move, and the other 63 hold.
     `term` called `waitpid` after its loop unconditionally, so every exit that left a live child
@@ -1540,7 +1541,7 @@ which is the point worth keeping.
     governs, and the caption greys.
     BOTH AXES ARE EDGE-REPORTED. Acquiring a first opener does not change the LEVEL, so a page told
     only about levels left "(Starting…)" on a working terminal for ever.
-    The control moves exactly two labels in `bench/m4a-console/probe.mjs` — `and never reports
+    The control moved exactly two labels in M4a's console probe — `and never reports
     not-responding, however long the queue waits` and `its level stays 0` — and leaves the other 75.
 182. **The detector's own proof was testing the wrong fixture, and the fix exposed it.** `pHealth`
     attached a window with NO relay at all, which constraint 181 now classifies as starting rather
