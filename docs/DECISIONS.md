@@ -650,6 +650,48 @@ directions are `bench/m7-win/probe.mjs`'s own section and `--negative no-cascade
 expiry: the device, the chardev mechanism under it and the ENXIO it answered are all deleted
 (constraint 211).
 
+## D31 — the window surface is kernel-owned, and a process draws by sending commands
+
+**Decided at M8, on a measurement taken first.** `MILESTONES.md`'s ordering correction said this
+choice had to be made before M12's blur governor, because "the governor cannot account what it did
+not allocate", and that the two mature systems chose opposite sides: Haiku's server allocates the
+bitmap and maps it to the client, SerenityOS has the client allocate and hand over an fd. The
+project's own documents said the surface would be a transferred `OffscreenCanvas`.
+
+**What was measured.** `bench/m8-surface/probe.py`, against a worker shaped like a process: a
+transferred canvas does NOT arrive while the worker spins, and does NOT arrive while it is parked
+in `Atomics.wait` — it arrives only after the worker awaits a macrotask, 594 ms after it was
+posted, which is exactly the length of the park it sat through. Constraint 219 has the table.
+
+**What that rules out.** A surface cannot be the reply to the syscall that asked for it: the
+process is parked in that call, and parked is precisely when a transfer cannot land. It could be
+made to work — a program written to `await` after `win_surface`, and a libos that correlates a port
+message with a syscall reply — but then every drawing program is async by obligation, the kernel has
+given away something it cannot revoke or account, and a releasable resource lives in a process
+worker (constraint 15).
+
+**What was chosen.** The kernel owns the surface. A process draws by writing a DISPLAY LIST into
+the byte region it already has and calling `win_draw`, which is one syscall per batch rather than
+one per operation. The page holds the canvas, replays the batch, and that is the frame.
+
+- **Accounting and revocation come free**, which is the whole reason the ordering correction said
+  to decide this early: the kernel knows every surface's size because it allocated it, so M12's
+  admission controller has something to admit against and constraint 17's cap has something to
+  count.
+- **A process still holds only integers** (constraint 15). The display list is bytes in its own
+  frame, which it already has.
+- **The cost is the vocabulary.** Every operation a program can perform has to exist in the ABI,
+  and M8 ships four — clear, fill, stroke and line — plus the pointer events that make them worth
+  having. A program cannot reach for an arbitrary Canvas2D call, which is a real loss and the
+  reason this is a decision rather than an obvious choice.
+- **The rejected alternative is not gone**, and it is worth re-reading before M12: a transferred
+  canvas is strictly faster for a program that draws thousands of operations per frame, because
+  the ops never cross an agent boundary. If a workload like that appears, the honest answer is a
+  second mechanism for it, declared as such, and not a quiet change of this one.
+
+*Evidence: measured. `bench/m8-surface/probe.py`, Chrome 157. Constraint 219, and the correction it
+makes to `CLAUDE.md` and `PLAN.md` §5.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

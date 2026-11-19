@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>M8 experiment — can a process be handed an OffscreenCanvas?</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+.ok{color:#8f8}.bad{color:#f88}</style></head>
+<body>
+<pre id="log">starting…</pre>
+<script>
+  globalThis.SURF = { state: 'starting', isolated: self.crossOriginIsolated === true, results: {} }
+</script>
+<script type="module">
+/**
+ * M8's owed experiment: CAN A WINDOW'S SURFACE BE A TRANSFERRED `OffscreenCanvas`?
+ *
+ * `PLAN.md` §5 and `CLAUDE.md` both say it is — "Window surfaces are transferred `OffscreenCanvas`,
+ * which is why the window ABI is `win_*` calls and not a `/dev/wm` device file: a file write cannot
+ * transfer a handle" — and nobody has measured whether the transfer can ARRIVE. A process is a
+ * dedicated worker that blocks in `Atomics.wait` between syscalls (constraint 46) and runs no
+ * event loop while a program computes, and `postMessage` delivery needs an event-loop turn.
+ *
+ * The answer changes what M8 builds, which is why it is owed first:
+ *
+ *   if it arrives while the worker is blocked     M8 can transfer a canvas on `win_create`
+ *   if it arrives only when the program awaits    a surface forces every drawing program to be
+ *                                                 async and to yield, and the libos has to
+ *                                                 correlate a transfer with a syscall reply
+ *   if it never arrives                           the surface must be KERNEL-OWNED and driven by
+ *                                                 commands through the existing channel
+ *
+ * The second measurement is the one that decides it, and the third asks the question that a count
+ * of arrivals cannot: once it is there, can it be DRAWN ON?
+ *
+ * MEASURED FROM THE WORKER'S OWN STATE, never from the page's: the page records when it posted
+ * the transfer, and the worker records what it had at the end of each phase. Those are different
+ * facts and the whole experiment is the gap between them.
+ */
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+
+const W_PHASE = 0, W_ASK = 1
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+async function until (what, ms = 4000, step = 10) {
+  const t0 = performance.now()
+  for (;;) {
+    if (what()) return performance.now() - t0
+    if (performance.now() - t0 > ms) return -1
+    await sleep(step)
+  }
+}
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.SURF.state = 'aborted'
+  globalThis.SURF.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures: without a SAB there is ' +
+    'no `Atomics.wait` for a process to block in, so the question cannot be asked.'
+  out.className = 'bad'
+  say(globalThis.SURF.why)
+} else {
+  main().catch((e) => {
+    globalThis.SURF.state = 'error'
+    globalThis.SURF.why = String((e && e.stack) || e)
+    say(globalThis.SURF.why)
+  })
+}
+
+async function main () {
+  const t0 = performance.now()
+  const sab = new SharedArrayBuffer(64)
+  const ctl = new Int32Array(sab)
+  const worker = new Worker('/bench/m8-surface/worker.mjs', { type: 'module', name: 'procdouble' })
+  const seen = []
+  let done = null
+  worker.onmessage = (ev) => {
+    seen.push(ev.data)
+    if (ev.data && ev.data.t === 'done') done = ev.data
+  }
+  worker.onerror = (e) => { say('worker error: ' + (e && e.message)) }
+  worker.postMessage({ t: 'init', sab })
+
+  // WAIT UNTIL IT IS BLOCKED, not for a fixed time: the whole question is about the state it is
+  // in when the transfer is posted, so the page must know it is in that state.
+  const parked = await until(() => Atomics.load(ctl, W_PHASE) === 2, 5000)
+  if (parked < 0) {
+    globalThis.SURF.state = 'error'
+    globalThis.SURF.why = 'the worker never reached its parked phase'
+    say(globalThis.SURF.why)
+    return
+  }
+  // A SURFACE THE SIZE M8 WOULD ACTUALLY USE, so the answer is not about a toy. 4x4 is what the
+  // milestone's own proof draws into; the canvas is a window-sized one.
+  const canvas = new OffscreenCanvas(640, 400)
+  const postedAt = Math.round(performance.now() - t0);
+  worker.postMessage({ t: 'surface', canvas }, [canvas]);
+  // THE TRANSFER IS ONE-WAY AND ONE-SHOT, and this is the page's half of that: the object it just
+  // sent is now DETACHED here, which is why there is no front/back pair and no cheap flip
+  // (MILESTONES, the ordering correction in the window half).
+  let detached = ''
+  try {
+    canvas.getContext('2d')
+    detached = 'NO — the page can still use it'
+  } catch (error) {
+    detached = String((error && error.message) || error)
+  }
+
+  const finished = await until(() => done !== null, 6000)
+  globalThis.SURF.results = {
+    postedAt,
+    parkedAfterMs: Math.round(parked),
+    finishedAfterMs: Math.round(finished),
+    detachedInThePage: detached,
+    worker: done,
+    // The phases, as the worker stored them in shared memory. `seen` is what it could post.
+    phases: done && done.seen,
+  }
+  globalThis.SURF.state = done ? 'done' : 'error'
+  if (!done) {
+    globalThis.SURF.why = 'the worker never finished its three phases'
+    say(globalThis.SURF.why)
+    return
+  }
+  const s = done.seen || {}
+  say('posted the transfer at ' + postedAt + ' ms, while the worker was PARKED in Atomics.wait')
+  say('')
+  say('the worker had the canvas:')
+  say('  after spinning synchronously      ' + (s.spin ? 'YES' : 'no'))
+  say('  after parking in Atomics.wait     ' + (s.park ? 'YES' : 'no') +
+    '   <- the one that decides M8')
+  say('  after awaiting one macrotask      ' + (s.yielded ? 'YES' : 'no'))
+  say('  and it arrived at                 ' + done.arrivedAt + ' ms (worker clock)')
+  say('')
+  say('drawing on it gave               ' + JSON.stringify(done.drew || done.drawError))
+  say('in the page the sent canvas is   ' + JSON.stringify(detached))
+  out.className = 'ok'
+}
+</script>
+</body>
+</html>

@@ -1959,3 +1959,42 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     refusing further reads, so the process that lost a window to another process's call learns why
     rather than reading a bare errno; `bench/m7-win/controls.py --only notice-too-late` puts that
     ordering back the wrong way round and six checks move.
+
+## M8's prerequisite experiment, measured before anything was built
+
+219. **A TRANSFERRED `OffscreenCanvas` CANNOT REACH A PARKED PROCESS, AND `CLAUDE.md` SAID THE
+    SURFACE WOULD BE ONE.** `PLAN.md` §5 and `CLAUDE.md` both carried it as a settled decision —
+    "Window surfaces are transferred `OffscreenCanvas`, which is why the window ABI is `win_*`
+    calls and not a `/dev/wm` device file: a file write cannot transfer a handle" — and nobody had
+    measured whether the transfer can arrive. `bench/m8-surface/probe.py` measures it against a
+    worker shaped like a process: one SAB, one port, and the same `Atomics.wait` park every
+    blocking syscall uses (constraint 46).
+
+    **Chrome 157, a 640×400 canvas posted while the worker was parked:**
+
+    | the worker had the canvas | |
+    | --- | --- |
+    | after 400 ms of synchronous work | **no** |
+    | after 600 ms parked in `Atomics.wait` | **no** — the one that decides it |
+    | after awaiting one macrotask | **yes**, 594 ms after it was posted |
+    | and drawing on it then | `rgba(74,155,216,255)` — it works once it is there |
+    | the page's own copy afterwards | detached: "OffscreenCanvas object is detached" |
+
+    So a transfer is not impossible — it is undeliverable **to a process that is doing anything**.
+    `postMessage` needs an event-loop turn and a process turns its loop only where a program
+    `await`s, which no synchronous program does and which the syscall stub cannot do (it is
+    synchronous by construction). A surface delivered that way would force every drawing program
+    to be async AND to yield after the call that created it, and the reply to the syscall could
+    not carry it.
+
+    **Three further consequences, each of which would have been found later and more expensively:**
+    a transfer is one-way and one-shot, so the page loses the object and there is no front/back
+    pair and no cheap flip; the kernel could not revoke a surface it had given away, which
+    constraint 49's admission controller and constraint 17's cap both need; and a canvas living in
+    a process is a releasable resource in a process, which constraint 15 forbids for the reason
+    `terminate()` offers no chance to finish.
+
+    **M8 therefore builds a KERNEL-OWNED surface driven through the syscall channel**, and
+    `docs/DECISIONS.md` D31 carries the choice with what it rejected. The `win_*` calls are still
+    right, but not for the reason the old sentence gave: a window needs identity, an owner and an
+    fd, and none of that is a transfer.
