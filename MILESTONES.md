@@ -34,7 +34,7 @@ checks is a wish.
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
 | M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
-| M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 32 expectations, 2 controls, 58 host checks, 5 mutations |
+| M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 41 expectations, 2 controls, 79 host checks, 8 mutations, 9 critic findings fixed |
 | **M10** | **Typed clipboard and drag-and-drop** | 4 | | ⬜ **next (option A)** |
 | M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
 | M12 | The blur governor | 3 | | ⬜ A |
@@ -1734,6 +1734,60 @@ whether they take focus, and nothing here has focus to take yet. There is no key
 modal (no Tab, no Escape handling in the host), so a dialog is answered by typing into it. And the
 flash that marks a refused raise is one frame of a CSS class; M11's skin is where that becomes
 something designed.
+
+---
+
+### What the critic changed, and two bugs a reader found
+
+**M9 WENT TO AN INDEPENDENT CRITIC WITH NONE OF THE AUTHOR'S CONTEXT, and it returned nine
+findings.** Every one was verified against the code before it was acted on; every one became a
+check. Two were user-visible and neither had anything to do with modality:
+
+| | |
+| --- | --- |
+| `appOf` read the owner chain FROM THE WRONG END | `ancestors()` is nearest-first, so an APP-modal dialog three deep froze the process at the TOP of the chain and left its own owner typable and raisable over itself. Depth-1 chains cannot tell the two readings apart, and every fixture was depth 1 (229) |
+| `create` grew the stack and posted no ORDER | the kernel was right and the screen was wrong: the page assigns a `z-index` only when it renders an order, so a clicked window had one and a window created afterwards had none — and painted behind it. Click a window, then `winopen` (230) |
+
+The other seven: `blockingFor` ran the whole table walk per pointer sample (231); a PASSIVE window
+raised directly took the global stack (232); suppression covered the client area and not the frame,
+so a blocked window could still be DRAGGED under its own modal (233); the ownerless-modal guard
+tested `scope === 1 || scope === 2`, the enum's order copied into a second file (234); one counter
+carried two different page races (235); `WMODAL_SYSTEM` needs no privilege and the escape hatch
+constraint 228 promised did not exist for it (236); and `bench/m9-modal/controls.py` scored an
+empty `moves` tuple as a PASS, which is how a control that broke the APP-scope rule and moved zero
+checks was reported as verified (237).
+
+**ONE FIX WAS WRONG ON THE FIRST ATTEMPT AND THE PROBE CAUGHT IT.** `anyBlocking()` started as an
+epoch-invalidated cache, and it answered stale for every caller that writes `mode` directly — which
+the host probe does, so twelve assertions about suppression went green against a kernel that was
+suppressing nothing. A derived value is recomputed from its source. The cost that fix is about was
+the subtree walk, never the mode test.
+
+```
+scripts/check.py --only m9              41 expectations (was 32)
+node bench/m9-modal/probe.mjs           79 host checks (was 58)
+bench/m9-modal/controls.py              8 mutations (was 5), each scored on which checks move
+scripts/check.py --negative no-owner-chain   m9 fail:  3 red, 38 intact
+scripts/check.py --negative no-modal         m9 fail: 15 red, 26 intact
+```
+
+**AND TWO BUGS CAME FROM A READER USING THE DESKTOP**, which 494 passing expectations had not
+touched — because every check reaches the filesystem and the terminal through the page's supervisor
+path, and a person reaches them by typing.
+
+- **`ls /` PRINTED NOTHING, AND `cd /usr/..` ANSWERED ENOENT.** The mount table resolves by longest
+  component prefix, so `/usr` worked without existing on the volume beneath it. One cause, two
+  symptoms. The kernel creates each mountpoint as a directory before mounting over it, and the
+  mount table stops being a second, invisible namespace (238). `--negative no-mountpoints` is the
+  world the reader met: one red, 38 intact.
+- **A SECOND TERMINAL DIED AFTER 30 SECONDS.** `term`'s ceiling bounded the whole session, and
+  every page passes `--ceiling 3600000` — so the only caller left on the 30-second default was a
+  human typing `term &`. It bounds IDLE time now, measured from after setup rather than from entry,
+  and both edges are checked (239). `term &` is in every live page's hint block, because the
+  complaint was also that nothing said it existed.
+
+`bench/shell-reports/repro.py` is where both are driven at a real prompt, and it is the file to
+extend the next time a milestone is reported done and a reader finds something in five minutes.
 
 ---
 
