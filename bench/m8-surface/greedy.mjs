@@ -13,7 +13,9 @@
 //                 is the half of accounting that revocation is
 //   cellsRefused  `write(2)` on a surfaced window, which has no text widget to render them
 
-import { EINVAL, ENOMEM, DL_CLEAR } from "/src/abi.mjs";
+import {
+  EINVAL, ENOMEM, DL_CLEAR, DLOP_BYTES, DL_MAX_OPS, SYS_win_draw, encodeDrawOp,
+} from "/src/abi.mjs";
 
 const NAME = "greedy";
 
@@ -53,6 +55,36 @@ export function run(env) {
   // And drawing still works, which is what makes the refusal above specific rather than a window
   // that stopped working.
   account.drewAfter = env.std.errnoName(env.win.draw(first.fd, [{ op: DL_CLEAR, a0: 0x101216ff }]));
+
+  /* ---- A BATCH THAT LIES ABOUT ITS OWN SIZE ------------------------------------------------
+   *
+   * THE DEFECT THIS EXISTS FOR, found by an independent critic: `win_draw` was the one handler
+   * that did not bound the byte length by `MAX_INLINE`. It checked only that the length matched
+   * the declared op count — and `subarray` CLAMPS rather than throwing, so a caller declaring
+   * 3,000 ops with a matching length had the kernel charge 2,043.875 ops, the page replay 2,043
+   * ops of whatever the region last held, and the call return 0. Constraint 225.
+   *
+   * These go through `env.syscall` and not `env.win.draw`, deliberately: the libos splits a long
+   * list and would never SEND a lying count, so the only way to reach the guard is to make the
+   * call the libos protects the kernel from.
+   */
+  const one = new Uint8Array(DLOP_BYTES);
+  encodeDrawOp(new DataView(one.buffer), 0, { op: DL_CLEAR, a0: 0x000000ff });
+  account.badOps = {
+    // More ops than a frame can hold, with a payload that cannot possibly be that long.
+    tooMany: env.std.errnoName(env.syscall(
+      SYS_win_draw, first.fd, DL_MAX_OPS + 1, 0, 0, 0, 0, 0, 0, one, 0, one.length)),
+    // A count that does not match the payload, in both directions.
+    tooFew: env.std.errnoName(env.syscall(
+      SYS_win_draw, first.fd, 2, 0, 0, 0, 0, 0, 0, one, 0, one.length)),
+    zero: env.std.errnoName(env.syscall(
+      SYS_win_draw, first.fd, 0, 0, 0, 0, 0, 0, 0, one, 0, one.length)),
+    negative: env.std.errnoName(env.syscall(
+      SYS_win_draw, first.fd, -1, 0, 0, 0, 0, 0, 0, one, 0, one.length)),
+    // And the honest one still works, which is what makes the refusals specific.
+    honest: env.std.errnoName(env.syscall(
+      SYS_win_draw, first.fd, 1, 0, 0, 0, 0, 0, 0, one, 0, one.length)),
+  };
 
   // ---- the budget -------------------------------------------------------------------------
   const held = [first.fd];

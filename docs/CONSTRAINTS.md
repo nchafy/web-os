@@ -2013,7 +2013,11 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     per-surface cap is **EINVAL**: it is not that the system is full, it is that no surface may be
     that big. The budget itself is **ENOMEM and never EAGAIN**, because a caller told to try again
     would try for ever — nothing is going to free the area it is waiting for.
-    `bench/m8-surface/controls.py --only budget-as-eagain` is that clause's control.
+    `bench/m8-surface/controls.py --only budget-as-einval` is that clause's control: it substitutes
+    EINVAL, which collapses "the system is full" into "your argument was wrong", and the clause
+    asserts ENOMEM exactly so any substitution moves it. (EAGAIN would have been the better
+    substitution and is not in that file's scope, so a mutation naming it would be a
+    ReferenceError and the probe would die rather than score.)
 
     **Revocation is the other half, and it is the half a transferred handle could not have had.**
     Destroying a window releases its area before the window goes; a resize charges the DIFFERENCE
@@ -2063,3 +2067,36 @@ one was the milestone's own subject, in the commit that was supposed to have clo
       check red with four of them. Counted as `lateGeoms` and published in `win-state`, because a
       page reporting geometry for windows that never existed WOULD be a defect and the count is
       what tells the two apart.
+
+225. **FOUR THINGS AN INDEPENDENT CRITIC FOUND IN M8, and the first one accepted a lie.**
+
+    - **`win_draw` was the only handler that did not bound its byte length by `MAX_INLINE`.** It
+      checked that the length matched the declared op count and nothing else — and `subarray`
+      CLAMPS rather than throwing, so a caller declaring 3,000 ops with a matching length had the
+      kernel charge 2,043.875 ops, the page replay 2,043 ops of whatever the region last held, and
+      the call return **0**. Constraint 9's rule, missed in one place. The guard is now the
+      sibling guard plus `nops > DL_MAX_OPS`, and `bench/m8-surface/greedy.mjs` asserts four
+      refusals and one acceptance THROUGH `env.syscall`, because the libos would never send a
+      lying count and the only way to reach the guard is to make the call it protects the kernel
+      from.
+    - **The page's replay truncated a torn batch**, which made `decodeDrawOps`'s own refusal
+      unreachable from the only caller that matters — while the docstring three lines above
+      promised the opposite. It passes the whole length now and lets it throw.
+    - **A POINTER COORDINATE IS SIGNED AND THE EVENT RECORD IS NOT.** `a` and `b` are u32 because
+      a key event's inline bytes and a resize's cell counts are unsigned; a capture keeps
+      delivering moves after the pointer leaves the surface, so a negative x is the normal case and
+      read back as 4,294,967,289. `pointerAt` in `src/abi.mjs` is the one place that is undone, the
+      same way `keyBytesOf` is the one place a key's bytes are unpacked, and `selfTest` asserts
+      both halves.
+    - **A SURFACED WINDOW STOPPED EMITTING FOCUS EVENTS, and its keys stopped being counted.** The
+      focus and blur listeners belonged to the TEXT widget the surface replaces, so a window that
+      surfaced never reported another focus change for the rest of its life; and the trusted /
+      synthetic key accounting lives in that widget, so a surfaced window could have satisfied a
+      "real keystroke" clause with a key the page dispatched to itself — which is the distinction
+      M4a's whole lesson rests on. Both are wired in `#wirePointer` now, the widget's counts are
+      retired into the host's at the mode switch, and `www/m8.html` asserts the focus event.
+
+    Four more were smaller and are fixed with them: the record size written as a literal twice
+    (which admitted a fractional op count), the content-mode refusal counted as a dead frame's, a
+    probe clause that asserted "something negative" where it named an errno, and a mutation whose
+    name did not match its substitution.

@@ -33,7 +33,7 @@ checks is a wish.
 | M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
-| M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 28 expectations, 1 control, 50 host checks, 5 mutations, and a prerequisite experiment that reversed the design |
+| M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
 | **M9** | **Owner, modality, close-request** | 3 | | ⬜ **next (option A)** |
 | M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
 | M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
@@ -1485,10 +1485,11 @@ window check, because nothing here waits on a threshold. The suite is 12 checks 
 expectations, all green.
 
 ```
-scripts/check.py                       12 checks, 460 expectations (m8: 28)
-scripts/check.py --only m8 --prove-failure   28 inverted, all failed
-scripts/check.py --negative no-draw          m8 fail: 7 red, 21 intact
-node bench/m8-surface/probe.mjs        50 host checks (the accounting and the codec, no browser)
+scripts/check.py                       12 checks, 462 expectations (m8: 30)
+scripts/check.py --only m8 --prove-failure   30 inverted, all failed
+scripts/check.py --negative no-draw          m8 fail: 7 red, 23 intact
+node bench/m8-surface/probe.mjs        51 host checks (the accounting and the codec, no browser)
+bench/m8-surface/shell.py              `paint` TYPED AT A PROMPT, which no check does
 bench/m8-surface/controls.py           5 mutations, each scored on which checks move
 bench/m8-surface/probe.py              THE PREREQUISITE EXPERIMENT, which reversed the design
 bench/m7-win/firefox.py --page m8      A SECOND ENGINE: verdict ok in 3.4 s, four of four
@@ -1565,6 +1566,39 @@ existed WOULD be a defect.
 **And the mutation harness found three weak assertions in its own probe**, as M7's did: a clause
 named after the area it did not check, a mutation that crashed the probe instead of scoring it, and
 three counts that moved as a consequence of one removal and had to be declared rather than excused.
+
+### One critic, then twelve fixes, and the first one accepted a lie
+
+M8 went build → independent attack → fix. **All twelve findings were reproduced against the code
+before being acted on, and all twelve are fixed.** Four are worth reading before trusting anything
+similar; constraint 225 carries them with the measurement each rests on.
+
+| | what it was |
+|---|---|
+| 225 | **`win_draw` was the only handler that did not bound its byte length by `MAX_INLINE`.** It checked the length against the declared op count and nothing else, and `subarray` CLAMPS — so a caller declaring 3,000 ops had the kernel charge 2,043.875 ops, the page replay 2,043 ops of whatever the region last held, and the call return **0** |
+| 225 | **The page's replay truncated a torn batch**, which made the refusal its own docstring promised unreachable from the only caller that matters |
+| 225 | **A pointer coordinate is signed and the event record is not.** A capture keeps delivering moves after the pointer leaves the surface, so a negative x is the normal case — and it read back as 4,294,967,289. `pointerAt` is the one place that is undone |
+| 225 | **A surfaced window stopped emitting focus events, and its keys stopped being counted.** Both belonged to the text widget the surface replaces, so a surfaced window could have satisfied a "real keystroke" clause with a key the page dispatched to itself |
+
+The other eight: the record size written as a literal twice (which admitted a fractional op count),
+the content-mode refusal counted as a dead frame's, two harness clauses that named more than they
+asserted, a mutation whose name did not match its substitution, dead code the `pagekernel.mjs`
+extraction left behind, a comment naming a field the record does not have, and a screenshot taken
+twice.
+
+**Two of them became checks rather than just fixes**, because a fixed bug is a check: the lying
+batch is four refusals and one acceptance through `env.syscall` — the libos would never send a
+lying count, so the only way to reach the guard is to make the call it protects the kernel from —
+and the focus event is a clause on `paint`'s own counter.
+
+### And it runs from the shell, which is the path a person takes
+
+`bench/m8-surface/shell.py` opens the live desktop in a real Chrome, types `paint -w 160 -h 120` at
+the prompt, and asserts a surface appeared AND that something was drawn on it: 19,200 painted
+pixels, none of which the page put there. **No check did this**: they spawn programs by URL, which
+is the page's supervisor path (`docs/DECISIONS.md` D18), and M6's own history is the reason to care
+— a program that ran from the page was refused from the filesystem, and only running it from the
+shell found that (constraint 208).
 
 ### What is not done
 

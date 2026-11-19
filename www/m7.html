@@ -78,8 +78,7 @@ import { WinHost } from '/src/wm/winhost.mjs'
  * a known second copy across nine `www/*.html` pages; `www/m8.html` needed all of it too, and the
  * second caller is what justifies the abstraction. The older pages still carry their own. */
 import {
-  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, ask, until, sleep,
-  typeSynthetic,
+  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, ask, until, typeSynthetic,
 } from '/www/pagekernel.mjs'
 
 const out = document.getElementById('log')
@@ -111,12 +110,7 @@ const WEDGE = '/bench/m7-win/wedge.mjs'
 const DRIVER_WAIT_MS = 2500
 const REAL_KEY_WAIT_MS = 60000
 
-/** How long one kernel boot may take before it is retried. DECLARED UP HERE WITH THE OTHER
- *  TIMEOUTS, and not beside the function that reads it, because `main()` is called while this
- *  module is still evaluating — so a `const` declared further down is in its temporal dead zone
- *  when the first kernel boots, and every run failed with
- *  `Cannot access 'BOOT_WAIT_MS' before initialization`. */
-const BOOT_WAIT_MS = 12000
+
 
 Object.assign(globalThis.M7, { isolated: self.crossOriginIsolated === true })
 globalThis.M7.proofs = {

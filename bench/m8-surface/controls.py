@@ -60,11 +60,16 @@ MUTATIONS = {
             "so the same size is granted again",
         ),
     ),
-    "budget-as-eagain": dict(
-        why="the budget answers -EAGAIN instead of -ENOMEM. A CEILING REPORTED AS A TRANSIENT: a "
-            "caller told to try again would try for ever, because nothing is going to free the "
-            "area it is waiting for. The errno is the only thing that tells a program whether to "
-            "ask for less or to give up.",
+    "budget-as-einval": dict(
+        why="the budget answers -EINVAL instead of -ENOMEM, which collapses 'the system is full' "
+            "into 'your argument was wrong'. The errno is the only thing that tells a program "
+            "whether to ask for a smaller surface or to give up, and the clause it moves asserts "
+            "ENOMEM EXACTLY — so any substitution moves it.\n"
+            "IT SUBSTITUTES EINVAL AND NOT EAGAIN, and the name used to say otherwise: EAGAIN is "
+            "not in scope in `wins.mjs`, so a mutation naming it would be a ReferenceError and "
+            "the probe would die rather than score. The constraint the clause carries — a ceiling "
+            "is never EAGAIN — is `docs/CONSTRAINTS.md` 220's prose, and what this control proves "
+            "is that the clause is coupled to the exact errno.",
         needle="""      this.stats.refusedSurface += 1;
       return -ENOMEM;""",
         replacement="""      this.stats.refusedSurface += 1;
@@ -103,16 +108,12 @@ MUTATIONS = {
             "replaced it with a canvas — so the bytes are accepted, posted, and dropped by a host "
             "that has nowhere to put them. One content mode per window is the rule this removes.",
         needle="""    if (this.surface) {
-      this.stats.goneWrites += 1;
-      return -EINVAL;
-    }""",
+      /* ITS OWN COUNTER""",
         replacement="""    if (false) {
-      this.stats.goneWrites += 1;
-      return -EINVAL;
-    }""",
+      /* ITS OWN COUNTER""",
         moves=(
             "a surfaced window refuses them",
-            "and the refusal is counted",
+            "and the refusal is counted apart from a dead frame's",
         ),
     ),
 }

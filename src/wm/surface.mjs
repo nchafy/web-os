@@ -13,7 +13,7 @@
 // revoked, which M12's blur governor needs.
 
 import {
-  DLOP_BYTES, DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, decodeDrawOps, cssColor,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, decodeDrawOps, cssColor,
 } from "../abi.mjs";
 
 /** The pointer flags M8 sends, kept here so the host and this file agree on one spelling. */
@@ -54,7 +54,12 @@ export class Surface {
    * tail, which is the same rule the window event record uses.
    */
   replay(bytes) {
-    const ops = decodeDrawOps(bytes, bytes.length - (bytes.length % DLOP_BYTES));
+    /* THE WHOLE LENGTH, SO THE REFUSAL ABOVE IS REACHABLE. This rounded down to a whole number of
+     * ops, which made `decodeDrawOps`'s "not a whole number of ops" throw unreachable from the
+     * only caller that matters — and the docstring three lines up promised the opposite. A torn
+     * batch is a kernel defect and must fail loudly here rather than be replayed as partial
+     * garbage (`CLAUDE.md`, harness honesty). */
+    const ops = decodeDrawOps(bytes, bytes.length);
     this.batches += 1;
     for (const op of ops) {
       this.ops += 1;

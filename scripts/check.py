@@ -2959,6 +2959,7 @@ M8_LABELS = (
     "and the process drew in response",
     "and the pixels under the drag changed",
     "while a corner the drag never reached did not",
+    "and the surface reported a focus change",
     # The accounting, which is the whole reason the surface is kernel-owned (D31).
     "budget ok",
     "a surface larger than the per-surface cap is EINVAL",
@@ -2970,6 +2971,7 @@ M8_LABELS = (
     "textmode ok",
     "a surfaced window refuses cells with EINVAL",
     "while a draw on the same window still succeeds",
+    "and a batch that lies about its own size is refused four ways",
     "verdict is ok",
     "document COOP",
     "document COEP",
@@ -3022,7 +3024,7 @@ M8_SHAPE = {
 
 #: What A DRAW THAT NEVER REACHES THE PAGE must break, and only this.
 #:
-#: Measured under the control on Chrome 157: exactly these seven red, the other twenty-one intact.
+#: Measured under the control on Chrome 157: exactly these seven red, the other twenty-three intact.
 #: The process still gets its surface, still sends its batch, still SEES the real pointer events
 #: and still draws in response; the kernel still charges the ops to the window and still refuses
 #: the budget and the cells. What disappears is the pixels.
@@ -3875,7 +3877,7 @@ CONTROLS: Dict[str, NegativeControl] = {
             "process still gets its surface and the page still makes a canvas for it, the program "
             "still reports the batch it sent, the REAL pointer events still reach the process and "
             "it still draws in response, the surface budget still refuses by name and still gives "
-            "the area back, and a surfaced window still refuses cells. Twenty-one of twenty-eight.\n"
+            "the area back, and a surfaced window still refuses cells. Twenty-three of thirty.\n"
             "WHAT IT IS ABOUT: a page that drew something of its own — a canvas it filled, a "
             "pattern it knew — would satisfy every pixel clause with no process behind it, and "
             "nothing else in this suite can tell the two apart.",
@@ -7912,7 +7914,7 @@ def check_m7(env: Env) -> None:
          "nothing else knows where a surface pixel is on screen. Several moves and not one, "
          "because a program that draws from the last point to this one needs two points.\n"
          "negative control: --negative no-draw makes `win_draw` accept its batch, count it and "
-         "discard it. Seven labels red and twenty-one intact - the surface is still created, the "
+         "discard it. Seven labels red and twenty-three intact - the surface is still created, the "
          "batch is still reported, the real pointer events still reach the process and it still "
          "draws in response, and the budget and the cell refusal are untouched. "
          "--negative no-isolation must come out BROKEN: no SAB, so no kernel and no surface.",
@@ -8024,6 +8026,11 @@ def check_m8(env: Env) -> None:
     env.expect_that("while a corner the drag never reached did not",
                     q.get("untouched") == q.get("before"),
                     {"untouched": q.get("untouched"), "before": q.get("before")})
+    # A SURFACE EMITS FOCUS EVENTS, which it stopped doing when the text widget it replaced took
+    # its focus listeners with it (constraint 225). The drag's own pointerdown focuses the canvas,
+    # so a run that saw a pointer must have seen a focus too.
+    env.expect_that("and the surface reported a focus change",
+                    (result.get("focus") or 0) > 0, {"result": result})
 
     # ---- PROOF 3: the budget refuses and releases ----------------------------------------
     b = ev("budget")
@@ -8056,6 +8063,16 @@ def check_m8(env: Env) -> None:
     # a window that stopped answering.
     env.expect_that("while a draw on the same window still succeeds",
                     tr.get("drewAfter") == "ESUCCESS", {"drewAfter": tr.get("drewAfter")})
+    # FOUR REFUSALS AND ONE ACCEPTANCE, each by errno. `win_draw` was the one handler that did not
+    # bound its byte length by MAX_INLINE, and `subarray` CLAMPS rather than throwing — so an
+    # oversized batch was truncated, charged as 2,043.875 ops and reported as a SUCCESS
+    # (constraint 225). The honest call in the same breath is what makes the refusals specific.
+    bad = tr.get("badOps") or {}
+    env.expect_that("and a batch that lies about its own size is refused four ways",
+                    bad.get("tooMany") == "EINVAL" and bad.get("tooFew") == "EINVAL"
+                    and bad.get("zero") == "EINVAL" and bad.get("negative") == "EINVAL"
+                    and bad.get("honest") == "ESUCCESS",
+                    {"badOps": bad})
 
     env.expect("verdict is ok", got["verdict"], "ok")
 

@@ -260,6 +260,10 @@ async function pPointer (boot) {
         && (result.strokes || 0) > 0,
       'and the pixels under the drag changed': painted >= 0 && ev.after !== ev.before,
       'while a corner the drag never reached did not': ev.untouched === ev.before,
+      // THE SURFACE EMITS FOCUS EVENTS, which it stopped doing when the text widget it replaced
+      // took its focus listeners with it (constraint 225). The drag's own pointerdown focuses the
+      // canvas, so a run that saw a pointer must have seen a focus too.
+      'and the surface reported a focus change': (result.focus || 0) > 0,
       'and the program exited when asked': result.exit === 0 && result.why === 'q',
     }
     ev.clauses = clauses
@@ -315,6 +319,13 @@ async function pBudget (boot) {
       'a surfaced window refuses cells with EINVAL': result.cellsRefused === 'EINVAL',
       'and still accepts a draw, so the refusal is about the mode and not the window':
         result.drewAfter === 'ESUCCESS',
+      // A BATCH THAT LIES ABOUT ITS OWN SIZE IS REFUSED, four ways. `win_draw` was the one
+      // handler that did not bound the byte length by MAX_INLINE, so an oversized batch was
+      // truncated and reported as a success (constraint 225).
+      'a batch that lies about its size is refused, and an honest one is not':
+        !!result.badOps && result.badOps.tooMany === 'EINVAL'
+        && result.badOps.tooFew === 'EINVAL' && result.badOps.zero === 'EINVAL'
+        && result.badOps.negative === 'EINVAL' && result.badOps.honest === 'ESUCCESS',
     }
     ev.textClauses = text
     ev.textFailed = Object.keys(text).filter((k) => text[k] === false)

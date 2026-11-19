@@ -379,8 +379,13 @@ const INTS = {
   WEV_DESTROYED: 5,
   //: M8. A pointer inside the window's own surface, in SURFACE pixels — not CSS px and not page
   //: coordinates, because a process knows only its own surface. `a` and `b` are x and y, `c` is
-  //: the button bitmask, and `flags` is DOWN/UP/MOVE below: one type rather than three, so a
-  //: program that only wants movement does not have to know about the other two.
+  //: the button bitmask, and `mods` carries DOWN/UP/MOVE below beside the keyboard modifiers: one
+  //: type rather than three, so a program that only wants movement need not know about the others.
+  //:
+  //: THE COORDINATES ARE SIGNED AND THE RECORD IS NOT. A capture keeps delivering moves after the
+  //: pointer leaves the surface, so a negative x is the normal case — and `a` is a u32, which
+  //: reads -7 back as 4,294,967,289. `pointerAt` below is the one place that is undone; a program
+  //: that read `ev.a` directly and clamped it would get a wildly wrong answer (constraint 225).
   WEV_POINTER: 6,
   WEV_MAX: 6,
 
@@ -1003,6 +1008,18 @@ export function decodeWinEvent(dv, off) {
   };
 }
 
+/**
+ * A POINTER event's coordinates, SIGN-EXTENDED. The record's fields are u32 because a key event's
+ * inline bytes and a resize's cell counts are unsigned, and a pointer's coordinates are not: a
+ * drag that leaves the surface delivers negative x and y, which `a >>> 0` turns into four billion.
+ *
+ * THE ONE PLACE THAT IS UNDONE, for the reason `keyBytesOf` is the one place a key's bytes are
+ * unpacked: a program that did it itself would get it wrong once and silently.
+ */
+export function pointerAt(ev) {
+  return { x: ev.a | 0, y: ev.b | 0, buttons: ev.c >>> 0 };
+}
+
 /** A KEY event's own bytes, out of the inline `(a, b)` pair. Empty for any other type, and for a
  *  length outside 1..4 — a record claiming 7 bytes in a 4-byte field is corrupt, not clamped. */
 export function keyBytesOf(ev) {
@@ -1361,6 +1378,16 @@ export function selfTest() {
   const eround = decodeWinEvent(eprobe, 0);
   if (eround.type !== WEV_KEY || eround.mods !== WMOD_CTRL || eround.a !== 2) {
     fail(`a key event round-trips as ${JSON.stringify(eround)}`);
+  }
+  // A POINTER COORDINATE SURVIVES A ROUND TRIP THROUGH THE u32 FIELDS, which it does not without
+  // `pointerAt`: -7 reads back as 4,294,967,289 (constraint 225).
+  const pprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  encodeWinEvent(pprobe, 0, { type: WEV_POINTER, mods: WPTR_MOVE, a: -7, b: 3, c: 1 });
+  const pround = decodeWinEvent(pprobe, 0);
+  if (pround.a === -7) fail("the event record's `a` is signed; pointerAt would be pointless");
+  const at = pointerAt(pround);
+  if (at.x !== -7 || at.y !== 3 || at.buttons !== 1) {
+    fail(`pointerAt gave ${JSON.stringify(at)}`);
   }
   const kb = keyBytesOf(eround);
   if (new TextDecoder().decode(kb) !== "é") fail(`the inline key bytes decode as ${kb}`);

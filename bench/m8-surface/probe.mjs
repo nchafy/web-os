@@ -16,7 +16,7 @@ import {
   Window, WinMgr, installWindowKernel,
 } from "../../src/kernel/wins.mjs";
 import {
-  EINVAL, ENOMEM, MAX_INLINE, SURFACE_BUDGET_PX, SURFACE_MAX_PX,
+  EINVAL, ENOMEM, EHOSTGONE, MAX_INLINE, SURFACE_BUDGET_PX, SURFACE_MAX_PX,
   DLOP_BYTES, DL_MAX_OPS, DL_CLEAR, DL_FILL_RECT, DL_LINE, DL_RESERVED,
   encodeDrawOp, decodeDrawOps, cssColor, pixelColor, unpackColor,
 } from "../../src/abi.mjs";
@@ -155,7 +155,10 @@ const ONE = W * H;
     DL_CLEAR);
   // A DESTROYED WINDOW REFUSES, because the page has no canvas for it any more.
   mgr.destroyTree(w.id);
-  check("a draw on a destroyed window is -EHOSTGONE", mgr.draw(w, ops) < 0, true);
+  // THE ERRNO AND NOT "SOMETHING NEGATIVE": after `destroyTree` the surface is nulled too, so
+  // the next guard's -EINVAL would satisfy a `< 0` clause and the two refusals mean different
+  // things (`CLAUDE.md`: assert each refusal's errno separately).
+  check("a draw on a destroyed window is -EHOSTGONE", mgr.draw(w, ops), -EHOSTGONE);
 }
 
 // ---- a surfaced window refuses cells -------------------------------------------------------
@@ -169,7 +172,8 @@ const ONE = W * H;
   check("a text window accepts cells", w.writeCells(new Uint8Array([65, 66])), 2);
   mgr.surface(w, 64, 64);
   check("a surfaced window refuses them", w.writeCells(new Uint8Array([65])), -EINVAL);
-  check("and the refusal is counted", w.report().goneWrites, 1);
+  check("and the refusal is counted apart from a dead frame's", w.report().refusedCells, 1);
+  check("while the dead-frame counter stays at zero", w.report().goneWrites, 0);
   check("while a draw still works", mgr.draw(w, new Uint8Array(DLOP_BYTES)), 0);
 }
 

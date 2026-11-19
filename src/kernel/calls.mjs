@@ -15,7 +15,7 @@ import {
   F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
-  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES, DLOP_BYTES,
+  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
@@ -1009,8 +1009,15 @@ HANDLERS.win_draw = (p, k) => {
   const d = winOf(p, p.ctl[A0]);
   if (typeof d === "number") return d;
   const nops = p.ctl[A1] | 0;
-  if (nops <= 0) return -EINVAL;
+  /* THE REGION IS THE BOUND, AND THIS WAS THE ONE HANDLER THAT DID NOT CHECK IT. Every sibling
+   * refuses a length outside `0 < len <= MAX_INLINE`; this one checked only that the length
+   * matched the declared op count, and `subarray` CLAMPS rather than throwing — so `nops = 3000`
+   * with a matching length passed the equality, the kernel charged 2,043.875 ops, the page
+   * replayed 2,043 ops of whatever the region last held, and the caller was told 0. Constraint 9
+   * is the rule and `DL_MAX_OPS` is its arithmetic for this call. */
+  if (nops <= 0 || nops > DL_MAX_OPS) return -EINVAL;
   const length = Atomics.load(p.ctl, LEN_I32);
+  if (length <= 0 || length > MAX_INLINE) return -EINVAL;
   // EXACTLY the ops the caller declared. A short buffer would have the page replay whatever the
   // region last held, and a long one would silently drop the tail — the same rule the window event
   // read applies in the other direction.

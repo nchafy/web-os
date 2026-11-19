@@ -19,7 +19,7 @@
 import {
   EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, ST_RETURN,
   WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER, WEV_MAX,
-  WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, encodeWinEvent,
+  WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES, encodeWinEvent,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
@@ -130,7 +130,7 @@ export class Window {
       readerParks: 0, stale: 0, goneReads: 0, goneWrites: 0, shortReads: 0,
       // M8: batches accepted, ops in them, and batches refused. A program that drew nothing and
       // one whose every batch was refused look identical without the third number.
-      batches: 0, ops: 0, refusedDraws: 0,
+      batches: 0, ops: 0, refusedDraws: 0, refusedCells: 0,
     };
   }
 
@@ -243,7 +243,11 @@ export class Window {
      * after. A program that printed a banner and then asked for a surface is the normal case and
      * is fine; one that goes back is told -EINVAL. */
     if (this.surface) {
-      this.stats.goneWrites += 1;
+      /* ITS OWN COUNTER, because it is a different failure from a write to a window whose frame is
+       * gone — and this diff makes that argument itself for `refusedDraws`. A reader of
+       * `/proc/<pid>/win/<winid>` must be able to tell "the frame died" from "you are in pixel
+       * mode". */
+      this.stats.refusedCells += 1;
       return -EINVAL;
     }
     if (bytes.length === 0) return 0;
@@ -445,10 +449,13 @@ export class WinMgr {
       win.stats.refusedDraws += 1;
       return -EINVAL;
     }
+    // `DLOP_BYTES` AND NOT 32, TWICE OVER: the record's size is `src/abi.mjs`'s to declare, and a
+    // literal here admitted a fractional op count — a 40-byte batch charged 1.25 ops.
+    const count = ops.length / DLOP_BYTES;
     win.stats.batches += 1;
-    win.stats.ops += ops.length / 32;
+    win.stats.ops += count;
     this.stats.batches += 1;
-    this.stats.ops += ops.length / 32;
+    this.stats.ops += count;
     // A COPY, for the reason `writeCells` makes one: the source is the caller's SAB and the caller
     // may overwrite it the instant its call is answered.
     if (drawReaches) K.post({ t: "win-draw", win: win.id, ops: ops.slice() });

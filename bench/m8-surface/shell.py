@@ -102,7 +102,6 @@ def main(argv=None) -> int:
                     if got["painted"] > 0:
                         break
                 time.sleep(0.25)
-            page.call("Page.captureScreenshot")
             shot = page.call("Page.captureScreenshot", format="png")
             pathlib.Path(args.out).write_bytes(__import__("base64").b64decode(shot["data"]))
             screen = page.evaluate(

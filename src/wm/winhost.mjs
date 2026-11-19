@@ -208,6 +208,12 @@ export class WinHost {
       entry.surface = null;
     }
     if (entry.term) {
+      /* THE WIDGET'S KEY COUNTS ARE RETIRED, NOT LOST. `keyCounts()` skips an entry whose `term`
+       * is null, so a window that printed a banner, took a keystroke and then surfaced used to
+       * drop that keystroke out of both the live sum and the retired one — and the trusted count
+       * is what every real-key clause in this suite asserts on. */
+      this.retired.trusted += entry.term.trustedKeys;
+      this.retired.synthetic += entry.term.synthKeys;
       entry.term.el.remove();
       entry.term = null;
     }
@@ -278,8 +284,20 @@ export class WinHost {
       const bytes = bytesForKey(e);
       if (!bytes) return;
       e.preventDefault();
+      /* COUNTED HERE, because the widget that counts them is gone. A synthesised `KeyboardEvent`
+       * exercises this handler and nothing in front of it, and `isTrusted` is the only way to tell
+       * the two apart — which is what M4a's whole lesson rests on. Without this a surfaced window
+       * could satisfy a "real keystroke" clause with a key the page dispatched to itself. */
+      if (e.isTrusted) this.retired.trusted += 1; else this.retired.synthetic += 1;
       this.#keys(entry.id, bytes, e);
     });
+    /* AND FOCUS, WHICH A SURFACE STOPPED EMITTING. The focus and blur listeners were the TERMINAL
+     * widget's, and `#surface` removes it — so a surfaced window never reported another focus
+     * change for the rest of its life, and a program that dimmed a caret on blur never recovered.
+     * `src/abi.mjs` calls focus "an EVENT and not a query, because the process that wants it is
+     * asleep in `poll`"; for a surface it was neither. */
+    el.addEventListener("focus", () => this.#focus(entry.id, 1));
+    el.addEventListener("blur", () => this.#focus(entry.id, 0));
   }
 
   #destroy(m) {

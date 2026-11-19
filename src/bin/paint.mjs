@@ -16,8 +16,8 @@
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
-  WEV_KEY, WEV_POINTER, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED,
-  WPTR_DOWN, WPTR_UP, WPTR_MOVE,
+  WEV_KEY, WEV_POINTER, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED, WEV_FOCUS,
+  WPTR_DOWN, WPTR_UP, WPTR_MOVE, pointerAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE,
   keyBytesOf,
 } from "/src/abi.mjs";
@@ -84,7 +84,7 @@ export function run(env) {
   const t0 = performance.now();
   const account = {
     program: NAME, win: 0, fd: 0, surface: { w, h },
-    ops: 0, batches: 0, strokes: 0, keys: 0, pointers: 0, clears: 0, resizes: 0,
+    ops: 0, batches: 0, strokes: 0, keys: 0, pointers: 0, clears: 0, resizes: 0, focus: 0,
     why: "",
   };
 
@@ -166,9 +166,17 @@ export function run(env) {
     // syscall each would be the per-op round trip the display list exists to avoid.
     const ops = [];
     for (const ev of evs) {
+      if (ev.type === WEV_FOCUS) {
+        // COUNTED, because a surfaced window stopped emitting these and nothing noticed: the
+        // focus listeners belonged to the TEXT widget the surface replaced (constraint 225).
+        account.focus += 1;
+        continue;
+      }
       if (ev.type === WEV_POINTER) {
         account.pointers += 1;
-        const at = { x: ev.a, y: ev.b };
+        // `pointerAt` AND NOT `{x: ev.a}`: the record's fields are u32 and a drag that leaves the
+        // surface delivers negative coordinates, which read back as four billion.
+        const at = pointerAt(ev);
         if (ev.mods & WPTR_DOWN) {
           last = at;
           // A DOT ON THE DOWN, so a click without a drag still marks the surface. A program that
