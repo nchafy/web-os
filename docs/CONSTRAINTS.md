@@ -1998,3 +1998,68 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     `docs/DECISIONS.md` D31 carries the choice with what it rejected. The `win_*` calls are still
     right, but not for the reason the old sentence gave: a window needs identity, an owner and an
     fd, and none of that is a transfer.
+
+## M8 — the window surface
+
+220. **THE SURFACE BUDGET IS A CEILING, IT ANSWERS ENOMEM, AND IT IS GIVEN BACK.** The kernel
+    allocates every surface, so it can account for one — which is the whole reason the surface is
+    kernel-owned (constraint 219, `docs/DECISIONS.md` D31) and the thing M12's blur governor needs:
+    an admission controller over area cannot admit against a number nobody keeps. 64 M device px
+    across every window of every process, just above the 58–63 M wall gap-04 measured, and 16 M for
+    any one surface — a maximized window at dpr 2 is 3.69 M (constraint 49), so one surface may be
+    four of those and a typo is refused.
+
+    **The errno carries the difference between "ask for less" and "give up".** A surface past the
+    per-surface cap is **EINVAL**: it is not that the system is full, it is that no surface may be
+    that big. The budget itself is **ENOMEM and never EAGAIN**, because a caller told to try again
+    would try for ever — nothing is going to free the area it is waiting for.
+    `bench/m8-surface/controls.py --only budget-as-eagain` is that clause's control.
+
+    **Revocation is the other half, and it is the half a transferred handle could not have had.**
+    Destroying a window releases its area before the window goes; a resize charges the DIFFERENCE
+    and not the sum, which is the defect that would exhaust a budget a program never exceeded —
+    fifty resizes of one window and the system is full. Measured in a browser:
+    18 window-sized surfaces granted, the 19th ENOMEM, and the same size granted again after the
+    windows were destroyed.
+221. **ONE CONTENT MODE PER WINDOW, and `write(2)` on a surfaced window is EINVAL.** A window shows
+    text until its process asks for a surface and pixels afterwards: the page replaces the terminal
+    widget with a canvas, so cells have nowhere to go. They are REFUSED rather than accepted and
+    dropped — accepting bytes nobody renders is the silent loss a user cannot diagnose, and this
+    repository has that defect on record three times already. A draw on the same window still
+    succeeds, which is what makes the refusal about the MODE rather than about a window that
+    stopped answering.
+222. **A DISPLAY LIST IS ONE SYSCALL PER BATCH, AND ITS RECORD IS FIXED WIDTH.** 32 bytes — a u16
+    op, a u16 flags, six i32 arguments and a reserved word — so a batch that could split an op in
+    half cannot make the kernel's count and the page's replay disagree about where the next op
+    starts. `DL_MAX_OPS` is DERIVED from `MAX_INLINE` (2,043 ops), never written as a number, and
+    the libos splits a longer list rather than refusing it.
+
+    **The arguments are signed and the colour slot is not.** A rectangle may legitimately start off
+    the left edge of a surface, so a clamp at zero would move a shape rather than clip it; and
+    `0xRRGGBBAA` with the alpha set is NEGATIVE as an i32, which a reader that forgot would decode
+    as a transparent black. Both are asserted in `src/abi.mjs`'s `selfTest`.
+
+    **The reserved word is the growth mechanism**, the same one the termios flags use: a seventh
+    argument can be added without changing the record size, and a record size that changes is a
+    batch the two sides count differently.
+223. **A POINTER EVENT IS A WINDOW EVENT, IN SURFACE PIXELS, AND A HOVER IS NOT SENT.** The surface
+    is scaled to its client area by CSS, so the page converts a browser event into the process's
+    own coordinates — a process knows only its own surface and must never be handed page
+    coordinates. **A move is sent only while a button is down**: a hover would be one event per
+    `pointermove` against a 256-record queue (constraint 213), so a second of hovering would
+    overflow a queue the process is being asked to drain. A program that needs hover can ask for it
+    when there is a program that needs hover.
+224. **TWO THINGS THE FIRST M8 RUNS CORRECTED, both of which looked like failures and were not.**
+
+    - **One colour, two renderings.** The pattern proof compared `cssColor(op.a4)` — for a canvas,
+      alpha 0–1 — against a pixel read out of that canvas with `getImageData`, which reports alpha
+      as a 0–255 byte. `rgba(74,155,216,1)` against `rgba(74,155,216,255)`: four clauses red over
+      four pixels that were exactly right. `src/abi.mjs` now renders both from one unpacking, and
+      `selfTest` asserts they differ only in the alpha.
+    - **A frame report for a window that is gone is a RACE, not an error.** The page builds a frame
+      when the kernel says so and reports the box its clamp settled on — but a process can create
+      and destroy a window while both messages are still in the page's queue. The kernel posted an
+      `error` for it, and a program that created and destroyed eighteen windows turned a green
+      check red with four of them. Counted as `lateGeoms` and published in `win-state`, because a
+      page reporting geometry for windows that never existed WOULD be a defect and the count is
+      what tells the two apart.

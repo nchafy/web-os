@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M8 — the window surface</title>
+<style>
+/* STRUCTURAL ONLY, as every page here is: the Aero frame, the glass and the gradients are M11. */
+body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+#log { margin:8px; white-space:pre-wrap }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:460px; margin:8px; border:1px solid #334; overflow:hidden }
+.window { position:absolute; display:flex; flex-direction:column; background:#1b1e24;
+  border:1px solid #556; box-sizing:border-box }
+.window-title { display:flex; align-items:center; gap:8px; padding:2px 4px; background:#2a2f38;
+  cursor:move; flex:0 0 auto }
+.window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
+.is-not-responding .window-title { background:#3a3030; color:#bbb }
+.title-buttons { display:flex; gap:4px }
+.title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
+  cursor:pointer }
+.window-body { flex:1 1 auto; min-height:0; display:flex }
+.terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
+  background:#000; color:#ddd; font:inherit }
+.terminal:focus { outline:1px solid #6a8 }
+/* A SURFACE FILLS ITS CLIENT AREA and is SCALED to it: the canvas is sized in the device pixels
+   the process asked for, and a process knows only its own surface. `pixelated`, so a 4x4 proof
+   pattern scaled up reads as four squares rather than a blur — the check reads the pixels back
+   out of the canvas, but a person reads them off the screen. */
+.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
+  background:#0b0d11; image-rendering:pixelated }
+.surface:focus { outline:1px solid #6a8 }
+</style>
+</head>
+<body>
+<pre id="log">M8 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M8 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M8's page harness: THE WINDOW SURFACE.
+ *
+ *   PROOF 1  a process draws a known pattern and the PIXELS ARE THERE, read back out of the
+ *            canvas the browser painted
+ *   PROOF 2  a REAL MOUSE DRAG reaches the process as pointer events, and what it draws in
+ *            response appears where the pointer went
+ *   PROOF 3  the surface budget refuses, by name, and gives the area back when a window is
+ *            destroyed
+ *   PROOF 4  a surfaced window refuses `write(2)`: one content mode per window, and cells with
+ *            nowhere to go are refused rather than dropped
+ *
+ * CONTROL ?no_draw=1 — `win_draw` accepts its batch, counts it, and DISCARDS it. `PLAN.md` §5's
+ * control for M8 in its own words: "draw nothing; the pattern assertion must fail". Everything
+ * that carries the ops keeps working — the process sends them, the kernel counts them, the page is
+ * told a batch arrived — so what disappears is the PIXELS and nothing else, which is the only cut
+ * that tells a working surface from a page drawing on its own.
+ *
+ * WHY THERE IS NO TRANSFERRED CANVAS HERE. Measured first: a transferred `OffscreenCanvas` does
+ * not arrive at a process that is spinning, and does not arrive at one parked in `Atomics.wait` —
+ * which is the state a process is in during the very syscall that would carry it (constraint 219).
+ * `bench/m8-surface/probe.py` is that measurement; `docs/DECISIONS.md` D31 is the choice it forced.
+ */
+import {
+  DL_CLEAR, DL_FILL_RECT, WEV_POINTER, WPTR_DOWN, WPTR_MOVE, pixelColor,
+} from '/src/abi.mjs'
+import { WinHost } from '/src/wm/winhost.mjs'
+import {
+  bootKernel, shutdown, spawnProgram, resultOf, ask, until, sleep, typeSynthetic,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  noDraw: params.get('no_draw') === '1',
+  liveOnly: params.get('live') === '1',
+}
+
+const PAINT = '/src/bin/paint.mjs'
+const GREEDY = '/bench/m8-surface/greedy.mjs'
+const TERM = '/src/bin/term.mjs'
+
+/** How long to wait for an outside driver to send REAL pointer events before the page synthesises
+ *  them. `scripts/check.py --only m8` is that driver, through `Input.dispatchMouseEvent`. The
+ *  split into a short wait on the DECLARATION and a long one on the EVENTS is M4a's, for its
+ *  reason: one timer cannot be both short enough not to stall a person and long enough not to fire
+ *  between a driver's `settle` and its first event. */
+const DRIVER_WAIT_MS = 2500
+const REAL_INPUT_WAIT_MS = 60000
+
+globalThis.M8.proofs = { pattern: null, pointer: null, budget: null, textmode: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M8.state = 'aborted'
+  globalThis.M8.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no pixels.'
+  out.className = 'bad'
+  say(globalThis.M8.why)
+} else {
+  main().catch((e) => {
+    globalThis.M8.state = 'error'
+    globalThis.M8.why = String((e && e.stack) || e)
+    say(globalThis.M8.why)
+  })
+}
+
+/** A kernel with a window host attached. The host builds a frame when a process creates a window
+ *  and a CANVAS when a process asks for a surface; nothing here decides either. */
+async function bootHost (boot) {
+  const k = await bootKernel(boot, globalThis.M8, say)
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  return { k, host, usr: mounts.usr || {}, mounts }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: a process draws a known pattern, and the pixels are there.
+
+   `MILESTONES.md` M8: "a process draws a known 4x4 pattern; screenshot and assert the pixels".
+   The pattern is `src/bin/paint.mjs`'s own `testPattern()` — a SHIPPED program's, not a fixture's,
+   so the proof is about the path a user runs — and this page asks that function what it drew
+   instead of agreeing a list of coordinates with it.
+   -------------------------------------------------------------------------------------------- */
+
+async function pPattern (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, PAINT, ['paint', '-t', '-w', '96', '-h', '64'])
+    ev.pid = pid
+    const framed = await until(() => s.host.frames.size >= 1, 20000)
+    ev.framedMs = Math.round(framed)
+    const surfaced = await until(() => Object.keys(s.host.surfaces()).length >= 1, 20000)
+    ev.surfacedMs = Math.round(surfaced)
+    const entry = [...s.host.frames.values()][0]
+    ev.win = entry && entry.id
+    ev.surfaces = s.host.surfaces()
+    const result = await resultOf(s.k, pid, 30000)
+    ev.result = result
+    ev.pattern = result.pattern || []
+    ev.hostStats = s.host.report()
+
+    // THE PIXELS, READ BACK OUT OF THE CANVAS THE BROWSER PAINTED — not out of the ops that were
+    // sent. An inert canvas and a working one are the same picture (constraint 40), and this is
+    // the only way to tell them apart.
+    const probes = []
+    if (entry && entry.surface) {
+      for (const op of ev.pattern) {
+        if (op.op !== DL_FILL_RECT) continue
+        // The CENTRE of each square, so a one-pixel offset in either direction still lands inside
+        // the rectangle a correct implementation drew.
+        const x = op.a0 + Math.floor(op.a2 / 2)
+        const y = op.a1 + Math.floor(op.a3 / 2)
+        // `pixelColor` AND NOT `cssColor`: `getImageData` reports alpha as a 0-255 byte and CSS
+        // wants 0-1, and comparing one against the other reported four correct pixels as wrong.
+        probes.push({ x, y, want: pixelColor(op.a4), got: entry.surface.pixel(x, y) })
+      }
+      // AND A PIXEL NOTHING DREW ON, which is what stops a canvas filled entirely with one colour
+      // from satisfying every clause above.
+      const clear = ev.pattern.find((op) => op.op === DL_CLEAR)
+      ev.paper = {
+        x: 90, y: 60, want: clear ? pixelColor(clear.a0) : '?',
+        got: entry.surface.pixel(90, 60),
+      }
+    }
+    ev.probes = probes
+    ev.wrong = probes.filter((p) => p.got !== p.want)
+    const clauses = {
+      'the process got a surface and the page made a canvas for it':
+        Object.keys(ev.surfaces).length === 1 && surfaced >= 0,
+      'the program reported the batch it sent': (result.batches || 0) >= 1
+        && (result.ops || 0) === ev.pattern.length,
+      'and every pixel of the pattern is on the canvas':
+        probes.length >= 4 && ev.wrong.length === 0,
+      'while a pixel nothing drew on is still the paper colour':
+        !!ev.paper && ev.paper.got === ev.paper.want,
+      'and the page replayed exactly the ops the kernel forwarded':
+        (ev.surfaces[ev.win] || {}).ops === ev.pattern.length
+        && (ev.surfaces[ev.win] || {}).unknown === 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k, globalThis.M8)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: a real mouse drag reaches the process, and what it draws lands where the pointer went.
+   -------------------------------------------------------------------------------------------- */
+
+async function pPointer (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, PAINT, ['paint', '-w', '160', '-h', '120'])
+    ev.pid = pid
+    await until(() => Object.keys(s.host.surfaces()).length >= 1, 20000)
+    const entry = [...s.host.frames.values()][0]
+    ev.win = entry.id
+    // The surface's own rectangle in PAGE coordinates, published so a driver outside this page
+    // knows where to click. The canvas is scaled by CSS, so this is the only honest source.
+    const r = entry.surface.el.getBoundingClientRect()
+    ev.rect = { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width),
+      h: Math.round(r.height) }
+    ev.surfacePx = { w: entry.surface.w, h: entry.surface.h }
+    // WHERE THE DRAG GOES, in page coordinates: a quarter of the way in, straight across to
+    // three quarters, at a third of the height. Published for the driver, and converted back to
+    // surface pixels below so the assertion is about the same line.
+    const from = { x: Math.round(r.left + r.width * 0.25), y: Math.round(r.top + r.height / 3) }
+    const to = { x: Math.round(r.left + r.width * 0.75), y: Math.round(r.top + r.height / 3) }
+    globalThis.M8.drag = { from, to }
+    const before = entry.surface.pixel(entry.surface.w >> 1, Math.round(entry.surface.h / 3))
+    ev.before = before
+
+    // REAL MOUSE EVENTS FIRST. The page announces itself and waits for a driver;
+    // `scripts/check.py` sees the phase and sends them through `Input.dispatchMouseEvent`, so the
+    // events the canvas receives are `isTrusted` and went through Chrome's own hit testing.
+    globalThis.M8.phase = 'await-pointer'
+    const declared = await until(
+      () => globalThis.M8.driver === 'check' || s.host.report().pointers > 0, DRIVER_WAIT_MS)
+    const got = declared < 0 ? -1 : await until(
+      () => s.host.report().pointers > 0, REAL_INPUT_WAIT_MS)
+    ev.drivenBy = got < 0 ? 'page' : (globalThis.M8.driver === 'check' ? 'check' : 'hand')
+    if (got < 0) synthDrag(entry.surface.el, from, to)
+    globalThis.M8.phase = 'dragged'
+
+    // The process has to see the events, act on them, and the page has to replay what it sent —
+    // three steps, so the wait is on the LAST one.
+    const painted = await until(
+      () => entry.surface.pixel(entry.surface.w >> 1, Math.round(entry.surface.h / 3)) !== before,
+      15000)
+    ev.paintedMs = Math.round(painted)
+    ev.after = entry.surface.pixel(entry.surface.w >> 1, Math.round(entry.surface.h / 3))
+    ev.hostStats = s.host.report()
+    ev.surfaces = s.host.surfaces()
+
+    // AND NOT EVERYWHERE: a surface that had been filled would satisfy "the middle changed".
+    ev.untouched = entry.surface.pixel(4, entry.surface.h - 4)
+    // Ask the program to stop, and read what it saw.
+    typeSynthetic(entry.surface.el, 'q')
+    const result = await resultOf(s.k, pid, 30000)
+    ev.result = result
+
+    const clauses = {
+      'a real pointer drag reached the process':
+        ev.drivenBy === 'page' ? null : (ev.hostStats.pointers > 0),
+      'the process saw pointer events and drew in response': (result.pointers || 0) > 2
+        && (result.strokes || 0) > 0,
+      'and the pixels under the drag changed': painted >= 0 && ev.after !== ev.before,
+      'while a corner the drag never reached did not': ev.untouched === ev.before,
+      'and the program exited when asked': result.exit === 0 && result.why === 'q',
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    ev.notMeasured = Object.keys(clauses).filter((k) => clauses[k] === null)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k, globalThis.M8)
+  }
+}
+
+/** The fallback drag. Synthesised PointerEvents reach the canvas's own handlers and nothing in
+ *  front of them, which is why the clause above reports NOT MEASURED when this is what ran. */
+function synthDrag (el, from, to) {
+  const step = (type, x, y, buttons) => el.dispatchEvent(new PointerEvent(type, {
+    pointerId: 1, clientX: x, clientY: y, button: 0, buttons, bubbles: true, cancelable: true,
+  }))
+  step('pointerdown', from.x, from.y, 1)
+  for (let i = 1; i <= 8; i += 1) {
+    step('pointermove', from.x + ((to.x - from.x) * i) / 8,
+      from.y + ((to.y - from.y) * i) / 8, 1)
+  }
+  step('pointerup', to.x, to.y, 0)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3 and PROOF 4: the budget refuses and releases, and a surfaced window refuses cells.
+   -------------------------------------------------------------------------------------------- */
+
+async function pBudget (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, GREEDY, ['greedy'])
+    ev.pid = pid
+    const result = await resultOf(s.k, pid, 60000)
+    ev.result = result
+    const wins = await ask(s.k, 'win-state')
+    ev.wins = wins.wins
+    const clauses = {
+      'a surface larger than the per-surface cap is EINVAL': result.tooBig === 'EINVAL',
+      'the budget refuses with ENOMEM, which is a ceiling and not a transient':
+        result.refusedWith === 'ENOMEM',
+      'after granting several window-sized surfaces': (result.granted || 0) >= 2,
+      'and destroying the windows gives the area back': result.released === 'ESUCCESS',
+      'the kernel accounts no surface once they are gone':
+        (ev.wins || {}).surfacePx === 0 && (ev.wins || {}).surfaces === 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    const text = {
+      'a surfaced window refuses cells with EINVAL': result.cellsRefused === 'EINVAL',
+      'and still accepts a draw, so the refusal is about the mode and not the window':
+        result.drewAfter === 'ESUCCESS',
+    }
+    ev.textClauses = text
+    ev.textFailed = Object.keys(text).filter((k) => text[k] === false)
+    return {
+      budget: { ok: ev.failed.length === 0, evidence: ev },
+      textmode: { ok: ev.textFailed.length === 0, evidence: { ...ev, clauses: text } },
+    }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k, globalThis.M8)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   AND THE DESKTOP: a shell, and `paint` a command away.
+   -------------------------------------------------------------------------------------------- */
+
+async function liveDesktop (boot) {
+  const s = await bootHost(boot)
+  if (!s.usr.ok) {
+    say('REFUSING TO GO ON: /usr did not mount, so there is no /usr/bin/sh to start.')
+    globalThis.M8.state = 'error'
+    globalThis.M8.why = '/usr did not mount: ' + JSON.stringify(s.usr.why)
+    return null
+  }
+  const { pid } = await spawnProgram(s.k, TERM, ['term', '--ceiling', '3600000'])
+  const promptMs = await until(() => {
+    const e = [...s.host.frames.values()][0]
+    return e && e.term && /\$ /.test(e.term.screen())
+  }, 25000)
+  const entry = [...s.host.frames.values()][0]
+  if (entry && entry.term) entry.term.focus()
+  globalThis.M8.live = { pid }
+  if (promptMs < 0) {
+    const state = await ask(s.k, 'm4-state').catch((e) => ({ why: String(e) }))
+    const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
+    say('NO PROMPT in 25 s. The relay is pid ' + pid + ', parked in ' +
+      JSON.stringify(row && row.inflight))
+    globalThis.M8.stuck = { relay: row }
+    return s
+  }
+  say('')
+  say('A LIVE DESKTOP is open above: click the terminal and type.')
+  say('  paint              a window you can DRAW IN with the mouse. 1-6 pick a colour,')
+  say('                     c clears, q quits. Every pixel is a display list through a syscall.')
+  say('  paint -w 640 -h 400   a bigger surface; the page scales it to the frame either way')
+  say('  paint -t           just the test pattern this page asserts on, left on screen')
+  say('  cat /proc/$$/win/* every window as a file, including its surface size')
+  return s
+}
+
+/* ---------------------------------------------------------------------------------------- */
+
+async function main () {
+  const t0 = performance.now()
+  say('M8: the window surface' + (CFG.noDraw ? '  [CONTROL: no_draw]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.noDraw) boot.noDraw = true
+  if (CFG.liveOnly) {
+    const s = await liveDesktop(boot)
+    if (s) {
+      globalThis.M8.verdict = 'live'
+      globalThis.M8.state = 'done'
+    }
+    return
+  }
+  const P = globalThis.M8.proofs
+
+  P.pattern = await pPattern(boot)
+  const p = P.pattern.evidence
+  say('pattern: ' + (p.probes || []).length + ' probes, ' + (p.wrong || []).length +
+    ' wrong; paper at (90,60) reads ' + JSON.stringify((p.paper || {}).got) +
+    '; the page replayed ' + JSON.stringify(p.surfaces))
+  if (p.failed.length) say('  pattern FAILED: ' + p.failed.join('; '))
+  for (const probe of (p.wrong || []).slice(0, 4)) {
+    say('    (' + probe.x + ',' + probe.y + ') wanted ' + probe.want + ' got ' + probe.got)
+  }
+
+  P.pointer = await pPointer(boot)
+  const q = P.pointer.evidence
+  say('pointer: driven by ' + q.drivenBy + ', ' + (q.hostStats || {}).pointers +
+    ' events to the kernel, the process saw ' + (q.result || {}).pointers + ' and drew ' +
+    (q.result || {}).strokes + ' strokes; the middle went ' + JSON.stringify(q.before) + ' -> ' +
+    JSON.stringify(q.after))
+  if (q.failed.length) say('  pointer FAILED: ' + q.failed.join('; '))
+
+  const both = await pBudget(boot)
+  P.budget = both.budget
+  P.textmode = both.textmode
+  const b = P.budget.evidence
+  say('budget: ' + (b.result || {}).granted + ' surfaces granted, then ' +
+    (b.result || {}).refusedWith + '; too big reads ' + (b.result || {}).tooBig +
+    '; after destroying them a new one reads ' + (b.result || {}).released)
+  if (b.failed.length) say('  budget FAILED: ' + b.failed.join('; '))
+  say('textmode: write on a surfaced window reads ' + (b.result || {}).cellsRefused +
+    ', while a draw reads ' + (b.result || {}).drewAfter)
+  if (b.textFailed.length) say('  textmode FAILED: ' + b.textFailed.join('; '))
+
+  const drivenBy = (P.pointer.evidence || {}).drivenBy || 'page'
+  globalThis.M8.config = {
+    noDraw: CFG.noDraw, drivenBy,
+    DL_CLEAR, DL_FILL_RECT, WEV_POINTER, WPTR_DOWN, WPTR_MOVE,
+  }
+  globalThis.M8.drivenBy = drivenBy
+  const sections = Object.entries(P)
+  const ran = sections.filter(([, v]) => v !== null)
+  const allOk = ran.length === sections.length && ran.every(([, v]) => v.ok)
+  /* 'hand-driven' IS ITS OWN VERDICT AND NOT A PASS, for M4a's reason: a person who opens this
+   * page drags their own mouse, so the clause that asserts a trusted pointer event is NOT
+   * MEASURED rather than false. `scripts/check.py` declares itself and requires 'ok'. */
+  globalThis.M8.verdict = allOk ? (drivenBy === 'hand' ? 'hand-driven' : 'ok') : 'FAIL'
+  globalThis.M8.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  const f = globalThis.M8.fetches
+  say('program fetches: ' + f.fetches + ' over ' + f.kernels + ' kernels, ' + f.retries +
+    ' retried (' + f.timeouts + ' deadline, ' + f.transport + ' transport)')
+  if (globalThis.M8.bootRetries) {
+    say('kernel boots retried: ' + globalThis.M8.bootRetries + ' (a worker that never started)')
+  }
+  say('verdict ' + globalThis.M8.verdict + ' in ' + Math.round(globalThis.M8.ms) + ' ms')
+  await liveDesktop(boot)
+  out.className = globalThis.M8.verdict === 'FAIL' ? 'bad' : 'ok'
+  globalThis.M8.state = 'done'
+}
+</script>
+</body>
+</html>

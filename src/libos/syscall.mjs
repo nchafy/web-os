@@ -20,8 +20,9 @@ import {
   SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid, SYS_setsid,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
-  SYS_win_create, SYS_win_destroy, SYS_win_set,
+  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
   WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, decodeWinEvents,
+  DLOP_BYTES, DL_MAX_OPS, encodeDrawOp,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
   SYS_getpgid, SYS_getppid, SYS_exit, SYS_clock_nanosleep, SYS_chdir, encodeSpawnRequest,
@@ -640,6 +641,33 @@ export function winSetTitle(fd, title) {
  *  settled on arrives back as a WEV_RESIZE event and in `/proc/<pid>/win/<winid>`. */
 export function winSetBox(fd, box) {
   return syscall(SYS_win_set, fd, WIN_SET_BOX, box.x | 0, box.y | 0, box.w | 0, box.h | 0);
+}
+
+/** Ask the kernel for a surface of `w` x `h` DEVICE PIXELS on this window, or get an errno. The
+ *  kernel owns it; this process is handed nothing and draws with `winDraw` (D31). */
+export function winSurface(fd, w, h) {
+  return syscall(SYS_win_surface, fd, w | 0, h | 0);
+}
+
+/**
+ * One batch of display-list ops. The ops are encoded HERE, through `src/abi.mjs`'s one codec, so a
+ * program never writes a field offset — and the batch is split at `DL_MAX_OPS`, which is derived
+ * from the frame size rather than written down.
+ *
+ * Returns 0, or the first negative errno. A program that drew half a frame and was then refused
+ * must be told, so the loop stops at the first refusal instead of reporting the last one.
+ */
+export function winDraw(fd, ops) {
+  const bytes = new Uint8Array(DL_MAX_OPS * DLOP_BYTES);
+  const dv = new DataView(bytes.buffer);
+  for (let from = 0; from < ops.length; from += DL_MAX_OPS) {
+    const batch = Math.min(DL_MAX_OPS, ops.length - from);
+    for (let i = 0; i < batch; i += 1) encodeDrawOp(dv, i * DLOP_BYTES, ops[from + i]);
+    const r = syscall(SYS_win_draw, fd, batch, 0, 0, 0, 0, 0, 0,
+      bytes, 0, batch * DLOP_BYTES);
+    if (r < 0) return r;
+  }
+  return 0;
 }
 
 /** Read whole window events: `read(2)` with the record decoding attached, so no program writes the

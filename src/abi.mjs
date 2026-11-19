@@ -137,7 +137,14 @@ const INTS = {
   SYS_win_create: 48,
   SYS_win_destroy: 49,
   SYS_win_set: 50,
-  NSYS: 51,
+  // M8. The surface is KERNEL-OWNED and a process draws by sending a DISPLAY LIST, which is one
+  // syscall per batch rather than one per operation. A transferred `OffscreenCanvas` was measured
+  // first and rejected: it cannot reach a process that is spinning or parked in `Atomics.wait`,
+  // so it cannot be the reply to the call that asked for it, and a surface given away can be
+  // neither accounted nor revoked (constraint 219, `docs/DECISIONS.md` D31).
+  SYS_win_surface: 51,
+  SYS_win_draw: 52,
+  NSYS: 53,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -370,7 +377,17 @@ const INTS = {
   //: SEVERAL windows and a process whose window was a child learns of it here. Without this event
   //: that process's fd table silently disagrees with the kernel's (MILESTONES, ordering correction).
   WEV_DESTROYED: 5,
-  WEV_MAX: 5,
+  //: M8. A pointer inside the window's own surface, in SURFACE pixels — not CSS px and not page
+  //: coordinates, because a process knows only its own surface. `a` and `b` are x and y, `c` is
+  //: the button bitmask, and `flags` is DOWN/UP/MOVE below: one type rather than three, so a
+  //: program that only wants movement does not have to know about the other two.
+  WEV_POINTER: 6,
+  WEV_MAX: 6,
+
+  //: `mods` on a WEV_POINTER. A move with no button held is a hover, which is the zero case.
+  WPTR_DOWN: 0x10,
+  WPTR_UP: 0x20,
+  WPTR_MOVE: 0x40,
 
   //: Modifier bits on WEV_KEY, in `mods`. The widget translates Ctrl into a C0 byte, so these are
   //: for a reader that wants to know what was held, never for deriving the byte.
@@ -391,6 +408,51 @@ const INTS = {
   //: `win_create` flags. A window with no owner passes 0 for the owner winid, which is why winids
   //: start at 1.
   WIN_F_NONE: 0,
+
+  /**
+   * M8's DISPLAY LIST OP. One fixed-width record, for the reason the event record is one: a batch
+   * that could split an op in half would make the kernel's count and the page's replay disagree
+   * about where the next op starts.
+   *
+   * 32 bytes: a u16 op, a u16 flags, and six i32 arguments. Six because the widest op — a line
+   * with a colour and a width — needs x0, y0, x1, y1, rgba, width, and a seventh would double the
+   * record for one case that does not exist.
+   */
+  DLOP_BYTES: 32,
+  DL_OP: 0, DL_FLAGS: 2, DL_A0: 4, DL_A1: 8, DL_A2: 12, DL_A3: 16, DL_A4: 20, DL_A5: 24,
+  //: A RESERVED WORD, written zero and preserved, which is the growth mechanism this ABI already
+  //: uses for the termios flags it does not implement: a seventh argument can be added without
+  //: changing the record size, and a record size that changes is a batch the two sides count
+  //: differently. The encoder writes it; nothing reads it.
+  DL_RESERVED: 28,
+
+  //: The ops. 0 is not used, so a record read out of a zeroed buffer is not a valid op.
+  //: EVERY COLOUR IS AN RGBA u32, 0xRRGGBBAA, which is the one place the colour encoding is
+  //: declared — the page unpacks it in `src/wm/surface.mjs` and nowhere else.
+  DL_CLEAR: 1,          // a0 = rgba. The whole surface.
+  DL_FILL_RECT: 2,      // a0..a3 = x, y, w, h; a4 = rgba
+  DL_STROKE_RECT: 3,    // a0..a3 = x, y, w, h; a4 = rgba; a5 = line width
+  DL_LINE: 4,           // a0..a3 = x0, y0, x1, y1; a4 = rgba; a5 = line width
+  DL_MAX: 4,
+
+  /** How many ops one `win_draw` may carry. Derived from MAX_INLINE and the record size at the
+   *  bottom of this file, never written as a number twice. */
+
+  /**
+   * THE SURFACE BUDGET, in device pixels, across every window of every process. M12's blur
+   * governor is an admission controller over area (constraint 49) and constraint 17's process cap
+   * exists because one renderer is shared — so the kernel refuses a surface it cannot account
+   * rather than discovering the ceiling as a dead tab.
+   *
+   * 64 M px is just above the 58–63 M device-px wall gap-04 measured for compositing, so a run
+   * that hits this budget is a run that was about to hit the real one. It is NOT the governor:
+   * that admits and degrades, and this only refuses.
+   */
+  SURFACE_BUDGET_PX: 64 * 1024 * 1024,
+
+  /** The largest single surface, in device pixels. A maximized window at dpr 2 is 3.69 M
+   *  (constraint 49), so 16 M leaves room for a 4× one and refuses a typo. */
+  SURFACE_MAX_PX: 16 * 1024 * 1024,
 
   /** Windows per process. A process that could create them without limit would exhaust the page's
    *  DOM the way an unbounded worker count exhausts the renderer (constraint 17's shape). */
@@ -417,7 +479,7 @@ export const {
   SYS_dup, SYS_dup2, SYS_pipe2,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl, SYS_chdir,
-  SYS_win_create, SYS_win_destroy, SYS_win_set, NSYS,
+  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -454,6 +516,10 @@ export const {
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
   WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_F_NONE, WIN_CAP,
+  WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
+  DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_MAX,
+  SURFACE_BUDGET_PX, SURFACE_MAX_PX,
 } = INTS;
 
 /**
@@ -514,7 +580,7 @@ export const SYS_NAME = Object.freeze([
   "dup", "dup2", "pipe2",
   "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
   "chdir",
-  "win_create", "win_destroy", "win_set",
+  "win_create", "win_destroy", "win_set", "win_surface", "win_draw",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -575,6 +641,9 @@ export const EFBIG = E.EFBIG;
 export const EBUSY = E.EBUSY;
 export const EXDEV = E.EXDEV;
 export const ESPIPE = E.ESPIPE;
+/** M8's surface budget refusal. A CEILING AND NOT A TRANSIENT, which is why it is not EAGAIN: a
+ *  caller told to try again would try for ever (constraint 220). */
+export const ENOMEM = E.ENOMEM;
 /** What `tty_get`, `tty_set` and `ioctl` answer for an fd that is not a pty, which is what makes
  *  `isatty()` expressible without a second call. */
 export const ENOTTY = E.ENOTTY;
@@ -966,6 +1035,85 @@ export function decodeWinEvents(bytes, length = bytes.length) {
   return out;
 }
 
+/** How many display-list ops one `win_draw` may carry. DERIVED, so the number is never written
+ *  twice: a batch is bytes in the caller's own frame and the frame is MAX_INLINE. */
+export const DL_MAX_OPS = Math.floor(MAX_INLINE / DLOP_BYTES);
+
+/**
+ * M8's display-list op, declared once and used by the process that writes it, the kernel that
+ * counts it and the page that replays it.
+ *
+ * The arguments are SIGNED: a rectangle may legitimately start off the left edge of a surface, and
+ * a clamp at zero would move a shape rather than clip it. The COLOUR is the exception — it is read
+ * back unsigned, because 0xRRGGBBAA with the alpha set is negative as an i32 and a reader that
+ * forgot would get a transparent black.
+ */
+export function encodeDrawOp(dv, off, op) {
+  dv.setUint16(off + DL_OP, op.op & 0xffff, true);
+  dv.setUint16(off + DL_FLAGS, (op.flags || 0) & 0xffff, true);
+  dv.setInt32(off + DL_A0, op.a0 | 0, true);
+  dv.setInt32(off + DL_A1, op.a1 | 0, true);
+  dv.setInt32(off + DL_A2, op.a2 | 0, true);
+  dv.setInt32(off + DL_A3, op.a3 | 0, true);
+  dv.setInt32(off + DL_A4, op.a4 | 0, true);
+  dv.setInt32(off + DL_A5, op.a5 | 0, true);
+  // Zero, always: a future argument lands here and an old writer must not leave anything in it.
+  dv.setUint32(off + DL_RESERVED, 0, true);
+}
+
+export function decodeDrawOp(dv, off) {
+  return {
+    op: dv.getUint16(off + DL_OP, true),
+    flags: dv.getUint16(off + DL_FLAGS, true),
+    a0: dv.getInt32(off + DL_A0, true),
+    a1: dv.getInt32(off + DL_A1, true),
+    a2: dv.getInt32(off + DL_A2, true),
+    a3: dv.getInt32(off + DL_A3, true),
+    // The colour slot, read UNSIGNED. See the note above.
+    a4: dv.getUint32(off + DL_A4, true),
+    a5: dv.getInt32(off + DL_A5, true),
+  };
+}
+
+/** A whole batch. A length that is not a whole number of ops is a kernel fault here rather than a
+ *  silently dropped tail — the same rule as `decodeWinEvents`. */
+export function decodeDrawOps(bytes, length = bytes.length) {
+  if (length % DLOP_BYTES !== 0) {
+    throw new Error(`decodeDrawOps: ${length} bytes is not a whole number of ops`);
+  }
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, length);
+  const out = [];
+  for (let off = 0; off < length; off += DLOP_BYTES) out.push(decodeDrawOp(dv, off));
+  return out;
+}
+
+/** `0xRRGGBBAA` unpacked. THE ONE PLACE THOSE BYTES ARE TAKEN APART, so a process's idea of a
+ *  colour, the canvas's and a check's cannot drift. */
+export function unpackColor(rgba) {
+  const v = rgba >>> 0;
+  return { r: (v >>> 24) & 0xff, g: (v >>> 16) & 0xff, b: (v >>> 8) & 0xff, a: v & 0xff };
+}
+
+/** For a canvas: CSS wants alpha as 0–1. */
+export function cssColor(rgba) {
+  const c = unpackColor(rgba);
+  return `rgba(${c.r},${c.g},${c.b},${c.a / 255})`;
+}
+
+/**
+ * For a PIXEL READ BACK: `getImageData` gives alpha as a 0–255 byte.
+ *
+ * TWO RENDERINGS OF ONE COLOUR IS WHAT THIS EXISTS TO STOP, and it cost a run to learn: M8's
+ * pattern proof compared `cssColor(op.a4)` against a pixel read out of the canvas and found
+ * `rgba(74,155,216,1)` against `rgba(74,155,216,255)` — four clauses red over four pixels that
+ * were exactly right. The alpha convention differs between the two APIs, and a check that renders
+ * the colour itself will get one of them wrong.
+ */
+export function pixelColor(rgba) {
+  const c = unpackColor(rgba);
+  return `rgba(${c.r},${c.g},${c.b},${c.a})`;
+}
+
 /**
  * Derivation and shape assertions, run at module load in both agents. They fire on the change that
  * breaks them rather than leaving a wrong number to be found by a wrong reply months later.
@@ -1221,10 +1369,57 @@ export function selfTest() {
   if (keyBytesOf({ ...eround, type: WEV_RESIZE }).length !== 0) {
     fail("a resize event yielded key bytes");
   }
-  const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED];
+  const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER];
   if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
   if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
   if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
+  // M8's display-list op: contiguous, filling, and its colour slot unsigned on the way back.
+  if (DL_OP + 2 !== DL_FLAGS || DL_FLAGS + 2 !== DL_A0 || DL_A0 + 4 !== DL_A1
+    || DL_A1 + 4 !== DL_A2 || DL_A2 + 4 !== DL_A3 || DL_A3 + 4 !== DL_A4
+    || DL_A4 + 4 !== DL_A5) {
+    fail("the display-list op fields are not contiguous");
+  }
+  if (DL_A5 + 4 !== DL_RESERVED) fail("the display-list op's reserved word is misplaced");
+  if (DL_RESERVED + 4 !== DLOP_BYTES) fail(`a display-list op is not ${DLOP_BYTES} bytes`);
+  const dprobe = new DataView(new ArrayBuffer(DLOP_BYTES));
+  // 0x4a9bd8ff is the project's own blue at full alpha, and it is NEGATIVE as an i32 — which is
+  // the mistake this assertion exists for.
+  encodeDrawOp(dprobe, 0, { op: DL_LINE, a0: -5, a1: 2, a2: 300, a3: 4, a4: 0x4a9bd8ff, a5: 3 });
+  const dround = decodeDrawOp(dprobe, 0);
+  if (dround.op !== DL_LINE || dround.a0 !== -5 || dround.a2 !== 300 || dround.a5 !== 3) {
+    fail(`a draw op round-trips as ${JSON.stringify(dround)}`);
+  }
+  if (dround.a4 !== 0x4a9bd8ff) fail(`the colour slot read back as ${dround.a4}`);
+  if (dprobe.getUint32(DL_RESERVED, true) !== 0) fail("the reserved word was not written zero");
+  if (cssColor(dround.a4) !== "rgba(74,155,216,1)") fail(`cssColor gave ${cssColor(dround.a4)}`);
+  if (cssColor(0x00000000) !== "rgba(0,0,0,0)") fail("a transparent colour did not round-trip");
+  // THE TWO RENDERINGS DIFFER ONLY IN THE ALPHA, which is the whole point: `getImageData` reports
+  // a 0-255 byte and CSS wants 0-1, and a check that rendered the colour itself got one of them
+  // wrong — four correct pixels reported as four failures.
+  if (pixelColor(dround.a4) !== "rgba(74,155,216,255)") {
+    fail(`pixelColor gave ${pixelColor(dround.a4)}`);
+  }
+  if (pixelColor(0x0b0d11ff) === cssColor(0x0b0d11ff)) {
+    fail("pixelColor and cssColor agree, so one of them is wrong about alpha");
+  }
+  const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE];
+  if (new Set(dlOps).size !== dlOps.length) fail("two display-list ops collide");
+  if (dlOps.includes(0)) fail("0 is a display-list op: a zeroed buffer would decode as one");
+  if (Math.max(...dlOps) !== DL_MAX) fail("DL_MAX is not the largest op");
+  if (DL_MAX_OPS < 1024) fail(`a batch holds only ${DL_MAX_OPS} ops`);
+  const wptr = [WPTR_DOWN, WPTR_UP, WPTR_MOVE];
+  if (new Set(wptr).size !== 3) fail("two pointer flags collide");
+  for (const b of wptr) {
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`pointer flag ${b} is not a single bit`);
+  }
+  // A pointer flag must not collide with a MODIFIER, because both travel in `mods`.
+  for (const b of wptr) {
+    for (const m of [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT]) {
+      if (b === m) fail(`pointer flag ${b} collides with a modifier`);
+    }
+  }
+  if (SURFACE_MAX_PX > SURFACE_BUDGET_PX) fail("one surface may exceed the whole budget");
+
   const wmods = [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT];
   if (new Set(wmods).size !== 3) fail("two window modifier bits collide");
   for (const b of wmods) {

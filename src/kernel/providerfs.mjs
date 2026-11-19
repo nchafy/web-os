@@ -31,6 +31,7 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "bin/yes", path: "src/bin/yes.mjs" }),
   Object.freeze({ name: "bin/term", path: "src/bin/term.mjs" }),
   Object.freeze({ name: "bin/winopen", path: "src/bin/winopen.mjs" }),
+  Object.freeze({ name: "bin/paint", path: "src/bin/paint.mjs" }),
 ]);
 
 /** `/bench`, mounted ONLY under a bench boot (src/kernel/kernel.mjs). `SYS_spawn` loads from the

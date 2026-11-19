@@ -27,7 +27,25 @@ import cdp  # noqa: E402  (the path has to be set up first)
 
 READY = ("(() => { const M = globalThis.%(g)s || {}; const s = M.state; "
          "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
-         "return M.phase === 'await-keys' ? 'await-keys' : '' })()")
+         "return (M.phase === 'await-keys' || M.phase === 'await-pointer') ? M.phase : '' })()")
+
+
+def mouse_drag(page, start, end, steps=8):
+    """A real press, several moves and a release, through `Input.dispatchMouseEvent`.
+
+    SEVERAL MOVES AND NOT ONE: a program that draws a line from the last point to this one needs
+    at least two points to draw anything, and a single jump from press to release is what a
+    synthesised drag looks like — not what a hand does.
+    """
+    page.call("Input.dispatchMouseEvent", type="mousePressed", x=start["x"], y=start["y"],
+              button="left", buttons=1, clickCount=1)
+    for i in range(1, steps + 1):
+        x = start["x"] + (end["x"] - start["x"]) * i // steps
+        y = start["y"] + (end["y"] - start["y"]) * i // steps
+        page.call("Input.dispatchMouseEvent", type="mouseMoved", x=x, y=y,
+                  button="left", buttons=1)
+    page.call("Input.dispatchMouseEvent", type="mouseReleased", x=end["x"], y=end["y"],
+              button="left", buttons=0, clickCount=1)
 
 
 def main(argv=None) -> int:
@@ -39,6 +57,9 @@ def main(argv=None) -> int:
     ap.add_argument("--port", type=int, default=8711)
     ap.add_argument("--page", default="m7", help="which www/<page>.html to drive")
     ap.add_argument("--keys", default="a", help="what to type when the page asks for keys")
+    ap.add_argument("--drag", action="store_true",
+                    help="the page is waiting for a POINTER drag (www/m8.html): read the "
+                         "coordinates it published and send real mouse events")
     args = ap.parse_args(argv)
 
     server = subprocess.Popen(
@@ -63,7 +84,20 @@ def main(argv=None) -> int:
             typed = False
             while time.time() < deadline:
                 state = page.evaluate(ready) or ""
-                if state == "await-keys" and not typed:
+                if state == "await-pointer" and not typed:
+                    # THE DRAG THE PAGE ASKED FOR, through Chrome's own input pipeline, at the
+                    # coordinates the page published — the canvas is scaled by CSS, so its own
+                    # rectangle is the only honest source for where to click.
+                    drag = json.loads(page.evaluate(
+                        "JSON.stringify(globalThis.%s.drag || null)" % glob) or "null")
+                    if not drag:
+                        print("the page asked for a pointer drag and published no coordinates")
+                        break
+                    page.evaluate("globalThis.%s.driver = 'check'" % glob)
+                    mouse_drag(page, drag["from"], drag["to"])
+                    typed = True
+                    state = ""
+                elif state == "await-keys" and not typed:
                     # REAL KEYS, through Chrome's own input pipeline, which is the only way the
                     # widget receives an `isTrusted` event.
                     page.evaluate(

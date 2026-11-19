@@ -15,7 +15,7 @@ import {
   F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
-  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES,
+  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES, DLOP_BYTES,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
@@ -978,6 +978,44 @@ HANDLERS.win_set = (p, k) => {
   // A selector nobody implements is -EINVAL, never 0: a caller checking the return would read a
   // no-op as a successful change.
   return -EINVAL;
+};
+
+/**
+ * win_surface(fd, w, h) -> 0, or an errno. THE KERNEL ALLOCATES THE SURFACE, which is what lets it
+ * account and revoke one (`docs/DECISIONS.md` D31). The process is handed nothing: it draws by
+ * sending a display list, because a transferred `OffscreenCanvas` cannot reach a process that is
+ * parked in the very call that would carry it (constraint 219).
+ *
+ * The size is in DEVICE PIXELS and the process chooses it. The page's frame is CSS pixels at some
+ * device-pixel ratio, so a program that wants one surface pixel per device pixel asks `win_set`
+ * for a box and reads the cell geometry back — it is not this call's business to guess.
+ */
+HANDLERS.win_surface = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  if (d.win.destroyed) return -EHOSTGONE;
+  return k.wins.surface(d.win, p.ctl[A1] | 0, p.ctl[A2] | 0);
+};
+
+/**
+ * win_draw(fd, nops) -> 0, with the ops in the byte region. ONE SYSCALL PER BATCH: a call per
+ * operation would make a 2,000-op frame 2,000 round trips, and M0 measured a round trip at ~100 µs.
+ *
+ * The ops are NOT interpreted here. The kernel counts them, charges them to the window and
+ * forwards the bytes; `src/wm/surface.mjs` is the one renderer, so the colour encoding and the op
+ * vocabulary have exactly one reading. A kernel that drew would be a kernel that owned a canvas.
+ */
+HANDLERS.win_draw = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const nops = p.ctl[A1] | 0;
+  if (nops <= 0) return -EINVAL;
+  const length = Atomics.load(p.ctl, LEN_I32);
+  // EXACTLY the ops the caller declared. A short buffer would have the page replay whatever the
+  // region last held, and a long one would silently drop the tail — the same rule the window event
+  // read applies in the other direction.
+  if (length !== nops * DLOP_BYTES) return -EINVAL;
+  return k.wins.draw(d.win, p.bytes.subarray(DATA_OFF, DATA_OFF + length));
 };
 
 /**

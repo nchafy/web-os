@@ -49,6 +49,10 @@ SLOW_PATH = "/__slow__/hold.png"
 
 FIREFOX = "/Applications/Firefox.app/Contents/MacOS/firefox"
 
+#: Which page is being rendered, as a one-element list so the handler closure reads the current
+#: value rather than one captured at import.
+PAGE = ["m7.html"]
+
 
 def make_handler(hold_ms: int):
     class Injecting(Handler):
@@ -70,8 +74,8 @@ def make_handler(hold_ms: int):
         def do_GET(self):
             # The HTML gets the slow image appended. Everything else is served verbatim, so the
             # module graph the browser loads is the one on disk.
-            if self.path.split("?")[0].endswith("m7.html"):
-                body = (ROOT / "www" / "m7.html").read_bytes()
+            if self.path.split("?")[0].endswith(PAGE[0]):
+                body = (ROOT / "www" / PAGE[0]).read_bytes()
                 tag = ('<img src="%s" alt="" width="1" height="1" '
                        'style="position:fixed;left:-10px">' % SLOW_PATH).encode()
                 body = re.sub(rb"</body>", tag + b"</body>", body, count=1)
@@ -95,21 +99,23 @@ def main(argv=None) -> int:
     ap.add_argument("--live", action="store_true", help="the desktop only, no proofs")
     ap.add_argument("--hold-ms", type=int, default=32000,
                     help="how long to hold the load event open (default 32000)")
-    ap.add_argument("--out", default=str(ROOT / "bench" / "m7-win" / "firefox.png"))
+    ap.add_argument("--page", default="m7", help="which www/<page>.html to render")
+    ap.add_argument("--out", default=None)
     args = ap.parse_args(argv)
 
     if not pathlib.Path(FIREFOX).exists():
         print("no Firefox at %s — install it or point FIREFOX at one" % FIREFOX)
         return 3
 
+    PAGE[0] = "%s.html" % args.page
+    out = pathlib.Path(args.out or (ROOT / "bench" / "m7-win" / ("firefox-%s.png" % args.page)))
     handler = functools.partial(make_handler(args.hold_ms), directory=str(ROOT))
     httpd = Server(("127.0.0.1", 0), handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
-    url = "http://127.0.0.1:%d/www/m7.html%s" % (port, "?live=1" if args.live else "")
+    url = "http://127.0.0.1:%d/www/%s%s" % (port, PAGE[0], "?live=1" if args.live else "")
     print("url      %s" % url)
-    out = pathlib.Path(args.out)
     profile = tempfile.mkdtemp(prefix="m7-firefox-")
     try:
         # A FRESH PROFILE, so a previous run's permissions or cache cannot explain a result.

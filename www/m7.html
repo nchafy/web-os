@@ -25,6 +25,13 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 .terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
   background:#000; color:#ddd; font:inherit }
 .terminal:focus { outline:1px solid #6a8 }
+/* A SURFACE FILLS ITS CLIENT AREA and is scaled to it: the canvas is sized in the DEVICE pixels
+   the process asked for, and a process knows only its own surface. `image-rendering:pixelated`
+   so a 4x4 proof pattern scaled up is four squares and not a blur — a check reads the pixels back
+   out of the canvas, but a reader reads them off the screen. */
+.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
+  background:#0b0d11; image-rendering:pixelated }
+.surface:focus { outline:1px solid #6a8 }
 /* The window table. A list of what the kernel thinks exists, beside the frames themselves — so a
    frame with nothing behind it is visible as a row that is not there. */
 #wins { margin:8px; border-collapse:collapse; font:12px/1.4 ui-monospace,Menlo,monospace }
@@ -67,6 +74,13 @@ import {
   POLLIN, F_WIN, F_PIPE_R, WEV_KEY, WEV_DESTROYED, WIN_EVENT_CAP, packKeyBytes,
 } from '/src/abi.mjs'
 import { WinHost } from '/src/wm/winhost.mjs'
+/* THE PAGE'S HALF OF A KERNEL, imported rather than pasted. `CLAUDE.md` records this machinery as
+ * a known second copy across nine `www/*.html` pages; `www/m8.html` needed all of it too, and the
+ * second caller is what justifies the abstraction. The older pages still carry their own. */
+import {
+  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, ask, until, sleep,
+  typeSynthetic,
+} from '/www/pagekernel.mjs'
 
 const out = document.getElementById('log')
 const desktop = document.getElementById('desktop')
@@ -104,48 +118,6 @@ const REAL_KEY_WAIT_MS = 60000
  *  `Cannot access 'BOOT_WAIT_MS' before initialization`. */
 const BOOT_WAIT_MS = 12000
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-
-/** REAP EVERY PROCESS BEFORE TERMINATING THE KERNEL THAT OWNS THEM. Terminating the kernel worker
- *  alone ORPHANS its process workers — nested workers are collected eventually, not promptly — and
- *  this page builds five kernels in one run. `www/m4b.html` does the same for the same reason, and
- *  `src/kernel/kernel.mjs`'s `shutdown` case carries the note that it is NOT a remedy for a
- *  spawn that stalled (constraint 121). The failure to acknowledge is recorded, never swallowed. */
-async function shutdown (k) {
-  try {
-    k.post({ t: 'shutdown' })
-    const done = await k.expect('shutdown', 5000)
-    /* AND THE KERNEL'S OWN FETCH COUNTERS, SUMMED ACROSS EVERY KERNEL THIS PAGE BUILDS. A
-     * non-zero `transport` in a run that PASSED is direct evidence that the retry in
-     * `programText` did something — this page lost about one program fetch in three runs to
-     * `TypeError: Failed to fetch` before that retry covered the transport, and the kernel
-     * panicked (constraint 212). A counter nobody reads is how that went unexplained for two
-     * runs, so the page reports it. */
-    const ks = (done && done.kernel) || {}
-    const f = globalThis.M7.fetches
-    f.kernels += 1
-    f.fetches += ks.programFetches || 0
-    f.retries += ks.programFetchRetries || 0
-    f.timeouts += ks.programFetchTimeouts || 0
-    f.transport += ks.programFetchTransport || 0
-  } catch (e) {
-    globalThis.M7.notes.push('shutdown did not acknowledge: ' + (e && e.message))
-  }
-  k.worker.terminate()
-}
-
-/** Poll a predicate until it holds. Returns the ms waited, or -1 on timeout. A window nobody reads
- *  raises no error anywhere, so every wait here is bounded and reports. THE PREDICATE IS AWAITED,
- *  because a Promise is always truthy and an async predicate would otherwise pass at once. */
-async function until (what, ms = 5000, step = 25) {
-  const t0 = performance.now()
-  for (;;) {
-    if (await what()) return performance.now() - t0
-    if (performance.now() - t0 > ms) return -1
-    await sleep(step)
-  }
-}
-
 Object.assign(globalThis.M7, { isolated: self.crossOriginIsolated === true })
 globalThis.M7.proofs = {
   poll_many: null, procwin: null, cascade: null, crossproc: null, close: null, health: null,
@@ -169,112 +141,6 @@ if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function'
   })
 }
 
-class KernelFail extends Error {}
-
-/** THE UNSOLICITED KINDS. Every `win-*` message is an event and not a reply to anything, so they
- *  are dispatched to listeners rather than queued for an `expect`. QUEUEING THEM WOULD LEAK: a
- *  session's keystrokes and cells arrive in the hundreds and `pending` only shrinks when something
- *  expects that exact kind. `win-geom` and `win-state` are replies and stay queueable. */
-const UNSOLICITED = new Set(
-  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed',
-    // `win-geom` IS AN EVENT TOO, and leaving it out was a leak: the kernel posts one for every
-    // frame the host reports — on create, on every pointerup, on every title-bar keyup — and
-    // nothing ever expects that kind, so every one of them sat in `pending` for ever. `win-state`
-    // is the only window reply, because something asks for it by name.
-    'win-geom'])
-
-function kernelBoot (cfg) {
-  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
-  const waiters = new Map(); const pending = []; const events = []
-  let abort = null
-  const listeners = []
-  const fail = (why) => {
-    abort = new KernelFail(why)
-    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
-  }
-  worker.onmessage = (ev) => {
-    const m = ev.data
-    if (!UNSOLICITED.has(m.t)) events.push(m)
-    if (m.t === 'up') {
-      globalThis.M7.kernelIsolated = m.isolated === true
-      globalThis.M7.kernelCfg = m.cfg
-    }
-    if (m.t === 'fault') {
-      globalThis.M7.faults.push({ pid: m.pid, why: m.why })
-      say('FAULT pid ' + m.pid + ': ' + m.why)
-    }
-    if (m.t === 'error' || m.t === 'panic') {
-      globalThis.M7.errors.push('kernel: ' + m.t + ': ' + m.why)
-      say('kernel ' + m.t + ': ' + m.why)
-    }
-    if (m.t === 'io-note') globalThis.M7.notes.push(m.why)
-    for (const fn of listeners) fn(m)
-    if (UNSOLICITED.has(m.t)) return
-    const cb = waiters.get(m.t)
-    if (cb) { waiters.delete(m.t); cb(m); return }
-    pending.push(m)
-  }
-  worker.onerror = (e) => {
-    globalThis.M7.errors.push('kernel worker: ' + e.message)
-    fail('kernel worker: ' + e.message)
-  }
-  const expect = (t, ms = 30000) => new Promise((res, rej) => {
-    if (abort) return rej(abort)
-    const i = pending.findIndex((m) => m.t === t)
-    if (i >= 0) return res(pending.splice(i, 1)[0])
-    const timer = setTimeout(() => {
-      waiters.delete(t); rej(new Error('timed out waiting for ' + t))
-    }, ms)
-    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
-  })
-  worker.postMessage({ t: 'boot', cfg })
-  return {
-    worker,
-    expect,
-    post: (m) => worker.postMessage(m),
-    on: (fn) => { listeners.push(fn) },
-    events,
-  }
-}
-
-/**
- * Boot a kernel, and RETRY ONCE if its worker never starts.
- *
- * THE RESIDUAL THIS EXISTS FOR IS NAMED IN THE REPOSITORY ALREADY: a Worker that will not start
- * fires an error event with an EMPTY message, no filename and line 0 (constraint 207), and
- * "the residual `up` stall is Chrome's worker startup under load, it is not ours" (constraint 155).
- * This page boots six kernels in seventeen seconds, which is the most of any page but
- * `www/m4b.html`, and it cost about one run in seven: `kernel worker: undefined`, and a check that
- * reported BROKEN with nothing to fix.
- *
- * SO IT IS BOUNDED, COUNTED AND REPORTED, which is the shape `docs/DECISIONS.md` D21 settled for
- * the program fetch: one retry, a fresh worker, `globalThis.M7.bootRetries` incremented and a note
- * saying which attempt failed and why. A silent retry would turn a measurable platform limit into
- * a page that is mysteriously slow sometimes.
- *
- * It is NOT a remedy for a kernel that boots and then misbehaves: the retry only covers a worker
- * that never reached `up`, and anything after that is the kernel's own business.
- */
-async function bootKernel (cfg) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const k = kernelBoot(cfg)
-    try {
-      await k.expect('up', BOOT_WAIT_MS)
-      return k
-    } catch (e) {
-      k.worker.terminate()
-      globalThis.M7.bootRetries += 1
-      const why = 'kernel boot attempt ' + (attempt + 1) + ' did not reach `up`: ' + e.message
-      globalThis.M7.notes.push(why)
-      // The FIRST failure is a retry; the second is the answer. A page that retried for ever
-      // would hide a kernel that cannot start at all.
-      if (attempt === 1) throw new Error(why + ' (retried once)')
-      say(why + ' — retrying once')
-    }
-  }
-  throw new Error('unreachable')
-}
-
 /**
  * A kernel with a window host attached. THE HOST IS THE PAGE'S WHOLE WINDOW HALF: it builds a
  * frame when the kernel says a process created a window, and it is the one route from a browser
@@ -285,79 +151,16 @@ async function bootKernel (cfg) {
  * changed.
  */
 async function bootHost (boot) {
-  const k = await bootKernel(boot)
+  const k = await bootKernel(boot, globalThis.M7, say)
   // THE MOUNT REPORT, FIRST. `/usr` is where `sh`, `term` and `winopen` live, so a refused mount
   // is a desktop that cannot start — reported at boot rather than as a window that never appears.
-  k.post({ t: 'm3-state' })
-  const mounts = (await k.expect('m3-state', 10000)).m3 || {}
-  const usr = mounts.usr || {}
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
   const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
   k.on((m) => { host.handle(m) })
-  const winState = async () => {
-    k.post({ t: 'win-state' })
-    return await k.expect('win-state', 5000)
-  }
-  const procState = async () => {
-    k.post({ t: 'm4-state' })
-    return await k.expect('m4-state', 5000)
-  }
-  return { k, host, usr, mounts, winState, procState }
-}
-
-/** Spawn one program by URL and park it. The page is the supervisor (`docs/DECISIONS.md` D18) and
- *  its own `t: "spawn"` takes a URL; every program here is also a row in `USR_ENTRIES` or under
- *  `/bench`, so nothing about these windows is privileged. */
-async function spawnProgram (k, url, argv, { ceiling = 60000 } = {}) {
-  k.post({
-    t: 'spawn', count: 1, programUrl: url,
-    cfg: { argv, uid: 0, gid: 0 }, readyTimeoutMs: 20000,
-  })
-  /* A SPAWN THAT DID NOT ANSWER MUST SAY WHAT THE KERNEL DID SAY. A bare "timed out waiting for
-   * spawned" names the wait and not the cause, and that is what it reported the first time this
-   * page hit the worker-startup stall of constraint 155: the kinds the kernel HAD posted are the
-   * difference between "the fetch stalled", "the program was refused" and "the worker never
-   * started". Constraint 122's rule, applied to a page's own supervisor path. */
-  const spawned = await k.expect('spawned', 20000).catch((e) => {
-    throw new Error(`${e.message} for ${url}; the kernel had posted `
-      + JSON.stringify(k.events.map((m) => m.t)) + ', last: '
-      + JSON.stringify(k.events[k.events.length - 1] || null).slice(0, 400))
-  })
-  if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
-  await k.expect('ready', 20000).catch((e) => {
-    throw new Error(`${e.message} after spawning ${url}; the kernel had posted `
-      + JSON.stringify(k.events.map((m) => m.t)))
-  })
-  const pid = spawned.pids[0]
-  k.post({ t: 'go', go: { mode: 'park', pid } })
-  return { pid, ceiling }
-}
-
-/** One program's result row, or a row that says why there is none. A stopped program raises no
- *  error — a parked `poll` is a legitimate state — so a timeout CARRIES STATE (constraint 122). */
-async function resultOf (s, pid, ms = 60000) {
-  try {
-    const results = await s.k.expect('results', ms)
-    return (results.results || []).find((r) => r.pid === pid)
-      || { why: 'no row for pid ' + pid, results: results.results }
-  } catch (e) {
-    return {
-      why: 'no result: ' + e.message,
-      state: await s.procState().catch((x) => String(x)),
-      windows: await s.winState().catch((x) => String(x)),
-    }
-  }
-}
-
-/** Synthesised keys, for the steps a driver does not type. They reach the widget's own handler and
- *  nothing in front of it, which is why `src/wm/terminal.mjs` counts them separately. */
-function typeSynthetic (term, text) {
-  for (const ch of text) {
-    const init = { bubbles: true, cancelable: true }
-    if (ch === '\n') Object.assign(init, { key: 'Enter' })
-    else if (ch === '\x03') Object.assign(init, { key: 'c', ctrlKey: true })
-    else if (ch === '\x04') Object.assign(init, { key: 'd', ctrlKey: true })
-    else Object.assign(init, { key: ch })
-    term.el.dispatchEvent(new KeyboardEvent('keydown', init))
+  return {
+    k, host, usr: mounts.usr || {}, mounts,
+    winState: () => ask(k, 'win-state'),
+    procState: () => ask(k, 'm4-state'),
   }
 }
 
@@ -424,7 +227,7 @@ async function pPollMany (boot) {
      * them with it, and the next line's `undefined.term` would report a TypeError instead of the
      * program's own reason for stopping. */
     if (!a || !b) {
-      ev.result = await resultOf(s, pid, 15000)
+      ev.result = await resultOf(s.k, pid, 15000)
       ev.hostReport = s.host.report()
       ev.windows = await s.winState().catch((x) => String(x))
       ev.failed = ['both windows were created and then went before anything was typed']
@@ -440,17 +243,17 @@ async function pPollMany (boot) {
     const got = declared < 0 ? -1 : await until(
       () => s.host.keyCounts().trusted > 0, REAL_KEY_WAIT_MS)
     ev.drivenBy = got < 0 ? 'page' : (globalThis.M7.driver === 'check' ? 'check' : 'hand')
-    if (got < 0) typeSynthetic(a.term, 'a')
+    if (got < 0) typeSynthetic(a.term.el, 'a')
     globalThis.M7.phase = 'typed'
     // AND A SYNTHESISED KEY INTO WINDOW B. The second window's job here is to be woken at all,
     // which a synthesised key proves exactly as well; what needs to be real is the trip through
     // the browser's own key translation, and window A has made it.
-    typeSynthetic(b.term, 'b')
+    typeSynthetic(b.term.el, 'b')
     ev.keyCounts = s.host.keyCounts()
 
     // The program exits as soon as every fd in its set has woken it, so its own result is the
     // proof — and `wokeBy` names which fd did and did not.
-    const result = await resultOf(s, pid, 60000)
+    const result = await resultOf(s.k, pid, 60000)
     ev.result = result
     ev.wokeBy = result.wokeBy || {}
     ev.keysSeen = result.keysSeen || {}
@@ -520,7 +323,7 @@ async function pPollMany (boot) {
      * keystrokes, still look live, and have nothing behind them — constraint 179's defect, which
      * was reported from a real browser as "I am unable to type into the terminals". */
     for (const entry of [...s.host.frames.values()]) entry.win.destroy()
-    await shutdown(s.k)
+    await shutdownKernel(s.k, globalThis.M7)
   }
 }
 
@@ -547,7 +350,7 @@ async function pCascade (boot) {
 
     // DESTROY THE OWNER, from a keystroke in the owner's own window — the gesture, not a page
     // message, so the whole path is exercised.
-    typeSynthetic(a.term, 'q')
+    typeSynthetic(a.term.el, 'q')
     const goneMs = await until(() => s.host.frames.size === 0, 15000)
     ev.goneMs = Math.round(goneMs)
     // SNAPSHOT, TAKEN NOW. See the note above `resultOf`: everything below waits for the program,
@@ -558,7 +361,7 @@ async function pCascade (boot) {
     ev.liveAfter = (after.windows || []).map((w) => w.id)
     ev.allRows = (after.all || []).map((w) => ({ id: w.id, destroyed: w.destroyed }))
 
-    const result = await resultOf(s, pid, 60000)
+    const result = await resultOf(s.k, pid, 60000)
     ev.result = result
     ev.cascades = result.cascades || []
     // ONE `win_destroy` REPORTED TWO WINDOWS. That list is the return value the milestone owes,
@@ -584,7 +387,7 @@ async function pCascade (boot) {
     return { ok: ev.failed.length === 0, evidence: ev }
   } finally {
     for (const entry of [...s.host.frames.values()]) entry.win.destroy()
-    await shutdown(s.k)
+    await shutdownKernel(s.k, globalThis.M7)
   }
 }
 
@@ -615,7 +418,7 @@ async function pCrossproc (boot) {
 
     // Destroy the OWNER's window, from its own keyboard.
     const [a] = [...s.host.frames.values()]
-    typeSynthetic(a.term, 'q')
+    typeSynthetic(a.term.el, 'q')
     const goneMs = await until(() => s.host.frames.size === 0, 15000)
     ev.goneMs = Math.round(goneMs)
     ev.framesAtCascade = s.host.frames.size
@@ -625,8 +428,8 @@ async function pCrossproc (boot) {
     // not be reproduced in three more — and a conjunction cannot say which half of itself failed.
     ev.allRows = (after.all || []).map((w) => ({ id: w.id, pid: w.pid, destroyed: w.destroyed }))
 
-    const ownerResult = await resultOf(s, owner.pid, 60000)
-    const childResult = await resultOf(s, child.pid, 60000)
+    const ownerResult = await resultOf(s.k, owner.pid, 60000)
+    const childResult = await resultOf(s.k, child.pid, 60000)
     ev.ownerResult = ownerResult
     ev.childResult = childResult
     ev.ownerCascade = (ownerResult.cascades || [])[0] || []
@@ -657,7 +460,7 @@ async function pCrossproc (boot) {
     return { ok: ev.failed.length === 0, evidence: ev }
   } finally {
     for (const entry of [...s.host.frames.values()]) entry.win.destroy()
-    await shutdown(s.k)
+    await shutdownKernel(s.k, globalThis.M7)
   }
 }
 
@@ -686,7 +489,7 @@ async function pClose (boot) {
     const goneMs = await until(() => s.host.frames.size === 0, 15000)
     ev.goneMs = Math.round(goneMs)
     ev.framesAfter = s.host.frames.size
-    const result = await resultOf(s, pid, 30000)
+    const result = await resultOf(s.k, pid, 30000)
     ev.result = result
     ev.closes = result.closes
     ev.destroyedSeen = result.destroyedSeen
@@ -701,7 +504,7 @@ async function pClose (boot) {
     return { ok: ev.failed.length === 0, evidence: ev }
   } finally {
     for (const entry of [...s.host.frames.values()]) entry.win.destroy()
-    await shutdown(s.k)
+    await shutdownKernel(s.k, globalThis.M7)
   }
 }
 
@@ -729,7 +532,7 @@ async function pHealth (boot) {
     const paintedMs = await until(() => /stopped reading/.test(w.term.screen()), 10000)
     ev.paintedMs = Math.round(paintedMs)
 
-    typeSynthetic(w.term, 'x')
+    typeSynthetic(w.term.el, 'x')
     const greyMs = await until(() => w.win.health >= 1, 8000)
     ev.greyMs = Math.round(greyMs)
     ev.caption1 = w.win.headingEl.textContent
@@ -751,7 +554,7 @@ async function pHealth (boot) {
     ev.clearedMs = Math.round(clearedMs)
     ev.caption3 = w.win.headingEl.textContent
     ev.transitions = w.health
-    const result = await resultOf(s, pid, 30000)
+    const result = await resultOf(s.k, pid, 30000)
     ev.result = result
 
     const clauses = {
@@ -771,7 +574,7 @@ async function pHealth (boot) {
     return { ok: ev.failed.length === 0, evidence: ev }
   } finally {
     for (const entry of [...s.host.frames.values()]) entry.win.destroy()
-    await shutdown(s.k)
+    await shutdownKernel(s.k, globalThis.M7)
   }
 }
 

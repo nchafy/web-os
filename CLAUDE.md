@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 219 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 224 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 31 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  219 normative constraints  ← cite these
+  CONSTRAINTS.md  224 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -104,13 +104,21 @@ src/
     terminal.mjs  the terminal widget. IT DOES NOT ECHO — constraint 161
     winhost.mjs   the page's half of EVERY window: one frame per kernel window, and the one
                   route from a browser event into a window's event queue
+    surface.mjs   M8: the ONE renderer of a display list. A canvas per surfaced window, and
+                  the only place a drawing op becomes a drawing call
 www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
   m4a.html        the window and the terminal. The one page a check types REAL keys into
   m6.html         the realm, the volume, the loader and the fault. M6's five proofs
-  m7.html         M7's five proofs, and then a LIVE DESKTOP: a shell you can type into, and
+  m7.html         M7's six proofs, and then a LIVE DESKTOP: a shell you can type into, and
                   `winopen` for as many more windows as you want. `?live=1` skips the proofs
+  m8.html         M8's four proofs — a pattern read back out of the canvas, a REAL mouse drag,
+                  the surface budget, the content mode — and then a desktop where `paint` is a
+                  window you draw in with the mouse
+  pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
+                  spawn a program by URL, collect its result. m7 and m8 import it; the older
+                  pages still carry their own copies
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
@@ -152,13 +160,16 @@ row below rather than restate it.
 | The largest inline payload | `MAX_INLINE` in `src/abi.mjs`. Program read buffers are sized from it, never from 65536 |
 | The trace render limit | `TRACE_RENDER_LIMIT` in `src/kernel/devfs.mjs`. `/dev/trace` and the page's `trace-read` are one renderer, so they are one limit |
 | A window's event queue and its record | `WIN_EVENT_CAP` and `WEV_*` + `encodeWinEvent`/`decodeWinEvent`/`keyBytesOf`/`packKeyBytes` in `src/abi.mjs`. The kernel writes the record and the libos reads it, which is the two sides |
+| A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
+| What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
+| The surface budget | `SURFACE_BUDGET_PX` and `SURFACE_MAX_PX` in `src/abi.mjs`; the accounting is `WinMgr.surface`/`releaseSurface` in `src/kernel/wins.mjs` and nowhere else |
 | Which bindings a process realm loses | `TARGETS` in `src/libos/lockdown.mjs`. A check enumerates it; `bench/m6-realm/program.mjs` MUST import it rather than list the names again |
 | The takers of the per-inode lock | the `withInode` docstring in `src/kernel/store.mjs`. `scripts/fsfuzz.py`'s `INODE_TAKERS` mirrors that list and lints against it |
 | Where a provider request URL is built | `urlFor` in `src/kernel/providers.mjs`, and nowhere else |
 | The provider table | `PROVIDERS` in `src/kernel/providers.mjs`, as data |
 | What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
 | The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
-| The 219 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 224 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -309,6 +320,10 @@ scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
+node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec
+bench/m8-surface/controls.py      # five mutations of the accounting, scored on which checks move
+bench/m8-surface/probe.py         # WHY the surface is kernel-owned, as a measurement (219)
+bench/m7-win/firefox.py --page m8 # M8 in a second engine; read the PNG it writes
 bench/m7-win/controls.py          # five mutations of it, scored on which checks move
 bench/m7-win/drive.py             # open www/m7.html in a real Chrome and print what it reported
 bench/m7-win/drive.py --live      # ...or just the desktop, left open to type into

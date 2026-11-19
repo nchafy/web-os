@@ -33,8 +33,8 @@ checks is a wish.
 | M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
-| **M8** | **The window surface** | 3 | | ⬜ **next (option A)** |
-| M9 | Owner, modality, close-request | 3 | | ⬜ A |
+| M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 28 expectations, 1 control, 50 host checks, 5 mutations, and a prerequisite experiment that reversed the design |
+| **M9** | **Owner, modality, close-request** | 3 | | ⬜ **next (option A)** |
 | M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
 | M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
 | M12 | The blur governor | 3 | | ⬜ A |
@@ -1473,6 +1473,108 @@ to it as text, and M8 is the transferred `OffscreenCanvas`. `modal` does not exi
 position is recorded and raises no event, because nothing acts on it. The taskbar's cross-process
 enumeration is still the second, separately-gated interface `CLAUDE.md` describes and no part of it
 is built.
+
+---
+
+## M8 — the window surface · done · 0.5 days · ~1,800 LoC
+
+**ACCEPT.** A process draws a known pattern and the pixels are on the canvas, read back out of the
+canvas the browser painted; a REAL MOUSE DRAG reaches the process as pointer events and what it
+draws lands where the pointer went. 28 expectations over four fresh kernels in 1.7 s — the fastest
+window check, because nothing here waits on a threshold. The suite is 12 checks and 460
+expectations, all green.
+
+```
+scripts/check.py                       12 checks, 460 expectations (m8: 28)
+scripts/check.py --only m8 --prove-failure   28 inverted, all failed
+scripts/check.py --negative no-draw          m8 fail: 7 red, 21 intact
+node bench/m8-surface/probe.mjs        50 host checks (the accounting and the codec, no browser)
+bench/m8-surface/controls.py           5 mutations, each scored on which checks move
+bench/m8-surface/probe.py              THE PREREQUISITE EXPERIMENT, which reversed the design
+bench/m7-win/firefox.py --page m8      A SECOND ENGINE: verdict ok in 3.4 s, four of four
+```
+
+### The experiment came first, and it reversed the plan
+
+`PLAN.md` §5 and `CLAUDE.md` both said a window's surface would be a TRANSFERRED `OffscreenCanvas`
+— "which is why the window ABI is `win_*` calls and not a `/dev/wm` device file: a file write
+cannot transfer a handle". Nobody had measured whether the transfer can ARRIVE.
+`bench/m8-surface/probe.py` measures it against a worker shaped like a process:
+
+| the worker had the canvas | |
+| --- | --- |
+| after 400 ms of synchronous work | **no** |
+| after 600 ms parked in `Atomics.wait` | **no** — the one that decides it |
+| after awaiting one macrotask | **yes**, 594 ms after it was posted |
+| drawing on it then | `rgba(74,155,216,255)`: it works once it is there |
+| the page's own copy afterwards | detached, so there is no front/back pair |
+
+`postMessage` needs an event-loop turn and a process turns its loop only where a program `await`s —
+which no synchronous program does and which the syscall stub cannot do, being synchronous by
+construction. **So a surface cannot be the reply to the syscall that asked for it.** It could be
+made to work, and the cost would be that every drawing program is async by obligation, that the
+kernel has given away something it can neither account nor revoke (which M12's governor needs), and
+that a releasable resource lives in a process worker (constraint 15).
+
+**The surface is therefore kernel-owned, and a process draws by sending a DISPLAY LIST** through
+the byte region it already has — one syscall per batch, not per operation. Constraint 219 and
+`docs/DECISIONS.md` D31; `CLAUDE.md`, `PLAN.md` §5 and `docs/ABI.md` are corrected where they said
+otherwise.
+
+**Built.** `win_surface` (51) and `win_draw` (52), the 32-byte `DL_*` op with one codec in
+`src/abi.mjs`, the surface budget and its revocation in `src/kernel/wins.mjs`, `WEV_POINTER`,
+`src/wm/surface.mjs` (the ONE renderer of a display list), the host's content-mode switch,
+`/usr/bin/paint`, `www/m8.html`, and `www/pagekernel.mjs` — the page's half of a kernel, extracted
+because M7's page and M8's both need all of it.
+
+**THE MILESTONE IS A PROGRAM YOU CAN RUN.** From the live desktop at the bottom of `www/m8.html`:
+`paint` opens a window you draw in with the mouse — 1–6 pick a colour, `c` clears, `q` quits — and
+every pixel is a display list through a syscall. `paint -t` draws the pattern this page asserts on
+and leaves it on screen. `cat /proc/$$/win/*` shows every window as a file, surface size included.
+
+### The four proofs, and what the control moved
+
+| | Proof | |
+| --- | --- | --- |
+| 1 | a process draws a known pattern and EVERY PIXEL IS ON THE CANVAS | read back at the centre of each square, plus one pixel NOTHING drew on — which is what stops a canvas filled with the pattern's own colour from satisfying the rest |
+| 2 | a REAL MOUSE DRAG reaches the process and the pixels under it change | `Input.dispatchMouseEvent` at coordinates the page publishes from the canvas's own rectangle; several moves, because a program drawing from its last point needs two points. A corner the drag never reached must NOT change |
+| 3 | the budget refuses by name and gives the area back | 18 window-sized surfaces granted, the 19th ENOMEM, EINVAL for one past the per-surface cap, and the same size granted again after the windows were destroyed |
+| 4 | one content mode per window | `write(2)` on a surfaced window is EINVAL while a draw still succeeds |
+
+**`--negative no-draw`** makes `win_draw` accept its batch, count it and discard it — `PLAN.md`
+§5's own words, "draw nothing; the pattern assertion must fail". **7 red, 21 intact**: the process
+still gets its surface, still reports the batch it sent, still SEES the real pointer events and
+still draws in response; the budget and the cell refusal are untouched. What disappears is the
+pixels, which is the only cut that tells a working surface from a page that drew something of its
+own.
+
+### What the first runs found, and both looked like failures
+
+**One colour, two renderings.** The pattern proof compared `cssColor(op.a4)` — for a canvas, alpha
+0–1 — against a pixel read out of that canvas, where `getImageData` reports alpha as a 0–255 byte.
+Four clauses red over four pixels that were exactly right. `src/abi.mjs` renders both from one
+unpacking now and `selfTest` asserts they differ only in the alpha (constraint 224).
+
+**A frame report for a window that is gone is a race, not an error.** The kernel posted an `error`
+for it, and a program that created and destroyed eighteen windows turned a green check red with
+four of them. The page cannot avoid it — it builds a frame when the kernel says so and reports the
+box its clamp settled on, and a process can destroy the window while both messages are still
+queued. Counted as `lateGeoms` now, because a page reporting geometry for windows that never
+existed WOULD be a defect.
+
+**And the mutation harness found three weak assertions in its own probe**, as M7's did: a clause
+named after the area it did not check, a mutation that crashed the probe instead of scoring it, and
+three counts that moved as a consequence of one removal and had to be declared rather than excused.
+
+### What is not done
+
+There is no text op, so a surface cannot draw a string: M8's vocabulary is clear, fill, stroke and
+line. A hover is not sent, because one event per `pointermove` would overflow a window's 256-record
+queue in about a second (constraint 223) — a program that needs hover can ask when there is one.
+The surface does not follow the frame: it is the process's own choice of resolution and the page
+scales it, so a program that wants to match its window asks for a new surface. And the budget only
+REFUSES: M12's governor is the thing that admits and degrades, and it now has a number to do it
+against.
 
 ---
 

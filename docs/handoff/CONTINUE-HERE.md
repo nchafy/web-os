@@ -49,19 +49,24 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a, M6 and **M7**. The spine is COMPLETE and
-the window half has started; the next milestone is **M8, the window surface**. Each has a record
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a, M6, M7 and **M8**. The spine is COMPLETE
+and the window half is two milestones in; the next is **M9: owner, modality, close-request**. Each has a record
 in `MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 11 checks, 432 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 42, m6 31 |
+| `scripts/check.py` | the suite — 12 checks, 460 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 42, m8 28, m6 31 |
 | `scripts/check.py --negative win-first-fd` | M7's first control — a parked `poll` evaluates only the FIRST fd of its set. 6 red, 36 intact, and the real keystroke into window A must still arrive |
 | `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 31 intact, and every poll and `/proc` label must hold |
 | `node bench/m7-win/probe.mjs` | 128 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
 | `bench/m7-win/controls.py` | 5 mutations of `wins.mjs`, scored on WHICH checks move. One is a DECLARED CRASH (`no-floor`), because a torn record must make a program fail loudly rather than decode as noise |
 | `bench/m7-win/firefox.py` | M7 IN A SECOND ENGINE. Renders the page headless and keeps the PNG — these pages print their own log, and Mozilla removed CDP so there is no driver. A slow subresource injected into the served HTML holds the load event open until the proofs finish. Verdict ok in 18.8 s on Firefox 156 |
 | `bench/m7-win/drive.py` | the fast loop: open `www/m7.html` in a real Chrome and print its own evidence, clause by clause. `--live` leaves the desktop open; `--page m4a` drives that one |
+| `scripts/check.py --negative no-draw` | M8's control — `win_draw` accepts its batch, counts it and DISCARDS it. 7 red, 21 intact, and the process must still get its surface, still report the batch, and still see the real pointer events |
+| `node bench/m8-surface/probe.mjs` | 50 host checks over the surface budget and the display-list codec: what is granted, what is refused and by which errno, what a resize charges, and what destroying a window gives back |
+| `bench/m8-surface/controls.py` | 5 mutations of the accounting, scored on WHICH checks move. `leak-on-resize` and `no-revocation` are the two that would exhaust a budget nobody exceeded |
+| `bench/m8-surface/probe.py` | WHY the surface is kernel-owned, as a measurement: a transferred `OffscreenCanvas` does not reach a process that is spinning or parked (constraint 219) |
+| `bench/m7-win/firefox.py --page m8` | M8 in Firefox: verdict ok in 3.4 s, four of four |
 | `bench/kernel-churn/probe.py --drop` | the program fetch dropped at the TRANSPORT, which panicked the kernel before constraint 212. Every kernel must still boot AND one must report a transport retry |
 | `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |
 | `scripts/check.py --negative no-lockdown` | M6's first control — the process realm is not stripped, so a uid-1000 process writes the kernel's blob by inode. 14 red, 17 intact, and every LOADER clause must hold |
@@ -253,6 +258,44 @@ destroy its window in the same `finally`.
 was left copied rather than extracted because every page is a shipped milestone whose bytes
 `served_matches_disk` asserts, and a half-done extraction is worse than a whole duplication. The
 next page is the ninth copy; extract it then, and re-run every check.
+
+## What M8 built, and the two things it leaves M9
+
+**The surface is KERNEL-OWNED and a process draws by sending a display list.** `win_surface` (51)
+asks for `w` × `h` device pixels and the kernel allocates, accounts and may revoke them;
+`win_draw` (52) carries a 32-byte-per-op batch in the byte region the process already has, which
+is one syscall per batch rather than one per operation. A process holds NOTHING: no canvas, no
+context, no handle.
+
+**READ constraint 219 BEFORE PROPOSING A TRANSFERRED CANVAS AGAIN.** It is measured, not argued: a
+transferred `OffscreenCanvas` does not arrive at a process that is spinning, and does not arrive at
+one parked in `Atomics.wait` — which is the state a process is in during the very syscall that
+would carry it. `bench/m8-surface/probe.py` re-runs that measurement in about ten seconds.
+
+1. **`modal` IS M9's AND NOTHING HERE PRE-EMPTS IT.** The owner chain already crosses processes and
+   already cascades (M7); what is missing is the BEHAVIOUR axis. `MILESTONES.md`'s ordering
+   correction is the thing to read first: SerenityOS's enforced `WindowMode` describes behaviour
+   (`Modeless | Passive | RenderAbove | Blocking`) where `modal ∈ {none, window, app, system}`
+   describes SCOPE, and an owned window needs both.
+
+2. **THE CLOSE REFUSAL IS M9's, AND THE EVENT IS ALREADY DELIVERED.** `WEV_CLOSE` reaches the
+   process (M7's sixth proof clicks the real close box and asserts it), and the frame still goes
+   afterwards. M9 is what makes the refusal real. Do not let a program pretend to refuse before
+   then; `src/bin/term.mjs` says so where a reader meets it.
+
+**Three things worth knowing before you touch a surface:**
+
+- **One content mode per window.** Text until `win_surface` succeeds, pixels after, and `write(2)`
+  is EINVAL from then on (constraint 221). The host replaces the terminal widget with a canvas in
+  ONE place — `WinHost#surface` — so a different widget is that line and nothing else.
+- **The op vocabulary is the ABI's, and it is four ops.** Clear, fill, stroke, line. There is no
+  text op, so a surface cannot draw a string; adding one means a payload area for the string, which
+  the fixed-width record does not have. That is the real cost of this design and
+  `docs/DECISIONS.md` D31 states it.
+- **The budget only REFUSES.** M12's governor is the thing that admits and degrades, and it now has
+  a number to do it against — `SURFACE_BUDGET_PX`, and `WinMgr`'s `surfacePx` as the outstanding
+  total. A governor that admitted against a number nobody kept is the reason this was decided at
+  M8 rather than at M12.
 
 ## What M7 built, and the four things it leaves M8
 

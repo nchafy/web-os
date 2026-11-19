@@ -591,6 +591,12 @@ class Control:
     #: device and the relay all keep working and the pty alone stops being the pty. It is what
     #: tells a real echo from a terminal widget echoing locally.
     PTY_DETACH = "pty-detach"
+    #: M8's own control, in `PLAN.md` §5's words: "draw nothing; the pattern assertion must
+    #: fail". `win_draw` accepts its batch, counts it and DISCARDS it, through the cfg.noDraw hook
+    #: which the kernel refuses without a bench boot. Everything that CARRIES the ops keeps
+    #: working — the process sends them, the kernel charges them to the window, the page is told a
+    #: window has a surface — so what disappears is the PIXELS and nothing else.
+    NO_DRAW = "no-draw"
     #: M6, half one. The realm strip does not run, so a process keeps the whole platform — and
     #: `navigator.storage` over the kernel's own volume above all (constraints 41, 53). Through the
     #: cfg.noLockdown hook, which the kernel refuses without a bench boot and which travels to the
@@ -641,6 +647,7 @@ CONTROL_RUNS = {
     Control.NO_WINCH: ("no-winch",),
     Control.PTY_DETACH: ("pty-detach",),
     Control.WIN_FIRST_FD: ("win-first-fd",),
+    Control.NO_DRAW: ("no-draw",),
     Control.NO_CASCADE: ("no-cascade",),
     Control.NO_LOCKDOWN: ("no-lockdown",),
     Control.NO_CSP: ("no-csp",),
@@ -1796,6 +1803,28 @@ BOOT_LABELS = (
 )
 
 
+def mouse_drag(page, start, end, steps: int = 8) -> None:
+    """A real press, several moves and a release, through `Input.dispatchMouseEvent`.
+
+    SEVERAL MOVES AND NOT ONE: a program that draws a line from its last point to this one needs
+    at least two points to draw anything, and one jump from press to release is what a synthesised
+    drag looks like rather than what a hand does.
+
+    The coordinates come from the page, which reads them off the canvas's own bounding rectangle: a
+    surface is SCALED to its client area, so nothing outside the page knows where a surface pixel
+    is on screen.
+    """
+    page.call("Input.dispatchMouseEvent", type="mousePressed", x=start["x"], y=start["y"],
+              button="left", buttons=1, clickCount=1)
+    for i in range(1, steps + 1):
+        page.call("Input.dispatchMouseEvent", type="mouseMoved",
+                  x=start["x"] + (end["x"] - start["x"]) * i // steps,
+                  y=start["y"] + (end["y"] - start["y"]) * i // steps,
+                  button="left", buttons=1)
+    page.call("Input.dispatchMouseEvent", type="mouseReleased", x=end["x"], y=end["y"],
+              button="left", buttons=0, clickCount=1)
+
+
 def held_rest(labels: Tuple[str, ...], failed: Tuple[str, ...]) -> Tuple[str, ...]:
     """Every label a check records that this control does not turn red - DERIVED, never listed.
 
@@ -2908,6 +2937,110 @@ _NO_CASCADE_FAILS = (
 )
 
 
+M8_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # THE MILESTONE'S OWN PROOF, in `MILESTONES.md`'s words: "a process draws a known 4x4 pattern;
+    # screenshot and assert the pixels". The pattern is `src/bin/paint.mjs`'s, so the proof is
+    # about the path a user runs, and the pixels are read back out of the canvas the browser
+    # painted — an inert canvas and a working one are the same picture (constraint 40).
+    "pattern ok",
+    "the process got a surface and the page made a canvas for it",
+    "the program reported the batch it sent",
+    "and every pixel of the pattern is on the canvas",
+    "while a pixel nothing drew on is still the paper colour",
+    "and the page replayed exactly the ops the kernel forwarded",
+    # A surface with no input is a frame around a picture. The drag is REAL mouse input through
+    # Chrome's own hit testing, which is the only thing that exercises the canvas's own listeners.
+    "pointer ok",
+    "a real mouse drag reached the process as pointer events",
+    "and the process drew in response",
+    "and the pixels under the drag changed",
+    "while a corner the drag never reached did not",
+    # The accounting, which is the whole reason the surface is kernel-owned (D31).
+    "budget ok",
+    "a surface larger than the per-surface cap is EINVAL",
+    "the budget refuses with ENOMEM, which is a ceiling and not a transient",
+    "after granting several window-sized surfaces",
+    "and destroying the windows gives the area back",
+    "the kernel accounts no surface once they are gone",
+    # One content mode per window.
+    "textmode ok",
+    "a surfaced window refuses cells with EINVAL",
+    "while a draw on the same window still succeeds",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m8.html",
+)
+
+M8_DOCUMENT = "/www/m8.html"
+
+#: `await-pointer` is a terminal state for the ready expression, so the check can send the drag.
+#: The page publishes the coordinates because the canvas is SCALED by CSS — its own bounding
+#: rectangle is the only honest source for where a click lands in surface pixels.
+M8_READY = ("(() => { const M = globalThis.M8 || {}; const s = M.state; "
+            "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
+            "return M.phase === 'await-pointer' ? 'await-pointer' : '' })()")
+
+M8_DONE = ("(() => { const s = globalThis.M8 && globalThis.M8.state; "
+           "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M8 = """(() => {
+  const M = globalThis.M8 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    pattern: one(P.pattern),
+    pointer: one(P.pointer),
+    budget: one(P.budget),
+    textmode: one(P.textmode),
+  }
+})()"""
+
+M8_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "pattern": (dict, type(None)),
+    "pointer": (dict, type(None)),
+    "budget": (dict, type(None)),
+    "textmode": (dict, type(None)),
+}
+
+#: What A DRAW THAT NEVER REACHES THE PAGE must break, and only this.
+#:
+#: Measured under the control on Chrome 157: exactly these seven red, the other twenty-one intact.
+#: The process still gets its surface, still sends its batch, still SEES the real pointer events
+#: and still draws in response; the kernel still charges the ops to the window and still refuses
+#: the budget and the cells. What disappears is the pixels.
+#:
+#: THAT SPLIT IS THE WHOLE CONTROL. A page that drew something of its own — a canvas it filled, a
+#: pattern it knew — would satisfy every pixel clause with no process behind it, and nothing else
+#: in the suite can tell the two apart.
+_NO_DRAW_FAILS = (
+    "pattern ok",
+    "and every pixel of the pattern is on the canvas",
+    "while a pixel nothing drew on is still the paper colour",
+    "and the page replayed exactly the ops the kernel forwarded",
+    "pointer ok",
+    "and the pixels under the drag changed",
+    "verdict is ok",
+)
+
+
 M4A_LABELS = (
     "cell reported",
     "page isolated",
@@ -3250,6 +3383,14 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "in this phase (it is a header on src/libos/, independent of COOP/COEP) and still "
                 "proves nothing here: a policy over a realm no process ever entered bounds "
                 "nothing.",
+        ), "m8": Expect(
+            UNMEASURABLE,
+            why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
+                "no kernel boots, no process runs, no window is created and no surface is "
+                "allocated. A canvas could still be DRAWN by the page, which is exactly why the "
+                "page refuses before it makes one: pixels with no process behind them are the "
+                "picture constraint 40 says cannot be told from a working surface. UNMEASURABLE "
+                "rather than FAIL, because a FAIL would claim a process drew and was not seen.",
         ), "m7": Expect(
             UNMEASURABLE,
             why="the same mechanism, one milestone on: without COOP/COEP there is no SAB, so no "
@@ -3720,6 +3861,33 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "the one it was given",
             failed=_NO_CASCADE_FAILS,
             held=held_rest(M7_LABELS, _NO_CASCADE_FAILS),
+        )},
+    ),
+    "no-draw": NegativeControl(
+        name="no-draw",
+        why="no_draw=1: `win_draw` accepts its batch, counts it against the window, and DISCARDS "
+            "it (the cfg.noDraw hook, refused without a bench boot). `PLAN.md` §5's control for "
+            "M8 in its own words: 'draw nothing; the pattern assertion must fail.'\n"
+            "WHAT MUST BREAK: every pixel. The pattern is not on the canvas, the drag leaves "
+            "nothing behind it, and the page's own op counter stays at zero — measured, "
+            "`{ops: 0, batches: 0}` against a program that reported sending seven ops.\n"
+            "WHAT MUST HOLD, and this is what makes it a control rather than a broken world: the "
+            "process still gets its surface and the page still makes a canvas for it, the program "
+            "still reports the batch it sent, the REAL pointer events still reach the process and "
+            "it still draws in response, the surface budget still refuses by name and still gives "
+            "the area back, and a surfaced window still refuses cells. Twenty-one of twenty-eight.\n"
+            "WHAT IT IS ABOUT: a page that drew something of its own — a canvas it filled, a "
+            "pattern it knew — would satisfy every pixel clause with no process behind it, and "
+            "nothing else in this suite can tell the two apart.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_draw", "1"),),
+        expects={"m8": Expect(
+            Outcome.FAIL,
+            why="the pixels must stop appearing while everything that carried the ops to the page "
+                "keeps working",
+            failed=_NO_DRAW_FAILS,
+            held=held_rest(M8_LABELS, _NO_DRAW_FAILS),
         )},
     ),
     "no-lockdown": NegativeControl(
@@ -7702,6 +7870,200 @@ def check_m7(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m7.html", env.served_matches_disk(env.document),
                     "the m7.html served does not match www/m7.html on disk")
+
+
+@check(
+    name="m8",
+    milestone="m8",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_DRAW),
+    labels=M8_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M8_DOCUMENT,
+    ready_expr=M8_READY,
+    ready_what="globalThis.M8 reaching done/aborted/error, or phase 'await-pointer' (www/m8.html)",
+    # 1 s measured for the whole page over four fresh kernels: no proof here waits on a threshold,
+    # so this is the fastest window check. The bound is generous for the reason M5's is - a
+    # program parked in `poll` raises no error, so a wedge must end as a BROKEN check carrying the
+    # page's own state rather than as a suite that never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M8 && globalThis.M8.state",
+    refusal_want="aborted",
+    note="A PROCESS PUTS PIXELS IN ITS OWN WINDOW, AND HOLDS NOTHING. The surface is kernel-owned "
+         "and a process draws by sending a DISPLAY LIST through the channel it already has - one "
+         "syscall per batch, not per operation. `docs/DECISIONS.md` D31 is the choice and "
+         "constraint 219 is the measurement that forced it: a transferred `OffscreenCanvas` does "
+         "NOT arrive at a process that is spinning, and does not arrive at one parked in "
+         "`Atomics.wait`, which is the state a process is in during the very syscall that would "
+         "carry it. `bench/m8-surface/probe.py` is that measurement, and it ran before any of "
+         "this was built.\n"
+         "THE PATTERN IS A SHIPPED PROGRAM'S, not a fixture's. `src/bin/paint.mjs -t` draws it and "
+         "exports the ops it drew, so this check derives what it expects instead of agreeing a "
+         "list of coordinates with the thing it is checking - and `paint` with no arguments is a "
+         "window you can draw in with the mouse.\n"
+         "THE PIXELS ARE READ BACK OUT OF THE CANVAS the browser painted, at the centre of each "
+         "square, plus one pixel NOTHING drew on - which is what stops a canvas filled entirely "
+         "with one colour from satisfying the rest. `src/abi.mjs` renders a colour for both "
+         "purposes (`cssColor` for a canvas, `pixelColor` for a pixel read back), because the two "
+         "APIs disagree about alpha and a check that rendered it itself reported four correct "
+         "pixels as four failures.\n"
+         "THE DRAG IS REAL MOUSE INPUT through `Input.dispatchMouseEvent`, at coordinates the page "
+         "publishes from the canvas's own bounding rectangle: the canvas is SCALED by CSS, so "
+         "nothing else knows where a surface pixel is on screen. Several moves and not one, "
+         "because a program that draws from the last point to this one needs two points.\n"
+         "negative control: --negative no-draw makes `win_draw` accept its batch, count it and "
+         "discard it. Seven labels red and twenty-one intact - the surface is still created, the "
+         "batch is still reported, the real pointer events still reach the process and it still "
+         "draws in response, and the budget and the cell refusal are untouched. "
+         "--negative no-isolation must come out BROKEN: no SAB, so no kernel and no surface.",
+)
+def check_m8(env: Env) -> None:
+    # ---- send the drag, then wait for the page to finish ----------------------------------
+    phase = env.page.evaluate("globalThis.M8 && globalThis.M8.phase")
+    state = env.page.evaluate(M8_DONE)
+    if not phase and not state:
+        env.unmeasurable(
+            "www/m8.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no pointer event was sent and nothing below was measured")
+    if phase == "await-pointer":
+        drag = env.page.evaluate("JSON.stringify(globalThis.M8.drag || null)")
+        if not drag or drag == "null":
+            env.unmeasurable(
+                "www/m8.html asked for a pointer drag and published no coordinates, so there was "
+                "nowhere to send one")
+        where = json.loads(drag)
+        # DECLARED BEFORE THE FIRST EVENT. The page cannot otherwise tell this check's drag from a
+        # person's - both are trusted - and it would report a hand-driven session as a failed one.
+        env.page.evaluate("globalThis.M8.driver = 'check'")
+        mouse_drag(env.page, where["from"], where["to"])
+        env.settle(M8_DONE, timeout=240.0,
+                   what="globalThis.M8.state reaching done after the drag was sent")
+
+    got = env.read(READ_M8, M8_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m8.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m8.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is created and no surface exists."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m8.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("pattern", "pointer", "budget", "textmode")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF 1: the pattern is on the canvas -------------------------------------------
+    p = ev("pattern")
+    probes = p.get("probes") or []
+    wrong = p.get("wrong") or []
+    surfaces = p.get("surfaces") or {}
+    env.expect_that("pattern ok", section_ok("pattern"), p)
+    env.expect_that("the process got a surface and the page made a canvas for it",
+                    len(surfaces) == 1 and p.get("surfacedMs", -1) >= 0,
+                    {"surfaces": surfaces, "framedMs": p.get("framedMs"),
+                     "surfacedMs": p.get("surfacedMs")})
+    env.expect_that("the program reported the batch it sent",
+                    ((p.get("result") or {}).get("batches") or 0) >= 1
+                    and ((p.get("result") or {}).get("ops") or 0) == len(p.get("pattern") or []),
+                    {"result": p.get("result"), "ops": len(p.get("pattern") or [])})
+    # THE MILESTONE'S OWN ASSERTION. Every filled square, read back at its centre.
+    env.expect_that("and every pixel of the pattern is on the canvas",
+                    len(probes) >= 4 and not wrong,
+                    {"probes": probes, "wrong": wrong})
+    # AND THE ONE THAT STOPS IT BEING VACUOUS: a canvas filled entirely with the pattern's own
+    # colour would satisfy the clause above.
+    env.expect_that("while a pixel nothing drew on is still the paper colour",
+                    bool(p.get("paper"))
+                    and (p.get("paper") or {}).get("got") == (p.get("paper") or {}).get("want"),
+                    {"paper": p.get("paper")})
+    # The page's own count against the kernel's: a replay that dropped an op, or one that did not
+    # recognise it, is a different defect from a pixel in the wrong place.
+    first = next(iter(surfaces.values()), {})
+    env.expect_that("and the page replayed exactly the ops the kernel forwarded",
+                    first.get("ops") == len(p.get("pattern") or []) and first.get("unknown") == 0,
+                    {"surface": first, "sent": len(p.get("pattern") or [])})
+
+    # ---- PROOF 2: a real drag, and the pixels under it ------------------------------------
+    q = ev("pointer")
+    host = q.get("hostStats") or {}
+    result = q.get("result") or {}
+    env.expect_that("pointer ok", section_ok("pointer"), q)
+    # REAL EVENTS, NOT SYNTHESISED ONES. `drivenBy` is the page's own account of which happened
+    # and the host's counter is the browser's; both are asserted, because the page's account could
+    # be wrong and the count alone would not say the page had stopped to be driven.
+    env.expect_that("a real mouse drag reached the process as pointer events",
+                    q.get("drivenBy") == "check" and (host.get("pointers") or 0) > 0
+                    and (result.get("pointers") or 0) > 2,
+                    {"drivenBy": q.get("drivenBy"), "host": host.get("pointers"),
+                     "process": result.get("pointers")})
+    env.expect_that("and the process drew in response", (result.get("strokes") or 0) > 0,
+                    {"result": result})
+    env.expect_that("and the pixels under the drag changed",
+                    q.get("paintedMs", -1) >= 0 and q.get("after") != q.get("before"),
+                    {"before": q.get("before"), "after": q.get("after"),
+                     "paintedMs": q.get("paintedMs")})
+    env.expect_that("while a corner the drag never reached did not",
+                    q.get("untouched") == q.get("before"),
+                    {"untouched": q.get("untouched"), "before": q.get("before")})
+
+    # ---- PROOF 3: the budget refuses and releases ----------------------------------------
+    b = ev("budget")
+    br = b.get("result") or {}
+    env.expect_that("budget ok", section_ok("budget"), b)
+    env.expect_that("a surface larger than the per-surface cap is EINVAL",
+                    br.get("tooBig") == "EINVAL", {"tooBig": br.get("tooBig")})
+    # ENOMEM AND NOT EAGAIN, asserted by name: the budget is a ceiling, and a caller told to try
+    # again would try for ever.
+    env.expect_that("the budget refuses with ENOMEM, which is a ceiling and not a transient",
+                    br.get("refusedWith") == "ENOMEM",
+                    {"refusedWith": br.get("refusedWith"), "rounds": br.get("rounds")})
+    env.expect_that("after granting several window-sized surfaces",
+                    (br.get("granted") or 0) >= 2, {"granted": br.get("granted")})
+    env.expect_that("and destroying the windows gives the area back",
+                    br.get("released") == "ESUCCESS", {"released": br.get("released")})
+    env.expect_that("the kernel accounts no surface once they are gone",
+                    (b.get("wins") or {}).get("surfacePx") == 0
+                    and (b.get("wins") or {}).get("surfaces") == 0,
+                    {"wins": b.get("wins")})
+
+    # ---- PROOF 4: one content mode per window --------------------------------------------
+    t = ev("textmode")
+    tr = t.get("result") or {}
+    env.expect_that("textmode ok", section_ok("textmode"), t)
+    env.expect_that("a surfaced window refuses cells with EINVAL",
+                    tr.get("cellsRefused") == "EINVAL",
+                    {"cellsRefused": tr.get("cellsRefused")})
+    # AND THE WINDOW STILL WORKS, which is what makes the refusal about the MODE rather than about
+    # a window that stopped answering.
+    env.expect_that("while a draw on the same window still succeeds",
+                    tr.get("drewAfter") == "ESUCCESS", {"drewAfter": tr.get("drewAfter")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m8.html", env.served_matches_disk(env.document),
+                    "the m8.html served does not match www/m8.html on disk")
 
 
 @check(

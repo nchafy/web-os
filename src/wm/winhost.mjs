@@ -17,9 +17,13 @@
 //   browser drag/resize   -> win-geom with the box the clamp settled on
 
 import { Win } from "./window.mjs";
-import { Terminal } from "./terminal.mjs";
+// `bytesForKey` is the TERMINAL's key translation, reused for a surface rather than written
+// again: a Ctrl-C is 0x03 whatever is inside the window (constraint 161's file is where it lives).
+import { Terminal, bytesForKey } from "./terminal.mjs";
+import { Surface } from "./surface.mjs";
 import {
-  WEV_KEY, WEV_CLOSE, WEV_FOCUS, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, packKeyBytes,
+  WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
+  WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
 } from "../abi.mjs";
 
 /** Cell metrics, measured once per host from a real rendered glyph rather than assumed: the cell
@@ -59,7 +63,9 @@ export class WinHost {
      *  of the browser's own event and `src/wm/terminal.mjs` is where it is read, so a second count
      *  in this file would be the same fact with two renderers. See `keyCounts`. */
     this.stats = { creates: 0, destroys: 0, keys: 0, cells: 0, geoms: 0, closes: 0, focus: 0,
-      dropped: 0, unknown: 0 };
+      dropped: 0, unknown: 0,
+      // M8: surfaces created, batches replayed, ops in them, and pointer events sent back.
+      surfaces: 0, batches: 0, ops: 0, pointers: 0 };
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -77,6 +83,8 @@ export class WinHost {
     if (m.t === "win-title") { this.#title(m); return true; }
     if (m.t === "win-box") { this.#box(m); return true; }
     if (m.t === "win-health") { this.#health(m); return true; }
+    if (m.t === "win-surface") { this.#surface(m); return true; }
+    if (m.t === "win-draw") { this.#draw(m); return true; }
     if (m.t === "win-fed") {
       this.fed.offered += m.offered | 0;
       this.fed.queued += m.queued | 0;
@@ -123,7 +131,11 @@ export class WinHost {
       into: win.bodyEl,
       onKeys: (bytes, event) => this.#keys(id, bytes, event),
     });
-    const entry = { id, win, term, pid: m.pid | 0, owner: m.owner | 0, health: [] };
+    // `surface` is null until the process asks for one, and `term` becomes null when it does.
+    // Exactly one of the two is set; see `#surface`.
+    const entry = {
+      id, win, term, surface: null, pid: m.pid | 0, owner: m.owner | 0, health: [],
+    };
     this.frames.set(id, entry);
     this.created.push({ win: id, pid: m.pid | 0, owner: m.owner | 0, title: m.title });
     this.stats.creates += 1;
@@ -168,7 +180,106 @@ export class WinHost {
     if (!entry) { this.stats.unknown += 1; return; }
     const bytes = m.bytes instanceof Uint8Array ? m.bytes : new Uint8Array(m.bytes || 0);
     this.stats.cells += bytes.length;
+    // A SURFACED WINDOW HAS NO TEXT WIDGET, so there is nowhere for cells to go. The kernel
+    // refuses `write` on one (see `src/kernel/files.mjs`), so arriving here means the two sides
+    // disagree — counted rather than dropped, because silent loss is the one failure a user
+    // cannot diagnose.
+    if (!entry.term) { this.stats.unknown += 1; return; }
     entry.term.write(bytes);
+  }
+
+  /**
+   * THE WINDOW CHANGES CONTENT MODE, once, and this is the only place it happens. A window is a
+   * TEXT window until its process asks for a surface, and a surface window afterwards: the text
+   * widget goes, a canvas takes its place, and `write(2)` on the fd is refused from then on.
+   *
+   * One content mode per window, because two renderers for one window's inside is two places the
+   * same pixel can come from — and a program that wanted both would be asking for a compositor it
+   * does not have.
+   */
+  #surface(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    if (entry.surface) {
+      // A RESIZE, which the kernel has already accounted. The old canvas goes rather than being
+      // resized in place: a canvas's `width` assignment clears it anyway, so keeping it would
+      // only hide that the pixels are gone.
+      entry.surface.destroy();
+      entry.surface = null;
+    }
+    if (entry.term) {
+      entry.term.el.remove();
+      entry.term = null;
+    }
+    entry.surface = new Surface({
+      into: entry.win.bodyEl, w: m.w, h: m.h, label: entry.win.titleText,
+    });
+    this.stats.surfaces += 1;
+    this.#wirePointer(entry);
+    entry.surface.el.focus();
+  }
+
+  #draw(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    if (!entry.surface) { this.stats.unknown += 1; return; }
+    const bytes = m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0);
+    this.stats.batches += 1;
+    this.stats.ops += entry.surface.replay(bytes);
+  }
+
+  /**
+   * Pointer events, in SURFACE pixels, as window events on the window's own fd.
+   *
+   * A MOVE IS SENT ONLY WHILE A BUTTON IS DOWN. A hover would be one event per pointermove — and
+   * `WIN_EVENT_CAP` is 256 records (constraint 213), so a second of hovering would overflow a
+   * queue the process is being asked to drain. A program that needs hover can ask for it when
+   * there is a program that needs hover.
+   */
+  #wirePointer(entry) {
+    const send = (flags, event) => {
+      if (!entry.surface) return;
+      const at = entry.surface.pointAt(event);
+      if (!at) return;
+      let mods = flags;
+      if (event.shiftKey) mods |= WMOD_SHIFT;
+      if (event.ctrlKey) mods |= WMOD_CTRL;
+      if (event.altKey) mods |= WMOD_ALT;
+      this.stats.pointers += 1;
+      this.post({
+        t: "win-in",
+        win: entry.id,
+        evs: [{ type: WEV_POINTER, mods, a: at.x, b: at.y, c: event.buttons | 0 }],
+      });
+    };
+    const el = entry.surface.el;
+    el.addEventListener("pointerdown", (e) => {
+      // The capture is what makes a drag that leaves the canvas keep arriving, and it may THROW
+      // for a pointerId no live pointer owns — Firefox does, Chrome does not (constraint 175). A
+      // throw here would leave the surface dead to the mouse and silent.
+      try {
+        el.setPointerCapture(e.pointerId);
+      } catch (error) {
+        this.stats.unknown += 1;
+      }
+      el.focus();
+      send(WPTR_DOWN, e);
+    });
+    el.addEventListener("pointermove", (e) => {
+      if (!e.buttons) return;
+      send(WPTR_MOVE, e);
+    });
+    el.addEventListener("pointerup", (e) => send(WPTR_UP, e));
+    // A cancelled pointer is an UP as far as a program is concerned: a drag the browser took away
+    // must not leave a program drawing for ever.
+    el.addEventListener("pointercancel", (e) => send(WPTR_UP, e));
+    // A surface takes the keyboard too, through the same path a terminal's keys take.
+    el.addEventListener("keydown", (e) => {
+      const bytes = bytesForKey(e);
+      if (!bytes) return;
+      e.preventDefault();
+      this.#keys(entry.id, bytes, e);
+    });
   }
 
   #destroy(m) {
@@ -178,8 +289,11 @@ export class WinHost {
     for (const id of [...ids].reverse()) {
       const entry = this.get(id);
       if (!entry) continue;
-      this.retired.trusted += entry.term.trustedKeys;
-      this.retired.synthetic += entry.term.synthKeys;
+      if (entry.term) {
+        this.retired.trusted += entry.term.trustedKeys;
+        this.retired.synthetic += entry.term.synthKeys;
+      }
+      if (entry.surface) entry.surface.destroy();
       entry.win.destroy();
       this.frames.delete(id);
       this.destroyed.push(id);
@@ -228,7 +342,19 @@ export class WinHost {
   /** What is on every screen, for a check that wants to read a window's text back. */
   screens() {
     const out = {};
-    for (const [id, entry] of this.frames) out[id] = entry.term.screen();
+    for (const [id, entry] of this.frames) {
+      out[id] = entry.term ? entry.term.screen() : null;
+    }
+    return out;
+  }
+
+  /** Every surface's own report, keyed by winid. What a check reads to ask how many ops the page
+   *  actually replayed — as against how many the process sent, which is the kernel's count. */
+  surfaces() {
+    const out = {};
+    for (const [id, entry] of this.frames) {
+      if (entry.surface) out[id] = entry.surface.report();
+    }
     return out;
   }
 
@@ -238,6 +364,7 @@ export class WinHost {
     let trusted = this.retired.trusted;
     let synthetic = this.retired.synthetic;
     for (const entry of this.frames.values()) {
+      if (!entry.term) continue;
       trusted += entry.term.trustedKeys;
       synthetic += entry.term.synthKeys;
     }

@@ -17,9 +17,9 @@
 // page kinds only from it.
 
 import {
-  EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ST_RETURN,
-  WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
-  WIN_EVENT_CAP, WIN_CAP, encodeWinEvent,
+  EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, ST_RETURN,
+  WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER, WEV_MAX,
+  WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, encodeWinEvent,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
@@ -39,6 +39,17 @@ let cascade = true;
 
 export function setCascade(on) {
   cascade = !!on;
+}
+
+/** M8's NEGATIVE CONTROL, boot-gated on bench=1: `win_draw` accepts its batch, counts it, and
+ *  DISCARDS it. `PLAN.md` §5's control for M8 in its own words — "draw nothing; the pattern
+ *  assertion must fail". Everything that CARRIES the ops keeps working, so what disappears is the
+ *  pixels and nothing else: it is the only cut that tells a working surface from a page that drew
+ *  something of its own. */
+let drawReaches = true;
+
+export function setDrawReaches(on) {
+  drawReaches = !!on;
 }
 
 /**
@@ -87,6 +98,16 @@ export class Window {
     /** Character cells, as the host measures them. 0 until the page reports a geometry. */
     this.cols = 0;
     this.rows = 0;
+    /**
+     * M8's SURFACE, which the KERNEL owns: `{w, h}` in device pixels, or null for a window that
+     * has not asked for one. The pixels live in the page, the accounting lives here, and the
+     * process holds neither — it sends a display list through the channel it already has
+     * (`docs/DECISIONS.md` D31, constraint 219).
+     *
+     * A window without a surface is not broken: it shows what a process `write`s to it as text,
+     * which is what every terminal does.
+     */
+    this.surface = null;
     this.events = new ByteRing(WIN_EVENT_BYTES);
     /** Whether the DOM frame behind this window still exists. `false` answers -EHOSTGONE and NEVER
      *  0: 0 on a read is end of input, which a relay treats as a clean logout, so the two confused
@@ -107,6 +128,9 @@ export class Window {
     this.stats = {
       queued: 0, delivered: 0, dropped: 0, cellBytes: 0, reads: 0, writes: 0,
       readerParks: 0, stale: 0, goneReads: 0, goneWrites: 0, shortReads: 0,
+      // M8: batches accepted, ops in them, and batches refused. A program that drew nothing and
+      // one whose every batch was refused look identical without the third number.
+      batches: 0, ops: 0, refusedDraws: 0,
     };
   }
 
@@ -213,6 +237,15 @@ export class Window {
       this.stats.goneWrites += 1;
       return -EHOSTGONE;
     }
+    /* A SURFACED WINDOW HAS NO TEXT WIDGET, so cells have nowhere to go and are REFUSED rather
+     * than accepted and dropped — accepting bytes nobody renders is the silent loss a user cannot
+     * diagnose. One content mode per window (M8): text until `win_surface` succeeds, pixels
+     * after. A program that printed a banner and then asked for a surface is the normal case and
+     * is fine; one that goes back is told -EINVAL. */
+    if (this.surface) {
+      this.stats.goneWrites += 1;
+      return -EINVAL;
+    }
     if (bytes.length === 0) return 0;
     const copy = bytes.slice();
     this.stats.cellBytes += copy.length;
@@ -316,6 +349,7 @@ export class Window {
   report() {
     return {
       id: this.id,
+      surface: this.surface ? { ...this.surface } : null,
       pid: this.pid,
       title: this.title,
       owner: this.owner,
@@ -345,7 +379,80 @@ export class WinMgr {
   constructor() {
     this.byId = new Map();
     this.nextId = 1;
-    this.stats = { created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0 };
+    this.stats = {
+      created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0,
+      // M8's surface accounting. `surfacePx` is what is OUTSTANDING; the refusals are counted
+      // apart because a budget nobody can see refuse anything is a budget nobody believes.
+      surfaces: 0, surfacePx: 0, refusedSurface: 0, batches: 0, ops: 0,
+    };
+  }
+
+  /**
+   * Give a window a surface, or refuse. THE KERNEL ALLOCATES AND THEREFORE CAN ACCOUNT AND
+   * REVOKE, which is the whole of `docs/DECISIONS.md` D31: M12's blur governor is an admission
+   * controller over AREA (constraint 49) and it cannot admit what it did not allocate.
+   *
+   * A second call RESIZES, which is what a window being dragged bigger needs, and the old area is
+   * released before the new one is charged — otherwise a program that resized its surface fifty
+   * times would exhaust a budget it never exceeded.
+   */
+  surface(win, w, h) {
+    // COUNTED LIKE EVERY OTHER REFUSAL. It was not, and `bench/m8-surface/probe.mjs` found it:
+    // a counter that excludes the most common refusal — a bad argument — reports a program that
+    // asked wrongly fifty times as one that never asked.
+    if (!(w > 0) || !(h > 0)) {
+      this.stats.refusedSurface += 1;
+      return -EINVAL;
+    }
+    const want = w * h;
+    if (want > SURFACE_MAX_PX) {
+      this.stats.refusedSurface += 1;
+      return -EINVAL;
+    }
+    const held = win.surface ? win.surface.w * win.surface.h : 0;
+    if (this.stats.surfacePx - held + want > SURFACE_BUDGET_PX) {
+      // -ENOMEM and not -EAGAIN: the budget is a ceiling, not a transient. A caller that retried
+      // would retry for ever.
+      this.stats.refusedSurface += 1;
+      return -ENOMEM;
+    }
+    this.stats.surfacePx += want - held;
+    if (!win.surface) this.stats.surfaces += 1;
+    win.surface = { w: w | 0, h: h | 0 };
+    K.post({ t: "win-surface", win: win.id, w: w | 0, h: h | 0 });
+    return 0;
+  }
+
+  /** Release a window's surface area back to the budget. Called from `destroy`, which is where
+   *  revocation lives: a window that is gone is area the next one may have. */
+  releaseSurface(win) {
+    if (!win.surface) return 0;
+    this.stats.surfacePx -= win.surface.w * win.surface.h;
+    this.stats.surfaces -= 1;
+    win.surface = null;
+    return 0;
+  }
+
+  /** One batch of display-list ops, forwarded to the page that owns the canvas. The ops are NOT
+   *  interpreted here: the kernel counts and accounts, and `src/wm/surface.mjs` is the one
+   *  renderer. A window with no surface refuses, because there is nothing to draw on. */
+  draw(win, ops) {
+    if (win.destroyed || !win.attached) {
+      win.stats.refusedDraws += 1;
+      return -EHOSTGONE;
+    }
+    if (!win.surface) {
+      win.stats.refusedDraws += 1;
+      return -EINVAL;
+    }
+    win.stats.batches += 1;
+    win.stats.ops += ops.length / 32;
+    this.stats.batches += 1;
+    this.stats.ops += ops.length / 32;
+    // A COPY, for the reason `writeCells` makes one: the source is the caller's SAB and the caller
+    // may overwrite it the instant its call is answered.
+    if (drawReaches) K.post({ t: "win-draw", win: win.id, ops: ops.slice() });
+    return 0;
   }
 
   get(id) {
@@ -429,6 +536,9 @@ export class WinMgr {
     walk(root);
     for (const each of ids) {
       const w = this.get(each);
+      // THE AREA GOES BACK BEFORE THE WINDOW DOES. A surface the budget still counts after its
+      // window is gone is a leak the governor would inherit.
+      this.releaseSurface(w);
       w.destroy();
       this.stats.destroyed += 1;
     }

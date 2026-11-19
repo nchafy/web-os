@@ -178,6 +178,9 @@ capacity makes progress in pieces — it does not deadlock.
 INVAL NAMETOOLONG
 `win_destroy(fd)` → the number destroyed in r0, their winids as u32 in the byte region · BADF INVAL
 `win_set(fd, what, …)` → 0 · BADF INVAL **EHOSTGONE**
+`win_surface(fd, w, h)` → 0 · BADF INVAL **ENOMEM** **EHOSTGONE** — `w` × `h` DEVICE pixels, and
+the kernel allocates it
+`win_draw(fd, nops, byteregion = nops × 32 B)` → 0 · BADF INVAL **EHOSTGONE**
 `win_poll` DOES NOT EXIST, and that is the design: the fd `win_create` returns is read with
 `read(2)` and waited on with `poll(2)`
 `clipboard_read` / `clipboard_write` → bytes / 0 · ACCES NOTSUP (gesture-gated)
@@ -232,9 +235,49 @@ publishes the fds that DO reach it, so the two namespaces can be read against ea
 every write, answer it. **ENXIO is gone with `/dev/console`** — it answered "this name exists and
 its device does not", and a window is no longer a name.
 
-**Still M8's and M9's.** The transferred `OffscreenCanvas` surface, `modal`, and the enforced
-refusal behind `WEV_CLOSE`. Three `dataobj_*` calls for a typed clipboard and drag-and-drop are
-M10's. Constraints 43–45.
+### The surface, as M8 built it
+
+**THE KERNEL OWNS IT AND A PROCESS DRAWS BY SENDING COMMANDS.** `win_surface` asks for `w` × `h`
+device pixels; the kernel allocates, accounts and may revoke them, and the process is handed
+NOTHING — it holds only integers (constraint 15). `win_draw` carries a DISPLAY LIST in the byte
+region it already has, which is one syscall per batch rather than one per operation.
+
+**The transferred `OffscreenCanvas` this document used to specify was measured and rejected.** It
+does not arrive at a process that is spinning, and does not arrive at one parked in
+`Atomics.wait` — which is the state a process is in during the very syscall that would carry it.
+`bench/m8-surface/probe.py` is the measurement, constraint 219 the record and
+`docs/DECISIONS.md` D31 the choice.
+
+**A display-list op is 32 bytes**, `DL_*` in `src/abi.mjs` with one codec used by the process that
+writes it, the kernel that counts it and the page that replays it. A u16 op, a u16 flags, six i32
+arguments and a reserved word. `DL_MAX_OPS` — how many fit in one call — is DERIVED from
+`MAX_INLINE`, and the libos splits a longer list rather than refusing it.
+
+| op | arguments |
+| --- | --- |
+| `DL_CLEAR` | `a0` = rgba. The whole surface, FILLED and not cleared, so a process that asked for opaque white does not get transparency |
+| `DL_FILL_RECT` | `a0..a3` = x, y, w, h; `a4` = rgba |
+| `DL_STROKE_RECT` | `a0..a3` = x, y, w, h; `a4` = rgba; `a5` = line width |
+| `DL_LINE` | `a0..a3` = x0, y0, x1, y1; `a4` = rgba; `a5` = line width |
+
+**Every colour is `0xRRGGBBAA`**, and `src/abi.mjs` renders it for both consumers: `cssColor` for a
+canvas (alpha 0–1) and `pixelColor` for a pixel read back with `getImageData` (alpha 0–255). The
+two APIs disagree about alpha, and a check that rendered the colour itself reported four correct
+pixels as four failures (constraint 224).
+
+**The arguments are signed; the colour slot is read unsigned.** A rectangle may start off the left
+edge of a surface, and `0xRRGGBBAA` with alpha set is negative as an i32.
+
+**`WEV_POINTER` is how a surface is reached**: `a` and `b` are x and y in SURFACE pixels, `c` is the
+button mask, and `mods` carries `WPTR_DOWN` / `WPTR_UP` / `WPTR_MOVE` beside the keyboard
+modifiers. A move is sent only while a button is down, because a hover would overflow the window's
+256-record queue in about a second (constraint 223).
+
+**One content mode per window**: `write(2)` on a surfaced window is EINVAL, because the page has
+replaced the text widget with a canvas and cells have nowhere to go (constraint 221).
+
+**Still M9's and M10's.** `modal`, and the enforced refusal behind `WEV_CLOSE`. Three `dataobj_*`
+calls for a typed clipboard and drag-and-drop are M10's. Constraints 44–45.
 
 ---
 

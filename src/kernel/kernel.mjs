@@ -36,7 +36,8 @@ import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
-  WinMgr, installWindowKernel, setCascade, NOT_RESPONDING_MS, END_PROCESS_MS,
+  WinMgr, installWindowKernel, setCascade, setDrawReaches,
+  NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
@@ -70,6 +71,10 @@ const FATAL_DEFAULT = new Set([
 
 let trace = null;
 let mounts = null;
+/** Frame reports that arrived after their window was destroyed. A race the page cannot avoid —
+ *  see the `win-geom` case — so it is counted here and published in `win-state`. */
+let lateGeoms = 0;
+
 /** M7. The window table. Built at boot and never null: a kernel with no windows is a kernel with
  *  an empty table, which is a state `win_create` can change — unlike M4a's single console, which
  *  the PAGE had to create before any process could open it. */
@@ -1547,6 +1552,11 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("noCascade requires bench=1");
         setCascade(false);
       }
+      // M8's control: a batch is accepted and counted and never reaches the page.
+      if (cfg.noDraw) {
+        if (cfg.bench !== 1) throw new Error("noDraw requires bench=1");
+        setDrawReaches(false);
+      }
       // `ptyDetach` makes a master write accept its bytes and discard them, so only the pty stops.
       if (cfg.ptyDetach) {
         if (cfg.bench !== 1) throw new Error("ptyDetach requires bench=1");
@@ -1712,7 +1722,16 @@ async function handle(m) {
     }
     case "win-geom": {
       const geomWin = WINDOWS.get(m.win | 0);
-      if (!geomWin) { post({ t: "error", why: `win-geom for unknown window ${m.win}` }); return; }
+      /* A GEOMETRY FOR A WINDOW THAT IS GONE IS A RACE, NOT AN ERROR, and it was reported as one.
+       * The page builds a frame when the kernel tells it to and reports the box it settled on —
+       * but a process can create and destroy a window while those two messages are still in the
+       * page's queue, so the report arrives about a window the kernel has already forgotten.
+       * Measured: a program that created and destroyed eighteen windows produced four
+       * `win-geom for unknown window N` errors and turned a green check red.
+       *
+       * COUNTED AND NOT SILENT: a page reporting geometry for windows that never existed would be
+       * a defect, and the count is what tells the two apart. */
+      if (!geomWin) { lateGeoms += 1; return; }
       geomWin.setBox(m);
       post({ t: "win-geom", win: geomWin.id, window: geomWin.report() });
       return;
@@ -1727,7 +1746,7 @@ async function handle(m) {
         t: "win-state",
         windows: WINDOWS.live().map((w) => w.report()),
         all: [...WINDOWS.byId.values()].map((w) => w.report()),
-        wins: WINDOWS.report(),
+        wins: { ...WINDOWS.report(), lateGeoms },
       });
       return;
     case "trace-read":
