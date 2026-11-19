@@ -46,21 +46,10 @@ export function makeDevFS(ctx) {
     zero: () => ZERO_BYTES,
   };
 
-  /** Names that resolve to a kernel OBJECT, not to bytes: `open` produces an `F_WIN` description
-   *  (src/kernel/files.mjs). Separate from `FILES` so the device is resolved at open time and
-   *  `/dev/console` is a NAME on a kernel with no window, answering -ENXIO rather than ENOENT. */
-  const CHARDEVS = {
-    console: 0o666,
-  };
-
   const lookup = (rel) => {
     const parts = relParts(rel);
     if (parts.length === 0) return { type: DIR };
     if (parts.length !== 1) return null;
-    if (Object.prototype.hasOwnProperty.call(CHARDEVS, parts[0])) {
-      // No length to publish, and `volatile` is false because that zero is stable.
-      return { type: FILE, chardev: parts[0], mode: CHARDEVS[parts[0]], size: 0 };
-    }
     // AN OWN-PROPERTY TEST, not a truthiness test: `FILES` inherits Object.prototype, so
     // `FILES["constructor"]` is `Object`, and without this guard `open("/dev/constructor")`
     // snapshots a plain object as the bytes and `read(2)` throws a TypeError out of a handler the
@@ -75,12 +64,9 @@ export function makeDevFS(ctx) {
     return { type: FILE, content: make(), mode, volatile: parts[0] === "trace" };
   };
 
-  const list = (rel) => (relParts(rel).length === 0
-    ? [...Object.keys(FILES), ...Object.keys(CHARDEVS)]
-    : null);
+  const list = (rel) => (relParts(rel).length === 0 ? Object.keys(FILES) : null);
 
-  // The SAME table the node lookup reads, so the two cannot drift. See `SynthFS.chardevAt`.
-  return new SynthFS({
-    name: "dev", lookup, list, mutErrno: "EROFS", chardevs: Object.keys(CHARDEVS),
-  });
+  // `/dev/console` was here until M7 and is not a name on this filesystem any more: a window is
+  // created by `win_create`, not opened by path (constraint 211).
+  return new SynthFS({ name: "dev", lookup, list, mutErrno: "EROFS" });
 }

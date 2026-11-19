@@ -48,13 +48,45 @@ from serve import Handler  # noqa: E402
 
 #: The path that never answers. A request for it is accepted and then simply held, which is the
 #: shape the deadline in `programImage` exists for — a fetch that neither resolves nor rejects.
-#: It is NOT a dropped connection: a reset would reject the fetch and `spawn` would already
-#: answer -ENOEXEC without any deadline, so a control built on a reset would prove nothing.
 STALL_PATH = "/__stall__/program.mjs"
+
+#: The path whose FIRST request is dropped at the transport — the connection is closed before any
+#: byte of a response — and whose second serves the real program. `fetch` reports that as
+#: `TypeError: Failed to fetch`, with no status.
+#:
+#: THE CLAIM THIS CONTROL CORRECTS WAS WRITTEN HERE. `STALL_PATH`'s note used to add that a
+#: dropped connection "would reject the fetch and `spawn` would already answer -ENOEXEC without
+#: any deadline, so a control built on a reset would prove nothing". That was wrong, and
+#: `www/m7.html` is where it cost something: a TypeError was NOT retried and NOT caught, so it
+#: escaped `programText` through `spawnBatch` to `self.onmessage`, which has no try/catch — the
+#: kernel PANICKED, and the page reported `timed out waiting for spawned` with nothing naming the
+#: cause. About one run in three on a page that boots five kernels. Constraint 212.
+DROP_PATH = "/__drop__/program.mjs"
+
+#: What the second request for DROP_PATH actually serves: a real program, so a kernel that got
+#: past the drop goes on to spawn and report `ready` like any other.
+DROP_TARGET = "/bench/m1-lifecycle/program.mjs"
 
 
 class _Stalling(Handler):
     def send_head(self):
+        if self.path.startswith("/__drop__/"):
+            # CLOSED BEFORE A SINGLE BYTE, once per server. `self.connection.close()` and
+            # `close_connection` together: the first makes the client's fetch reject, the second
+            # stops the handler trying to write a response into a dead socket.
+            with self.server._drop_lock:
+                first = self.server._dropped == 0
+                self.server._dropped += 1 if first else 0
+            if first:
+                self.close_connection = True
+                try:
+                    self.connection.close()
+                except OSError:
+                    pass
+                return None
+            # The retry gets the real program, so the kernel goes on to spawn it.
+            self.path = DROP_TARGET
+            return Handler.send_head(self)
         if self.path.startswith("/__stall__/"):
             # Headers, then nothing. The body never arrives and the connection stays open, so the
             # client's `fetch` promise is left pending for as long as it will wait.
@@ -75,6 +107,8 @@ def serving():
     import functools
     handler = functools.partial(_Stalling, directory=str(ROOT))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd._drop_lock = threading.Lock()
+    httpd._dropped = 0
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -121,19 +155,29 @@ def main(argv=None):
                     help="the program each kernel spawns; the stall is on the fetch of it, so "
                          "this is a lever (default bench/m1-lifecycle/program.mjs)")
     ap.add_argument("--mode", default=None, help="argv[0] handed to the program")
+    ap.add_argument("--drop", action="store_true",
+                    help="drop the FIRST program fetch at the transport — the connection is "
+                         "closed before any response — and serve the real program on the retry. "
+                         "Every kernel must still boot and spawn, and at least one must report a "
+                         "non-zero `transport` retry: that counter is the only direct evidence "
+                         "the retry in `programText` did anything. Without it the kernel panics "
+                         "(constraint 212).")
     ap.add_argument("--stall", action="store_true",
                     help="point every kernel at a URL that answers headers and then never sends "
                          "a body. The deadline in `programImage` must turn that into a failed "
                          "spawn; without it the kernel hangs and this never completes.")
     args = ap.parse_args(argv)
     sizes = [int(x) for x in str(args.n).split(",") if x.strip()]
-    program = STALL_PATH if args.stall else args.program
+    if args.stall and args.drop:
+        ap.error("--stall and --drop are two different failures; run them separately")
+    program = STALL_PATH if args.stall else (DROP_PATH if args.drop else args.program)
 
     report = {"sizes": {}}
     with serving() as base:
         for n in sizes:
             booted = stalled = 0
             runs_with_a_stall = 0
+            transport = retries = 0
             where = {}
             refused_by_kernel = []
             durations = []
@@ -159,6 +203,8 @@ def main(argv=None):
                     if r.get("kernelRefused"):
                         refused_by_kernel.append(r["kernelRefused"][:120])
                 durations += [r.get("ms", 0) for r in rows if r.get("ok")]
+                transport += sum(r.get("transport") or 0 for r in rows)
+                retries += sum(r.get("retries") or 0 for r in rows)
             report["sizes"][n] = {
                 "runs": args.runs, "kernels_booted": booted, "kernels_stalled": stalled,
                 "runs_with_a_stall": runs_with_a_stall,
@@ -170,6 +216,11 @@ def main(argv=None):
                 "refused_by_the_kernel": refused_by_kernel,
                 "boot_ms_median": round(statistics.median(durations), 1) if durations else None,
                 "boot_ms_max": max(durations) if durations else None,
+                # THE RETRY, OBSERVED. With `--drop` the first program fetch of each server is
+                # closed at the transport, so a kernel that went on to spawn did it on a retry —
+                # and `transport` is the kernel's own count of exactly that.
+                "transport_retries": transport,
+                "retries": retries,
             }
             s = report["sizes"][n]
             print("n=%-4d runs=%d booted=%-5d stalled=%-3d (%.3f%% per kernel)  "
@@ -181,7 +232,27 @@ def main(argv=None):
             if refused_by_kernel:
                 print("      the kernel refused %d of them itself: %s"
                       % (len(refused_by_kernel), refused_by_kernel[0]))
+            if retries:
+                print("      %d retried program fetch(es): %d at the transport, %d at the deadline"
+                      % (retries, transport, retries - transport))
     print(json.dumps(report, indent=2))
+    if args.drop:
+        # THE CONTROL SCORES ITSELF, and on BOTH halves: every kernel got past a dropped fetch,
+        # AND at least one kernel's own counter says it took a retry to do it. The first half
+        # alone would pass against a server that never dropped anything.
+        totals = [v for v in report["sizes"].values()]
+        stalls = sum(v["kernels_stalled"] for v in totals)
+        seen = sum(v["transport_retries"] for v in totals)
+        if stalls:
+            print("--drop: %d kernel(s) stalled, so the retry did NOT cover the transport failure"
+                  % stalls)
+            return 1
+        if not seen:
+            print("--drop: no kernel reported a transport retry, so nothing was actually dropped "
+                  "and this control proved nothing")
+            return 1
+        print("--drop: every kernel booted and spawned, and %d of their program fetches took a "
+              "transport retry to do it" % seen)
     return 0
 
 

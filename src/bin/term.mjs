@@ -1,21 +1,26 @@
 // `term`: the terminal emulator, as a userland process. It owns a pty master and a window, and it
 // moves bytes between them:
 //
-//     window -> read(/dev/console) -> write(master) -> line discipline -> read(slave) by the shell
-//     shell  -> write(slave)       -> read(master)  -> write(/dev/console) -> cells on the screen
+//     window -> read(winfd) -> key events -> write(master) -> line discipline -> read(slave) by sh
+//     shell  -> write(slave) -> read(master) -> write(winfd) -> cells on the screen
 //
 // A process and not the page: a window agent cannot `Atomics.wait` (constraint 1) so it cannot hold
 // the master, and the shell needs a real pty so Ctrl-C raises SIGINT on the foreground group
-// (constraint 16). `/dev/console` is the seam.
+// (constraint 16).
+//
+// M7 CHANGED THE SEAM AND NOTHING ELSE ABOUT THIS PROGRAM'S SHAPE. It used to open
+// `/dev/console` — a device the PAGE had created, one per kernel. It calls `win_create` now, so a
+// second terminal is a second process calling the same syscall, and the window it gets is its own.
 //
 // The relay must `poll` both sources, because it has one futex word: parked in `read(master)` it is
-// deaf to the keyboard, and parked in `read(console)` the pty's 16 KiB output ring fills and the
+// deaf to the keyboard, and parked in `read(winfd)` the pty's 16 KiB output ring fills and the
 // shell blocks in `write` (constraint 42).
 
 // Absolute, not relative (constraint 125): a program's image is a Blob URL with an opaque path.
 import {
-  MAX_INLINE, O_RDONLY, O_RDWR, POLLIN, POLLHUP, POLLERR, POLLNVAL,
+  MAX_INLINE, O_RDONLY, POLLIN, POLLHUP, POLLERR, POLLNVAL,
   SIGHUP, EINTR, EHOSTGONE, SPAWN_DUP2, SPAWN_CLOSE,
+  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED, keyBytesOf,
 } from "/src/abi.mjs";
 
 const SHELL = "/usr/bin/sh";
@@ -32,7 +37,7 @@ const CEILING_MS = 30000;
 /** One read's buffer. The region is MAX_INLINE, so a bigger one could never be filled. */
 const CHUNK = Math.min(MAX_INLINE, 8192);
 
-/** Hold fd 0 before opening anything, or the console or the pty master lands on it and every
+/** Hold fd 0 before opening anything, or the window or the pty master lands on it and every
  *  convention that treats 0 as stdin is wrong. Constraint 94. */
 function ensureStdin(env) {
   const fd = env.fs.open("/dev/zero", O_RDONLY);
@@ -52,7 +57,27 @@ function unInterrupted(call) {
 export function run(env) {
   const argv = (env.argv || []).map(String);
   let ceiling = CEILING_MS;
+  let title = "Terminal";
+  let owner = 0;
   for (let i = 1; i < argv.length; i += 1) {
+    if (argv[i] === "--title") {
+      const text = argv[i + 1];
+      if (text === undefined) return { exit: 1, program: "term", why: "--title wants a string" };
+      title = text;
+      i += 1;
+      continue;
+    }
+    if (argv[i] === "--owner") {
+      // A window id, from whoever spawned this relay. Parented onto ANOTHER PROCESS'S window is
+      // the normal case for a broker, so this is not restricted to ids this process made.
+      const id = Number(argv[i + 1]);
+      if (!Number.isInteger(id) || id < 0) {
+        return { exit: 1, program: "term", why: `--owner wants a winid, got ${argv[i + 1]}` };
+      }
+      owner = id;
+      i += 1;
+      continue;
+    }
     if (argv[i] !== "--ceiling") continue;
     // Refused, not silently defaulted: `Number(x) || ceiling` accepts both `0` and `abc`.
     const raw = argv[i + 1];
@@ -61,33 +86,38 @@ export function run(env) {
       return { exit: 1, program: "term", why: `--ceiling wants a positive number, got ${raw}` };
     }
     ceiling = ms;
+    i += 1;
   }
   const t0 = performance.now();
   const account = {
     program: "term",
-    keyBytes: 0, cellBytes: 0, polls: 0, wakes: 0, interrupted: 0,
+    win: 0, keyBytes: 0, cellBytes: 0, events: 0, resizes: 0, closes: 0,
+    polls: 0, wakes: 0, interrupted: 0,
     shellPid: 0, shellStatus: null, why: "",
   };
 
   const zero = ensureStdin(env);
   if (zero < 0) return { exit: 1, ...account, why: `/dev/zero: ${env.std.errnoName(zero)}` };
 
-  // The window first, so -ENXIO (no window attached to this kernel) is reported before a pty and a
-  // shell exist to clean up, and the caller can tell it from a crash.
-  const con = env.fs.open("/dev/console", O_RDWR);
-  if (con < 0) {
-    return { exit: 2, ...account, why: `/dev/console: ${env.std.errnoName(con)}`, errno: -con };
+  // The window first, so a refusal is reported before a pty and a shell exist to clean up, and the
+  // caller can tell it from a crash.
+  const made = env.win.create({ title, owner, w: 640, h: 400 });
+  if (typeof made === "number") {
+    return { exit: 2, ...account, why: `win_create: ${env.std.errnoName(made)}`, errno: -made };
   }
+  const con = made.fd;
+  account.win = made.win;
 
   const pty = env.tty.ptyOpen();
   if (typeof pty === "number") {
-    env.fs.close(con);
+    env.win.destroy(con);
     return { exit: 3, ...account, why: `pty_open: ${env.std.errnoName(pty)}` };
   }
   const { master, slave } = pty;
 
   // The shell on the slave, with both pty fds closed in the child: a program must not hold the
-  // other end of its own terminal.
+  // other end of its own terminal. THE WINDOW FD IS NOT INHERITED EITHER — it is not in the file
+  // actions and it is above 2 — so the shell cannot write cells behind this relay's back.
   const actions = [
     { op: SPAWN_DUP2, a: slave, b: 0 },
     { op: SPAWN_DUP2, a: slave, b: 1 },
@@ -95,11 +125,12 @@ export function run(env) {
   ];
   if (master > 2) actions.push({ op: SPAWN_CLOSE, a: master });
   if (slave > 2) actions.push({ op: SPAWN_CLOSE, a: slave });
+  if (con > 2) actions.push({ op: SPAWN_CLOSE, a: con });
   const pid = env.proc.spawn(SHELL, ["sh"], actions);
   if (pid < 0) {
     env.fs.close(master);
     env.fs.close(slave);
-    env.fs.close(con);
+    env.win.destroy(con);
     return { exit: 4, ...account, why: `spawn ${SHELL}: ${env.std.errnoName(pid)}` };
   }
   account.shellPid = pid;
@@ -115,7 +146,7 @@ export function run(env) {
     env.proc.waitpid(pid, 0);
     env.fs.close(master);
     env.fs.close(slave);
-    env.fs.close(con);
+    env.win.destroy(con);
     return {
       exit: 6,
       ...account,
@@ -152,16 +183,39 @@ export function run(env) {
     const conRev = r.fds[0].revents;
     const mstRev = r.fds[1].revents;
 
-    // Keystrokes first: a user who types while output is flowing must not wait for it to stop.
+    // Events first: a user who types while output is flowing must not wait for it to stop.
     if (conRev & POLLIN) {
-      const n = unInterrupted(() => env.fs.read(con, buf, 0, buf.length));
-      if (n === -EHOSTGONE) { why = "the window was destroyed"; break; }
-      if (n < 0 && n !== -EINTR) { why = `read(console): ${env.std.errnoName(n)}`; break; }
-      if (n > 0) {
-        account.keyBytes += n;
-        // write(master) is input: it runs the line discipline, where echo and Ctrl-C happen.
-        const w = unInterrupted(() => env.fs.write(master, buf.subarray(0, n)));
-        if (w < 0 && w !== -EINTR) { why = `write(master): ${env.std.errnoName(w)}`; break; }
+      const evs = unInterrupted(() => env.win.read(con));
+      if (evs === -EHOSTGONE) { why = "the window was destroyed"; break; }
+      if (typeof evs === "number") {
+        if (evs < 0 && evs !== -EINTR) { why = `read(win): ${env.std.errnoName(evs)}`; break; }
+      } else {
+        for (const ev of evs) {
+          account.events += 1;
+          if (ev.type === WEV_KEY) {
+            const bytes = keyBytesOf(ev);
+            if (bytes.length === 0) continue;
+            account.keyBytes += bytes.length;
+            // write(master) is input: it runs the line discipline, where echo and Ctrl-C happen.
+            const w = unInterrupted(() => env.fs.write(master, bytes));
+            if (w < 0 && w !== -EINTR) { why = `write(master): ${env.std.errnoName(w)}`; break; }
+          } else if (ev.type === WEV_RESIZE) {
+            account.resizes += 1;
+            // THE RESIZE IS WHY THE EVENT STREAM IS NOT JUST KEYSTROKES: a set on the master
+            // raises SIGWINCH on the slave's foreground group, so the shell learns its new size
+            // through POSIX's own channel rather than through anything window-shaped.
+            env.tty.winsizeSet(master, ev.b, ev.a);
+          } else if (ev.type === WEV_CLOSE) {
+            // M7 DELIVERS THE REQUEST AND DOES NOT ENFORCE IT. The page still takes the frame down
+            // after posting this, so the session ends either way; M9 is what makes the refusal
+            // real, and until then a relay that pretended to refuse would be lying to the user.
+            account.closes += 1;
+            why = "the window asked to close";
+          } else if (ev.type === WEV_DESTROYED) {
+            why = "the window was destroyed";
+          }
+        }
+        if (why) break;
       }
     }
 
@@ -173,7 +227,7 @@ export function run(env) {
         account.cellBytes += n;
         const w = unInterrupted(() => env.fs.write(con, buf.subarray(0, n)));
         if (w === -EHOSTGONE) { why = "the window was destroyed"; break; }
-        if (w < 0 && w !== -EINTR) { why = `write(console): ${env.std.errnoName(w)}`; break; }
+        if (w < 0 && w !== -EINTR) { why = `write(win): ${env.std.errnoName(w)}`; break; }
       }
     }
 
@@ -202,11 +256,15 @@ export function run(env) {
   const stat = env.proc.waitpid(pid, 0);
   account.shellStatus = typeof stat === "object" ? stat : { errno: -stat };
   env.fs.close(master);
-  env.fs.close(con);
+  // DESTROY RATHER THAN CLOSE, so the cascade is reported: a terminal that owns a child window
+  // takes it down with it, and `win_destroy` is the call that says which ids went.
+  const destroyed = env.win.destroy(con);
+  account.destroyed = Array.isArray(destroyed) ? destroyed : [];
   account.why = why;
   account.ms = performance.now() - t0;
-  // Exit 0 only for the ways a session ends; a deadline or an errno gets a code the page asserts on.
+  // Exit 0 only for the ways a session ends; a deadline or an errno gets a code the page
+  // asserts on.
   const clean = why === "the shell exited" || why === "the terminal reached end of output"
-    || why === "the window was destroyed";
+    || why === "the window was destroyed" || why === "the window asked to close";
   return { exit: clean ? 0 : 5, ...account };
 }

@@ -3,9 +3,10 @@
 // the notify or G_INFLIGHT — reply() in kernel.mjs is the only writer of those.
 
 import {
-  A0, A1, A2, A3, LEN_I32, DATA_OFF, MAX_INLINE, NSYS, SYS_NAME,
+  A0, A1, A2, A3, A4, A5, LEN_I32, DATA_OFF, MAX_INLINE, NSYS, SYS_NAME,
   EBADF, EINVAL, ENOSYS, EIO, EAGAIN, EPERM, EINTR, ECHILD, ESRCH,
   ENOENT, ENOTDIR, EISDIR, EACCES, ENAMETOOLONG, EROFS, ESPIPE, EOVERFLOW, EMFILE,
+  EHOSTGONE,
   ELIMIT_ERRNO, FD_INFLIGHT_CAP, OPEN_MAX, STAT_EXITED, STAT_KILLED, WNOHANG,
   SIGKILL, SIGSTOP, SIG_DFL, SIG_IGN, SIG_HANDLE, SIG_BIT,
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
@@ -14,6 +15,7 @@ import {
   F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
+  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
@@ -283,10 +285,7 @@ HANDLERS.open = (p, k) => {
   const wantR = access === O_RDONLY || access === O_RDWR;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  // A CHARACTER DEVICE IS THE ONE EXCEPTION to the mount's read-only flag: `/dev` is MNT_RO because
-  // its TREE cannot change, and writing to `/dev/console` changes no tree. O_CREAT is still denied.
-  const chardev = at.mount.fs.chardevAt ? at.mount.fs.chardevAt(at.rel) : null;
-  if (((flags & O_CREAT) || (wantW && !chardev)) && mountReadOnly(k, at.mount)) return -EROFS;
+  if (((flags & O_CREAT) || wantW) && mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
   try {
     decision = at.mount.fs.openDecision(credOf(p), at.rel, {
@@ -325,17 +324,6 @@ HANDLERS.open = (p, k) => {
     // O_APPEND IS NOT A SEEK AT OPEN: the offset is resolved per write from `d.flags`. Setting
     // `d.pos` to the size here makes two `>>` descriptions share an end offset and both overwrite.
     return p.fds.add(d);
-  }
-  // A character device: the description is a kernel OBJECT, not bytes. The node exists in `/dev`
-  // whether or not a window was attached, because the mount table is static at boot
-  // (constraint 78), so a name with no device behind it is -ENXIO and not ENOENT.
-  if (decision.chardev) {
-    const d = k.chardev(decision.chardev, flags, decision);
-    if (typeof d === "number") return d;
-    const fd = p.fds.add(d);
-    // Undone on failure, or the device counts an open the caller was never told about.
-    if (fd < 0) KIND_OPS[d.kind].close(d);
-    return fd;
   }
   if (decision.synth) {
     const d = {
@@ -880,6 +868,118 @@ HANDLERS.ioctl = (p, k) => {
   return 0;
 };
 
+/* ----------------------------------------------------------------------------------------------
+   M7: the window calls. A WINDOW IS A FILE DESCRIPTION, so there are only three of them — creating
+   one, destroying one, and changing a field. Everything a window SAYS travels back through
+   `read(2)` on the fd, and everything it SHOWS goes out through `write(2)`.
+   ---------------------------------------------------------------------------------------------- */
+
+/** A title argument. Unlike `readPath` an EMPTY one is legal — an untitled window is a window —
+ *  and a NUL is refused for the reason a path's is: the page would render the rest as text. */
+function readTitle(p) {
+  const length = Atomics.load(p.ctl, LEN_I32);
+  if (length < 0 || length > MAX_INLINE) return -EINVAL;
+  if (length === 0) return "";
+  const bytes = new Uint8Array(p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+  const text = DECODER.decode(bytes);
+  if (text.includes("\0")) return -EINVAL;
+  if (text.length > NAME_MAX) return -ENAMETOOLONG;
+  return text;
+}
+
+/** The window behind an fd, or a negative errno. EBADF for no fd and EINVAL for an fd on something
+ *  that is not a window — not ENOTTY, which `isatty` has taken to mean "not a terminal". */
+function winOf(p, fd) {
+  const d = p.fds.get(fd);
+  if (!d) return -EBADF;
+  if (d.kind !== F_WIN) return -EINVAL;
+  return d;
+}
+
+/**
+ * win_create(w, h, owner, flags, x, y, title bytes) -> fd in r0, winid in r1.
+ *
+ * TWO RETURNS, because the fd is what the process waits on and the winid is what another process
+ * names to parent a window onto this one. A winid alone would leave a process with two windows
+ * unable to be woken by both (constraint 42); an fd alone would make cross-process ownership
+ * inexpressible, which is the gap MILESTONES' ordering correction names.
+ */
+HANDLERS.win_create = (p, k) => {
+  const title = readTitle(p);
+  if (typeof title === "number") return title;
+  const win = k.wins.create(p.pid, {
+    title,
+    w: p.ctl[A0] | 0,
+    h: p.ctl[A1] | 0,
+    owner: p.ctl[A2] | 0,
+    x: p.ctl[A4] | 0,
+    y: p.ctl[A5] | 0,
+  });
+  if (typeof win === "number") return win;
+  const description = { kind: F_WIN, refs: 1, flags: O_RDWR, win, inflight: 0 };
+  const fd = p.fds.add(description);
+  if (fd < 0) {
+    // Undo, or the caller is told -EMFILE and a frame appears on screen that nothing holds.
+    k.wins.destroyTree(win.id);
+    return fd;
+  }
+  p.r1 = win.id;
+  return fd;
+};
+
+/**
+ * win_destroy(fd) -> the number destroyed in r0, their winids as u32 in the byte region.
+ *
+ * THE LIST IS THE POINT. Destroying a parent destroys its children, so one call closes several
+ * windows, and a caller that had to infer which ones would keep fds for windows the kernel has
+ * forgotten. The caller's own fd is closed here too: a window is a file description, and destroying
+ * the thing an fd describes while leaving the fd open is the desynchronisation this call exists to
+ * avoid.
+ */
+HANDLERS.win_destroy = (p, k) => {
+  const fd = p.ctl[A0] | 0;
+  const d = winOf(p, fd);
+  if (typeof d === "number") return d;
+  const ids = k.wins.destroyTree(d.win.id);
+  p.fds.close(fd);
+  const record = new Uint8Array(ids.length * 4);
+  const dv = new DataView(record.buffer);
+  ids.forEach((id, i) => dv.setUint32(i * 4, id >>> 0, true));
+  const wrote = replyBytes(p, record);
+  if (wrote < 0) return wrote;
+  // r0 is the COUNT and `rlen` the byte length: a caller reading r0 as "how many windows went"
+  // must not have to divide by a record size it was never told.
+  return ids.length;
+};
+
+/** win_set(fd, what, …) — WIN_SET_TITLE takes the title in the byte region, WIN_SET_BOX takes
+ *  (x, y, w, h) in a2..a5. One call with a selector, because every case is "change a field of this
+ *  window" and the kernel's answer is the same post to the page. */
+HANDLERS.win_set = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  if (d.win.destroyed) return -EHOSTGONE;
+  const what = p.ctl[A1] | 0;
+  if (what === WIN_SET_TITLE) {
+    const title = readTitle(p);
+    if (typeof title === "number") return title;
+    d.win.title = title;
+    k.post({ t: "win-title", win: d.win.id, title });
+    return 0;
+  }
+  if (what === WIN_SET_BOX) {
+    const box = { x: p.ctl[A2] | 0, y: p.ctl[A3] | 0, w: p.ctl[A4] | 0, h: p.ctl[A5] | 0 };
+    if (box.w < 0 || box.h < 0) return -EINVAL;
+    // REQUESTED, not applied: the page owns the clamp (src/wm/window.mjs) and reports back what it
+    // did, so the kernel's recorded box is never a geometry no frame ever had.
+    k.post({ t: "win-box", win: d.win.id, ...box });
+    return 0;
+  }
+  // A selector nobody implements is -EINVAL, never 0: a caller checking the return would read a
+  // no-op as a successful change.
+  return -EINVAL;
+};
+
 /**
  * The parked `poll` calls. Constraint 42: `poll()` is the single wait primitive over fds, because a
  * process has one futex word and one outstanding call.
@@ -910,10 +1010,12 @@ function pollOne(p, fd, events) {
     if (d.pty.writable(isMaster)) revents |= POLLOUT;
     if (isMaster ? d.pty.slaves === 0 : d.pty.masters === 0) revents |= POLLHUP;
   } else if (d.kind === F_WIN) {
-    // The row that makes a window waitable alongside a pty (constraint 42).
-    if (d.console.readable()) revents |= POLLIN;
-    if (d.console.writable()) revents |= POLLOUT;
-    if (d.console.hungUp()) revents |= POLLHUP;
+    // The row that makes a window waitable alongside a pty and a pipe (constraint 42). It survived
+    // M4a's console being replaced by `win_create` unchanged, which is the one decision M4a's
+    // special case was carrying.
+    if (d.win.readable()) revents |= POLLIN;
+    if (d.win.writable()) revents |= POLLOUT;
+    if (d.win.hungUp()) revents |= POLLHUP;
   } else {
     // A regular, generated or tmpfs file and the sink never park, so a poller must not sleep here.
     revents |= POLLIN | POLLOUT;
@@ -922,11 +1024,24 @@ function pollOne(p, fd, events) {
   return revents & (events | POLLERR | POLLHUP | POLLNVAL);
 }
 
+/**
+ * M7's NEGATIVE CONTROL, boot-gated on bench=1: evaluate only the FIRST fd of a set.
+ * `PLAN.md` §5's control for M7 in its own words — "wake only on the first fd in the set; the
+ * two-window case must hang". A process with one futex word is exactly what makes this fatal, so a
+ * control that removed the windows instead would have proved nothing about `poll`.
+ */
+let pollFirstOnly = false;
+
+export function setPollFirstOnly(on) {
+  pollFirstOnly = !!on;
+}
+
 /** Evaluate one waiter's whole set. Returns the ready count and fills `revents`. */
 function pollScan(p, entries) {
   let ready = 0;
-  for (const e of entries) {
-    e.revents = pollOne(p, e.fd, e.events);
+  for (let i = 0; i < entries.length; i += 1) {
+    const e = entries[i];
+    e.revents = (pollFirstOnly && i > 0) ? 0 : pollOne(p, e.fd, e.events);
     if (e.revents !== 0) ready += 1;
   }
   return ready;

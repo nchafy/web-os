@@ -35,8 +35,9 @@ export function bytesForKey(event) {
 }
 
 export class Terminal {
-  /** `spec.into` is the window's client area; `spec.onKeys` takes a Uint8Array and is the one
-   *  route off this widget. */
+  /** `spec.into` is the window's client area; `spec.onKeys` takes a Uint8Array AND THE EVENT and is
+   *  the one route off this widget. The event travels because a window event record carries the
+   *  modifiers that were held (M7), and `isTrusted` is readable nowhere else. */
   constructor(spec) {
     this.onKeys = spec.onKeys;
     /** Kept apart because a single string has no cursor for `\r` and `\b` to move within. */
@@ -86,7 +87,7 @@ export class Terminal {
       if (b >= 0x20 && b < 0x7f) this.printableSent += String.fromCharCode(b);
     }
     // And nothing is drawn (constraint 161).
-    this.onKeys(bytes);
+    this.onKeys(bytes, event);
   }
 
   /** Bytes from the pty. The only thing that may change the screen. `stream: true` is load-bearing:

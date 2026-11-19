@@ -174,9 +174,12 @@ capacity makes progress in pieces — it does not deadlock.
 `random(n ≤ 65536)` → bytes; above 65536 returns INVAL, because `crypto.getRandomValues` throws
 `QuotaExceededError` past that
 `env_get` / `env_set` → bytes / 0
-`win_create(specB)` → winid · NOMEM INVAL
-`win_set(winid, propB)` / `win_destroy(winid)` / `win_poll(winid, timeout)` → event records ·
-**EHOSTGONE** INTR
+`win_create(w, h, owner, flags, x, y, titleB)` → **fd** in r0, **winid** in r1 · MFILE ENOENT
+INVAL NAMETOOLONG
+`win_destroy(fd)` → the number destroyed in r0, their winids as u32 in the byte region · BADF INVAL
+`win_set(fd, what, …)` → 0 · BADF INVAL **EHOSTGONE**
+`win_poll` DOES NOT EXIST, and that is the design: the fd `win_create` returns is read with
+`read(2)` and waited on with `poll(2)`
 `clipboard_read` / `clipboard_write` → bytes / 0 · ACCES NOTSUP (gesture-gated)
 `notify(specB)` → id · ACCES
 `tty_get(fd)` / `tty_set(fd, termiosB)` — ICANON ECHO ISIG, VMIN VTIME VINTR VQUIT VSUSP ·
@@ -185,24 +188,53 @@ NOTTY BADF INVAL
 the slave's foreground pgrp
 `pty_open()` → master in r0, slave in r1
 
-**Option A amends the window group** — see `../PLAN.md` §5. `win_create` returns an **fd** (not a
-bare winid) so `poll()` is the single wait primitive, and it also returns a transferred
-`OffscreenCanvas` as the window's surface. It gains `owner` and `modal`, and a
-`WIN_CLOSE_REQUEST` event. Three `dataobj_*` calls are added for a typed clipboard and
-drag-and-drop. Constraints 42–45.
+### The window group, as M7 built it
 
-**M4a added NO CALL.** The whole window group is still M7's and M8's, and none of it is
-implemented. What M4a built is `/dev/console`: a character device whose description is kind `F_WIN`
-and which is therefore reached through `open`, `read`, `write`, `poll` and `close` — calls that
-already existed. The window is a FILE DESCRIPTION from the first day there is a window, which is
-the half of constraint 42 that cannot be retrofitted; `win_create` replaces the one producer of
-that description and nothing else changes. `src/kernel/console.mjs` carries the special-case
-notice and `docs/DECISIONS.md` D25 the alternatives it rejected.
+**Three calls, numbers 48, 49 and 50**, appended and never renumbered. Everything a window SAYS
+comes back through `read(2)` on the fd, and everything it SHOWS goes out through `write(2)`, so
+there is no `win_read`, no `win_poll` and no `win_write`.
 
-Two errnos answer for it, and they are not interchangeable (constraint 159): **ENXIO** for a name
-with no device behind it — `/dev/console` exists on every kernel and a window does not — and
-**EHOSTGONE** for a window that existed and was destroyed, which is a hangup and raises SIGHUP on
-the foreground group.
+**`win_create` returns BOTH an fd and a winid, and it needs both.** The fd is what the process
+waits on — a process has one futex word and one outstanding call, so a bare winid would leave a
+process holding two windows unable to be woken by either (constraint 42). The winid is what
+ANOTHER process names to parent a window onto this one, and a process holding an fd for a window
+it did not create is not expressible. `owner` MAY name a window in another process; it must name a
+live one, and ENOENT says so.
+
+**`win_destroy` returns the LIST of winids it destroyed**, oldest ancestor first, and closes the
+caller's fd. Destroying a parent destroys its children, so ONE call closes SEVERAL windows — a
+caller told only "ok" would keep fds for windows the kernel has forgotten. SerenityOS's
+`destroy_window` returns the same list for the same reason.
+
+**A window event is a 16-byte record**, `WEV_*` in `src/abi.mjs` with one codec used by the kernel
+that writes it and the libos that reads it. Fixed width, because a read that could split a record
+would make one key press two readiness edges: the kernel floors every window read to a whole
+number of records and answers **EINVAL** — never a short read — for a buffer that cannot hold one.
+
+| type | carries |
+| --- | --- |
+| `WEV_KEY` | the UTF-8 bytes INLINE: `a` is the length 1–4 and `b` the bytes, little-endian. `mods` carries SHIFT/CTRL/ALT for a reader that wants them, never for deriving the byte |
+| `WEV_RESIZE` | `a` = columns, `b` = rows. CELLS and not pixels, because a terminal needs it for `tty_winsize_set`; the pixel box is published in `/proc/<pid>/win/<winid>` |
+| `WEV_CLOSE` | the X button was pressed. M7 DELIVERS it and the frame still goes; M9 is what lets the process refuse |
+| `WEV_FOCUS` | `a` = 1 entering, 0 leaving |
+| `WEV_DESTROYED` | `a` = the winid that went. The last record a destroyed window holds, so a process whose window was destroyed by ANOTHER process's call learns why rather than reading a bare errno |
+
+**The queue is bounded and the overflow is defined**: `WIN_EVENT_CAP` records per window, the
+NEWEST dropped and counted, published as `dropped` in `/proc/<pid>/win/<winid>`. That is M1's
+per-fd event budget (constraint 42), charged against the fd that caused it, so a window nobody is
+reading does not starve the same process's pipe.
+
+**`/proc/<pid>/win/<winid>` is a file**, named by winid and not by fd — a window may be held on
+several fds through `dup`, and an owner in another process has no fd for it at all. Each file
+publishes the fds that DO reach it, so the two namespaces can be read against each other.
+
+**`EHOSTGONE` is the window's hangup** (constraint 159): a read after the destroy notice, and
+every write, answer it. **ENXIO is gone with `/dev/console`** — it answered "this name exists and
+its device does not", and a window is no longer a name.
+
+**Still M8's and M9's.** The transferred `OffscreenCanvas` surface, `modal`, and the enforced
+refusal behind `WEV_CLOSE`. Three `dataobj_*` calls for a typed clipboard and drag-and-drop are
+M10's. Constraints 43–45.
 
 ---
 

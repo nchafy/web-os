@@ -85,6 +85,11 @@ async function oneKernel (index) {
       cfg: { argv: [MODE], uid: 0, gid: 0 }, readyTimeoutMs: 15000 })
     const spawned = await expect('spawned', 15000)
     row.fetches = spawned.program && spawned.program.fetches
+    // A SPAWN THAT SUCCEEDED AFTER A RETRY still says so: `--drop` drops the first program fetch
+    // at the transport, and these are what distinguish "it worked" from "it worked first time".
+    row.retries = spawned.program && spawned.program.retries
+    row.timeouts = spawned.program && spawned.program.timeouts
+    row.transport = spawned.program && spawned.program.transport
     await expect('ready', 15000)
     row.ok = true
   } catch (e) {

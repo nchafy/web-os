@@ -613,6 +613,43 @@ it is the `shallow` mutation, and it exists because it is the obvious way to wri
 *Evidence: measured. 25 host checks, three mutations each moving exactly its declared set.
 Constraints 196 and 41.*
 
+## D30 — a window is destroyed by its last fd, and an owner may be in another process
+
+**Decided at M7, with the alternatives measured rather than argued.** Three questions had to be
+answered together, because each one's cheap answer makes another expensive.
+
+**Who destroys a window?** The last description on it, through `close(2)`. The alternative — a
+window that outlives its fds until something calls `win_destroy` — leaves a frame on screen with
+nothing behind it, which is constraint 179's defect reached by omission rather than by a page bug.
+So `close` on the last fd destroys, and `win_destroy` exists only to make the CASCADE reportable.
+
+**What does `win_destroy` return?** The LIST of winids it destroyed, oldest ancestor first.
+Destroying a parent destroys its children, so one call closes several windows, and a caller told
+only "ok" keeps fds for windows the kernel has forgotten. SerenityOS's `destroy_window` returns the
+same list. The rejected answer is to leave the caller to infer it from the owner chain it set up,
+which requires the caller to model the kernel's table — and the chain may include windows it does
+not own.
+
+**May an owner be in another process?** Yes, and this is the one with teeth. A picker broker
+parents its dialog onto the REQUESTING app's window; that is the whole point of a broker, and
+`MILESTONES.md`'s ordering correction names it as something M7 owes M9 and M10. The authority it
+grants is real: destroying your window may destroy a window belonging to another process. It is
+accepted BY THE CHILD when it names a parent, it travels in one direction only — a child's
+destruction never reaches its parent — and the child is told on its own fd, through the one
+`WEV_DESTROYED` record a destroyed window keeps.
+
+**What was NOT decided here.** Whether a close can be REFUSED. `WEV_CLOSE` is delivered and the
+frame still goes; M9 owns the refusal, and a relay that pretended to refuse would be lying to the
+user. Said in `src/bin/term.mjs` where a reader meets it.
+
+*Evidence: judgement, with two references. SerenityOS's returned id list and Haiku's owner chain
+are in `docs/research/09-hobbyist-os-actions.md` §4. Constraints 213 and 216; the cascade's two
+directions are `bench/m7-win/probe.mjs`'s own section and `--negative no-cascade` is the browser's.*
+
+**D25 is now spent.** It recorded `/dev/console` as a special case with an expiry, and M7 is the
+expiry: the device, the chardev mechanism under it and the ENXIO it answered are all deleted
+(constraint 211).
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

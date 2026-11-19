@@ -130,7 +130,14 @@ const INTS = {
   SYS_ioctl: 46,
   // The write side of `/proc/<pid>/cwd`. There is no `getcwd`: that file already answers it.
   SYS_chdir: 47,
-  NSYS: 48,
+  // M7. THREE CALLS AND NOT A `/dev/wm` DEVICE FILE: M8 transfers an OffscreenCanvas out of
+  // `win_create`, and a file write cannot transfer a handle (PLAN.md §5). A window's EVENTS travel
+  // the other way, through `read(2)` on the fd these return, so `poll` needs no window-specific
+  // wait (constraint 42).
+  SYS_win_create: 48,
+  SYS_win_destroy: 49,
+  SYS_win_set: 50,
+  NSYS: 51,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -342,6 +349,53 @@ const INTS = {
   TIOCGPGRP: 0x540f,
   TIOCSPGRP: 0x5410,
 
+  /**
+   * M7's window event record. FIXED WIDTH, so a `read` that asks for fewer bytes than the ring
+   * holds cannot split a record in half: the kernel floors every window read to a multiple of this
+   * and refuses a shorter buffer. A variable-length record would need the reader to re-assemble a
+   * header across two reads, which is the pty's problem and a pty has a line discipline to do it.
+   */
+  WEV_BYTES: 16,
+  WEV_TYPE: 0, WEV_MODS: 2, WEV_A: 4, WEV_B: 8, WEV_C: 12,
+
+  //: Event types. 0 is not used, so a record read out of a zeroed buffer is not a valid KEY event.
+  //: KEY carries its UTF-8 bytes INLINE — `a` is the length 1..4 and `b` the bytes, little-endian —
+  //: because a keystroke that needed a second read to collect its payload would be a second
+  //: readiness edge for one key press.
+  WEV_KEY: 1,
+  WEV_RESIZE: 2,
+  WEV_CLOSE: 3,
+  WEV_FOCUS: 4,
+  //: The destroy cascade: destroying a parent destroys its children, so ONE `win_destroy` closes
+  //: SEVERAL windows and a process whose window was a child learns of it here. Without this event
+  //: that process's fd table silently disagrees with the kernel's (MILESTONES, ordering correction).
+  WEV_DESTROYED: 5,
+  WEV_MAX: 5,
+
+  //: Modifier bits on WEV_KEY, in `mods`. The widget translates Ctrl into a C0 byte, so these are
+  //: for a reader that wants to know what was held, never for deriving the byte.
+  WMOD_SHIFT: 0x1,
+  WMOD_CTRL: 0x2,
+  WMOD_ALT: 0x4,
+
+  /** How many events one window queues before it drops them, counted and published in
+   *  `/proc/<pid>/win/<winid>`. The per-fd bound constraint 42 requires — see src/kernel/wins.mjs.
+   *  256 records is 4 KiB, the same order as the pty's input queue it sits beside. */
+  WIN_EVENT_CAP: 256,
+
+  //: `win_set`'s `what`. One call with a selector rather than four calls, because every one of them
+  //: is "change a field of this window" and the kernel's answer is the same post to the page.
+  WIN_SET_TITLE: 1,
+  WIN_SET_BOX: 2,
+
+  //: `win_create` flags. A window with no owner passes 0 for the owner winid, which is why winids
+  //: start at 1.
+  WIN_F_NONE: 0,
+
+  /** Windows per process. A process that could create them without limit would exhaust the page's
+   *  DOM the way an unbounded worker count exhausts the renderer (constraint 17's shape). */
+  WIN_CAP: 32,
+
   // `spawn`'s file actions, posix_spawn-shaped. The two a shell needs and no more: a case that
   // does not exist yet must not get a parameter (CLAUDE.md, general enough and no further).
   SPAWN_DUP2: 1,
@@ -362,7 +416,8 @@ export const {
   SYS_stat, SYS_lstat, SYS_chmod, SYS_chown, SYS_readdir, SYS_truncate, SYS_statfs,
   SYS_dup, SYS_dup2, SYS_pipe2,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
-  SYS_poll, SYS_ioctl, SYS_chdir, NSYS,
+  SYS_poll, SYS_ioctl, SYS_chdir,
+  SYS_win_create, SYS_win_destroy, SYS_win_set, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -395,6 +450,10 @@ export const {
   POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL,
   TIOCGPGRP, TIOCSPGRP,
+  WEV_BYTES, WEV_TYPE, WEV_MODS, WEV_A, WEV_B, WEV_C,
+  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
+  WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
+  WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_F_NONE, WIN_CAP,
 } = INTS;
 
 /**
@@ -455,6 +514,7 @@ export const SYS_NAME = Object.freeze([
   "dup", "dup2", "pipe2",
   "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
   "chdir",
+  "win_create", "win_destroy", "win_set",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -848,6 +908,65 @@ export function decodeWinsize(dv, off) {
 }
 
 /**
+ * M7's window event record, declared once and used by the kernel that writes it, the libos that
+ * decodes it and the host probe that checks it — the one-source-of-truth rule applied to the one
+ * record that crosses the window boundary.
+ *
+ * `a` carries a UTF-8 LENGTH for a KEY event and a COORDINATE for a RESIZE, so the field is
+ * unsigned on both: a negative width is not expressible and a 4-byte key length cannot be read as
+ * -1 by a decoder that chose the wrong signedness.
+ */
+export function encodeWinEvent(dv, off, ev) {
+  dv.setUint16(off + WEV_TYPE, ev.type & 0xffff, true);
+  dv.setUint16(off + WEV_MODS, (ev.mods || 0) & 0xffff, true);
+  dv.setUint32(off + WEV_A, (ev.a || 0) >>> 0, true);
+  dv.setUint32(off + WEV_B, (ev.b || 0) >>> 0, true);
+  dv.setUint32(off + WEV_C, (ev.c || 0) >>> 0, true);
+}
+
+export function decodeWinEvent(dv, off) {
+  return {
+    type: dv.getUint16(off + WEV_TYPE, true),
+    mods: dv.getUint16(off + WEV_MODS, true),
+    a: dv.getUint32(off + WEV_A, true),
+    b: dv.getUint32(off + WEV_B, true),
+    c: dv.getUint32(off + WEV_C, true),
+  };
+}
+
+/** A KEY event's own bytes, out of the inline `(a, b)` pair. Empty for any other type, and for a
+ *  length outside 1..4 — a record claiming 7 bytes in a 4-byte field is corrupt, not clamped. */
+export function keyBytesOf(ev) {
+  if (ev.type !== WEV_KEY) return new Uint8Array(0);
+  const n = ev.a | 0;
+  if (n < 1 || n > 4) return new Uint8Array(0);
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i += 1) out[i] = (ev.b >>> (8 * i)) & 0xff;
+  return out;
+}
+
+/** The inline `(a, b)` pair for up to 4 UTF-8 bytes. The INVERSE of keyBytesOf, declared beside it
+ *  so the packing order cannot be written twice and disagree. */
+export function packKeyBytes(bytes) {
+  const n = Math.min(bytes.length, 4);
+  let b = 0;
+  for (let i = 0; i < n; i += 1) b |= (bytes[i] & 0xff) << (8 * i);
+  return { a: n, b: b >>> 0 };
+}
+
+/** Decode a whole read's worth of records. A trailing partial record is IMPOSSIBLE by the floor the
+ *  kernel applies, so it is a kernel fault here rather than a silently dropped tail. */
+export function decodeWinEvents(bytes, length = bytes.length) {
+  if (length % WEV_BYTES !== 0) {
+    throw new Error(`decodeWinEvents: ${length} bytes is not a whole number of records`);
+  }
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, length);
+  const out = [];
+  for (let off = 0; off < length; off += WEV_BYTES) out.push(decodeWinEvent(dv, off));
+  return out;
+}
+
+/**
  * Derivation and shape assertions, run at module load in both agents. They fire on the change that
  * breaks them rather than leaving a wrong number to be found by a wrong reply months later.
  */
@@ -1080,6 +1199,37 @@ export function selfTest() {
     fail(`winsize round-trips as ${JSON.stringify(wround)}`);
   }
   if (WS_YPIXEL + 2 !== WINSIZE_BYTES) fail("winsize fields do not fill the record");
+
+  // M7's window event record. The offsets are asserted CONTIGUOUS and FILLING, because a gap would
+  // be read as part of the next field by the side that computed its own offsets.
+  if (WEV_TYPE + 2 !== WEV_MODS || WEV_MODS + 2 !== WEV_A
+    || WEV_A + 4 !== WEV_B || WEV_B + 4 !== WEV_C) {
+    fail("the window event fields are not contiguous");
+  }
+  if (WEV_C + 4 !== WEV_BYTES) fail(`a window event is not ${WEV_BYTES} bytes`);
+  const eprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  const packed = packKeyBytes(new TextEncoder().encode("é"));   // 2 UTF-8 bytes, so n > 1 is tested
+  encodeWinEvent(eprobe, 0, { type: WEV_KEY, mods: WMOD_CTRL, ...packed, c: 0 });
+  const eround = decodeWinEvent(eprobe, 0);
+  if (eround.type !== WEV_KEY || eround.mods !== WMOD_CTRL || eround.a !== 2) {
+    fail(`a key event round-trips as ${JSON.stringify(eround)}`);
+  }
+  const kb = keyBytesOf(eround);
+  if (new TextDecoder().decode(kb) !== "é") fail(`the inline key bytes decode as ${kb}`);
+  // The two guards that make a corrupt record refuse rather than clamp.
+  if (keyBytesOf({ ...eround, a: 7 }).length !== 0) fail("a 7-byte key length was accepted");
+  if (keyBytesOf({ ...eround, type: WEV_RESIZE }).length !== 0) {
+    fail("a resize event yielded key bytes");
+  }
+  const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED];
+  if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
+  if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
+  if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
+  const wmods = [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT];
+  if (new Set(wmods).size !== 3) fail("two window modifier bits collide");
+  for (const b of wmods) {
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`window modifier ${b} is not a single bit`);
+  }
 
   // poll's pollfd, whose shape docs/ABI.md publishes.
   if (PFD_FD + 4 !== PFD_EVENTS || PFD_EVENTS + 2 !== PFD_REVENTS) {

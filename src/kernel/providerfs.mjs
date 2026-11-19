@@ -30,6 +30,7 @@ export const USR_ENTRIES = Object.freeze([
   // `yes` is the system's only endless source, so it is what makes `yes | head -1` expressible.
   Object.freeze({ name: "bin/yes", path: "src/bin/yes.mjs" }),
   Object.freeze({ name: "bin/term", path: "src/bin/term.mjs" }),
+  Object.freeze({ name: "bin/winopen", path: "src/bin/winopen.mjs" }),
 ]);
 
 /** `/bench`, mounted ONLY under a bench boot (src/kernel/kernel.mjs). `SYS_spawn` loads from the

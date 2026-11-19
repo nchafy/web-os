@@ -186,8 +186,9 @@ later milestone will reason about:
   that is not an fd needs a busy-poll loop to be serviced alongside a pty, which is
   `docs/designs/REVIEW-FINDINGS.md` finding 1 and constraint 42. What M7 replaces is the one
   PRODUCER of the description — `open("/dev/console")` becomes `win_create` — and the ops row in
-  `src/kernel/files.mjs` plus the row in `pollOne` survive unchanged. `src/kernel/console.mjs`'s
-  header is where the special case is declared; delete the file, not the kind.
+  `src/kernel/files.mjs` plus the row in `pollOne` survive unchanged. **M7 did exactly that**:
+  the device file is deleted, the kind is not, and `src/kernel/wins.mjs` is where the window lives
+  now (constraint 211).
 - **`src/wm/terminal.mjs` DOES NOT ECHO, and the whole milestone rests on that.** A widget that
   echoed locally would pass M4a's proof with no pty behind it. `--negative pty-detach` is the only
   thing in the suite that can tell the two apart, which is why it cuts at `Pty.writeInput` —

@@ -29,11 +29,11 @@ checks is a wish.
 | M4 | Pipes, process groups | 5 | 1 | ✅ done — **ACCEPT**, 23 expectations, 1 control, 12 review findings fixed |
 | M4b | pty, line discipline, `poll` | 2 | 1 | ✅ done — **ACCEPT**, 54 expectations, 4 controls |
 | M5 | The shell, eleven programs, exec through the filesystem | 6 | 1.5 | ✅ done — **ACCEPT**, 38 expectations, 6 controls, 14 review findings fixed |
-| M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 26 expectations, 1 control |
+| M4a | The terminal gets a real window | 2 | 1 | ✅ done — **ACCEPT**, 22 expectations, 1 control (26 before M7 took the detector's four) |
 | M6 | Neuter the process realm | 2 | 0.5 | ✅ done — **ACCEPT**, 31 expectations, 2 controls, 6 review findings fixed, and constraint 139's prescription corrected |
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
-| **M7** | **A window is a file description** | 4 | | ⬜ **next (option A)** |
-| M8 | The window surface | 3 | | ⬜ A |
+| M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 39 expectations, 2 controls, 123 host checks, 5 mutations |
+| **M8** | **The window surface** | 3 | | ⬜ **next (option A)** |
 | M9 | Owner, modality, close-request | 3 | | ⬜ A |
 | M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
 | M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
@@ -1076,7 +1076,7 @@ showed the extraction was faithful.
 **ACCEPT.** A real browser keypress reaches a shell on a real pty and the PTY's echo puts the
 character on the screen. 26 expectations in 6.38 s over two fresh kernels.
 
-**Built.** `src/kernel/console.mjs` is `/dev/console`: one host-backed device, a keystroke queue
+**Built.** `src/kernel/wins.mjs`'s ancestor was `/dev/console`: one host-backed device, a keystroke queue
 one way and a post to the page the other, with a row in `src/kernel/files.mjs`'s ops table
 (`F_WIN`, the kind the ABI reserved by name) and a row in `pollOne`. `src/bin/term.mjs` is the
 terminal emulator AS A PROCESS — it opens the console, opens a pty, spawns `/usr/bin/sh` on the
@@ -1086,7 +1086,7 @@ the keyboard equivalent of it. `src/wm/terminal.mjs` is the widget, and **it dra
 keypress**. `www/m4a.html` wires the four together.
 
 **The special case, and its expiry.** One console, created by the kernel when the page attaches a
-window, with `open("/dev/console")` as its only producer. Said in `src/kernel/console.mjs`'s
+window, with `open("/dev/console")` as its only producer. Said in that device's
 header, in `src/bin/term.mjs`'s, and in `docs/DECISIONS.md` D25. What M7 keeps is the ONE decision
 underneath it: **a window is a file description, so `poll` is the single wait primitive** — the ops
 row and the poll row survive `win_create` unchanged. Everything else goes.
@@ -1323,6 +1323,121 @@ same `state: zombie, exitkind: 1, exitvalue: 6`.
 security boundary and the threat model is first-party only for v1. What remains open is written
 down rather than implied — `script-src 'self'` still permits any same-origin module (199) — and
 M6 ships no document policy on purpose (200).
+
+---
+
+## M7 — a window is a file description · done · 1 day · ~3,000 LoC
+
+**ACCEPT.** One process opens two windows and a pipe and `poll()` wakes it for each in turn — the
+milestone's own proof, in `PLAN.md` §5's words — with a REAL browser keystroke arriving on the fd
+it was typed into. 39 expectations over five fresh kernels in 17.4 s. The suite is 11 checks and
+429 expectations, all green.
+
+```
+scripts/check.py                       11 checks, 429 expectations (m7: 39)
+scripts/check.py --only m7 --prove-failure   39 inverted, all failed
+scripts/check.py --negative win-first-fd     m7 fail:  6 red, 33 intact
+scripts/check.py --negative no-cascade       m7 fail: 11 red, 28 intact
+node bench/m7-win/probe.mjs            123 host checks (the window table, no browser)
+bench/m7-win/controls.py               5 mutations, each scored on which checks move
+bench/kernel-churn/probe.py --drop     the program fetch, dropped at the transport
+bench/m7-win/drive.py                  the page in a real Chrome, with its evidence printed
+```
+
+**`/dev/console` IS DELETED, WITH THE MECHANISM UNDER IT.** That is what the milestone was for: it
+was ONE window, created by the PAGE before any process existed, and a process has one futex word,
+so a process holding two windows could not be woken by both (constraint 42). `win_create` returns
+an fd and a winid; the window's events are that fd's readable set; `read`, `write`, `poll` and
+`close` are the calls that were already there. The chardev machinery in `src/kernel/synth.mjs`, the
+`chardev` branch in `open(2)` and the ENXIO it answered went with the one row they served
+(constraint 211). What survived unchanged is the ONE decision M4a's special case was carrying: the
+`F_WIN` ops row and the row in `pollOne`.
+
+**Built.** `src/kernel/wins.mjs` (the window table, the event ring, the owner chain, the destroy
+cascade, the not-responding detector), three appended calls — `win_create` 48, `win_destroy` 49,
+`win_set` 50 — the 16-byte `WEV_*` event record with one codec in `src/abi.mjs`,
+`/proc/<pid>/win/<winid>` as a file, `src/wm/winhost.mjs` (the page's half: one frame per kernel
+window), `src/bin/winopen.mjs` (N windows from the shell, with `-o` for an owned one and `-O` for
+an owner in another process), `www/m7.html`, and the migration of `src/bin/term.mjs` and
+`www/m4a.html` off the device.
+
+**THE MILESTONE IS A PROGRAM YOU CAN RUN, and that is the point of the page.** `www/m7.html` ends
+with a live desktop: a real shell on a real pty in a window a process created, and the kernel's own
+window table rendered beside it. From that prompt, `winopen -n 2 -o` opens two more windows and
+prints which fd each event arrived on; `q` closes one and the cascade takes the other; `ls
+/proc/$$/win` lists the shell's windows as files. `?live=1` skips the proofs.
+
+### The five proofs, and what each control moved
+
+| | Proof | Control | Moves |
+| --- | --- | --- | --- |
+| 1 | one process, two windows and a pipe, each waking one `poll` | `win-first-fd` evaluates only the FIRST fd of a set | 6 labels — window B, the pipe, the per-fd key identity, the program's reason for exiting, the verdict. Window A still wakes it and the REAL keystroke still arrives |
+| 2 | `/proc/<pid>/win` lists the winids; each file names its window, its pid and the fds that reach it | — | held by both controls, which is what says the directory is not the thing being tested |
+| 3 | destroying an owner destroys its children, and `win_destroy` returns the list | `no-cascade` destroys a parent alone | 11 labels across proofs 3 and 4 |
+| 4 | an owner may name a window in ANOTHER PROCESS, and the cascade crosses the boundary | `no-cascade` | the child survives its owner, and the child process is told nothing |
+| 5 | the not-responding detector, both edges | neither | greys at 985–1,009 ms, End Process at 3,990–4,013 ms, clears 4,157–4,224 ms after the process drains |
+
+Proof 5's FIXTURE CHANGED WITH THE MILESTONE and is more honest for it. M4a attached a window with
+NO PROCESS READING IT, which `win_create` makes unreachable. The subject now is
+`bench/m7-win/wedge.mjs`: a process that creates a window, stops reading it for nine seconds, and
+then comes back and drains — a program that was busy and then resumed, which is the case the
+caption is actually for. It sleeps rather than spins, because a spinning process starves the kernel
+it shares a renderer with (M0's own anti-vacuity control walked into that).
+
+**The detector lost a state.** "(Starting…)" existed because M4a's window had no process yet; with
+`win_create` the creating process holds the fd from the window's first instant, so the state is
+unreachable and the caption, `openedEver` and `starting()` are deleted (constraint 210).
+
+### What the browser found that the host probe could not
+
+**The headline proof's exit condition was VACUOUS, and it passed.** `poller.mjs` ran until every fd
+had woken it once — and the page reports each frame's geometry the instant it builds it, so both
+windows had a `WEV_RESIZE` queued before anything was typed and all three fds were ready on the
+first poll. Measured: `wokeBy {0:1, 3:1}` with `keysSeen {}`, the program exiting before a key was
+pressed. It now runs until each window has delivered a KEY and the pipe bytes or EOF (constraint
+214).
+
+**The first window landed on fd 0**, because `spawn` leaves fd 0 free and nothing held it — and in
+the same run the pipe in the poll set was `undefined`, because `pipe2` answers `{rfd, wfd}` and the
+program read `{read, write}`: `poll` answered POLLNVAL for fd `undefined`, which is READY, so the
+pipe's clause passed on an fd that did not exist (constraint 215).
+
+**And the kernel panicked about one run in three.** `programText` bounded the program fetch and
+retried once, but only for its own deadline: a `TypeError: Failed to fetch` — the transport, which
+is what a page taking ~75 ranged GETs plus four program fetches through one local server
+intermittently gets — was rethrown, escaped to `self.onmessage`, which has no `try`/`catch`, and
+took the kernel down. The page reported `timed out waiting for spawned` and named nothing, which is
+why the page now attaches the kernel's own message kinds to that timeout. Three failures in six
+runs before, none in eight after. `bench/kernel-churn/probe.py --drop` is the check, and it fires
+both ways. Constraint 212, and it corrects a claim that probe itself was carrying.
+
+### What the mutation harness found, which is three defects in the probe it was scoring
+
+`bench/m7-win/controls.py` mutates `src/kernel/wins.mjs` five ways and scores WHICH host checks
+move. On its first run it found that **three of its five mutations were mis-scored because the
+probe was weak**, not because the subject was:
+
+- an overflow fixture that pushed 256 IDENTICAL events, so "the oldest came out" held under a
+  mutation that dropped the oldest to make room;
+- a cascade clause comparing the posted id list against the ids the same call returned — both out
+  of the run under test, which is constraint 120's `None == None` in a new place;
+- and a probe that DIED on three of the mutations, because `decodeWinEvents` refuses a torn length
+  and the probe handed it a negative errno. A harness that cannot report the defect it is pointed
+  at is the worst outcome available.
+
+One mutation also returned a RESULT rather than a failure: making the whole-record guard
+`free <= 0` moved nothing, because the ring's capacity is a whole number of records and every push
+and shift is whole, so the two tests are the same test. The guard is kept as the statement of that
+invariant and `src/kernel/wins.mjs` says so where it sits.
+
+### What is not done
+
+`WEV_CLOSE` is DELIVERED and the frame still goes: M9 owns the refusal, and a relay that pretended
+to refuse would be lying to the user. There is no surface — a window shows what a process `write`s
+to it as text, and M8 is the transferred `OffscreenCanvas`. `modal` does not exist. A window's
+position is recorded and raises no event, because nothing acts on it. The taskbar's cross-process
+enumeration is still the second, separately-gated interface `CLAUDE.md` describes and no part of it
+is built.
 
 ---
 

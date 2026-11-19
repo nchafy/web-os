@@ -1,0 +1,820 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M7 — a window is a file description</title>
+<style>
+/* STRUCTURAL ONLY, as M4a's page is, and for the same reason: the Aero frame, the glass and the
+   gradients are M11. A window needs to be positioned to be a window and a terminal needs a
+   monospace cell to be a terminal. Nothing here is a token and nothing here should be copied
+   forward. */
+body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+#log { margin:8px; white-space:pre-wrap }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:460px; margin:8px; border:1px solid #334; overflow:hidden }
+.window { position:absolute; display:flex; flex-direction:column; background:#1b1e24;
+  border:1px solid #556; box-sizing:border-box }
+.window-title { display:flex; align-items:center; gap:8px; padding:2px 4px; background:#2a2f38;
+  cursor:move; flex:0 0 auto }
+.window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
+.is-not-responding .window-title { background:#3a3030; color:#bbb }
+.title-buttons { display:flex; gap:4px }
+.title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
+  cursor:pointer }
+.window-body { flex:1 1 auto; min-height:0; display:flex }
+.terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
+  background:#000; color:#ddd; font:inherit }
+.terminal:focus { outline:1px solid #6a8 }
+/* The window table. A list of what the kernel thinks exists, beside the frames themselves — so a
+   frame with nothing behind it is visible as a row that is not there. */
+#wins { margin:8px; border-collapse:collapse; font:12px/1.4 ui-monospace,Menlo,monospace }
+#wins th, #wins td { border:1px solid #334; padding:1px 6px; text-align:right }
+#wins th { background:#1b1e24; color:#9ab }
+#wins td.l, #wins th.l { text-align:left }
+</style>
+</head>
+<body>
+<pre id="log">M7 starting…</pre>
+<div id="desktop"></div>
+<table id="wins"><caption class="l">/proc/&lt;pid&gt;/win, as the kernel has it</caption></table>
+<script>
+  globalThis.M7 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+  }
+</script>
+<script type="module">
+/**
+ * M7's page harness: A WINDOW IS A FILE DESCRIPTION.
+ *
+ *   PROOF 1  one process, two windows and a pipe, and `poll()` wakes it for each in turn
+ *   PROOF 2  `/proc/<pid>/win` lists the winids and each file's fields read back
+ *   PROOF 3  destroying a parent destroys its children, and `win_destroy` reports the list
+ *   PROOF 4  an owner may name a window in ANOTHER PROCESS, and the cascade crosses the boundary
+ *   PROOF 5  the not-responding detector, both edges, against a process that stopped reading
+ *
+ * CONTROL ?win_first_fd=1 — a parked `poll` evaluates only the FIRST fd of its set.
+ * `PLAN.md` §5's control for M7 in its own words: "wake only on the first fd in the set; the
+ * two-window case must hang". A process has one futex word, so that is fatal by construction —
+ * window B and the pipe can never wake the poller, which runs to its ceiling reporting exactly
+ * which fds woke it.
+ *
+ * CONTROL ?no_cascade=1 — destroying a parent destroys only the parent. PROOF 3 and PROOF 4 must
+ * go red while PROOF 1, PROOF 2 and PROOF 5 hold: the cascade is a property of `win_destroy` and
+ * nothing to do with waiting on an fd.
+ */
+import {
+  POLLIN, F_WIN, F_PIPE_R, WEV_KEY, WEV_DESTROYED, WIN_EVENT_CAP, packKeyBytes,
+} from '/src/abi.mjs'
+import { WinHost } from '/src/wm/winhost.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const table = document.getElementById('wins')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/* `?live=1` — JUST THE DESKTOP, and no proofs at all. One kernel, one terminal, a shell, and the
+ * window table updating beside it. The proofs are a harness; this is the thing itself, and it is
+ * also the only path light enough to debug on a loaded machine. */
+const CFG = {
+  winFirstFd: params.get('win_first_fd') === '1',
+  noCascade: params.get('no_cascade') === '1',
+  liveOnly: params.get('live') === '1',
+}
+
+const TERM = '/src/bin/term.mjs'
+const WINOPEN = '/src/bin/winopen.mjs'
+const POLLER = '/bench/m7-win/poller.mjs'
+const WEDGE = '/bench/m7-win/wedge.mjs'
+
+/** How long to wait for an outside driver to type real keys before the page types them itself.
+ *  `scripts/check.py --only m7` is that driver. Standing alone in a browser the page still
+ *  completes, and reports `drivenBy: 'page'` so the difference is never silent. The split into a
+ *  short wait on the DECLARATION and a long one on the KEYS is M4a's, for its reason: one timer
+ *  could not be both short enough not to stall a human and long enough not to fire between a
+ *  driver's `settle` and its first key. */
+const DRIVER_WAIT_MS = 2500
+const REAL_KEY_WAIT_MS = 60000
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/** REAP EVERY PROCESS BEFORE TERMINATING THE KERNEL THAT OWNS THEM. Terminating the kernel worker
+ *  alone ORPHANS its process workers — nested workers are collected eventually, not promptly — and
+ *  this page builds five kernels in one run. `www/m4b.html` does the same for the same reason, and
+ *  `src/kernel/kernel.mjs`'s `shutdown` case carries the note that it is NOT a remedy for a
+ *  spawn that stalled (constraint 121). The failure to acknowledge is recorded, never swallowed. */
+async function shutdown (k) {
+  try {
+    k.post({ t: 'shutdown' })
+    const done = await k.expect('shutdown', 5000)
+    /* AND THE KERNEL'S OWN FETCH COUNTERS, SUMMED ACROSS EVERY KERNEL THIS PAGE BUILDS. A
+     * non-zero `transport` in a run that PASSED is direct evidence that the retry in
+     * `programText` did something — this page lost about one program fetch in three runs to
+     * `TypeError: Failed to fetch` before that retry covered the transport, and the kernel
+     * panicked (constraint 212). A counter nobody reads is how that went unexplained for two
+     * runs, so the page reports it. */
+    const ks = (done && done.kernel) || {}
+    const f = globalThis.M7.fetches
+    f.kernels += 1
+    f.fetches += ks.programFetches || 0
+    f.retries += ks.programFetchRetries || 0
+    f.timeouts += ks.programFetchTimeouts || 0
+    f.transport += ks.programFetchTransport || 0
+  } catch (e) {
+    globalThis.M7.notes.push('shutdown did not acknowledge: ' + (e && e.message))
+  }
+  k.worker.terminate()
+}
+
+/** Poll a predicate until it holds. Returns the ms waited, or -1 on timeout. A window nobody reads
+ *  raises no error anywhere, so every wait here is bounded and reports. THE PREDICATE IS AWAITED,
+ *  because a Promise is always truthy and an async predicate would otherwise pass at once. */
+async function until (what, ms = 5000, step = 25) {
+  const t0 = performance.now()
+  for (;;) {
+    if (await what()) return performance.now() - t0
+    if (performance.now() - t0 > ms) return -1
+    await sleep(step)
+  }
+}
+
+Object.assign(globalThis.M7, { isolated: self.crossOriginIsolated === true })
+globalThis.M7.proofs = {
+  poll_many: null, procwin: null, cascade: null, crossproc: null, health: null,
+}
+/** The program-fetch counters, summed over every kernel this page shuts down. See `shutdown`. */
+globalThis.M7.fetches = { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M7.state = 'aborted'
+  globalThis.M7.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no proofs.'
+  out.className = 'bad'
+  say(globalThis.M7.why)
+} else {
+  main().catch((e) => {
+    globalThis.M7.state = 'error'
+    globalThis.M7.why = String((e && e.stack) || e)
+    say(globalThis.M7.why)
+  })
+}
+
+class KernelFail extends Error {}
+
+/** THE UNSOLICITED KINDS. Every `win-*` message is an event and not a reply to anything, so they
+ *  are dispatched to listeners rather than queued for an `expect`. QUEUEING THEM WOULD LEAK: a
+ *  session's keystrokes and cells arrive in the hundreds and `pending` only shrinks when something
+ *  expects that exact kind. `win-geom` and `win-state` are replies and stay queueable. */
+const UNSOLICITED = new Set(
+  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed'])
+
+function kernelBoot (cfg) {
+  const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
+  const waiters = new Map(); const pending = []; const events = []
+  let abort = null
+  const listeners = []
+  const fail = (why) => {
+    abort = new KernelFail(why)
+    for (const [t, w] of waiters) { waiters.delete(t); w(abort) }
+  }
+  worker.onmessage = (ev) => {
+    const m = ev.data
+    if (!UNSOLICITED.has(m.t)) events.push(m)
+    if (m.t === 'up') {
+      globalThis.M7.kernelIsolated = m.isolated === true
+      globalThis.M7.kernelCfg = m.cfg
+    }
+    if (m.t === 'fault') {
+      globalThis.M7.faults.push({ pid: m.pid, why: m.why })
+      say('FAULT pid ' + m.pid + ': ' + m.why)
+    }
+    if (m.t === 'error' || m.t === 'panic') {
+      globalThis.M7.errors.push('kernel: ' + m.t + ': ' + m.why)
+      say('kernel ' + m.t + ': ' + m.why)
+    }
+    if (m.t === 'io-note') globalThis.M7.notes.push(m.why)
+    for (const fn of listeners) fn(m)
+    if (UNSOLICITED.has(m.t)) return
+    const cb = waiters.get(m.t)
+    if (cb) { waiters.delete(m.t); cb(m); return }
+    pending.push(m)
+  }
+  worker.onerror = (e) => {
+    globalThis.M7.errors.push('kernel worker: ' + e.message)
+    fail('kernel worker: ' + e.message)
+  }
+  const expect = (t, ms = 30000) => new Promise((res, rej) => {
+    if (abort) return rej(abort)
+    const i = pending.findIndex((m) => m.t === t)
+    if (i >= 0) return res(pending.splice(i, 1)[0])
+    const timer = setTimeout(() => {
+      waiters.delete(t); rej(new Error('timed out waiting for ' + t))
+    }, ms)
+    waiters.set(t, (m) => { clearTimeout(timer); if (m instanceof Error) rej(m); else res(m) })
+  })
+  worker.postMessage({ t: 'boot', cfg })
+  return {
+    worker,
+    expect,
+    post: (m) => worker.postMessage(m),
+    on: (fn) => { listeners.push(fn) },
+    events,
+  }
+}
+
+/**
+ * A kernel with a window host attached. THE HOST IS THE PAGE'S WHOLE WINDOW HALF: it builds a
+ * frame when the kernel says a process created a window, and it is the one route from a browser
+ * event into that window's event queue (`src/wm/winhost.mjs`).
+ *
+ * There is no `console-attach` here and nothing like it. M4a's page had to create the one window
+ * before any process could open it; a process creates its own now, which is the whole of what M7
+ * changed.
+ */
+async function bootHost (boot) {
+  const k = kernelBoot(boot)
+  await k.expect('up', 30000)
+  // THE MOUNT REPORT, FIRST. `/usr` is where `sh`, `term` and `winopen` live, so a refused mount
+  // is a desktop that cannot start — reported at boot rather than as a window that never appears.
+  k.post({ t: 'm3-state' })
+  const mounts = (await k.expect('m3-state', 10000)).m3 || {}
+  const usr = mounts.usr || {}
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  const winState = async () => {
+    k.post({ t: 'win-state' })
+    return await k.expect('win-state', 5000)
+  }
+  const procState = async () => {
+    k.post({ t: 'm4-state' })
+    return await k.expect('m4-state', 5000)
+  }
+  return { k, host, usr, mounts, winState, procState }
+}
+
+/** Spawn one program by URL and park it. The page is the supervisor (`docs/DECISIONS.md` D18) and
+ *  its own `t: "spawn"` takes a URL; every program here is also a row in `USR_ENTRIES` or under
+ *  `/bench`, so nothing about these windows is privileged. */
+async function spawnProgram (k, url, argv, { ceiling = 60000 } = {}) {
+  k.post({
+    t: 'spawn', count: 1, programUrl: url,
+    cfg: { argv, uid: 0, gid: 0 }, readyTimeoutMs: 20000,
+  })
+  /* A SPAWN THAT DID NOT ANSWER MUST SAY WHAT THE KERNEL DID SAY. A bare "timed out waiting for
+   * spawned" names the wait and not the cause, and that is what it reported the first time this
+   * page hit the worker-startup stall of constraint 155: the kinds the kernel HAD posted are the
+   * difference between "the fetch stalled", "the program was refused" and "the worker never
+   * started". Constraint 122's rule, applied to a page's own supervisor path. */
+  const spawned = await k.expect('spawned', 20000).catch((e) => {
+    throw new Error(`${e.message} for ${url}; the kernel had posted `
+      + JSON.stringify(k.events.map((m) => m.t)) + ', last: '
+      + JSON.stringify(k.events[k.events.length - 1] || null).slice(0, 400))
+  })
+  if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+  await k.expect('ready', 20000).catch((e) => {
+    throw new Error(`${e.message} after spawning ${url}; the kernel had posted `
+      + JSON.stringify(k.events.map((m) => m.t)))
+  })
+  const pid = spawned.pids[0]
+  k.post({ t: 'go', go: { mode: 'park', pid } })
+  return { pid, ceiling }
+}
+
+/** One program's result row, or a row that says why there is none. A stopped program raises no
+ *  error — a parked `poll` is a legitimate state — so a timeout CARRIES STATE (constraint 122). */
+async function resultOf (s, pid, ms = 60000) {
+  try {
+    const results = await s.k.expect('results', ms)
+    return (results.results || []).find((r) => r.pid === pid)
+      || { why: 'no row for pid ' + pid, results: results.results }
+  } catch (e) {
+    return {
+      why: 'no result: ' + e.message,
+      state: await s.procState().catch((x) => String(x)),
+      windows: await s.winState().catch((x) => String(x)),
+    }
+  }
+}
+
+/** Synthesised keys, for the steps a driver does not type. They reach the widget's own handler and
+ *  nothing in front of it, which is why `src/wm/terminal.mjs` counts them separately. */
+function typeSynthetic (term, text) {
+  for (const ch of text) {
+    const init = { bubbles: true, cancelable: true }
+    if (ch === '\n') Object.assign(init, { key: 'Enter' })
+    else if (ch === '\x03') Object.assign(init, { key: 'c', ctrlKey: true })
+    else if (ch === '\x04') Object.assign(init, { key: 'd', ctrlKey: true })
+    else Object.assign(init, { key: ch })
+    term.el.dispatchEvent(new KeyboardEvent('keydown', init))
+  }
+}
+
+/** The window table, rendered from the kernel's own report. */
+function renderWins (rows) {
+  const cols = ['win', 'pid', 'title', 'owner', 'children', 'cells', 'pending', 'dropped',
+    'parked', 'level', 'staleMs']
+  const head = '<tr>' + cols.map((c) => `<th class="l">${c}</th>`).join('') + '</tr>'
+  const body = rows.map((r) => '<tr>' + cols.map((c) => {
+    const v = c === 'cells' ? `${r.cols}x${r.rows}` : r[c]
+    return `<td class="l">${v === undefined ? '' : String(v)}</td>`
+  }).join('') + '</tr>').join('')
+  table.innerHTML = '<caption class="l">the kernel\'s window table</caption>' + head + body
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1 and PROOF 2: one process, two windows and a pipe, in one poll. Then /proc/<pid>/win.
+   -------------------------------------------------------------------------------------------- */
+
+async function pPollMany (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    // `/usr` CARRIES `echo`, which this program spawns to write its pipe. A refused mount would
+    // otherwise surface as the poller's own exit 4 with nothing saying why.
+    if (!s.usr.ok) throw new Error('/usr did not mount: ' + JSON.stringify(s.usr.why))
+    const { pid } = await spawnProgram(s.k, POLLER, ['poller', '--ceiling', '40000'])
+    ev.pid = pid
+    // BOTH FRAMES MUST EXIST BEFORE ANYTHING IS TYPED, and they are the host's own record of what
+    // the kernel asked for — not of what the page decided to draw.
+    const framesMs = await until(() => s.host.created.length >= 2, 20000)
+    ev.created = s.host.created
+    ev.framesMs = Math.round(framesMs)
+    const screen = () => {
+      const first = [...s.host.frames.values()][0]
+      return first ? first.term.screen() : ''
+    }
+    const banner = await until(() => /pipe fd /.test(screen()), 20000)
+    ev.banner = screen()
+    ev.bannerMs = Math.round(banner)
+
+    // THE PROCESS IS PARKED IN `poll`, NOT IN `read`, AND THAT IS ONLY TRUE NOW: nothing is
+    // flowing, so a process parked on one of its three fds would be deaf to the other two.
+    // Read from the kernel's own park state rather than inferred from a keystroke working.
+    const before = await s.procState()
+    const row = (before.procs || []).find((p) => p.pid === pid) || {}
+    ev.inflight = row.inflight || null
+    ev.fdKinds = (row.fds || []).map((f) => f.kind)
+    ev.parkedInPoll = row.inflight === 'poll'
+
+    // ---- the typing ------------------------------------------------------------------------
+    //
+    // REAL KEYS INTO WINDOW A. The page announces itself and waits for a driver;
+    // `scripts/check.py` sees the phase, focuses the first terminal and presses keys through
+    // Chrome's own input pipeline, so the event the widget receives is `isTrusted`.
+    const entries = [...s.host.frames.values()]
+    const a = entries[0]
+    const b = entries[1]
+    /* A MISSING FRAME MUST NAME ITSELF. Both windows were created — `ev.created` is the kernel's
+     * own account — so if they are not on the desktop now the poller has already exited and taken
+     * them with it, and the next line's `undefined.term` would report a TypeError instead of the
+     * program's own reason for stopping. */
+    if (!a || !b) {
+      ev.result = await resultOf(s, pid, 15000)
+      ev.hostReport = s.host.report()
+      ev.windows = await s.winState().catch((x) => String(x))
+      ev.failed = ['both windows were created and then went before anything was typed']
+      ev.clauses = { 'both frames were still up when the keys were typed': false }
+      globalThis.M7.proofs.poll_many = { ok: false, evidence: ev }
+      globalThis.M7.proofs.procwin = { ok: false, evidence: { why: 'the poller did not finish' } }
+      return s
+    }
+    a.term.focus()
+    globalThis.M7.phase = 'await-keys'
+    const declared = await until(
+      () => globalThis.M7.driver === 'check' || s.host.keyCounts().trusted > 0, DRIVER_WAIT_MS)
+    const got = declared < 0 ? -1 : await until(
+      () => s.host.keyCounts().trusted > 0, REAL_KEY_WAIT_MS)
+    ev.drivenBy = got < 0 ? 'page' : (globalThis.M7.driver === 'check' ? 'check' : 'hand')
+    if (got < 0) typeSynthetic(a.term, 'a')
+    globalThis.M7.phase = 'typed'
+    // AND A SYNTHESISED KEY INTO WINDOW B. The second window's job here is to be woken at all,
+    // which a synthesised key proves exactly as well; what needs to be real is the trip through
+    // the browser's own key translation, and window A has made it.
+    typeSynthetic(b.term, 'b')
+    ev.keyCounts = s.host.keyCounts()
+
+    // The program exits as soon as every fd in its set has woken it, so its own result is the
+    // proof — and `wokeBy` names which fd did and did not.
+    const result = await resultOf(s, pid, 60000)
+    ev.result = result
+    ev.wokeBy = result.wokeBy || {}
+    ev.keysSeen = result.keysSeen || {}
+    ev.fds = result.fds || []
+    ev.pipeFd = result.pipeFd
+    ev.why = result.why
+    const [fdA, fdB] = ev.fds
+    ev.wokeOnA = (ev.wokeBy[fdA] || 0) > 0
+    ev.wokeOnB = (ev.wokeBy[fdB] || 0) > 0
+    ev.wokeOnPipe = (ev.wokeBy[ev.pipeFd] || 0) > 0
+    // THE KEY ARRIVED ON THE FD IT WAS TYPED INTO. A poll that reported every fd ready whenever
+    // anything happened would satisfy the three clauses above and fail this one.
+    ev.keyOnA = (ev.keysSeen[fdA] || '').includes('a')
+    ev.keyOnB = (ev.keysSeen[fdB] || '').includes('b')
+    ev.fed = s.host.report().fed
+
+    const clauses = {
+      'the process created two windows and the page built both frames': ev.created.length === 2,
+      'and it was parked in poll over all three fds, not in read on one':
+        ev.parkedInPoll === true && ev.fdKinds.filter((k) => k === F_WIN).length === 2
+        && ev.fdKinds.includes(F_PIPE_R),
+      'poll woke it for window A': ev.wokeOnA,
+      'poll woke it for window B': ev.wokeOnB,
+      'poll woke it for the pipe': ev.wokeOnPipe,
+      'and each key arrived on the fd it was typed into': ev.keyOnA && ev.keyOnB,
+      'the keys into window A were real browser keystrokes':
+        ev.drivenBy === 'page' ? null : (ev.keyCounts.trusted > 0),
+      'the program exited because every fd had woken it': result.exit === 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    ev.notMeasured = Object.keys(clauses).filter((k) => clauses[k] === null)
+    globalThis.M7.proofs.poll_many = { ok: ev.failed.length === 0, evidence: ev }
+
+    // ---- PROOF 2, out of the same run: `/proc/<pid>/win` ----------------------------------
+    const pw = result.procWin || {}
+    const files = pw.files || {}
+    const wins = (result.wins || []).map(String)
+    const fieldsOk = wins.every((id) => {
+      const f = files[id] || {}
+      // THE FDS THAT REACH IT, which is what joins the two namespaces: the directory is named by
+      // winid and the process waits on an fd.
+      return f.win === id && String(f.pid) === String(pid) && (f.fds || '').length > 0
+    })
+    const p2 = {
+      pid, wins, names: pw.names, files, fieldsOk,
+      foreign: pw.foreign, absent: pw.absent, otherPid: pw.otherPid,
+      otherAlive: pw.otherAlive,
+      clauses: {
+        'the directory lists one entry per live window':
+          Array.isArray(pw.names) && pw.names.length === wins.length
+          && wins.every((id) => pw.names.includes(id)),
+        'and each file names its window, its process and the fds that reach it': fieldsOk,
+        'and a winid nobody owns is ENOENT': pw.absent === 'ENOENT',
+        // NOT MEASURED rather than false when the second process never started: a clause that
+        // passed because its subject was absent would be asserting nothing.
+        "and another LIVE process's directory does not carry this window":
+          pw.otherAlive ? pw.foreign === 'ENOENT' : null,
+      },
+    }
+    p2.failed = Object.keys(p2.clauses).filter((k) => p2.clauses[k] === false)
+    p2.notMeasured = Object.keys(p2.clauses).filter((k) => p2.clauses[k] === null)
+    globalThis.M7.proofs.procwin = { ok: p2.failed.length === 0, evidence: p2 }
+    return s
+  } finally {
+    /* THE FRAMES GO WITH THE KERNEL. Terminating the worker leaves windows that still take
+     * keystrokes, still look live, and have nothing behind them — constraint 179's defect, which
+     * was reported from a real browser as "I am unable to type into the terminals". */
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: the destroy cascade, driven from a keystroke in a real window.
+   -------------------------------------------------------------------------------------------- */
+
+async function pCascade (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    // `winopen -n 2 -o`: two windows, the second OWNED by the first. `q` in a window destroys it.
+    const { pid } = await spawnProgram(
+      s.k, WINOPEN, ['winopen', '-n', '2', '-o', '-c', '15000'])
+    ev.pid = pid
+    const framesMs = await until(() => s.host.created.length >= 2, 20000)
+    ev.created = s.host.created
+    ev.framesMs = Math.round(framesMs)
+    const [a, b] = [...s.host.frames.values()]
+    ev.owner = { win: a.id, owner: a.owner }
+    ev.owned = { win: b.id, owner: b.owner }
+    const live = await s.winState()
+    ev.liveBefore = (live.windows || []).map((w) => w.id)
+
+    // DESTROY THE OWNER, from a keystroke in the owner's own window — the gesture, not a page
+    // message, so the whole path is exercised.
+    typeSynthetic(a.term, 'q')
+    const goneMs = await until(() => s.host.frames.size === 0, 15000)
+    ev.goneMs = Math.round(goneMs)
+    // SNAPSHOT, TAKEN NOW. See the note above `resultOf`: everything below waits for the program,
+    // and the program's own exit closes whatever the cascade left behind.
+    ev.framesAtCascade = s.host.frames.size
+    ev.destroyed = [...s.host.destroyed]
+    const after = await s.winState()
+    ev.liveAfter = (after.windows || []).map((w) => w.id)
+    ev.allRows = (after.all || []).map((w) => ({ id: w.id, destroyed: w.destroyed }))
+
+    const result = await resultOf(s, pid, 60000)
+    ev.result = result
+    ev.cascades = result.cascades || []
+    // ONE `win_destroy` REPORTED TWO WINDOWS. That list is the return value the milestone owes,
+    // and the program's own log line printed it.
+    ev.reportedList = (ev.cascades[0] || []).slice()
+
+    const clauses = {
+      'the second window named the first as its owner': b.owner === a.id,
+      'destroying the owner destroyed both': ev.liveAfter.length === 0,
+      'and win_destroy reported BOTH ids to the caller':
+        ev.reportedList.length === 2 && ev.reportedList[0] === a.id
+        && ev.reportedList[1] === b.id,
+      'and the page took both frames down': ev.framesAtCascade === 0
+        && ev.destroyed.length === 2,
+      // BECAUSE EVERY WINDOW WENT, not merely "it exited": a program that ran to its own
+      // ceiling still exits 0, so the exit status alone cannot tell the two apart — and under
+      // `--negative no-cascade` that is exactly what happens.
+      'and the program exited because every window had gone, not at its ceiling':
+        result.exit === 0 && result.why === 'every window is gone',
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: an owner may be a window in ANOTHER PROCESS.
+   -------------------------------------------------------------------------------------------- */
+
+async function pCrossproc (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const owner = await spawnProgram(s.k, WINOPEN, ['winopen', '-n', '1', '-c', '15000'])
+    await until(() => s.host.created.length >= 1, 20000)
+    const ownerWin = s.host.created[0].win
+    ev.ownerPid = owner.pid
+    ev.ownerWin = ownerWin
+    // THE SECOND PROCESS NAMES THE FIRST PROCESS'S WINDOW on its command line. A picker broker
+    // parenting its dialog onto the requesting app's window is this, and nothing else.
+    const child = await spawnProgram(
+      s.k, WINOPEN, ['winopen', '-n', '1', '-O', String(ownerWin), '-c', '15000'])
+    ev.childPid = child.pid
+    await until(() => s.host.created.length >= 2, 20000)
+    ev.created = s.host.created
+    const childRow = s.host.created[1] || {}
+    ev.childWin = childRow.win
+    ev.childOwner = childRow.owner
+    ev.differentPids = childRow.pid !== s.host.created[0].pid
+
+    // Destroy the OWNER's window, from its own keyboard.
+    const [a] = [...s.host.frames.values()]
+    typeSynthetic(a.term, 'q')
+    const goneMs = await until(() => s.host.frames.size === 0, 15000)
+    ev.goneMs = Math.round(goneMs)
+    ev.framesAtCascade = s.host.frames.size
+    const after = await s.winState()
+    ev.liveAfter = (after.windows || []).map((w) => w.id)
+    // EVERY ROW, not only the live ones, because one run reported a live window here that could
+    // not be reproduced in three more — and a conjunction cannot say which half of itself failed.
+    ev.allRows = (after.all || []).map((w) => ({ id: w.id, pid: w.pid, destroyed: w.destroyed }))
+
+    const ownerResult = await resultOf(s, owner.pid, 60000)
+    const childResult = await resultOf(s, child.pid, 60000)
+    ev.ownerResult = ownerResult
+    ev.childResult = childResult
+    ev.ownerCascade = (ownerResult.cascades || [])[0] || []
+    // THE CHILD LEARNED OF IT. Its window was destroyed by another process's call, so the only
+    // thing that can tell it is the event on its own fd — which is why WEV_DESTROYED exists.
+    ev.childEvents = childResult.events
+
+    const clauses = {
+      'the two windows belong to different processes': ev.differentPids === true,
+      "and the child's window names the other process's window as its owner":
+        ev.childOwner === ownerWin,
+      // TWO CLAUSES AND NOT ONE. A single conjunction here reported FAIL once in five runs and
+      // could not say which half moved; the page's own log showed the cascade list was right, so
+      // it was the kernel's live set — which is now its own named row, with every row's state
+      // beside it in the evidence.
+      'one win_destroy reported both ids, across the process boundary':
+        ev.ownerCascade.length === 2,
+      'and the kernel has no live window left': ev.liveAfter.length === 0,
+      // THE DESTROY NOTICE, not "some event arrived": its window was destroyed by ANOTHER
+      // PROCESS's call, so the only thing that can tell it is the WEV_DESTROYED record on its own
+      // fd — which is why that event type exists.
+      'and the child process was told, on its own fd':
+        (childResult.destroyedSeen || 0) > 0 && childResult.exit === 0,
+      'and both frames went': ev.framesAtCascade === 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: the not-responding detector, BOTH EDGES.
+   -------------------------------------------------------------------------------------------- */
+
+async function pHealth (boot) {
+  /* THE FIXTURE CHANGED WITH THE MILESTONE, and the new one is more honest. M4a attached a window
+   * with NO PROCESS AT ALL and typed into it, which M7 makes impossible: a window is created by
+   * the process that will read it. So the subject is now a process that HAS a window and is not
+   * collecting its events — `bench/m7-win/wedge.mjs` sleeps for nine seconds and then comes back
+   * and drains, which is a program that was busy and then resumed, and is the case the caption is
+   * actually for. */
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, WEDGE, ['wedge', '--hold', '9000', '--drain', '6000'])
+    ev.pid = pid
+    await until(() => s.host.frames.size >= 1, 20000)
+    const [w] = [...s.host.frames.values()]
+    ev.win = w.id
+    // A WINDOW THAT WORKS FIRST: the process wrote into it before it stopped reading, so this
+    // proof cannot pass against a frame that was never wired up.
+    const paintedMs = await until(() => /stopped reading/.test(w.term.screen()), 10000)
+    ev.paintedMs = Math.round(paintedMs)
+
+    typeSynthetic(w.term, 'x')
+    const greyMs = await until(() => w.win.health >= 1, 8000)
+    ev.greyMs = Math.round(greyMs)
+    ev.caption1 = w.win.headingEl.textContent
+    ev.endHiddenAtGrey = w.win.endBtn.hidden
+    const endMs = await until(() => w.win.health >= 2, 12000)
+    ev.endMs = Math.round(endMs)
+    ev.caption2 = w.win.headingEl.textContent
+    ev.endShown = !w.win.endBtn.hidden
+    const stale = await s.winState()
+    const row = (stale.windows || []).find((x) => x.id === w.id) || {}
+    ev.staleMs = row.staleMs
+    ev.pending = row.pending
+    ev.level = row.level
+
+    /* THE CLEARING EDGE. The process comes back and drains, and the caption must clear. A
+     * threshold with no tested lower edge is a threshold that latches, and the latch would not be
+     * visible in any clause above. */
+    const clearedMs = await until(() => w.win.health === 0, 20000)
+    ev.clearedMs = Math.round(clearedMs)
+    ev.caption3 = w.win.headingEl.textContent
+    ev.transitions = w.health
+    const result = await resultOf(s, pid, 30000)
+    ev.result = result
+
+    const clauses = {
+      'the window worked before its process stopped reading': paintedMs >= 0,
+      'the caption greys when events go uncollected':
+        greyMs >= 0 && / \(Not Responding\)$/.test(ev.caption1),
+      'End Process appears only at the second threshold':
+        ev.endHiddenAtGrey === true && ev.endShown === true && endMs >= 0,
+      'the kernel agrees the queue was waiting': (ev.pending || 0) > 0
+        && (ev.staleMs || 0) >= 1000,
+      'and the caption clears when the process drains the queue':
+        clearedMs >= 0 && !/ \(Not Responding\)$/.test(ev.caption3),
+      'and the process reports what it drained': (result.drained || 0) > 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdown(s.k)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   AND THE DESKTOP ITSELF: a terminal, a shell, and the window table beside it.
+   -------------------------------------------------------------------------------------------- */
+
+async function liveDesktop (boot, { quiet = false } = {}) {
+  const s = await bootHost(boot)
+  if (!s.usr.ok) {
+    say('REFUSING TO GO ON: /usr did not mount, so there is no /usr/bin/sh to start.')
+    globalThis.M7.state = 'error'
+    globalThis.M7.why = '/usr did not mount: ' + JSON.stringify(s.usr.why)
+    return null
+  }
+  const { pid } = await spawnProgram(s.k, TERM, ['term', '--ceiling', '3600000'])
+  const promptMs = await until(() => {
+    const e = [...s.host.frames.values()][0]
+    return e && /\$ /.test(e.term.screen())
+  }, 25000)
+  const entry = [...s.host.frames.values()][0]
+  if (entry) entry.term.focus()
+  globalThis.M7.live = { s, pid }
+  /* THE WINDOW TABLE, UPDATING. It is the kernel's own account of what exists beside the frames
+   * the page drew, so a frame with nothing behind it shows up as a row that is not there — which
+   * is constraint 40's rule applied to the thing itself rather than to a check of it. */
+  const tick = setInterval(async () => {
+    try {
+      const st = await s.winState()
+      renderWins(st.windows || [])
+    } catch (e) {
+      clearInterval(tick)
+    }
+  }, 700)
+  if (promptMs < 0) {
+    const state = await s.procState().catch((e) => ({ why: String(e) }))
+    const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
+    say('NO PROMPT in 25 s. The relay is pid ' + pid + ', parked in ' +
+      JSON.stringify(row && row.inflight) + ', holding fds ' +
+      JSON.stringify((row && row.fds) || []) + '.')
+    globalThis.M7.stuck = { relay: row, windows: await s.winState().catch(() => null) }
+    if (!quiet) {
+      globalThis.M7.state = 'error'
+      globalThis.M7.why = 'the shell painted no prompt in 25 s'
+    }
+    return s
+  }
+  say('')
+  say('A LIVE DESKTOP is open above: click the terminal and type.')
+  say('  ls /usr/bin        the programs, including winopen')
+  say('  winopen -n 2 -o    two more windows, the second OWNED by the first.')
+  say('                     Type in them; press q to close one and watch the cascade.')
+  say('  winopen -n 1       in one terminal, then `winopen -n 1 -O <winid>` in another:')
+  say('                     an owner in ANOTHER PROCESS, which is what M9 is built on.')
+  say('  ls /proc/$$/win    the shell\'s own windows, as files. `cat` one of them.')
+  say('  ps                 every process, including the ones holding the windows')
+  return s
+}
+
+/* ---------------------------------------------------------------------------------------- */
+
+async function main () {
+  const t0 = performance.now()
+  say('M7: a window is a file description'
+    + (CFG.winFirstFd ? '  [CONTROL: win_first_fd]' : '')
+    + (CFG.noCascade ? '  [CONTROL: no_cascade]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.winFirstFd) boot.winFirstFd = true
+  if (CFG.noCascade) boot.noCascade = true
+  if (CFG.liveOnly) {
+    const s = await liveDesktop(boot)
+    if (s) {
+      globalThis.M7.verdict = 'live'
+      globalThis.M7.state = 'done'
+    }
+    return
+  }
+  const P = globalThis.M7.proofs
+
+  await pPollMany(boot)
+  const e = P.poll_many.evidence
+  say('poll: pid ' + e.pid + ' held fds ' + JSON.stringify(e.fds) + ' + pipe ' + e.pipeFd +
+    ', parked in ' + JSON.stringify(e.inflight) + ', woken ' + JSON.stringify(e.wokeBy) +
+    ', keys ' + JSON.stringify(e.keysSeen) + ', driven by ' + e.drivenBy +
+    ' (' + e.keyCounts.trusted + ' real / ' + e.keyCounts.synthetic + ' synthetic)')
+  if (e.failed.length) say('  poll FAILED: ' + e.failed.join('; '))
+  const pw = P.procwin.evidence
+  say('proc: /proc/' + pw.pid + '/win lists ' + JSON.stringify(pw.names) +
+    '; an absent winid reads ' + pw.absent + ', and pid ' + pw.otherPid + "'s directory reads " +
+    pw.foreign)
+  if (pw.failed.length) say('  proc FAILED: ' + pw.failed.join('; '))
+
+  P.cascade = await pCascade(boot)
+  const c = P.cascade.evidence
+  say('cascade: win ' + c.owner.win + ' owned ' + c.owned.win + '; one win_destroy reported ' +
+    JSON.stringify(c.reportedList) + ', live after ' + JSON.stringify(c.liveAfter))
+  if (c.failed.length) say('  cascade FAILED: ' + c.failed.join('; '))
+
+  P.crossproc = await pCrossproc(boot)
+  const x = P.crossproc.evidence
+  say('cross-process: pid ' + x.ownerPid + ' owns win ' + x.ownerWin + ', pid ' + x.childPid +
+    ' owns win ' + x.childWin + ' parented onto it; after q the cascade reported ' +
+    JSON.stringify(x.ownerCascade))
+  if (x.failed.length) say('  cross-process FAILED: ' + x.failed.join('; '))
+
+  P.health = await pHealth(boot)
+  const h = P.health.evidence
+  say('health: grey at ' + h.greyMs + ' ms, End Process at ' + h.endMs + ' ms, cleared ' +
+    h.clearedMs + ' ms after the process drained ' + ((h.result || {}).drained) + ' events')
+  if (h.failed.length) say('  health FAILED: ' + h.failed.join('; '))
+
+  const drivenBy = (P.poll_many.evidence || {}).drivenBy || 'page'
+  globalThis.M7.config = {
+    winFirstFd: CFG.winFirstFd, noCascade: CFG.noCascade, drivenBy,
+    POLLIN, F_WIN, F_PIPE_R, WEV_KEY, WEV_DESTROYED, WIN_EVENT_CAP,
+  }
+  globalThis.M7.drivenBy = drivenBy
+  const sections = Object.entries(P)
+  const ran = sections.filter(([, v]) => v !== null)
+  const allOk = ran.length === sections.length && ran.every(([, v]) => v.ok)
+  /* 'hand-driven' IS ITS OWN VERDICT AND NOT A PASS, for M4a's reason: a person who opens this
+   * page types their own keys, so the clause that asserts a trusted keystroke into window A is
+   * NOT MEASURED rather than false. `scripts/check.py` declares itself and requires 'ok'. */
+  globalThis.M7.verdict = allOk ? (drivenBy === 'hand' ? 'hand-driven' : 'ok') : 'FAIL'
+  globalThis.M7.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  const f = globalThis.M7.fetches
+  say('program fetches: ' + f.fetches + ' over ' + f.kernels + ' kernels, ' + f.retries +
+    ' retried (' + f.timeouts + ' deadline, ' + f.transport + ' transport)')
+  say('verdict ' + globalThis.M7.verdict + ' in ' + Math.round(globalThis.M7.ms) + ' ms')
+  /* AND THEN A DESKTOP YOU CAN ACTUALLY USE. Every proof above is a FIXTURE — it builds a kernel,
+   * measures one property and tears both down — so when they have all finished the page would show
+   * nothing at all. This session is not a fixture: it is left running, with its own kernel, a
+   * shell on a real pty, and `winopen` for as many more windows as you want. It is started AFTER
+   * the verdict so a hand that types into it cannot perturb a measurement. */
+  await liveDesktop(boot, { quiet: true })
+  out.className = globalThis.M7.verdict === 'FAIL' ? 'bad' : 'ok'
+  globalThis.M7.state = 'done'
+}
+</script>
+</body>
+</html>

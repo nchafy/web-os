@@ -594,6 +594,18 @@ class Control:
     #: process because that is where the strip lives. MILESTONES.md M6's own control: "Skip the
     #: stripping; the same program must succeed."
     NO_LOCKDOWN = "no-lockdown"
+    #: M7's own control, in `PLAN.md` §5's words: "wake only on the first fd in the set; the
+    #: two-window case must hang". A parked `poll` evaluates only the FIRST fd of its set, through
+    #: the cfg.winFirstFd hook which the kernel refuses without a bench boot. A process has one
+    #: futex word and one outstanding call, so that is fatal by construction: the poller's second
+    #: window and its pipe can never wake it, and it runs to its own ceiling reporting exactly
+    #: which fds did.
+    WIN_FIRST_FD = "win-first-fd"
+    #: M7. Destroying a parent destroys ONLY the parent, through the cfg.noCascade hook. The
+    #: obvious implementation, and the one that leaves a dialog on screen over a window that is
+    #: gone — and leaves the caller holding fds for windows the kernel has forgotten, which is the
+    #: desynchronisation `win_destroy`'s returned list exists to prevent.
+    NO_CASCADE = "no-cascade"
     #: M6, half two. The process realm's Content-Security-Policy is not served, so the module
     #: loader is unbounded again: a COMPUTED `import(expr)` and `eval` both work (constraint 139).
     #: A SERVER switch rather than a query parameter, because a policy is a response header — the
@@ -625,6 +637,8 @@ CONTROL_RUNS = {
     Control.NO_FINISH_GUARD: ("no-finish-guard",),
     Control.NO_WINCH: ("no-winch",),
     Control.PTY_DETACH: ("pty-detach",),
+    Control.WIN_FIRST_FD: ("win-first-fd",),
+    Control.NO_CASCADE: ("no-cascade",),
     Control.NO_LOCKDOWN: ("no-lockdown",),
     Control.NO_CSP: ("no-csp",),
 }
@@ -2745,6 +2759,145 @@ _SPAWN_SELF_FAILS = (
 #: Clause-level, as every section here is. The HELD set under `pty-detach` is everything that is
 #: not the echo: the window still delivers the keystroke to the kernel, the relay is still parked
 #: in `poll` over both sources, the frame still moves, and the detector still fires both ways.
+M7_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # THE HEADLINE. `PLAN.md` §5 M7: "one process opens two windows and a pipe, and `poll()` wakes
+    # it for each in turn". A process has ONE futex word and ONE outstanding call (constraint 42),
+    # so with a per-window wait the program behind this section could not be written.
+    "poll ok",
+    "one process created two windows and the page built both frames",
+    "and it waited on all three fds at once, parked in poll",
+    "poll woke it for window A",
+    "poll woke it for window B",
+    "poll woke it for the pipe",
+    "and each key arrived on the fd it was typed into",
+    "the keys into window A were real browser keystrokes",
+    "and the program exited because every fd had delivered, not at its ceiling",
+    # The other half of what the milestone claims: a window is visible as a FILE.
+    "procwin ok",
+    "/proc/<pid>/win lists one entry per live window",
+    "and each file names its window, its process and the fds that reach it",
+    "and a winid nobody owns is ENOENT",
+    "and another live process's directory does not carry this window",
+    # The destroy cascade, which MILESTONES' ordering correction says M7 owes M9 and M10.
+    "cascade ok",
+    "destroying an owner destroys its children",
+    "and win_destroy reports every id to the caller",
+    "and the page takes every frame down",
+    "and the program exits because its windows went, not at its ceiling",
+    # Cross-process ownership, the second thing that correction names.
+    "crossproc ok",
+    "two processes, and one owns a window parented onto the other's",
+    "one win_destroy reports both ids across the process boundary",
+    "and the kernel has no live window left",
+    "and the other process is told on its own fd",
+    "and both frames went",
+    # The not-responding detector, which moved here from `m4a` with the window ABI.
+    "health ok",
+    "the window worked before its process stopped reading",
+    "the caption greys when events go uncollected",
+    "End Process appears only at the second threshold",
+    "and the kernel agrees the queue was waiting",
+    "and the caption clears when the process drains the queue",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m7.html",
+)
+
+M7_DOCUMENT = "/www/m7.html"
+
+#: TWO TERMINAL STATES, AND `await-keys` IS ONE OF THEM — M4a's arrangement, for its reason: the
+#: page sets up the session, announces that it is waiting to be typed at, and stops, so the keys
+#: that arrive went through Chrome's own focus and key translation and the widget sees `isTrusted`.
+M7_READY = ("(() => { const M = globalThis.M7 || {}; const s = M.state; "
+            "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
+            "return M.phase === 'await-keys' ? 'await-keys' : '' })()")
+
+M7_DONE = ("(() => { const s = globalThis.M7 && globalThis.M7.state; "
+           "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M7 = """(() => {
+  const M = globalThis.M7 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    poll_many: one(P.poll_many),
+    procwin: one(P.procwin),
+    cascade: one(P.cascade),
+    crossproc: one(P.crossproc),
+    health: one(P.health),
+  }
+})()"""
+
+M7_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "poll_many": (dict, type(None)),
+    "procwin": (dict, type(None)),
+    "cascade": (dict, type(None)),
+    "crossproc": (dict, type(None)),
+    "health": (dict, type(None)),
+}
+
+#: What EVALUATING ONLY THE FIRST FD OF A POLL SET must break, and only this.
+#:
+#: Measured under the control on Chrome 157: exactly these six red, the other thirty-three intact.
+#: Window A still wakes the poller, the real keystroke still reaches it, `/proc/<pid>/win` still
+#: lists both windows, the cascade still cascades, and the detector still greys and clears — the
+#: wedge polls a ONE-fd set, so first-fd-only cannot touch it.
+#:
+#: THAT SPLIT IS THE WHOLE CONTROL. A `poll` that answered correctly for one fd and never for the
+#: others would satisfy every other label in this check, and nothing else in the suite can tell
+#: the two apart: M4b's `poll` sections use two fds of different kinds in ONE process, which is the
+#: same shape, but they are the pty's check and would go red for the pty's reasons.
+_WIN_FIRST_FD_FAILS = (
+    "poll ok",
+    "poll woke it for window B",
+    "poll woke it for the pipe",
+    "and each key arrived on the fd it was typed into",
+    "and the program exited because every fd had delivered, not at its ceiling",
+    "verdict is ok",
+)
+
+#: What A DESTROY THAT DOES NOT CASCADE must break.
+#:
+#: Eleven red, twenty-eight intact. Both cascade sections go, including the cross-process one — a
+#: child in another process is destroyed by the same walk — and so does the clause that asserts
+#: each program exited BECAUSE ITS WINDOWS WENT: a program that ran to its own ceiling still exits
+#: 0, so the exit status alone cannot tell the two apart.
+#:
+#: WHAT MUST HOLD: every poll label, every `/proc` label, and both edges of the detector. The
+#: cascade is a property of `win_destroy` and has nothing to do with waiting on an fd.
+_NO_CASCADE_FAILS = (
+    "cascade ok",
+    "destroying an owner destroys its children",
+    "and win_destroy reports every id to the caller",
+    "and the page takes every frame down",
+    "and the program exits because its windows went, not at its ceiling",
+    "crossproc ok",
+    "one win_destroy reports both ids across the process boundary",
+    "and the kernel has no live window left",
+    "and the other process is told on its own fd",
+    "and both frames went",
+    "verdict is ok",
+)
+
+
 M4A_LABELS = (
     "cell reported",
     "page isolated",
@@ -2767,11 +2920,10 @@ M4A_LABELS = (
     "arrow keys on the title bar move the window",
     "a pointer drag moves the window",
     "and the clamp keeps the title bar reachable at both extremes",
-    # The not-responding detector, deferred from M1 because there was no UI to hook.
-    "health ok",
-    "the caption greys when keystrokes go uncollected",
-    "End Process appears only at the second threshold",
-    "and the caption clears when the queue drains",
+    # THE NOT-RESPONDING DETECTOR'S FOUR LABELS MOVED TO `m7`, with the proof. Its fixture here
+    # was a window with NO PROCESS READING IT, which M7 makes unreachable: a window is created by
+    # the process that will read it. `scripts/check_floors.json` carries the floor this lowered,
+    # and `check_m7` carries six labels where this had four.
     "verdict is ok",
     "document COOP",
     "document COEP",
@@ -2812,7 +2964,6 @@ READ_M4A = """(() => {
     echo: one(P.echo),
     parked: one(P.parked),
     geometry: one(P.geometry),
-    health: one(P.health),
   }
 })()"""
 
@@ -2823,7 +2974,6 @@ M4A_SHAPE = {
     "echo": (dict, type(None)),
     "parked": (dict, type(None)),
     "geometry": (dict, type(None)),
-    "health": (dict, type(None)),
 }
 
 #: What a DETACHED PTY must break, and only this.
@@ -3090,6 +3240,15 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "in this phase (it is a header on src/libos/, independent of COOP/COEP) and still "
                 "proves nothing here: a policy over a realm no process ever entered bounds "
                 "nothing.",
+        ), "m7": Expect(
+            UNMEASURABLE,
+            why="the same mechanism, one milestone on: without COOP/COEP there is no SAB, so no "
+                "kernel boots and no process runs - and a window is created BY A PROCESS now, so "
+                "there is nothing to create one. The frames could still be DRAWN, which is "
+                "exactly why the page refuses before it builds any: a frame with nothing behind "
+                "it is the picture constraint 40 says cannot be told from a working window. "
+                "UNMEASURABLE rather than FAIL, because a FAIL would claim a process waited on "
+                "three fds and was woken by one.",
         ), "m4a": Expect(
             UNMEASURABLE,
             why="the same mechanism once more: without COOP/COEP there is no SAB, so no kernel "
@@ -3487,8 +3646,8 @@ CONTROLS: Dict[str, NegativeControl] = {
             "whole reason src/wm/terminal.mjs draws nothing on a keypress.\n"
             "WHAT MUST HOLD: that the WINDOW still delivered the keystroke to the kernel (the "
             "device's own byte counter), that the relay is still parked in `poll` over a window "
-            "fd and a pty master, the frame's geometry and clamp, and both edges of the "
-            "not-responding detector. Twenty of twenty-six labels.",
+            "fd and a pty master, and the frame's geometry and clamp. Sixteen of twenty-two "
+            "labels; the detector's four went to `m7` with the window ABI.",
         serve_kwargs={},
         fixture=None,
         query=(("pty_detach", "1"),),
@@ -3498,6 +3657,59 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "carried them to the pty keeps working",
             failed=_PTY_DETACH_FAILS,
             held=held_rest(M4A_LABELS, _PTY_DETACH_FAILS),
+        )},
+    ),
+    "win-first-fd": NegativeControl(
+        name="win-first-fd",
+        why="win_first_fd=1: a parked `poll` evaluates only the FIRST fd of its set (the "
+            "cfg.winFirstFd hook, refused without a bench boot). `PLAN.md` §5's control for M7 "
+            "in its own words: 'wake only on the first fd in the set; the two-window case must "
+            "hang.'\n"
+            "WHAT MUST BREAK: window B and the pipe can never wake the poller, so the one process "
+            "holding two windows and a pipe runs to its own ceiling with its second window's key "
+            "and its child's bytes still queued. A process has ONE futex word and ONE outstanding "
+            "call (constraint 42), which is what makes a single-fd wake fatal rather than slow.\n"
+            "WHAT MUST HOLD, and this is what makes it a control rather than a broken world: "
+            "window A still wakes it, the REAL keystroke still reaches it through Chrome's own "
+            "key translation, `/proc/<pid>/win` still lists both windows with the fds that reach "
+            "them, the destroy cascade still cascades across a process boundary, and both edges "
+            "of the not-responding detector still fire — the wedge polls a ONE-fd set, so "
+            "first-fd-only cannot touch it. Thirty-three of thirty-nine labels.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("win_first_fd", "1"),),
+        expects={"m7": Expect(
+            Outcome.FAIL,
+            why="a process that waits on three fds must stop being woken by two of them, while "
+                "everything that is not a wait keeps working",
+            failed=_WIN_FIRST_FD_FAILS,
+            held=held_rest(M7_LABELS, _WIN_FIRST_FD_FAILS),
+        )},
+    ),
+    "no-cascade": NegativeControl(
+        name="no-cascade",
+        why="no_cascade=1: destroying a parent destroys ONLY the parent (the cfg.noCascade hook, "
+            "refused without a bench boot). The obvious implementation, and the one SerenityOS's "
+            "`destroy_window` return value exists to prevent.\n"
+            "WHAT MUST BREAK: the owned window outlives the window it belongs to - measured, "
+            "`one win_destroy reported [1], live after [2]` - so the page is left with a frame "
+            "over a window that is gone, and the CALLER is told one id for an operation that "
+            "should have closed two. The cross-process case breaks with it, because a child in "
+            "another process is destroyed by the same walk. And so does each program's reason for "
+            "exiting: a program that ran to its own ceiling still exits 0, so the exit status "
+            "alone cannot tell the two apart.\n"
+            "WHAT MUST HOLD: every poll label, including the real keystroke; every `/proc/<pid>/"
+            "win` label; and both edges of the detector. The cascade is a property of "
+            "`win_destroy` and has nothing to do with waiting on an fd. Twenty-eight of thirty-nine.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_cascade", "1"),),
+        expects={"m7": Expect(
+            Outcome.FAIL,
+            why="one win_destroy must stop reporting - and stop destroying - the windows owned by "
+                "the one it was given",
+            failed=_NO_CASCADE_FAILS,
+            held=held_rest(M7_LABELS, _NO_CASCADE_FAILS),
         )},
     ),
     "no-lockdown": NegativeControl(
@@ -7026,13 +7238,14 @@ def check_m5(env: Env) -> None:
          "the kernel's line discipline -> back. The geometry is read out of the DOM dataset "
          "`apply()` wrote, never off the Win object, because an inert frame and a working one are "
          "the same picture (constraint 40).\n"
-         "THE DETECTOR, BOTH EDGES. The second session attaches a window with NO relay, so "
-         "keystrokes queue uncollected: the caption greys at 1,000 ms, End Process appears at "
-         "5,000 ms, and starting the relay drains the queue and clears the caption. A threshold "
-         "with no tested lower edge is a threshold that latches.\n"
+         "THE DETECTOR'S PROOF MOVED TO `m7` WITH THE SEAM. M7 deleted `/dev/console`: the "
+         "relay calls `win_create`, so this page creates no window and the old fixture - a "
+         "window with no process reading it - is unreachable. `check_m7` carries both edges "
+         "against `bench/m7-win/wedge.mjs`, a process that HAS a window and stops collecting "
+         "its events.\n"
          "negative control: --negative pty-detach makes a write to the master discard its bytes. "
          "Six labels red - the echo, the line being run, Ctrl-C, Ctrl-D and the verdict - and "
-         "twenty intact, including `the window delivered the keystroke to the kernel`. "
+         "sixteen intact, including `the window delivered the keystroke to the kernel`. "
          "--negative no-isolation must come out BROKEN: no SAB, so no kernel and no pty.",
 )
 def check_m4a(env: Env) -> None:
@@ -7084,7 +7297,7 @@ def check_m4a(env: Env) -> None:
     if got["state"] != "done":
         env.unmeasurable("www/m4a.html never reached a terminal state (state=%r)" % got["state"])
 
-    sections = ("echo", "parked", "geometry", "health")
+    sections = ("echo", "parked", "geometry")
     env.expect_that(
         "cell reported",
         all(got[name] is not None for name in sections),
@@ -7127,7 +7340,7 @@ def check_m4a(env: Env) -> None:
     env.expect_that("the window delivered the keystroke to the kernel",
                     e.get("windowDelivered") is True,
                     {"keyBytesOut": e.get("keyBytesOut"), "fed": e.get("fed"),
-                     "console": e.get("console")})
+                     "window": e.get("window")})
     # THE MILESTONE'S OWN PROOF.
     env.expect_that("and the pty echoed the typed line back onto the screen",
                     e.get("echoedTheLine") is True,
@@ -7193,10 +7406,246 @@ def check_m4a(env: Env) -> None:
                     and left.get("w") == right.get("w") == (g.get("start") or {}).get("w"),
                     {"left": left, "right": right, "surface": surface})
 
-    # ---- PROOF: the not-responding detector, both edges ----------------------------------
+    # THE NOT-RESPONDING DETECTOR'S PROOF IS `check_m7`'s, with the window ABI that made its
+    # fixture possible. See M4A_LABELS.
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m4a.html", env.served_matches_disk(env.document),
+                    "the m4a.html served does not match www/m4a.html on disk")
+
+
+@check(
+    name="m7",
+    milestone="m7",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.WIN_FIRST_FD, Control.NO_CASCADE),
+    labels=M7_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M7_DOCUMENT,
+    ready_expr=M7_READY,
+    ready_what="globalThis.M7 reaching done/aborted/error, or phase 'await-keys' (www/m7.html)",
+    # 17 s measured over five fresh kernels, whose longest waits are the detector's own second
+    # threshold at 5 s and its drain. The bound is generous and is still a BOUND, for the reason
+    # M5's is: a window nobody reads raises no error anywhere - a parked `poll` is a legitimate
+    # state - so a program that wedged must end as a BROKEN check carrying the kernel's park and
+    # window state, which www/m7.html attaches to its own timeouts, rather than as a suite that
+    # never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M7 && globalThis.M7.state",
+    refusal_want="aborted",
+    note="A WINDOW IS A FILE DESCRIPTION. `win_create` returns an fd, the window's events are "
+         "that fd's readable set, and `poll()` is the single wait primitive over it "
+         "(constraint 42). M4a's `/dev/console` is GONE: it was one window, created by the page "
+         "before any process existed, and a process with two windows could not have been woken "
+         "by both.\n"
+         "THE HEADLINE IS A PROGRAM YOU CAN RUN. `bench/m7-win/poller.mjs` opens two windows and "
+         "a pipe, spawns a child to write the pipe, and polls all three - reporting which fd woke "
+         "it and what arrived there. Its first exit condition was VACUOUS and the browser found "
+         "it: the page reports each frame's geometry the instant it builds it, so both windows "
+         "had a WEV_RESIZE queued before anything was typed and all three fds were ready on the "
+         "first poll. It now runs until each window has delivered a KEY and the pipe has "
+         "delivered bytes or end of input.\n"
+         "THE KEYS INTO WINDOW A ARE REAL. The page announces `phase: await-keys` and stops; this "
+         "check focuses the first terminal and presses them through `Input.dispatchKeyEvent`, so "
+         "the widget receives `isTrusted` events. Window B's key is synthesised, because what "
+         "needs to be real is the trip through the browser's own key translation and window A has "
+         "made it.\n"
+         "THE CASCADE AND THE OWNER CHAIN are what MILESTONES' ordering correction says M7 owes "
+         "M9 and M10: destroying a parent destroys its children, `win_destroy` RETURNS the list "
+         "of ids it destroyed, and an owner may name a window in ANOTHER PROCESS - `winopen -O "
+         "<winid>` from the shell is that, and the page drives it as two processes.\n"
+         "THE DETECTOR MOVED HERE FROM `m4a`, both edges, against `bench/m7-win/wedge.mjs`: a "
+         "process that creates a window, stops reading it for nine seconds and then comes back "
+         "and drains. M4a's fixture was a window with NO process reading it, which this milestone "
+         "makes unreachable.\n"
+         "negative control: --negative win-first-fd makes a parked `poll` evaluate only the FIRST "
+         "fd of its set - `PLAN.md` §5's own words, 'the two-window case must hang'. Six labels "
+         "red and thirty-three intact, including the real keystroke into window A and both edges of "
+         "the detector. --negative no-cascade destroys a parent without its children: eleven red, "
+         "twenty-eight intact, including every poll and `/proc` label. --negative no-isolation must "
+         "come out BROKEN: no SAB, so no kernel and no windows.",
+)
+def check_m7(env: Env) -> None:
+    # ---- drive the keys, then wait for the page to finish ---------------------------------
+    #
+    # `ready_expr` admits `await-keys` as a terminal state precisely so this runs. A page that is
+    # aborted or errored never reaches that phase, so this arm is skipped and the read below
+    # reports the refusal.
+    phase = env.page.evaluate("globalThis.M7 && globalThis.M7.phase")
+    state = env.page.evaluate(M7_DONE)
+    if not phase and not state:
+        env.unmeasurable(
+            "www/m7.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no keystroke was typed and nothing below was measured")
+    if phase == "await-keys":
+        # THE FIRST TERMINAL IS WINDOW A's, because the page focused it before announcing the
+        # phase. Asserted rather than assumed: keys sent to the body would make the page time out
+        # waiting for an event and the report would blame the window.
+        focused = env.page.evaluate(
+            "(() => { const t = document.querySelector('.terminal');"
+            " if (!t) return 'no terminal element';"
+            " t.focus();"
+            " return document.activeElement === t ? '' : 'the terminal refused focus' })()")
+        if focused:
+            env.unmeasurable("www/m7.html: %s, so no keystroke could reach it" % focused)
+        # DECLARED BEFORE THE FIRST KEY. The page cannot otherwise tell this check's keystrokes
+        # from a person's - both are `isTrusted` - and M4a reported a hand-driven session as a
+        # FAILED one before it had this.
+        env.page.evaluate("globalThis.M7.driver = 'check'")
+        env.page.type_keys("a")
+        env.settle(M7_DONE, timeout=240.0,
+                   what="globalThis.M7.state reaching done after the key was typed")
+
+    got = env.read(READ_M7, M7_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m7.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m7.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs and no window is created."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m7.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("poll_many", "procwin", "cascade", "crossproc", "health")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF 1: two windows and a pipe, in one poll ------------------------------------
+    e = ev("poll_many")
+    woke = e.get("wokeBy") or {}
+    fds = e.get("fds") or []
+    kinds = e.get("fdKinds") or []
+    env.expect_that("poll ok", section_ok("poll_many"), e)
+    env.expect_that("one process created two windows and the page built both frames",
+                    len(e.get("created") or []) == 2 and len(fds) == 2,
+                    {"created": e.get("created"), "fds": fds, "framesMs": e.get("framesMs")})
+    # THE KIND NUMBERS COME FROM THE PAGE, which imported them from `src/abi.mjs`: a kind number
+    # written here as well would be one fact in two languages, and the harness cannot import a
+    # .mjs. Every other check publishes its errnos and signals the same way.
+    cfg = got["cfg"] or {}
+    env.expect_that("and it waited on all three fds at once, parked in poll",
+                    e.get("parkedInPoll") is True
+                    and kinds.count(cfg.get("F_WIN")) == 2
+                    and cfg.get("F_PIPE_R") in kinds,
+                    {"inflight": e.get("inflight"), "kinds": kinds, "F_WIN": cfg.get("F_WIN"),
+                     "F_PIPE_R": cfg.get("F_PIPE_R")})
+    env.expect_that("poll woke it for window A", e.get("wokeOnA") is True, {"wokeBy": woke})
+    env.expect_that("poll woke it for window B", e.get("wokeOnB") is True, {"wokeBy": woke})
+    env.expect_that("poll woke it for the pipe", e.get("wokeOnPipe") is True,
+                    {"wokeBy": woke, "pipeFd": e.get("pipeFd")})
+    # THE DISCRIMINATING CLAUSE. A poll that reported every fd ready whenever anything happened
+    # would satisfy the three above and fail this one.
+    env.expect_that("and each key arrived on the fd it was typed into",
+                    e.get("keyOnA") is True and e.get("keyOnB") is True,
+                    {"keysSeen": e.get("keysSeen"), "fds": fds})
+    env.expect_that("the keys into window A were real browser keystrokes",
+                    e.get("drivenBy") == "check"
+                    and ((e.get("keyCounts") or {}).get("trusted") or 0) > 0,
+                    {"drivenBy": e.get("drivenBy"), "keyCounts": e.get("keyCounts")})
+    # BECAUSE EVERY FD DELIVERED, not merely "it exited": a program that ran to its own ceiling
+    # exits 0 too, and under `--negative win-first-fd` that is exactly what happens.
+    env.expect_that("and the program exited because every fd had delivered, not at its ceiling",
+                    (e.get("result") or {}).get("exit") == 0
+                    and "delivered" in str(e.get("why") or ""),
+                    {"why": e.get("why"), "exit": (e.get("result") or {}).get("exit"),
+                     "wokeBy": woke})
+
+    # ---- PROOF 2: /proc/<pid>/win --------------------------------------------------------
+    pw = ev("procwin")
+    wins = pw.get("wins") or []
+    names = pw.get("names")
+    env.expect_that("procwin ok", section_ok("procwin"), pw)
+    env.expect_that("/proc/<pid>/win lists one entry per live window",
+                    isinstance(names, list) and sorted(names) == sorted(wins) and len(wins) == 2,
+                    {"names": names, "wins": wins})
+    env.expect_that("and each file names its window, its process and the fds that reach it",
+                    pw.get("fieldsOk") is True,
+                    {"files": pw.get("files"), "pid": pw.get("pid")})
+    env.expect_that("and a winid nobody owns is ENOENT", pw.get("absent") == "ENOENT",
+                    {"absent": pw.get("absent")})
+    # THE PID IS PART OF THE PATH'S MEANING. The winid space is global, so a lookup that ignored
+    # the pid would make every window readable under every process. The clause requires the other
+    # process to be ALIVE at the moment of the read, or an ENOENT about a reaped pid would pass
+    # for an ENOENT about a window.
+    env.expect_that("and another live process's directory does not carry this window",
+                    pw.get("otherAlive") is True and pw.get("foreign") == "ENOENT",
+                    {"otherPid": pw.get("otherPid"), "alive": pw.get("otherAlive"),
+                     "foreign": pw.get("foreign")})
+
+    # ---- PROOF 3: the destroy cascade ----------------------------------------------------
+    c = ev("cascade")
+    env.expect_that("cascade ok", section_ok("cascade"), c)
+    env.expect_that("destroying an owner destroys its children",
+                    c.get("liveAfter") == [] and (c.get("owned") or {}).get("owner")
+                    == (c.get("owner") or {}).get("win"),
+                    {"owner": c.get("owner"), "owned": c.get("owned"),
+                     "liveBefore": c.get("liveBefore"), "liveAfter": c.get("liveAfter"),
+                     "rows": c.get("allRows")})
+    env.expect_that("and win_destroy reports every id to the caller",
+                    len(c.get("reportedList") or []) == 2
+                    and (c.get("reportedList") or [None])[0] == (c.get("owner") or {}).get("win"),
+                    {"reported": c.get("reportedList"), "cascades": c.get("cascades")})
+    env.expect_that("and the page takes every frame down",
+                    c.get("framesAtCascade") == 0 and len(c.get("destroyed") or []) == 2,
+                    {"frames": c.get("framesAtCascade"), "destroyed": c.get("destroyed"),
+                     "goneMs": c.get("goneMs")})
+    env.expect_that("and the program exits because its windows went, not at its ceiling",
+                    (c.get("result") or {}).get("exit") == 0
+                    and (c.get("result") or {}).get("why") == "every window is gone",
+                    {"result": c.get("result")})
+
+    # ---- PROOF 4: cross-process ownership ------------------------------------------------
+    x = ev("crossproc")
+    env.expect_that("crossproc ok", section_ok("crossproc"), x)
+    env.expect_that("two processes, and one owns a window parented onto the other's",
+                    x.get("differentPids") is True and x.get("childOwner") == x.get("ownerWin"),
+                    {"ownerPid": x.get("ownerPid"), "ownerWin": x.get("ownerWin"),
+                     "childPid": x.get("childPid"), "childWin": x.get("childWin"),
+                     "childOwner": x.get("childOwner")})
+    env.expect_that("one win_destroy reports both ids across the process boundary",
+                    len(x.get("ownerCascade") or []) == 2,
+                    {"cascade": x.get("ownerCascade"), "ownerResult": x.get("ownerResult")})
+    # TWO CLAUSES AND NOT ONE, because a single conjunction here went red once in five runs and
+    # could not say which half moved (www/m7.html carries the record).
+    env.expect_that("and the kernel has no live window left", x.get("liveAfter") == [],
+                    {"liveAfter": x.get("liveAfter"), "rows": x.get("allRows")})
+    # THE DESTROY NOTICE, not "some event arrived": the child's window was destroyed by another
+    # process's call, so the only thing that can tell it is the WEV_DESTROYED record on its own fd.
+    env.expect_that("and the other process is told on its own fd",
+                    ((x.get("childResult") or {}).get("destroyedSeen") or 0) > 0
+                    and (x.get("childResult") or {}).get("exit") == 0,
+                    {"childResult": x.get("childResult")})
+    env.expect_that("and both frames went", x.get("framesAtCascade") == 0,
+                    {"frames": x.get("framesAtCascade"), "goneMs": x.get("goneMs")})
+
+    # ---- PROOF 5: the not-responding detector, both edges ---------------------------------
     h = ev("health")
     env.expect_that("health ok", section_ok("health"), h)
-    env.expect_that("the caption greys when keystrokes go uncollected",
+    env.expect_that("the window worked before its process stopped reading",
+                    h.get("paintedMs", -1) >= 0, {"paintedMs": h.get("paintedMs")})
+    env.expect_that("the caption greys when events go uncollected",
                     h.get("greyMs", -1) >= 0 and " (Not Responding)" in (h.get("caption1") or ""),
                     {"greyMs": h.get("greyMs"), "caption": h.get("caption1"),
                      "transitions": h.get("transitions")})
@@ -7206,20 +7655,27 @@ def check_m4a(env: Env) -> None:
                     h.get("endHiddenAtGrey") is True and h.get("endShown") is True
                     and h.get("endMs", -1) >= 0,
                     {"hiddenAtGrey": h.get("endHiddenAtGrey"), "shown": h.get("endShown"),
-                     "endMs": h.get("endMs"), "staleMs": h.get("staleMs")})
-    env.expect_that("and the caption clears when the queue drains",
+                     "endMs": h.get("endMs")})
+    # THE CAPTION IS NOT THE ONLY WITNESS. A page that greyed a caption on its own would satisfy
+    # the clauses above; these are the kernel's own numbers for that window.
+    env.expect_that("and the kernel agrees the queue was waiting",
+                    (h.get("pending") or 0) > 0 and (h.get("staleMs") or 0) >= 1000,
+                    {"pending": h.get("pending"), "staleMs": h.get("staleMs"),
+                     "level": h.get("level")})
+    env.expect_that("and the caption clears when the process drains the queue",
                     h.get("clearedMs", -1) >= 0
-                    and " (Not Responding)" not in (h.get("caption3") or "x (Not Responding)"),
+                    and " (Not Responding)" not in (h.get("caption3") or "x (Not Responding)")
+                    and ((h.get("result") or {}).get("drained") or 0) > 0,
                     {"clearedMs": h.get("clearedMs"), "caption": h.get("caption3"),
-                     "transitions": h.get("transitions")})
+                     "result": h.get("result")})
 
     env.expect("verdict is ok", got["verdict"], "ok")
 
     served = env.request(env.document)
     env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
-    env.expect_that("served m4a.html", env.served_matches_disk(env.document),
-                    "the m4a.html served does not match www/m4a.html on disk")
+    env.expect_that("served m7.html", env.served_matches_disk(env.document),
+                    "the m7.html served does not match www/m7.html on disk")
 
 
 @check(

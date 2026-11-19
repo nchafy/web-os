@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 209 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 216 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 29 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 30 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  209 normative constraints  ← cite these
+  CONSTRAINTS.md  216 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -94,18 +94,23 @@ src/
     trace.mjs     the syscall trace ring. Reads no clock; see constraint 72
     providers.mjs the provider table as DATA, and the only place a request URL is built
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
-    console.mjs   /dev/console: M4a's window, as a file description. Special-cased; M7 deletes it
+    wins.mjs      M7: a window IS a file description. The event ring, the owner chain, the
+                  destroy cascade, the not-responding detector. It replaced M4a's console
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
     lockdown.mjs  M6: what a program's realm loses, as data. Fails CLOSED and says why
   bin/            the programs in /usr/bin, one file each. `true.mjs` states the program contract
   wm/             userland window manager
     window.mjs    the frame, ported unstyled from ../webxp. Geometry, clamp, drag, arrow keys
     terminal.mjs  the terminal widget. IT DOES NOT ECHO — constraint 161
+    winhost.mjs   the page's half of EVERY window: one frame per kernel window, and the one
+                  route from a browser event into a window's event queue
 www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
   m4a.html        the window and the terminal. The one page a check types REAL keys into
   m6.html         the realm, the volume, the loader and the fault. M6's five proofs
+  m7.html         M7's five proofs, and then a LIVE DESKTOP: a shell you can type into, and
+                  `winopen` for as many more windows as you want. `?live=1` skips the proofs
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
@@ -146,14 +151,14 @@ row below rather than restate it.
 | The longest component a name may be | `NAME_MAX` in `src/abi.mjs`. Every `statfs` implementation publishes it; none restates 255 |
 | The largest inline payload | `MAX_INLINE` in `src/abi.mjs`. Program read buffers are sized from it, never from 65536 |
 | The trace render limit | `TRACE_RENDER_LIMIT` in `src/kernel/devfs.mjs`. `/dev/trace` and the page's `trace-read` are one renderer, so they are one limit |
-| The console's input queue size | `CONSOLE_INPUT_BYTES` in `src/kernel/console.mjs`, derived from `PTY_INPUT_BYTES` — it feeds the pty's queue and must not exceed it |
+| A window's event queue and its record | `WIN_EVENT_CAP` and `WEV_*` + `encodeWinEvent`/`decodeWinEvent`/`keyBytesOf`/`packKeyBytes` in `src/abi.mjs`. The kernel writes the record and the libos reads it, which is the two sides |
 | Which bindings a process realm loses | `TARGETS` in `src/libos/lockdown.mjs`. A check enumerates it; `bench/m6-realm/program.mjs` MUST import it rather than list the names again |
 | The takers of the per-inode lock | the `withInode` docstring in `src/kernel/store.mjs`. `scripts/fsfuzz.py`'s `INODE_TAKERS` mirrors that list and lints against it |
 | Where a provider request URL is built | `urlFor` in `src/kernel/providers.mjs`, and nowhere else |
 | The provider table | `PROVIDERS` in `src/kernel/providers.mjs`, as data |
 | What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
 | The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
-| The 209 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 216 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -298,7 +303,12 @@ scripts/serve.py --no-isolation     # omit the headers, to prove a check fails w
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
 scripts/check.py --controls         # what negative controls exist and what each proves
-node bench/m6-realm/probe.mjs       # M6's lockdown under node, including its refusal path
+node bench/m7-win/probe.mjs        # M7's window table and one window, under node
+bench/m7-win/controls.py          # five mutations of it, scored on which checks move
+bench/m7-win/drive.py             # open www/m7.html in a real Chrome and print what it reported
+bench/m7-win/drive.py --live      # ...or just the desktop, left open to type into
+bench/kernel-churn/probe.py --drop  # the program fetch, dropped at the transport (constraint 212)
+node bench/m6-realm/probe.mjs      # M6's lockdown under node, including its refusal path
 bench/m6-realm/controls.py          # and three mutations of it, scored on which checks move
 bench/m6-realm/csp-probe.py         # WHERE a policy must be delivered, measured not assumed
 scripts/serve.py --no-csp           # omit the process realm's policy, to prove a check fails

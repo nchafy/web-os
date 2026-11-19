@@ -47,19 +47,26 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
  *   PROOF 4  the not-responding detector, both edges
  *
  * CONTROL ?pty_detach=1 — a write to the pty master accepts its bytes and DISCARDS them. Every
- * other link keeps working: the key event reaches the widget, the widget reaches /dev/console, the
- * device wakes the relay, the relay writes the master and is told it succeeded. Only the pty stops
- * being the pty, so the echo stops and PROOF 1 must go red while PROOF 3 (geometry) and the
- * "window delivered the keystroke to the kernel" clause must HOLD. `MILESTONES.md` M4a: "Detach
- * the pty; the keystroke must not appear."
+ * other link keeps working: the key event reaches the widget, the widget reaches the window's
+ * event queue, the queue wakes the relay, the relay writes the master and is told it succeeded.
+ * Only the pty stops being the pty, so the echo stops and PROOF 1 must go red while PROOF 3
+ * (geometry) and the "window delivered the keystroke to the kernel" clause must HOLD.
+ * `MILESTONES.md` M4a: "Detach the pty; the keystroke must not appear."
  *
  * WHY THAT IS THE RIGHT CUT. A terminal widget that echoed locally would pass this milestone's
  * proof with no pty behind it at all. This control is the only thing in the suite that tells the
  * two apart, which is why `src/wm/terminal.mjs` carries the no-local-echo notice at the top.
+ *
+ * M7 MOVED THE SEAM AND ONE PROOF. `/dev/console` is gone: the relay calls `win_create` and the
+ * window it gets is its own, so this page no longer creates a window at all — `src/wm/winhost.mjs`
+ * builds a frame when the kernel says a process made one. The not-responding detector's proof went
+ * with the seam, to `www/m7.html`: its fixture here was a window with NO process reading it, and
+ * that state is no longer reachable. What stays is this milestone's own subject — a terminal in a
+ * real frame, echoing through a real pty, driven by real keys.
  */
 import { POLLIN, SIGINT, F_WIN, F_PTY_M } from '/src/abi.mjs'
 import { Win } from '/src/wm/window.mjs'
-import { Terminal } from '/src/wm/terminal.mjs'
+import { WinHost } from '/src/wm/winhost.mjs'
 
 const out = document.getElementById('log')
 const desktop = document.getElementById('desktop')
@@ -121,7 +128,7 @@ async function until (what, ms = 5000, step = 25) {
 }
 
 Object.assign(globalThis.M4A, { isolated: self.crossOriginIsolated === true })
-globalThis.M4A.proofs = { echo: null, parked: null, geometry: null, health: null }
+globalThis.M4A.proofs = { echo: null, parked: null, geometry: null }
 
 if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
   globalThis.M4A.state = 'aborted'
@@ -138,6 +145,11 @@ if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function'
 }
 
 class KernelFail extends Error {}
+
+/** Every `win-*` message that is an EVENT rather than a reply. `win-geom` and `win-state` are
+ *  replies and stay queueable. */
+const UNSOLICITED = new Set(
+  ['win-create', 'win-out', 'win-destroy', 'win-title', 'win-box', 'win-health', 'win-fed'])
 
 function kernelBoot (cfg) {
   const worker = new Worker('/src/kernel/kernel.mjs', { type: 'module', name: 'kernel' })
@@ -164,13 +176,13 @@ function kernelBoot (cfg) {
       say('kernel ' + m.t + ': ' + m.why)
     }
     if (m.t === 'io-note') globalThis.M4A.notes.push(m.why)
-    // THE UNSOLICITED KINDS. `console-out` is the screen, `console-health` is the caption, and
-    // `console-fed` is the kernel's receipt for one keystroke — none is a reply to anything, so
+    // THE UNSOLICITED KINDS. `win-out` is the screen, `win-health` is the caption, and
+    // `win-fed` is the kernel's receipt for one batch of events — none is a reply to anything, so
     // they are dispatched to listeners rather than queued for an `expect`. QUEUEING THEM WOULD
     // LEAK: a session's keystrokes and output arrive in the hundreds, and `pending` only ever
     // shrinks when something expects that exact kind.
     for (const fn of listeners) fn(m)
-    if (m.t === 'console-out' || m.t === 'console-health' || m.t === 'console-fed') return
+    if (UNSOLICITED.has(m.t)) return
     const cb = waiters.get(m.t)
     if (cb) { waiters.delete(m.t); cb(m); return }
     pending.push(m)
@@ -199,73 +211,61 @@ function kernelBoot (cfg) {
 }
 
 /**
- * Build one terminal session: a kernel, a console, a window, a terminal widget, and the relay.
+ * Build one terminal session: a kernel, a window host, and the relay — which creates its own
+ * window. THE PAGE NO LONGER MAKES THE WINDOW: `win_create` does, from inside the process that
+ * will read it, which is the whole of what M7 changed. `src/wm/winhost.mjs` builds the frame when
+ * the kernel says so.
  *
- * `startRelay: false` leaves the window attached with NOTHING holding `/dev/console`, which is
- * what PROOF 4 needs: keystrokes queue unread and the detector has something to detect.
+ * `startRelay: false` is gone with it. It left a window attached with NOTHING holding
+ * `/dev/console`, and that state cannot exist now: a window with no process is a window nobody
+ * created.
  */
-async function session (boot, { startRelay = true, title = 'Terminal' } = {}) {
+async function session (boot, { title = 'Terminal', ceiling = 120000 } = {}) {
   const k = kernelBoot(boot)
   await k.expect('up', 30000)
-  k.post({ t: 'console-attach' })
-  await k.expect('console-attached', 10000)
-  const health = []
-  const win = new Win({
-    title,
-    into: desktop,
-    onEndProcess: () => { win.el.dataset.endPressed = '1' },
-    onClose: () => { k.post({ t: 'console-detach' }); return true },
-  })
-  const term = new Terminal({
-    into: win.bodyEl,
-    onKeys: (bytes) => k.post({ t: 'console-in', bytes }),
-  })
-  /* THE KERNEL'S RECEIPT FOR EVERY KEYSTROKE, AND SOMETHING THAT READS IT. `console-fed` carries
-   * how many bytes the device TOOK of the bytes it was OFFERED, and it exists because a terminal
-   * that loses input silently is the one failure a user cannot diagnose — which it was, until this
-   * listener: the message was dispatched and nothing anywhere consumed it, so the counter was an
-   * unread receipt and the claim was untrue. Summed here and asserted by the echo proof. */
-  const fed = { offered: 0, took: 0, dropped: 0 }
-  k.on((m) => {
-    if (m.t === 'console-fed') {
-      fed.offered += m.offered
-      fed.took += m.took
-      // NOT `|| fed.dropped`: a reported zero is a fact and `0 || x` discards it, which is this
-      // codebase's recurring bug in miniature — an honest value collapsed into a default.
-      if (m.console) fed.dropped = m.console.dropped
-    }
-    if (m.t === 'console-out') term.write(new Uint8Array(m.bytes))
-    if (m.t === 'console-health') {
-      health.push({ level: m.level, staleMs: m.staleMs })
-      // THE KERNEL DECIDES AND THE WINDOW DISPLAYS. The page does not compute the condition: that
-      // is `src/kernel/console.mjs`'s job, because it is the side that can see the queue — and it
-      // is also the only side that knows whether anyone has opened the device yet, which is the
-      // difference between "(Starting…)" and "(Not Responding)".
-      win.setHealth(m.level, m.starting === true)
-    }
-  })
-  term.focus()
-  let pid = 0
-  if (startRelay) {
-    k.post({
-      t: 'spawn', count: 1, programUrl: RELAY,
-      cfg: { argv: ['term', '--ceiling', '120000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
-    })
-    const spawned = await k.expect('spawned', 20000)
-    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
-    await k.expect('ready', 20000)
-    pid = spawned.pids[0]
-    k.post({ t: 'go', go: { mode: 'park', pid } })
-  }
-  const consoleState = async () => {
-    k.post({ t: 'console-state' })
-    return (await k.expect('console-state', 5000)).console
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  const winState = async () => {
+    k.post({ t: 'win-state' })
+    return await k.expect('win-state', 5000)
   }
   const procState = async () => {
     k.post({ t: 'm4-state' })
     return await k.expect('m4-state', 5000)
   }
-  return { k, win, term, health, fed, pid, consoleState, procState }
+  k.post({
+    t: 'spawn', count: 1, programUrl: RELAY,
+    cfg: { argv: ['term', '--ceiling', String(ceiling), '--title', title], uid: 0, gid: 0 },
+    readyTimeoutMs: 20000,
+  })
+  const spawned = await k.expect('spawned', 20000)
+  if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+  await k.expect('ready', 20000)
+  const pid = spawned.pids[0]
+  k.post({ t: 'go', go: { mode: 'park', pid } })
+  // THE FRAME IS THE KERNEL'S DOING NOW, so it is waited for rather than constructed. A relay that
+  // never got as far as `win_create` is a session with no window, and this says so by timing out
+  // rather than by reporting a widget that was never wired to anything.
+  const framed = await until(() => host.frames.size >= 1, 20000)
+  if (framed < 0) {
+    const state = await procState().catch((e) => ({ why: String(e) }))
+    throw new Error('the relay created no window in 20 s: '
+      + JSON.stringify(((state && state.procs) || []).find((x) => x.pid === pid) || null))
+  }
+  const entry = [...host.frames.values()][0]
+  entry.term.focus()
+  /** This session's window as the kernel has it: the queue depth, the drops and the detector's
+   *  clock. A stopped terminal raises no error, so this is the only way to tell a working relay
+   *  from a wedged one. */
+  const windowRow = async () => {
+    const st = await winState()
+    return (st.windows || []).find((w) => w.id === entry.id) || null
+  }
+  return {
+    k, host, pid, winState, procState, windowRow,
+    win: entry.win, term: entry.term, winId: entry.id,
+    health: entry.health, fed: host.fed,
+  }
 }
 
 /* --------------------------------------------------------------------------------------------
@@ -278,7 +278,7 @@ async function pEcho (boot) {
   try {
     // The shell paints a prompt on the terminal before anything is typed. Through the whole chain:
     // sh writes the slave, the discipline queues it on the master, the relay reads the master and
-    // writes /dev/console, the kernel posts it, the widget renders it.
+    // writes the window fd, the kernel posts it, the widget renders it.
     const promptMs = await until(() => /\$ /.test(s.term.screen()), 20000)
     ev.sawPrompt = promptMs >= 0
     ev.promptMs = Math.round(promptMs)
@@ -367,13 +367,13 @@ async function pEcho (boot) {
     // THE HELD CLAUSE UNDER THE CONTROL: the window DID deliver the keystroke to the kernel. With
     // the pty detached the echo stops and this stays true, which is what makes the control specific
     // rather than "something broke".
-    const cs = await s.consoleState()
-    ev.console = cs
-    // DELIVERY IS THREE FACTS AND NOT ONE: the device counted the bytes, it took every byte it
-    // was offered, and it dropped none. A queue that overflowed would still satisfy the first.
+    const cs = await s.windowRow()
+    ev.window = cs
+    // DELIVERY IS THREE FACTS AND NOT ONE: the window queued the events, it took every one it was
+    // offered, and it dropped none. A queue that overflowed would still satisfy the first.
     ev.fed = { ...s.fed }
-    ev.windowDelivered = (cs.keyBytes || 0) >= ev.keyBytesOut && ev.keyBytesOut > 0
-      && s.fed.offered > 0 && s.fed.took === s.fed.offered && (cs.dropped || 0) === 0
+    ev.windowDelivered = !!cs && (cs.queued || 0) > 0 && ev.keyBytesOut > 0
+      && s.fed.offered > 0 && s.fed.queued === s.fed.offered && (cs.dropped || 0) === 0
 
     // CTRL-C AT A PROMPT, synthesised: the shell's own group is the terminal's foreground, so the
     // discipline raises SIGINT on the shell — which must survive it and prompt again. A program
@@ -395,9 +395,9 @@ async function pEcho (boot) {
         relayRow = (results.results || []).find((r) => r.pid === s.pid) || null
       } catch (e) {
         // A TIMEOUT CARRIES STATE. A stopped relay raises no error — a parked poll is legitimate —
-        // so the kernel's own park and console state is attached rather than left to be guessed.
+        // so the kernel's own park and window state is attached rather than left to be guessed.
         relayRow = { why: 'no result: ' + e.message, state: await s.procState(),
-          console: await s.consoleState() }
+          window: await s.windowRow() }
       }
     }
     ev.relay = relayRow
@@ -430,7 +430,16 @@ async function pEcho (boot) {
      * report "I am unable to type into the terminals": every proof killed its own kernel and left
      * its frame on the desktop. A dead terminal must not be indistinguishable from a working one,
      * which is constraint 40's rule applied to the thing itself rather than to a check of it. */
-    s.win.destroy()
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    /* REAP EVERY PROCESS BEFORE TERMINATING THE KERNEL. Terminating the kernel worker alone
+     * ORPHANS its process workers, which `src/kernel/kernel.mjs`'s `shutdown` case exists for and
+     * which `www/m4b.html` has always done. */
+    try {
+      s.k.post({ t: 'shutdown' })
+      await s.k.expect('shutdown', 5000)
+    } catch (e) {
+      globalThis.M4A.notes.push('shutdown did not acknowledge: ' + (e && e.message))
+    }
     s.k.worker.terminate()
   }
 }
@@ -547,94 +556,13 @@ function pGeometry () {
   }
 }
 
-/* --------------------------------------------------------------------------------------------
-   PROOF 4: the not-responding detector, BOTH EDGES.
-   -------------------------------------------------------------------------------------------- */
-
-async function pHealth (boot) {
-  /* A RELAY THAT OPENED THE DEVICE AND THEN DIED, which is the condition the detector is for.
-   *
-   * This used to attach a window with NO relay at all, and that fixture had to go: a device nobody
-   * has ever opened is STARTING, not wedged, and reporting it as "(Not Responding)" is the wrong
-   * diagnosis — it told a reader their booting terminal was broken (constraint 181). So the proof
-   * now builds a WORKING terminal, kills its emulator process with End Process, and only then
-   * types. `openedEver` stays set through the death, so the stale clock governs and the caption
-   * greys — about a terminal that genuinely is not coming back.
-   *
-   * It is the better fixture on its own terms too: it needs no test-only behaviour in a shipped
-   * program, and it exercises the kernel's own `end-process` path, which is the very button the
-   * second threshold reveals.
-   */
-  const s = await session(boot, { startRelay: true, title: 'Terminal' })
-  try {
-    // FIRST, A TERMINAL THAT WORKS. Without this the proof could pass against a window that was
-    // never wired up, which is the failure this whole milestone is about.
-    const promptMs = await until(() => /\$ /.test(s.term.screen()), 20000)
-    const beforeKill = await s.consoleState()
-
-    // NOW KILL THE EMULATOR, through the kernel's own End Process path: kill(-SIGKILL), reap,
-    // terminate the worker. The device's fds go with it, so `opens` returns to 0 while
-    // `openedEver` stays set — which is exactly a terminal whose emulator has died.
-    s.k.post({ t: 'end-process', pid: s.pid })
-    const released = await until(async () => {
-      const c = await s.consoleState()
-      return !!c && c.opens === 0
-    }, 8000, 150)
-
-    typeSynthetic(s.term, 'x')
-    const greyMs = await until(() => s.win.health >= 1, 6000)
-    const caption1 = s.win.headingEl.textContent
-    const endHiddenAtGrey = s.win.endBtn.hidden
-    const endMs = await until(() => s.win.health >= 2, 12000)
-    const caption2 = s.win.headingEl.textContent
-    const endShown = !s.win.endBtn.hidden
-    const stale = await s.consoleState()
-
-    /* THE CLEARING EDGE. A new relay opens the device, drains the queue, and the caption must come
-     * back. A threshold with no tested lower edge is a threshold that latches, and the latch would
-     * not be visible in any clause above. */
-    s.k.post({
-      t: 'spawn', count: 1, programUrl: RELAY,
-      cfg: { argv: ['term', '--ceiling', '20000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
-    })
-    const spawned = await s.k.expect('spawned', 20000)
-    await s.k.expect('ready', 20000)
-    s.k.post({ t: 'go', go: { mode: 'park', pid: spawned.pids[0] } })
-    const clearedMs = await until(() => s.win.health === 0, 15000)
-    const caption3 = s.win.headingEl.textContent
-
-    const clauses = {
-      'the terminal worked before it was killed': promptMs >= 0,
-      'killing the emulator released the device': released >= 0,
-      'the caption greys when keystrokes go uncollected':
-        greyMs >= 0 && / \(Not Responding\)$/.test(caption1),
-      'End Process appears only at the second threshold':
-        endHiddenAtGrey === true && endShown === true && endMs >= 0,
-      'and the caption clears when a new relay drains the queue':
-        clearedMs >= 0 && !/ \(Not Responding\)$/.test(caption3),
-    }
-    const failed = Object.keys(clauses).filter((k) => !clauses[k])
-    return {
-      ok: failed.length === 0,
-      evidence: {
-        clauses, failed,
-        promptMs: Math.round(promptMs),
-        greyMs: Math.round(greyMs), endMs: Math.round(endMs),
-        clearedMs: Math.round(clearedMs),
-        caption1, caption2, caption3, endHiddenAtGrey, endShown,
-        // The kernel's own numbers at the moment the second threshold fired, so the caption is not
-        // the only witness — and `openedEver` is what makes this a wedge rather than a boot.
-        staleMs: stale.staleMs, queued: stale.queued, level: stale.level,
-        openedEver: stale.openedEver, starting: stale.starting,
-        opensBeforeKill: beforeKill.opens, killedPid: s.pid,
-        transitions: s.health,
-      },
-    }
-  } finally {
-    s.win.destroy()
-    s.k.worker.terminate()
-  }
-}
+/* THE NOT-RESPONDING DETECTOR'S PROOF IS IN `www/m7.html` AND NOT HERE ANY MORE.
+   Its fixture was a window with NO PROCESS READING IT, built by this page before any process
+   existed. M7 makes that unreachable: a window is created by the process that will read it. The
+   honest subject is a process that HAS a window and has stopped collecting its events, which is
+   `bench/m7-win/wedge.mjs`, and it is M7's PROOF 5 — both edges, the same two thresholds, and the
+   kernel's own queue depth beside the caption. The detector itself has not moved: it is still
+   `src/kernel/wins.mjs`'s `sample()` on the heartbeat, and still constraint 163. */
 
 /* ---------------------------------------------------------------------------------------- */
 
@@ -665,23 +593,8 @@ async function liveOnly (boot) {
     globalThis.M4A.why = '/usr did not mount: ' + JSON.stringify(usr.why)
     return
   }
-  k.post({ t: 'console-attach' })
-  await k.expect('console-attached', 10000)
-  const health = []
-  const win = new Win({
-    title: 'Terminal',
-    into: desktop,
-    onEndProcess: () => { win.el.dataset.endPressed = '1' },
-    onClose: () => { k.post({ t: 'console-detach' }); return true },
-  })
-  const term = new Terminal({
-    into: win.bodyEl,
-    onKeys: (bytes) => k.post({ t: 'console-in', bytes }),
-  })
-  k.on((m) => {
-    if (m.t === 'console-out') term.write(new Uint8Array(m.bytes))
-    if (m.t === 'console-health') { health.push(m); win.setHealth(m.level, m.starting === true) }
-  })
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
   k.post({
     t: 'spawn', count: 1, programUrl: RELAY,
     cfg: { argv: ['term', '--ceiling', '3600000'], uid: 0, gid: 0 }, readyTimeoutMs: 20000,
@@ -696,29 +609,33 @@ async function liveOnly (boot) {
   await k.expect('ready', 20000)
   const pid = spawned.pids[0]
   k.post({ t: 'go', go: { mode: 'park', pid } })
-  say('relay spawned as pid ' + pid + '; waiting for the shell to paint a prompt…')
-  term.focus()
+  say('relay spawned as pid ' + pid + '; waiting for its window and a prompt…')
+  const framed = await until(() => host.frames.size >= 1, 20000)
+  const entry = [...host.frames.values()][0]
+  if (entry) entry.term.focus()
+  const term = entry ? entry.term : { screen: () => '' }
+  if (framed < 0) say('THE RELAY CREATED NO WINDOW in 20 s.')
 
   /* AND THEN WAIT FOR THE PROMPT, rather than declaring success on having spawned something.
    * A relay that is running and not reading looks exactly like a working one from the page's
    * side — the only difference visible from here is that nothing is ever painted. */
   const promptMs = await until(() => /\$ /.test(term.screen()), 20000)
-  globalThis.M4A.live = { k, win, term, health, pid }
+  globalThis.M4A.live = { k, host, term, pid }
   if (promptMs < 0) {
     k.post({ t: 'm4-state' })
     let state = null
     try { state = await k.expect('m4-state', 5000) } catch (e) { state = { why: String(e) } }
-    k.post({ t: 'console-state' })
-    let con = null
-    try { con = (await k.expect('console-state', 5000)).console } catch (e) { con = null }
+    k.post({ t: 'win-state' })
+    let wins = null
+    try { wins = (await k.expect('win-state', 5000)).windows } catch (e) { wins = null }
     const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
     say('NO PROMPT in 20 s. The relay is pid ' + pid + ', parked in ' +
       JSON.stringify(row && row.inflight) + ', holding fds ' +
       JSON.stringify((row && row.fds) || []) + '.')
-    say('the console device says ' + JSON.stringify(con))
+    say('the kernel\'s windows are ' + JSON.stringify(wins))
     globalThis.M4A.state = 'error'
     globalThis.M4A.why = 'the shell painted no prompt in 20 s'
-    globalThis.M4A.stuck = { relay: row, console: con, procs: (state && state.procs) || [] }
+    globalThis.M4A.stuck = { relay: row, windows: wins, procs: (state && state.procs) || [] }
     return
   }
   say('prompt in ' + Math.round(promptMs) + ' ms. Click the terminal and type: ' +
@@ -757,11 +674,6 @@ async function main () {
   if (P.geometry.evidence.failed.length) {
     say('  geometry FAILED: ' + P.geometry.evidence.failed.join('; '))
   }
-
-  P.health = await pHealth(boot)
-  say('health: a window with NO process reading it — grey at ' + P.health.evidence.greyMs +
-    ' ms, End Process at ' + P.health.evidence.endMs + ' ms, cleared ' +
-    P.health.evidence.clearedMs + ' ms after a relay drained the queue')
 
   const drivenBy = (P.echo && P.echo.evidence && P.echo.evidence.drivenBy) || 'page'
   globalThis.M4A.config = { ptyDetach: CFG.ptyDetach, drivenBy, SIGINT, POLLIN }

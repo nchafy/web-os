@@ -1850,3 +1850,78 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     program NAME, while every bench orchestrator uses argv[0] as a mode. The program detects the
     shape instead of taking a flag.
 
+
+## M7 — a window is a file description
+
+210. **THE "(STARTING…)" CAPTION IS UNREACHABLE AND IS DELETED.** M4a's detector had three states
+    because its window existed before any process had opened `/dev/console`, so a terminal still
+    coming up had to be told apart from one that had died (constraint 181). With `win_create` the
+    window is made BY the process that will read it and the fd exists from the window's first
+    instant, so there is no window waiting for a first opener. `openedEver`, `starting()` and the
+    third caption are gone, and `Win.setHealth` takes one argument. A caption nothing can produce
+    is dead code, and the two labels that asserted it went with it.
+211. **`/dev/console` IS GONE, AND SO IS THE CHARACTER-DEVICE MECHANISM UNDER IT.** It was the one
+    row `CHARDEVS` ever had — a name whose `open` produced a kernel object rather than bytes, and
+    the one thing on a read-only generated filesystem that could be opened for writing. With the
+    row removed the mechanism had no caller, so `SynthFS.chardevAt`, the `chardev` field on a
+    generated node, the `chardev` branch in `open(2)` and the kernel's `openChardev` are deleted
+    with it. **ENXIO is no longer reachable from `open`**: it answered "this name exists and its
+    device does not", and a window is not a name any more. `docs/DECISIONS.md` D25 recorded the
+    expiry when the special case was created; this is it.
+212. **A PROGRAM FETCH THAT FAILS AT THE TRANSPORT MUST BE RETRIED, AND IT WAS NOT — THE KERNEL
+    PANICKED.** `programText` bounded the fetch at 5 s and retried ONCE (constraint 155), but the
+    retry covered only `AbortController` firing. `fetch` reports every network-level failure as
+    `TypeError: Failed to fetch` with no status, and that was rethrown: it escaped `programText`
+    through `programImage` and `spawnBatch` to `self.onmessage`, which has no `try`/`catch`, so
+    the kernel reported `panic` and the page reported `timed out waiting for spawned`.
+
+    **Measured: three failures in six runs of `scripts/check.py --only m7 --prove-failure`, and
+    none in eight after the fix.** `www/m7.html` is where it surfaced because it boots five
+    kernels and takes ~75 ranged GETs plus four program fetches through one local server in 17 s.
+    The fix is four lines in the one place the retry already lived, split by CAUSE: an abort is
+    the deadline, a `TypeError` is the transport and is retried, and an HTTP status — which
+    `response.ok` raises as a plain `Error` — is never retried, because a 404 will be a 404 again.
+
+    **It is a check now, both ways.** `bench/kernel-churn/probe.py --drop` closes the first program
+    fetch before a single byte and serves the real program on the retry: every kernel must still
+    boot and spawn, AND at least one must report a non-zero `transport` retry, which is the only
+    direct evidence the retry did anything. With the four lines removed, 1 of 4 kernels stalls at
+    `spawned`. **The claim this corrects was written in that probe**: its note said a dropped
+    connection "would reject the fetch and `spawn` would already answer -ENOEXEC without any
+    deadline, so a control built on a reset would prove nothing". The spawn did not answer
+    -ENOEXEC; it took the kernel down.
+213. **A WINDOW'S EVENT QUEUE IS BOUNDED PER FD, THE NEWEST IS DROPPED, AND THE COUNT IS
+    PUBLISHED.** `WIN_EVENT_CAP` = 256 records = 4 KiB, the same order as the pty's input queue it
+    sits beside. This is M1's item (e) — a fixed budget with a defined overflow, charged against
+    the fd rather than the process — so a window nobody is reading does not starve the same
+    process's pipe. **The NEWEST is dropped and not the oldest**, deliberately: the oldest event is
+    the one whose age the not-responding detector is measuring, so dropping it would hide the wedge
+    the detector exists to report. `dropped` is in `/proc/<pid>/win/<winid>` whether or not it is
+    zero, for the reason `/dev/trace`'s counter is (constraint 72).
+214. **A PROOF'S EXIT CONDITION MUST NOT BE SATISFIABLE BY THE SYSTEM'S OWN SETUP, AND M7's FIRST
+    ONE WAS.** `bench/m7-win/poller.mjs` ran until every fd in its poll set had woken it once —
+    and the page reports each frame's geometry the instant it builds it, so both windows had a
+    `WEV_RESIZE` queued before anything was typed and all three fds were ready on the FIRST poll.
+    Measured: `wokeBy {0:1, 3:1}` with `keysSeen {}`, the program exiting before a key was pressed.
+    It now runs until each window has delivered a KEY and the pipe has delivered bytes or end of
+    input. **Two more of the same class, both found by `bench/m7-win/controls.py` rather than by
+    reading**: an overflow clause whose fixture pushed 256 identical events, so "the oldest came
+    out" held under a mutation that dropped the oldest; and a cascade clause that compared the
+    posted id list against the ids the same call returned, which is constraint 120's `None ==
+    None` in a new place. The mutation harness paid for itself three times on its first run.
+215. **THE FIRST WINDOW LANDED ON fd 0**, because `spawn` leaves fd 0 free and nothing held it —
+    constraint 94's defect reached through a different call. Measured: `fds: [0, 3]` for a process
+    whose first window was its stdin. `bench/m7-win/poller.mjs` opens `/dev/zero` first, as
+    `src/bin/term.mjs` already did. **And the pipe in the same poll set was `undefined`**, because
+    `pipe2` answers `{rfd, wfd}` and the program read `{read, write}`: `poll` reported POLLNVAL for
+    fd `undefined`, which is READY, so the pipe's clause passed on an fd that did not exist. Two
+    defects in one run, both invisible to a clause that only asked whether something was ready.
+216. **A WINDOW IS DESTROYED WHEN THE LAST DESCRIPTION ON IT CLOSES, and `win_destroy` on a parent
+    takes its children with it ACROSS PROCESSES.** Those are two halves of one rule: a window with
+    no fd is a frame with nothing behind it (constraint 179), and a dialog outliving the window it
+    belongs to is what M9 exists to prevent. The authority is deliberate and narrow — a child
+    accepts it by naming a parent, and it travels one way only, so a child's destruction never
+    reaches its parent. The destroyed window queues ONE last `WEV_DESTROYED` record before
+    refusing further reads, so the process that lost a window to another process's call learns why
+    rather than reading a bare errno; `bench/m7-win/controls.py --only notice-too-late` puts that
+    ordering back the wrong way round and six checks move.

@@ -246,23 +246,37 @@ registerKind(F_PTY_M, {
   },
 });
 
-/** F_WIN: a window as a file description — M4a's `/dev/console`. ONE kind, unlike the pipe and the
- *  pty: reading takes keystrokes and writing paints cells through one description. `null` from
- *  `readKeys` means PARKED, and an idle terminal is the normal state (constraint 88). */
+/** The window manager, injected at boot like the Store above it. */
+let WINS = null;
+
+export function installWins(mgr) {
+  WINS = mgr;
+}
+
+/** F_WIN: a window as a file description (M7, `src/kernel/wins.mjs`). ONE kind, unlike the pipe and
+ *  the pty: reading takes EVENT RECORDS and writing paints cells, through one description. `null`
+ *  from `readEvents` means PARKED, and an idle window is the normal state (constraint 88).
+ *
+ *  `close` DESTROYS the window and its children, because a window nothing holds a description on
+ *  is a frame on screen with nothing behind it — which is constraint 179's defect, reached by
+ *  omission rather than by a page bug. */
 registerKind(F_WIN, {
   read(d, p, dstOff, length, at) {
     if (at !== undefined) return -ESPIPE;
-    return d.console.readKeys(p, p.seq, p.bytes, dstOff, length);
+    return d.win.readEvents(p, p.seq, p.bytes, dstOff, length);
   },
   write(d, u8, offset, length, p, at) {
     if (at !== undefined) return -ESPIPE;
-    return d.console.writeCells(u8.subarray(offset, offset + length));
+    return d.win.writeCells(u8.subarray(offset, offset + length));
   },
   fsync() {
     return 0;
   },
   close(d) {
-    return d.console.close();
+    d.win.close();
+    // WINS is injected, not imported: files.mjs is imported by the kernel that owns the manager.
+    if (d.win.opens <= 0 && WINS) WINS.destroyTree(d.win.id);
+    return 0;
   },
 });
 

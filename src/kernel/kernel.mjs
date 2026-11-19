@@ -12,13 +12,15 @@ import {
   W_CLOSED, W_DONE, K_BOOT, K_UP, K_PANIC, HB_PERIOD_MS, SAB_BYTES, PROC_CAP, EINTR, EINVAL,
   ENOSYS, EIO, EAGAIN, EPERM, ESRCH, ECHILD, TEARDOWN_ERRNO, SIGKILL, SIGTERM, SIGINT, SIGHUP,
   SIGPIPE, SIGABRT, SIGQUIT, SIGILL, SIGSEGV,
-  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, F_WIN, ENODEV, ENXIO, MAX_INLINE, SPAWN_DUP2,
+  SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
   ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
-import { makeSink, installTruncateOverflow, installStore, KIND_OPS } from "./files.mjs";
 import {
-  buildCalls, installStall, PENDING, pollWake, pollForget, pollPending,
+  makeSink, installTruncateOverflow, installStore, installWins, KIND_OPS,
+} from "./files.mjs";
+import {
+  buildCalls, installStall, PENDING, pollWake, pollForget, pollPending, setPollFirstOnly,
 } from "./calls.mjs";
 import { Store, MOUNT_RW, MOUNT_RO, MOUNT_REFUSE, MOUNT_FRESH } from "./store.mjs";
 import { makeInlineIo } from "./io-inline.mjs";
@@ -34,8 +36,8 @@ import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
-  Console, installConsoleKernel, NOT_RESPONDING_MS, END_PROCESS_MS,
-} from "./console.mjs";
+  WinMgr, installWindowKernel, setCascade, NOT_RESPONDING_MS, END_PROCESS_MS,
+} from "./wins.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -68,10 +70,10 @@ const FATAL_DEFAULT = new Set([
 
 let trace = null;
 let mounts = null;
-/** M4a. THE one console, or null when the page has attached no window. NULL IS A STATE, NOT AN
- *  ABSENCE: `/dev/console` is a name in a mount table static at boot (constraint 78) and the window
- *  is not, so `open` with no window answers -ENXIO where a destroyed window answers -EHOSTGONE. */
-let console1 = null;
+/** M7. The window table. Built at boot and never null: a kernel with no windows is a kernel with
+ *  an empty table, which is a state `win_create` can change — unlike M4a's single console, which
+ *  the PAGE had to create before any process could open it. */
+let WINDOWS = null;
 /** The exec loader, and the kernel's OWN byte region, registered with the I/O worker under a
  *  NEGATIVE id so it can never collide with a process's. One buffer, locked around the reads that
  *  use it: two `SYS_spawn` calls are two `later()` bodies interleaving at every await. */
@@ -174,7 +176,8 @@ function reply(p, r0, r1 = 0, st = ST_RETURN, rlen = 0) {
 const POLL_K = { reply };
 
 /** Re-evaluate every parked `poll`, under the flag that governs re-evaluation. TWO CALLERS:
- *  `reply`, and M4a's console, whose keystrokes pass through no reply at all (constraint 160).
+ *  `reply`, and a window, whose events from the page pass through no reply at all
+ *  (constraint 160).
  *  TEARDOWN IS NOT A CALLER: its wake is deliberately UNGATED, so under `no-poll-wake` a peer
  *  parked over a dying process's pipe is still woken. */
 function pollWakeAll() {
@@ -433,6 +436,12 @@ let programFetches = 0;
 /** Program fetches abandoned on the deadline below, and the retries after them. A check asserts
  *  both are 0 in a healthy run, so the bound cannot quietly become the normal path. */
 let programFetchTimeouts = 0;
+/** TRANSPORT FAILURES, counted apart from deadlines because they have a different cause and a
+ *  different fix. Measured on this machine: `www/m7.html` boots five kernels and takes ~75 ranged
+ *  GETs plus four program fetches through one local server in 17 s, and about one run in three
+ *  lost ONE of those fetches to `TypeError: Failed to fetch` — a refused or reset connection, not
+ *  a timeout and not a 404. Constraint 210. */
+let programFetchTransport = 0;
 let programFetchRetries = 0;
 
 /** HOW LONG A PROGRAM FETCH MAY TAKE. `spawn` cannot answer until the program is loaded, so an
@@ -466,12 +475,29 @@ async function programText(url) {
       return text;
     } catch (error) {
       clearTimeout(timer);
-      // An abort is this deadline firing; anything else is the server or the URL, and a 404 is not
-      // worth retrying.
+      /* TWO RETRYABLE FAILURES AND ONE THAT IS NOT, and the split is by CAUSE rather than by
+       * convenience:
+       *
+       *   an abort           this deadline firing. Retried, as it always was.
+       *   a TypeError        the TRANSPORT failed — a refused or reset connection. `fetch` reports
+       *                      every network-level failure as `TypeError: Failed to fetch`, with no
+       *                      status, and it is the class one retry actually fixes. It was NOT
+       *                      retried, and a page that boots five kernels in seventeen seconds hit
+       *                      it about one run in three: the kernel PANICKED and the page reported
+       *                      `timed out waiting for spawned` with nothing naming the cause
+       *                      (constraint 212).
+       *   anything else      an HTTP status, which `response.ok` above raises as a plain Error. A
+       *                      404 is not worth retrying and never was.
+       */
       if (control.signal.aborted) {
         programFetchTimeouts += 1;
         last = new Error(
           `program fetch for ${url} did not complete within ${PROGRAM_FETCH_MS} ms`);
+        continue;
+      }
+      if (error instanceof TypeError) {
+        programFetchTransport += 1;
+        last = new Error(`program fetch for ${url} failed at the transport: ${error.message}`);
         continue;
       }
       throw error;
@@ -614,6 +640,11 @@ async function spawnBatch(m) {
     t: "spawned", pids, refused, cap: PROC_CAP, live: table.live.size,
     program: {
       url: image.url, bytes: image.bytes, resolved: image.resolved, fetches: programFetches,
+      // THE RETRIES TRAVEL WITH THE ANSWER, so a spawn that SUCCEEDED can still show what it
+      // took: `bench/kernel-churn/probe.py --drop` asserts a non-zero `transport` here, which is
+      // the only direct evidence that the retry in `programText` did anything (constraint 212).
+      retries: programFetchRetries, timeouts: programFetchTimeouts,
+      transport: programFetchTransport,
     },
     why: refused ? capRefusedWhy(refusedAt, refused, pids.length) : "",
   });
@@ -788,46 +819,25 @@ function tick() {
   hbTick += 1;
   // No notify: processes only ever READ the heartbeat, so there is nobody to wake.
   Atomics.store(g, G_HEARTBEAT, ++hb);
-  // M4a's not-responding detector rides this timer rather than keeping its own.
-  consoleSample();
+  // The not-responding detector rides this timer rather than keeping its own.
+  windowSample();
 }
 
-/** `open("/dev/console")` reached a character device. ENXIO is for a name with no device (see
- *  `console1`); ENODEV is for a name this kernel has no driver for. Refused rather than assumed: a
- *  row added to devfs.mjs's CHARDEVS without one here would fault the kernel on the first read. */
-function openChardev(name, flags) {
-  if (name !== "console") return -ENODEV;
-  if (!console1) return -ENXIO;
-  console1.opens += 1;
-  // The first open is what makes "not responding" meaningful. See `Console.openedEver`.
-  console1.openedEver = true;
-  return { kind: F_WIN, refs: 1, flags, console: console1, inflight: 0 };
-}
-
-/** Attach a window. A second attach REPLACES the device, so the old one's parked readers are
- *  answered -EHOSTGONE rather than left waiting on a window that is gone. */
-function consoleAttach() {
-  if (console1) console1.detach();
-  console1 = new Console();
-  /* THE HEALTH LEVEL IS POSTED UNCONDITIONALLY, exactly once, here. `Console.sample` is
-   * EDGE-TRIGGERED and a fresh device starts at level 0, so without this the page's caption would
-   * stay "(Not Responding)" over a brand-new device. */
-  post({
-    t: "console-health", level: 0, staleMs: 0, queued: 0, starting: true,
-    notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
-  });
-  return console1.report();
-}
-
-function consoleSample() {
-  if (!console1) return;
-  const level = console1.sample();
-  if (level < 0) return;
-  post({
-    t: "console-health", level, staleMs: Math.round(console1.staleMs()),
-    queued: console1.keys.length, starting: console1.starting(),
-    notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
-  });
+/**
+ * The per-heartbeat health sweep, EDGE-TRIGGERED and over the windows whose level moved only: a
+ * message per window per tick is the O(N) fan-out constraint 18 forbids.
+ *
+ * The thresholds travel with every post rather than being pasted into the page, so the caption and
+ * the detector cannot disagree about when 1,000 ms has passed.
+ */
+function windowSample() {
+  if (!WINDOWS) return;
+  for (const change of WINDOWS.sample()) {
+    post({
+      t: "win-health", ...change,
+      notRespondingMs: NOT_RESPONDING_MS, endProcessMs: END_PROCESS_MS,
+    });
+  }
 }
 
 /** The complementary path to the heartbeat, and O(live) ONCE — constraint 18 forbids a per-frame
@@ -909,7 +919,7 @@ function kstats() {
     serviceMeanUs: kCalls ? (kServiceMs * 1000) / kCalls : 0,
     notifyWoke, notify0, lateReply, dropped, badCallId, asyncFail, intr: intrCount,
     // Both 0 in a healthy run; a non-zero timeout means `spawn` was about to hang.
-    programFetches, programFetchTimeouts, programFetchRetries,
+    programFetches, programFetchTimeouts, programFetchTransport, programFetchRetries,
     // Published so the double-reply class stays assertable: a check can require this to equal the
     // number of signals that reached a calling process. See `finish`.
     answeredDuringCall,
@@ -1371,6 +1381,9 @@ async function handle(m) {
         const procFs = makeProcFS({
           table: () => table,
           mounts: () => mounts,
+          // A getter, called per read: `/proc` is regenerated per read and never caches, and the
+          // window table it reports is the live one.
+          wins: () => WINDOWS,
           // M3's first negative control. False in every real boot.
           cache: cfg.procCache === true,
         });
@@ -1467,9 +1480,10 @@ async function handle(m) {
         // after this object is built. One flag governs BOTH places re-evaluation happens, because
         // removing only the wake leaves the timeout answering correctly 5 seconds late.
         get pollReevaluates() { return pollWakeEnabled; },
-        // `open` resolved a path to a CHARACTER DEVICE and needs the object behind the name. Here
-        // and not in `calls.mjs` because the console is attached by a page message, not a syscall.
-        chardev: openChardev,
+        // M7's window table, and the one post the window calls make: `win_create` and `win_set`
+        // tell the page to build or change a frame. A getter for the reason the mount table is one.
+        get wins() { return WINDOWS; },
+        post,
       });
       // EVERY CONTROL HOOK BELOW IS GATED ON bench=1: a control requiring a hand edit is a control
       // nobody re-runs, and a hook a later change could leave armed is worse than either.
@@ -1481,17 +1495,20 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("truncateOverflow requires bench=1");
         installTruncateOverflow();
       }
-      // The kernel operations a pipe, a pty and the console perform on a process, injected rather
+      // The kernel operations a pipe, a pty and a window perform on a process, injected rather
       // than imported: this file imports all three, so the reverse would be a cycle.
       installPipeKernel({ reply, raise: raiseOne });
       installPtyKernel({ reply, signalGroup });
-      // The console needs a wake nothing else will give: a keystroke passes through no reply.
-      installConsoleKernel({
+      // A window needs a wake nothing else will give: an event from the page passes through no
+      // reply (constraint 160).
+      installWindowKernel({
         reply,
         post,
         now,
         pollWake: () => pollWakeAll(),
       });
+      WINDOWS = new WinMgr();
+      installWins(WINDOWS);
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
       // `noIsig` clears ISIG on every new pty, so Ctrl-C arrives as data. `noPollWake` stops
@@ -1508,6 +1525,17 @@ async function handle(m) {
       if (cfg.noWinch) {
         if (cfg.bench !== 1) throw new Error("noWinch requires bench=1");
         setPtyWinch(false);
+      }
+      /* M7's two controls. `winFirstFd` evaluates only the FIRST fd of a poll set, which is
+       * `PLAN.md` §5's control for M7 in its own words — "wake only on the first fd in the set;
+       * the two-window case must hang". `noCascade` destroys a parent without its children. */
+      if (cfg.winFirstFd) {
+        if (cfg.bench !== 1) throw new Error("winFirstFd requires bench=1");
+        setPollFirstOnly(true);
+      }
+      if (cfg.noCascade) {
+        if (cfg.bench !== 1) throw new Error("noCascade requires bench=1");
+        setCascade(false);
       }
       // `ptyDetach` makes a master write accept its bytes and discard them, so only the pty stops.
       if (cfg.ptyDetach) {
@@ -1633,28 +1661,47 @@ async function handle(m) {
     case "m3-state":
       post({ t: "m3-state", m3: m3State() });
       return;
-    // M4a: the window, the page's half of /dev/console. THESE FOUR ARE SERVED FROM THE PAGE'S PORT
-    // AND FROM NOWHERE ELSE — a process's messages arrive on its own MessagePort and go to
-    // `onProcessMessage` — so a process cannot forge a keystroke or detach a window.
-    case "console-attach":
-      post({ t: "console-attached", console: consoleAttach() });
-      return;
-    case "console-in": {
-      if (!console1) { post({ t: "error", why: "console-in with no window attached" }); return; }
-      const bytes = m.bytes instanceof Uint8Array ? m.bytes : new Uint8Array(m.bytes || 0);
-      const took = console1.feed(bytes);
-      // `took` is how the page learns a keystroke was DROPPED: silent input loss cannot be
-      // diagnosed by a user.
-      post({ t: "console-fed", offered: bytes.length, took, console: console1.report() });
+    /* M7: the page's half of every window. THESE FOUR ARE SERVED FROM THE PAGE'S PORT AND FROM
+     * NOWHERE ELSE — a process's messages arrive on its own MessagePort and go to
+     * `onProcessMessage` — so a process cannot forge a keystroke into another process's window or
+     * destroy a frame it does not hold.
+     *
+     * There is no `win-attach`: a window is created BY A PROCESS, through `win_create`, which is
+     * the whole of what M7 changed. The page builds a frame when the kernel tells it to. */
+    case "win-in": {
+      // One message may carry several events: a paste is many keys, and a post per event would
+      // cost a structured clone each.
+      const evs = Array.isArray(m.evs) ? m.evs : [];
+      let queued = 0;
+      for (const ev of evs) if (WINDOWS.feed(m.win | 0, ev)) queued += 1;
+      const fedWin = WINDOWS.get(m.win | 0);
+      // `queued` against `offered` is how the page learns an event was DROPPED: silent input loss
+      // cannot be diagnosed by a user (constraint 160's lesson, kept).
+      post({
+        t: "win-fed", win: m.win | 0, offered: evs.length, queued,
+        window: fedWin ? fedWin.report() : null,
+      });
       return;
     }
-    case "console-detach":
-      // Every parked reader is answered -EHOSTGONE: it will never make another call.
-      if (!console1) { post({ t: "console-detached", answered: 0 }); return; }
-      post({ t: "console-detached", answered: console1.detach(), console: console1.report() });
+    case "win-geom": {
+      const geomWin = WINDOWS.get(m.win | 0);
+      if (!geomWin) { post({ t: "error", why: `win-geom for unknown window ${m.win}` }); return; }
+      geomWin.setBox(m);
+      post({ t: "win-geom", win: geomWin.id, window: geomWin.report() });
       return;
-    case "console-state":
-      post({ t: "console-state", console: console1 ? console1.report() : null });
+    }
+    case "win-gone":
+      // The frame is gone — the user closed it, or the page tore it down. Same cascade as
+      // `win_destroy`, because a child whose parent's frame went has no frame either.
+      post({ t: "win-destroy", ids: WINDOWS.detach(m.win | 0), why: "page" });
+      return;
+    case "win-state":
+      post({
+        t: "win-state",
+        windows: WINDOWS.live().map((w) => w.report()),
+        all: [...WINDOWS.byId.values()].map((w) => w.report()),
+        wins: WINDOWS.report(),
+      });
       return;
     case "trace-read":
       // The trace as TEXT, through the same renderer and limit `/dev/trace` uses, so the page and

@@ -20,6 +20,8 @@ import {
   SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid, SYS_setsid,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
+  SYS_win_create, SYS_win_destroy, SYS_win_set,
+  WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, decodeWinEvents,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
   SYS_getpgid, SYS_getppid, SYS_exit, SYS_clock_nanosleep, SYS_chdir, encodeSpawnRequest,
@@ -599,6 +601,57 @@ export function poll(fds, timeoutMs = -1) {
       revents: out.getUint16(i * POLLFD_BYTES + PFD_REVENTS, true),
     })),
   };
+}
+
+/* M7's window calls. A WINDOW IS A FILE DESCRIPTION: there is no `win_read` and no `win_poll`,
+   because `read` and `poll` already work on the fd `winCreate` returns. */
+
+/** win_create({title, w, h, owner, x, y}) -> {fd, win}, or a negative errno. TWO RETURNS: the fd
+ *  is what this process waits on, and the winid is what ANOTHER process names to parent a window
+ *  onto this one (`owner`). */
+export function winCreate(spec = {}) {
+  const bytes = PATH_ENC.encode(String(spec.title || ""));
+  const r = syscall(
+    SYS_win_create, spec.w | 0, spec.h | 0, spec.owner | 0, 0, spec.x | 0, spec.y | 0, 0, 0,
+    bytes, 0, bytes.length,
+  );
+  if (r < 0) return r;
+  return { fd: r, win: r1of() };
+}
+
+/** win_destroy(fd) -> the winids destroyed, oldest ancestor first, or a negative errno. THE LIST
+ *  IS THE RETURN VALUE: destroying a parent destroys its children, so a caller that assumed one id
+ *  would keep fds for windows the kernel has forgotten. The fd is closed by the kernel. */
+export function winDestroy(fd) {
+  const n = syscall(SYS_win_destroy, fd);
+  if (n < 0) return n;
+  const dv = new DataView(u8.buffer, DATA_OFF, n * 4);
+  const ids = [];
+  for (let i = 0; i < n; i += 1) ids.push(dv.getUint32(i * 4, true));
+  return ids;
+}
+
+export function winSetTitle(fd, title) {
+  const bytes = PATH_ENC.encode(String(title));
+  return syscall(SYS_win_set, fd, WIN_SET_TITLE, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+/** Ask the page to move or resize. REQUESTED, not applied: the page owns the clamp, and the box it
+ *  settled on arrives back as a WEV_RESIZE event and in `/proc/<pid>/win/<winid>`. */
+export function winSetBox(fd, box) {
+  return syscall(SYS_win_set, fd, WIN_SET_BOX, box.x | 0, box.y | 0, box.w | 0, box.h | 0);
+}
+
+/** Read whole window events: `read(2)` with the record decoding attached, so no program writes the
+ *  offsets out again. A buffer under one record is -EINVAL from the kernel, never a short read. */
+export function winRead(fd, max = 32) {
+  const want = Math.min(max * WEV_BYTES, MAX_INLINE - (MAX_INLINE % WEV_BYTES));
+  const n = syscall(SYS_read, fd, want);
+  if (n <= 0) return n;
+  // A COPY out of the byte region before decoding: the region is reused by the next syscall, so a
+  // decoded record must not be a view onto it.
+  const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n));
+  return decodeWinEvents(bytes, n);
 }
 
 export function statfs() {

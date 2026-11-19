@@ -16,6 +16,7 @@ import {
   pipe2, spawn, waitpid, kill, sigaction, setpgid, setsid, getpgid, getppid, exit,
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
+  winCreate, winDestroy, winSetTitle, winSetBox, winRead,
 } from "./syscall.mjs";
 /** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
  *  A module no process had already imported would be fetched once PER SPAWNED PROCESS — the herd
@@ -47,6 +48,14 @@ const TTY = Object.freeze({
   winsizeGet: ttyWinsizeGet, winsizeSet: ttyWinsizeSet,
   getPgrp: tcGetPgrp, setPgrp: tcSetPgrp,
   poll,
+});
+
+/** M7's window calls, on `env.win`. `read` is here as well as on `env.fs` because a window read
+ *  returns RECORDS: the same syscall, with the one decoder (`src/abi.mjs`) attached. */
+const WIN = Object.freeze({
+  create: winCreate, destroy: winDestroy,
+  setTitle: winSetTitle, setBox: winSetBox,
+  read: winRead,
 });
 
 /** M5's two libraries. A module namespace object is non-writable per property but NOT frozen, so a
@@ -201,6 +210,7 @@ async function onCommand(m) {
       fs: FS,
       proc: PROC,
       tty: TTY,
+      win: WIN,
       // Frozen: these are MODULE objects shared by every program this worker runs.
       std: STD,
       shlex: SHLEX,

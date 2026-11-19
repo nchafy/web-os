@@ -34,8 +34,6 @@ function node(raw) {
     content: raw.content,
     target: raw.target,
     size: raw.size,
-    // The kernel object `open` resolves to instead of bytes; devfs.mjs CHARDEVS is its only source.
-    chardev: raw.chardev,
     // Content changes between one read and the next. See `#info`.
     volatile: raw.volatile === true,
   };
@@ -57,29 +55,18 @@ function contentLength(content) {
  * "/", so a generator cannot depend on where it was mounted.
  */
 export class SynthFS {
-  /** `mutErrno` is the code every mutation is refused with; `chardevs` are single-component names
-   *  that resolve to a kernel object. */
-  constructor({ name, lookup, list, mutErrno = "EROFS", chardevs = [] }) {
+  /** `mutErrno` is the code every mutation is refused with. */
+  constructor({ name, lookup, list, mutErrno = "EROFS" }) {
     this.name = name;
     this.dev = 0;
     this.#lookup = lookup;
     this.#list = list;
     this.#mutErrno = mutErrno;
-    this.#chardevs = new Set(chardevs);
   }
 
   #lookup;
   #list;
   #mutErrno;
-  #chardevs;
-
-  /** A SET LOOKUP AND NEVER A GENERATOR CALL: `open` asks this on every open of every generated
-   *  mount, and `/dev/trace`'s generator renders the whole trace. */
-  chardevAt(rel) {
-    if (this.#chardevs.size === 0) return null;
-    const parts = splitPath(rel);
-    return parts.length === 1 && this.#chardevs.has(parts[0]) ? parts[0] : null;
-  }
 
   setDev(dev) {
     this.dev = dev | 0;
@@ -178,30 +165,16 @@ export class SynthFS {
    * reading `/proc/<pid>/status` in two `read()` calls cannot see two different moments.
    */
   openDecision(cred, rel, opts = {}) {
-    // A CHARACTER DEVICE IS THE ONE THING HERE THAT MAY BE OPENED FOR WRITING; `/dev/console`
-    // opened O_RDWR is its normal case. `create` is refused even for a device: a mount with no
-    // `mknod` must not claim to have made one.
+    // EVERY GENERATED FILE IS READ-ONLY, and the refusal stays AHEAD OF THE LOOKUP:
+    // `open("/proc/nope", O_WRONLY)` is EROFS before it and ENOENT after, and
+    // `bench/m3-synth/probe.mjs` holds the former so a reorder is not silent.
     //
-    // The refusal stays AHEAD OF THE LOOKUP: `open("/proc/nope", O_WRONLY)` is EROFS before it and
-    // ENOENT after, and `bench/m3-synth/probe.mjs` holds the former so a reorder is not silent.
-    const device = this.chardevAt(rel);
-    if (opts.create || (opts.wantW && !device)) throw new FsError(this.#mutErrno, rel);
+    // M7 deleted the one exception. `/dev/console` was a CHARACTER DEVICE — a name that opened to a
+    // kernel object rather than to bytes, writable on a read-only mount — and it was the only row
+    // this mechanism ever had. A window is created by `win_create` now, so the mechanism had no
+    // caller and went with its row (constraint 211).
+    if (opts.create || opts.wantW) throw new FsError(this.#mutErrno, rel);
     const n = this.#need(rel);
-    if (n.chardev) {
-      if (opts.dirOk) throw new FsError("ENOTDIR", rel);
-      if (opts.wantX && (n.mode & 0o111) === 0) throw new FsError("EACCES", rel);
-      return {
-        chardev: n.chardev,
-        rel,
-        type: n.type,
-        ino: synthIno(this.dev, rel),
-        dev: this.dev,
-        info: this.#info(rel, n),
-      };
-    }
-    // THE SAME RULE `src/fs/vfs.mjs` APPLIES, so one answer to "can I open a directory" holds on
-    // every mount. Linux instead succeeds and answers EISDIR on the `read`; constraint 82 records
-    // the divergence.
     if (n.type === DIR && !opts.dirOk) throw new FsError("EISDIR", rel);
     if (opts.dirOk && n.type !== DIR) throw new FsError("ENOTDIR", rel);
     // ANY execute bit, not the one belonging to `cred`'s shift: these nodes are generated and

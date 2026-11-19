@@ -2,6 +2,7 @@
 // control is a cached listing, which must make a killed pid linger in `ls /proc`.
 
 import { DIR, FILE } from "../fs/vfs.mjs";
+import { WEV_BYTES } from "../abi.mjs";
 import { SynthFS, relParts } from "./synth.mjs";
 import { RUNNING, SPAWNING, ZOMBIE, DEAD } from "./table.mjs";
 
@@ -49,6 +50,44 @@ const PID_FILES = {
   cwd: (slot) => `${slot.cwd}\n`,
 };
 
+/**
+ * `/proc/<pid>/win/<winid>`: one window as facts. The DIRECTORY IS NAMED BY WINID AND NOT BY FD,
+ * which `PLAN.md` §5 specifies and which is the only choice that works: a window may be held on
+ * several fds through `dup`, and an owner in another process names the winid and has no fd for it
+ * at all. The fds that reach it are published as a field, so the mapping is still readable.
+ */
+function winLines(win, slot) {
+  const fds = [];
+  slot.fds.fds.forEach((d, i) => {
+    if (d && d.win === win) fds.push(i);
+  });
+  return [
+    `win:\t${win.id}`,
+    `pid:\t${win.pid}`,
+    `fds:\t${fds.join(",")}`,
+    `title:\t${win.title}`,
+    `owner:\t${win.owner}`,
+    `children:\t${win.children.join(",")}`,
+    `box:\t${win.box.x},${win.box.y},${win.box.w},${win.box.h}`,
+    `cells:\t${win.cols}x${win.rows}`,
+    `attached:\t${win.attached ? 1 : 0}`,
+    `destroyed:\t${win.destroyed ? 1 : 0}`,
+    `opens:\t${win.opens}`,
+    // The queue depth, its overflow and the detector's clock. A window that stopped being read
+    // raises no error — a parked reader is a legitimate state — so these three are the only way to
+    // tell a working window from a wedged one.
+    `pending:\t${win.events.length / WEV_BYTES}`,
+    `dropped:\t${win.stats.dropped}`,
+    `parked:\t${win.waitingReaders.length}`,
+    `level:\t${win.level}`,
+    `stalems:\t${Math.round(win.staleMs())}`,
+    `queued:\t${win.stats.queued}`,
+    `delivered:\t${win.stats.delivered}`,
+    `cellbytes:\t${win.stats.cellBytes}`,
+    "",
+  ].join("\n");
+}
+
 function countFds(slot) {
   let n = 0;
   for (const d of slot.fds.fds) if (d) n += 1;
@@ -67,6 +106,9 @@ function fdNumbers(slot) {
 /** A line of facts, not Linux's symlink: an fd on a pipe or a window has no path to point at. */
 function fdLine(d) {
   const parts = [`kind:\t${d.kind}`, `refs:\t${d.refs}`];
+  // THE ONE FIELD THAT JOINS THE TWO NAMESPACES: an fd on a window names its winid, so
+  // `/proc/<pid>/fd/4` and `/proc/<pid>/win/<winid>` can be read against each other.
+  if (d.win !== undefined) parts.push(`win:\t${d.win.id}`);
   if (d.ino !== undefined) parts.push(`ino:\t${d.ino}`);
   if (d.type !== undefined) parts.push(`type:\t${d.type}`);
   if (d.pos !== undefined) parts.push(`pos:\t${d.pos}`);
@@ -80,6 +122,21 @@ export function makeProcFS(ctx) {
   const slotOf = (pid) => {
     const t = ctx.table();
     return t ? t.get(pid) : undefined;
+  };
+
+  /** A window of this process, by winid. The pid check is what keeps `/proc/<a>/win/<n>` from
+   *  reading a window belonging to process <b>: the winid space is global, and a path that ignored
+   *  the pid would make every window readable under every process. */
+  const winOf = (id, pid) => {
+    const mgr = ctx.wins();
+    if (!mgr) return null;
+    const win = mgr.get(id);
+    return win && !win.destroyed && win.pid === pid ? win : null;
+  };
+
+  const winIds = (pid) => {
+    const mgr = ctx.wins();
+    return mgr ? mgr.ofPid(pid).map((w) => w.id) : [];
   };
 
   /** M3's FIRST NEGATIVE CONTROL, and the one deliberate cache here: `ctx.cache` is false in every
@@ -121,6 +178,21 @@ export function makeProcFS(ctx) {
 
     if (parts.length === 1) return { type: DIR };
 
+    // `/proc/<pid>/win` and `/proc/<pid>/win/<winid>`. A DESTROYED window is not listed and is not
+    // openable: its fd still answers -EHOSTGONE, which is the fd's business, and a directory entry
+    // for a window that is gone would be a window the page no longer has a frame for.
+    if (parts[1] === "win") {
+      if (parts.length === 2) return { type: DIR };
+      if (parts.length === 3) {
+        const id = pidOf(parts[2]);
+        if (id === null) return null;
+        const win = winOf(id, pid);
+        if (!win) return null;
+        return { type: FILE, content: winLines(win, slot), volatile: true };
+      }
+      return null;
+    }
+
     if (parts[1] === "fd") {
       if (parts.length === 2) return { type: DIR };
       if (parts.length === 3) {
@@ -146,8 +218,9 @@ export function makeProcFS(ctx) {
     if (pid === null) return null;
     const slot = slotOf(pid);
     if (!slot) return null;
-    if (parts.length === 1) return [...Object.keys(PID_FILES), "fd"];
+    if (parts.length === 1) return [...Object.keys(PID_FILES), "fd", "win"];
     if (parts.length === 2 && parts[1] === "fd") return fdNumbers(slot).map(String);
+    if (parts.length === 2 && parts[1] === "win") return winIds(pid).map(String);
     return null;
   };
 
