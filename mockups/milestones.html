@@ -314,7 +314,7 @@ $ check.py --only surface
   proof:'A process draws a known 4×4 pattern; screenshot and assert the pixels.',
   neg:'Draw nothing — the pattern assertion must fail.' },
 
- { id:'M9', grp:'Window half (A)', t:'Owner, modality, close-request', d:'3 d', tag:'option A',
+ { id:'M9', built:'/www/m9.html', builtWhat:'four proofs, then a desktop: `editor` will not close without asking', grp:'Window half (A)', t:'Owner, modality, close-request', d:'3 d', tag:'option A',
   lede:'Three missing concepts users notice instantly: a dialog that falls behind its own parent, and a close button that discards unsaved work because the app was never asked.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:28,y:24,w:390,h:250,title:'editor — notes.txt *',body:T(`
@@ -702,9 +702,9 @@ function show(i){
       <div><div class="card proof"><h3>Proof</h3>${m.proof}</div>
         <div class="card neg" style="margin-top:12px"><h3>Negative control</h3>${m.neg}</div></div>
     </div>
-    <p class="foot">Mockup, not a screenshot. <b>M0 to M8 are built</b> — those carry a BUILT
+    <p class="foot">Mockup, not a screenshot. <b>M0 to M9 are built</b> — those carry a BUILT
     line above with the page that proves them, and the page is what to believe; everything from
-    M9 on is still a drawing. Milestones, proofs and negative controls come from
+    M10 on is still a drawing. Milestones, proofs and negative controls come from
     <code>MILESTONES.md</code>; measured figures from <code>docs/research/gap-04.md</code> and
     <code>bench/feasibility/results.json</code>.
     Five of the first six milestones have no user interface at all, which is the honest reason

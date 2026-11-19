@@ -20,8 +20,8 @@ import {
   SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid, SYS_setsid,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
-  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
-  WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, decodeWinEvents,
+  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, SYS_win_raise,
+  WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, decodeWinEvents,
   DLOP_BYTES, DL_MAX_OPS, encodeDrawOp,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
@@ -641,6 +641,19 @@ export function winSetTitle(fd, title) {
  *  settled on arrives back as a WEV_RESIZE event and in `/proc/<pid>/win/<winid>`. */
 export function winSetBox(fd, box) {
   return syscall(SYS_win_set, fd, WIN_SET_BOX, box.x | 0, box.y | 0, box.w | 0, box.h | 0);
+}
+
+/** M9. The two axes of an owned window: `scope` is WHICH windows this one affects and `mode` is
+ *  WHAT happens to them. A window with no owner may only be system-modal or nothing, because both
+ *  of the other scopes are defined by walking the owner chain. */
+export function winSetModal(fd, scope, mode) {
+  return syscall(SYS_win_set, fd, WIN_SET_MODAL, scope | 0, mode | 0);
+}
+
+/** Raise this window to the top, with the windows that ride with it. -EPERM when a modal blocks
+ *  it: the kernel decides, and the refusal is a rule rather than a transient to retry. */
+export function winRaise(fd) {
+  return syscall(SYS_win_raise, fd);
 }
 
 /** Ask the kernel for a surface of `w` x `h` DEVICE PIXELS on this window, or get an errno. The

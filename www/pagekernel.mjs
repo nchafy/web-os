@@ -19,6 +19,9 @@
 export const UNSOLICITED = new Set([
   "win-create", "win-out", "win-destroy", "win-title", "win-box", "win-health", "win-fed",
   "win-geom", "win-surface", "win-draw",
+  // M9. The stack, the refusal and the modality change are all events: the kernel posts them when
+  // it decides, not when asked, so nothing ever `expect`s one.
+  "win-stack", "win-blocked", "win-modal",
 ]);
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

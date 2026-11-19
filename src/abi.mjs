@@ -144,7 +144,12 @@ const INTS = {
   // neither accounted nor revoked (constraint 219, `docs/DECISIONS.md` D31).
   SYS_win_surface: 51,
   SYS_win_draw: 52,
-  NSYS: 53,
+  // M9. RAISING IS THE KERNEL'S, because modality has to be ENFORCED and not drawn: a page that
+  // owned the stack could be asked to put a window above the modal that blocks it, and would.
+  // SerenityOS's server computes the blocker by walking the owner chain and suppresses input to
+  // the blocked windows; this is the same division (constraint 226).
+  SYS_win_raise: 53,
+  NSYS: 54,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -409,6 +414,42 @@ const INTS = {
   //: is "change a field of this window" and the kernel's answer is the same post to the page.
   WIN_SET_TITLE: 1,
   WIN_SET_BOX: 2,
+  //: M9. a2 = the SCOPE, a3 = the BEHAVIOUR. Two axes and not one, which is the correction
+  //: `MILESTONES.md`'s ordering note makes to M9's own plan: `modal ∈ {none,window,app,system}`
+  //: describes WHICH windows are affected, and SerenityOS's enforced `WindowMode` describes WHAT
+  //: happens to them. An owned window needs both (constraint 226).
+  WIN_SET_MODAL: 3,
+
+  /**
+   * THE SCOPE: which windows a modal window affects. Computed by walking the owner chain, so a
+   * window with no owner can be system-modal and nothing else.
+   */
+  WMODAL_NONE: 0,
+  //: Its OWNER only. A save dialog over the document it belongs to.
+  WMODAL_WINDOW: 1,
+  //: Every window of the owner's PROCESS. The owner's pid and not the dialog's: a picker broker's
+  //: dialog is owned by the requesting app's window and runs in the broker, and it is the APP that
+  //: must be blocked.
+  WMODAL_APP: 2,
+  //: Everything but itself and its own descendants. There is no second user, so this is the
+  //: honest spelling of "nothing else may be touched until this is answered".
+  WMODAL_SYSTEM: 3,
+  WMODAL_MAX: 3,
+
+  /**
+   * THE BEHAVIOUR, SerenityOS's four values, which is the axis M9's plan was missing.
+   * `docs/research/08-hobbyist-os-survey.md` carries the reference and the file it lives in.
+   */
+  //: Ordinary. Stacks and raises like anything else.
+  WMODE_MODELESS: 0,
+  //: Never takes the stack from its owner: a tooltip or a status bubble. It is raised WITH its
+  //: owner and never above a sibling.
+  WMODE_PASSIVE: 1,
+  //: Always above its owner and does not block it — a palette or a toolbox.
+  WMODE_RENDER_ABOVE: 2,
+  //: Above its owner AND the owner cannot be raised over it. The only mode that refuses a raise.
+  WMODE_BLOCKING: 3,
+  WMODE_MAX: 3,
 
   //: `win_create` flags. A window with no owner passes 0 for the owner winid, which is why winids
   //: start at 1.
@@ -484,7 +525,8 @@ export const {
   SYS_dup, SYS_dup2, SYS_pipe2,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl, SYS_chdir,
-  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, NSYS,
+  SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
+  SYS_win_raise, NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -520,7 +562,9 @@ export const {
   WEV_BYTES, WEV_TYPE, WEV_MODS, WEV_A, WEV_B, WEV_C,
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
   WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
-  WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_F_NONE, WIN_CAP,
+  WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_F_NONE, WIN_CAP,
+  WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
+  WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_MAX,
@@ -585,7 +629,7 @@ export const SYS_NAME = Object.freeze([
   "dup", "dup2", "pipe2",
   "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
   "chdir",
-  "win_create", "win_destroy", "win_set", "win_surface", "win_draw",
+  "win_create", "win_destroy", "win_set", "win_surface", "win_draw", "win_raise",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -1446,6 +1490,26 @@ export function selfTest() {
     }
   }
   if (SURFACE_MAX_PX > SURFACE_BUDGET_PX) fail("one surface may exceed the whole budget");
+
+  // M9's two axes. DENSE AND DISTINCT, each from 0, because they are read out of the same call's
+  // arguments and a gap would make an unset argument mean something.
+  const scopes = [WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM];
+  const modes = [WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING];
+  for (const [name, set, max] of [["modal scope", scopes, WMODAL_MAX],
+    ["window mode", modes, WMODE_MAX]]) {
+    if (new Set(set).size !== set.length) fail(`two ${name} values collide`);
+    if (Math.min(...set) !== 0) fail(`${name} does not start at 0`);
+    if (Math.max(...set) !== max) fail(`${name}'s MAX is not its largest value`);
+    if (set.length !== max + 1) fail(`${name} is not dense over 0..${max}`);
+  }
+  // THE TWO AXES ARE INDEPENDENT, and the selector numbering must not imply otherwise: NONE and
+  // MODELESS are both 0, so a window nobody set up is modeless and affects nothing.
+  if (WMODAL_NONE !== 0 || WMODE_MODELESS !== 0) {
+    fail("the quiet value of each axis must be 0, so an unset window is ordinary");
+  }
+  if (WIN_SET_MODAL === WIN_SET_TITLE || WIN_SET_MODAL === WIN_SET_BOX) {
+    fail("two win_set selectors collide");
+  }
 
   const wmods = [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT];
   if (new Set(wmods).size !== 3) fail("two window modifier bits collide");

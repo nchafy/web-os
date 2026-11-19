@@ -65,7 +65,14 @@ export class WinHost {
     this.stats = { creates: 0, destroys: 0, keys: 0, cells: 0, geoms: 0, closes: 0, focus: 0,
       dropped: 0, unknown: 0,
       // M8: surfaces created, batches replayed, ops in them, and pointer events sent back.
-      surfaces: 0, batches: 0, ops: 0, pointers: 0 };
+      surfaces: 0, batches: 0, ops: 0, pointers: 0,
+      // M9: stacks applied, raises asked for, and raises the kernel refused.
+      stacks: 0, raiseAsks: 0, blocked: 0 };
+    /** The last stack the kernel sent, bottom first, and the last refusal it reported. A check
+     *  reads these rather than the DOM's own order, because the kernel's order is the authority
+     *  and the DOM is only what this file did with it. */
+    this.order = [];
+    this.lastBlocked = null;
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -85,6 +92,9 @@ export class WinHost {
     if (m.t === "win-health") { this.#health(m); return true; }
     if (m.t === "win-surface") { this.#surface(m); return true; }
     if (m.t === "win-draw") { this.#draw(m); return true; }
+    if (m.t === "win-stack") { this.#stack(m); return true; }
+    if (m.t === "win-blocked") { this.#blocked(m); return true; }
+    if (m.t === "win-modal") { this.#modal(m); return true; }
     if (m.t === "win-fed") {
       this.fed.offered += m.offered | 0;
       this.fed.queued += m.queued | 0;
@@ -113,18 +123,26 @@ export class WinHost {
       title: m.title || `window ${id}`,
       into: this.into,
       x: m.x, y: m.y, w: m.w, h: m.h,
-      /* THE X BUTTON TELLS THE KERNEL AND THE KERNEL TAKES THE FRAME DOWN. Returning false keeps
-       * the frame until `win-destroy` arrives, so the window's own process sees WEV_CLOSE first and
-       * the DOM is never ahead of the kernel. M9 is what lets that process refuse. */
+      /* THE X BUTTON ASKS AND DOES NOT ACT, which is M9 and constraint 44: "a close MUST be a
+       * request the owner can refuse... without a close-request event, unsaved work is discarded
+       * silently". It posts WEV_CLOSE and NOTHING ELSE — no `win-gone` — so the frame stays until
+       * the window's own process calls `win_destroy`.
+       *
+       * A PROCESS THAT IGNORES IT IS NOT A TRAP, and that falls out of M7 rather than needing
+       * anything new: the close event sits uncollected, the not-responding detector's clock starts,
+       * the caption greys at 1,000 ms and End Process appears at 5,000 ms. The user's escape hatch
+       * is the one that was already there. */
       onClose: () => {
         this.stats.closes += 1;
         this.post({ t: "win-in", win: id, evs: [{ type: WEV_CLOSE }] });
-        this.post({ t: "win-gone", win: id });
         return false;
       },
+      /* AND THAT ESCAPE HATCH KILLS THE PROCESS, not the frame. Removing the frame would leave the
+       * process running with a window it still thinks it has; the kernel's own end-process path
+       * reaps it, teardown closes its fds, and the window goes with them (constraint 14). */
       onEndProcess: () => {
         win.el.dataset.endPressed = "1";
-        this.post({ t: "win-gone", win: id });
+        this.post({ t: "end-process", pid: entry.pid });
       },
     });
     const term = new Terminal({
@@ -145,6 +163,14 @@ export class WinHost {
     // Focus follows creation, which is what a user expects of a window that just opened and is what
     // lets a check type into the newest one without hunting for it.
     term.focus();
+    /* A CLICK ANYWHERE IN THE FRAME ASKS THE KERNEL TO RAISE IT, and the kernel decides — it is the
+     * only side that knows whether a modal blocks it (constraint 226). `pointerdown` in the
+     * CAPTURE phase, so a click on the close box or inside a surface asks too: a user who clicks a
+     * buried window expects it to come up whatever they hit. */
+    win.el.addEventListener("pointerdown", () => {
+      this.stats.raiseAsks += 1;
+      this.post({ t: "win-raise", win: id });
+    }, true);
     // Drag and arrow-key moves both end in `apply()`, so one listener per frame covers both.
     win.el.addEventListener("pointerup", () => this.#report(entry));
     win.barEl.addEventListener("keyup", () => this.#report(entry));
@@ -366,6 +392,54 @@ export class WinHost {
     return out;
   }
 
+
+  /**
+   * THE KERNEL'S ORDER, APPLIED. `z-index` from the position in the list, so the DOM's own
+   * insertion order stops mattering — and the page never decides what is on top, because only the
+   * kernel knows what a modal is blocking.
+   */
+  #stack(m) {
+    const ids = Array.isArray(m.ids) ? m.ids : [];
+    this.order = [...ids];
+    this.stats.stacks += 1;
+    ids.forEach((id, at) => {
+      const entry = this.get(id);
+      if (!entry) return;
+      // From 1, so a frame the kernel does not know about (there should be none) is visibly
+      // behind every frame it does.
+      entry.win.el.style.zIndex = String(at + 1);
+      entry.win.el.dataset.depth = String(at);
+    });
+  }
+
+  /** A raise the kernel refused, with the window that refused it. FLASHED AND NOT SWALLOWED: a
+   *  click that does nothing reads as a broken window, and the modal is where the user has to go. */
+  #blocked(m) {
+    this.stats.blocked += 1;
+    this.lastBlocked = { win: m.win | 0, by: m.by | 0 };
+    const blocker = this.get(m.by | 0);
+    if (!blocker) return;
+    blocker.win.el.dataset.blocking = "1";
+    // The class is removed on the next frame, so a check reading the DOM sees the state and a
+    // person sees a flash. `requestAnimationFrame` and not a timer: one frame is the shortest
+    // thing a person can see and the longest a check should have to wait.
+    blocker.win.el.classList.add("is-blocking");
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => blocker.win.el.classList.remove("is-blocking"));
+    });
+  }
+
+  /** A window's modality changed. Recorded on the frame so a check can read it out of the DOM,
+   *  which is the only place a reader can see it. */
+  #modal(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    entry.scope = m.scope | 0;
+    entry.mode = m.mode | 0;
+    entry.win.el.dataset.modalScope = String(m.scope | 0);
+    entry.win.el.dataset.windowMode = String(m.mode | 0);
+  }
+
   /** Every surface's own report, keyed by winid. What a check reads to ask how many ops the page
    *  actually replayed — as against how many the process sent, which is the kernel's count. */
   surfaces() {
@@ -393,6 +467,12 @@ export class WinHost {
     return {
       ...this.stats,
       keyCounts: this.keyCounts(),
+      order: [...this.order],
+      lastBlocked: this.lastBlocked,
+      // What the DOM actually has, so a check can compare the kernel's order against the page's
+      // rendering of it rather than trusting that this file applied it.
+      zIndex: Object.fromEntries([...this.frames].map(
+        ([id, e]) => [id, Number(e.win.el.style.zIndex || 0)])),
       cell: this.cell,
       live: [...this.frames.keys()],
       created: this.created,

@@ -27,7 +27,8 @@ import cdp  # noqa: E402  (the path has to be set up first)
 
 READY = ("(() => { const M = globalThis.%(g)s || {}; const s = M.state; "
          "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
-         "return (M.phase === 'await-keys' || M.phase === 'await-pointer') ? M.phase : '' })()")
+         "return ['await-keys', 'await-pointer', 'await-click'].includes(M.phase)"
+         " ? M.phase : '' })()")
 
 
 def mouse_drag(page, start, end, steps=8):
@@ -84,7 +85,22 @@ def main(argv=None) -> int:
             typed = False
             while time.time() < deadline:
                 state = page.evaluate(ready) or ""
-                if state == "await-pointer" and not typed:
+                if state == "await-click" and not typed:
+                    # A CLICK ON A BURIED WINDOW, where the page says it is. Only the page knows:
+                    # the frame is positioned by the clamp.
+                    at = json.loads(page.evaluate(
+                        "JSON.stringify(globalThis.%s.click || null)" % glob) or "null")
+                    if not at:
+                        print("the page asked for a click and published no coordinates")
+                        break
+                    page.evaluate("globalThis.%s.driver = 'check'" % glob)
+                    page.call("Input.dispatchMouseEvent", type="mousePressed",
+                              x=at["x"], y=at["y"], button="left", buttons=1, clickCount=1)
+                    page.call("Input.dispatchMouseEvent", type="mouseReleased",
+                              x=at["x"], y=at["y"], button="left", buttons=0, clickCount=1)
+                    typed = True
+                    state = ""
+                elif state == "await-pointer" and not typed:
                     # THE DRAG THE PAGE ASKED FOR, through Chrome's own input pipeline, at the
                     # coordinates the page published — the canvas is scaled by CSS, so its own
                     # rectangle is the only honest source for where to click.

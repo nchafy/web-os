@@ -34,8 +34,8 @@ checks is a wish.
 | | **— end of spine. Choose option A / B / C here —** | **35** | | |
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
 | M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
-| **M9** | **Owner, modality, close-request** | 3 | | ⬜ **next (option A)** |
-| M10 | Typed clipboard and drag-and-drop | 4 | | ⬜ A |
+| M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 32 expectations, 2 controls, 58 host checks, 5 mutations |
+| **M10** | **Typed clipboard and drag-and-drop** | 4 | | ⬜ **next (option A)** |
 | M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
 | M12 | The blur governor | 3 | | ⬜ A |
 | M13 | The geometry harness | 5 | | ⬜ A |
@@ -1609,6 +1609,122 @@ The surface does not follow the frame: it is the process's own choice of resolut
 scales it, so a program that wants to match its window asks for a new surface. And the budget only
 REFUSES: M12's governor is the thing that admits and degrades, and it now has a number to do it
 against.
+
+---
+
+## M9 — owner, modality, close-request · done · 0.5 days · ~1,900 LoC
+
+**ACCEPT.** A dialog stays above the window that owns it; a REAL mouse click on that window is
+refused by the kernel, which names the blocker; typing into the blocked window changes nothing and
+the kernel says how much it ate; and the X button asks instead of acting — Esc refuses the close,
+the editor is editable again, and answering destroys every owned window through M7's cascade. 32
+expectations over three fresh kernels in 3.4 s. The suite is 13 checks and 494 expectations, all
+green.
+
+```
+scripts/check.py                       13 checks, 494 expectations (m9: 32)
+scripts/check.py --only m9 --prove-failure   32 inverted, all failed
+scripts/check.py --negative no-owner-chain   m9 fail:  3 red, 29 intact
+scripts/check.py --negative no-modal         m9 fail: 11 red, 21 intact
+node bench/m9-modal/probe.mjs          58 host checks (the stack, the chain, the walk)
+bench/m9-modal/controls.py             5 mutations, each scored on which checks move
+```
+
+### The kernel owns the stack, and that is the structural half
+
+Modality is a rule about which window may be on top and which may receive input. Both are the
+page's natural business — it has the DOM — and neither can be left there: **a page asked to raise a
+window above the modal that blocks it has no way to know better, and would.** So `win_raise` (53)
+is a syscall, the kernel computes the blocker by walking the owner chain, and `win-stack` carries
+the WHOLE order to the page rather than a "raise this one" instruction. The page renders an order
+it is handed and never decides it. Constraint 226, `docs/DECISIONS.md` D32, and SerenityOS's server
+does the same thing in `Window::blocking_modal_window`.
+
+**INPUT SUPPRESSION IS THE OTHER HALF, and without it "modal" means only "stays on top."** A key or
+a pointer to a blocked window is refused and counted in `/proc/<pid>/win/<winid>`; a resize, a
+focus change, a close request and a destroy notice are NOT, because a window that missed those
+would be wrong about the world once the modal went away.
+
+**Built.** `win_raise`, `WIN_SET_MODAL` with its two axes, the stack and the blocker walk in
+`src/kernel/wins.mjs`, input suppression in `feed`, the page's stack renderer and blocked-flash in
+`src/wm/winhost.mjs`, `/usr/bin/editor`, `www/m9.html`, and `/proc`'s `scope`, `mode` and
+`suppressed` fields.
+
+**AN OWNED WINDOW IS TWO AXES, AND THIS MILESTONE'S PLAN HAD ONE.** `modal ∈ {none, window, app,
+system}` is the SCOPE; SerenityOS's `WindowMode` is the BEHAVIOUR. `MILESTONES.md`'s own ordering
+correction said both were needed, and the editor is the proof: it opens a **palette** that is
+`RENDER_ABOVE` and blocks nothing, and a **dialog** that is `BLOCKING`. Both are "owned by that
+window" and nothing else about them is the same (constraint 227).
+
+**THE MILESTONE IS A PROGRAM YOU CAN RUN.** From the live desktop at the bottom of `www/m9.html`:
+`editor` opens a window you type in, with its tool palette above it. Press the X and **it does not
+close** — a dialog appears, the editor is still there behind it, clicking the editor's title bar
+will not raise it and the dialog flashes, and typing into the editor arrives nowhere. Esc keeps
+editing; y or n closes both. `editor -a` makes the dialog APP-modal, which blocks the editor's
+second window too; `winopen -n 1` opens an unrelated process's window, which a window-modal dialog
+does NOT block.
+
+### The four proofs, and what each control moved
+
+| | Proof | |
+| --- | --- | --- |
+| 1 | the owner chain and the refusal | raising the editor brings its palette up with it; the dialog sits above its owner and the page renders that; a REAL click on the owner is refused, the blocker is named, and the order does not change at all; an unrelated process's window still raises |
+| 2 | input suppression | typing into the blocked editor changes nothing on its screen, the kernel's `suppressed` counter moves, and nothing is left queued |
+| 3 | the close is a request | the X opens a dialog and closes nothing; Esc refuses and the editor is editable again; answering destroys all three owned windows through the cascade |
+| 4 | the two axes are two | an APP-modal dialog refuses a raise of a SIBLING window of the same process and suppresses its input — which a window-modal one does not |
+
+**`--negative no-owner-chain`** raises a window without the dialogs that ride with it — `PLAN.md`
+§5's own words, "the dialog must fall behind". 3 red, 29 intact: the refusal still happens, because
+the modal still blocks. **`--negative no-modal`** makes nothing blocking: 11 red, 21 intact, and
+what HOLDS is the whole close contract, because that half of M9 has nothing to do with modality. A
+control that broke both halves could not tell them apart.
+
+### What the controls found, and the first one was a defect
+
+**THE BLOCKER WALK WAS WRITTEN BACKWARDS.** A blocking window blocks nobody in ITS OWN subtree;
+the first version excluded the RAISING window's subtree instead, which is the same sentence read
+backwards — so a save dialog, being its editor's child, could not block the editor that owns it.
+**The stack order looked right the whole time**, because a dialog rides up with its owner either
+way; what gave it away was typing into the blocked window and watching the characters arrive. It is
+`bench/m9-modal/controls.py --only backwards-subtree` now, and it moves 17 checks in both
+directions — the blocks that disappear AND the windows that become wrongly blocked.
+
+**AND THE CONTROLS FOUND TWO PROOFS THAT COULD NOT SEE THEIR OWN SUBJECT:**
+
+- **`--negative no-owner-chain` came out GREEN** against a check that claimed to be about the
+  chain. With the modal already up, a raise of the editor is REFUSED — so removing the riders
+  changed nothing. The chain is only observable when a raise is GRANTED, which is why the editor
+  now has a palette and the proof raises the editor *before* the dialog exists.
+- **`--negative no-modal` held a clause that asserted the order had not changed**, twice over:
+  first because the clause checked only the TOP of the stack, and a `BLOCKING` dialog rides up with
+  its owner either way; then because the editor was already above the stranger, so a granted raise
+  produced the same order as a refused one. The clause compares the whole order now, and the proof
+  buries the editor first.
+
+**Two harness defects went with them**, both the repo's own documented traps: the probe indexed
+`postsOf(t)[0]` directly and DIED on the failure it was testing for, and its failure report grew
+past 64 KiB under one mutation so the pipe truncated the JSON and the control could not parse the
+result it had asked for.
+
+### What this changed in M7
+
+**M7's close proof asserted the old contract.** It required a `WEV_DESTROYED` record to arrive as
+well as the close, which was right when the PAGE destroyed the window: the program learned by
+event. Under M9 the program destroys its own window and is not told — it does not need to be — so
+the clause now asserts that the PROGRAM is what acts, by the ids `win_destroy` returns. The notice
+is still asserted where it is still the subject: the cross-process cascade, where another process's
+call takes your window down. `winopen` honours a close request now, which is what a program with
+nothing to save should do.
+
+### What is not done
+
+Nobody may raise another process's window except on a user's click: a management interface that
+could is the second, separately-gated interface `CLAUDE.md` describes for the taskbar, and M14 owns
+it. `WMODE_PASSIVE` rides up exactly as `RENDER_ABOVE` does — the two differ in SerenityOS by
+whether they take focus, and nothing here has focus to take yet. There is no keyboard route to a
+modal (no Tab, no Escape handling in the host), so a dialog is answered by typing into it. And the
+flash that marks a refused raise is one frame of a CSS class; M11's skin is where that becomes
+something designed.
 
 ---
 

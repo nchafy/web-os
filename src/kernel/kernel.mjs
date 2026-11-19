@@ -36,7 +36,7 @@ import { TmpFS } from "./tmpfs.mjs";
 import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
-  WinMgr, installWindowKernel, setCascade, setDrawReaches,
+  WinMgr, installWindowKernel, setCascade, setDrawReaches, setOwnerChain, setModalBlocks,
   NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
 
@@ -1557,6 +1557,16 @@ async function handle(m) {
         if (cfg.bench !== 1) throw new Error("noDraw requires bench=1");
         setDrawReaches(false);
       }
+      /* M9's two. `noOwnerChain` raises a window without the dialogs that ride with it, and
+       * `noModal` makes nothing blocking — so a raise is granted and no input is suppressed. */
+      if (cfg.noOwnerChain) {
+        if (cfg.bench !== 1) throw new Error("noOwnerChain requires bench=1");
+        setOwnerChain(false);
+      }
+      if (cfg.noModal) {
+        if (cfg.bench !== 1) throw new Error("noModal requires bench=1");
+        setModalBlocks(false);
+      }
       // `ptyDetach` makes a master write accept its bytes and discard them, so only the pty stops.
       if (cfg.ptyDetach) {
         if (cfg.bench !== 1) throw new Error("ptyDetach requires bench=1");
@@ -1691,6 +1701,7 @@ async function handle(m) {
     case "win-in":
     case "win-geom":
     case "win-gone":
+    case "win-raise":
     case "win-state":
       /* THE ONE GUARD FOR ALL FOUR. `WINDOWS` is built in the `boot` case, and `handle()` turns a
        * throw into a `panic` — so a page that posted any of these before awaiting `up` killed the
@@ -1737,10 +1748,25 @@ async function handle(m) {
       return;
     }
     case "win-gone":
-      // The frame is gone — the user closed it, or the page tore it down. Same cascade as
-      // `win_destroy`, because a child whose parent's frame went has no frame either.
+      /* The frame is gone — the page tore it down. NOT THE X BUTTON ANY MORE: M9 made a close a
+       * REQUEST the process may refuse (constraint 44), so the X posts `win-in [WEV_CLOSE]` and
+       * nothing else. What still arrives here is a page shutting a session down, which is a frame
+       * that really has gone. Same cascade as `win_destroy`, because a child whose parent's frame
+       * went has no frame either. */
       post({ t: "win-destroy", ids: WINDOWS.detach(m.win | 0), why: "page" });
       return;
+    case "win-raise": {
+      /* A USER CLICKED A WINDOW, and the KERNEL decides whether it comes up: it is the only side
+       * that knows what a modal is blocking (constraint 226). The page is told the whole new order
+       * either way — `win-stack` on a grant, `win-blocked` on a refusal — so it never has to guess.
+       *
+       * A raise for a window that is gone is a RACE and not an error, for the reason `win-geom`'s
+       * is: the click and the destroy can cross in the page's own queue. */
+      const toRaise = WINDOWS.get(m.win | 0);
+      if (!toRaise || toRaise.destroyed) { lateGeoms += 1; return; }
+      WINDOWS.raise(toRaise);
+      return;
+    }
     case "win-state":
       post({
         t: "win-state",

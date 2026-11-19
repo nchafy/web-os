@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M9 — owner, modality, close-request</title>
+<style>
+/* STRUCTURAL ONLY, as every page here is: the Aero frame and the glass are M11. */
+body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+#log { margin:8px; white-space:pre-wrap }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:470px; margin:8px; border:1px solid #334; overflow:hidden }
+.window { position:absolute; display:flex; flex-direction:column; background:#1b1e24;
+  border:1px solid #556; box-sizing:border-box }
+.window-title { display:flex; align-items:center; gap:8px; padding:2px 4px; background:#2a2f38;
+  cursor:move; flex:0 0 auto }
+.window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
+.is-not-responding .window-title { background:#3a3030; color:#bbb }
+/* A WINDOW THAT REFUSED A RAISE SAYS SO FOR ONE FRAME. A click that does nothing reads as a broken
+   window, and the modal is where the user has to go. */
+.is-blocking { outline:2px solid #d8d14a }
+.is-blocking .window-title { background:#4a4620 }
+/* A BLOCKING window's own frame, so a reader can see which one is modal without reading the log. */
+.window[data-window-mode="3"] { border-color:#d8d14a }
+.title-buttons { display:flex; gap:4px }
+.title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
+  cursor:pointer }
+.window-body { flex:1 1 auto; min-height:0; display:flex }
+.terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
+  background:#000; color:#ddd; font:inherit }
+.terminal:focus { outline:1px solid #6a8 }
+.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
+  background:#0b0d11; image-rendering:pixelated }
+.surface:focus { outline:1px solid #6a8 }
+</style>
+</head>
+<body>
+<pre id="log">M9 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M9 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M9's page harness: OWNER, MODALITY, CLOSE-REQUEST.
+ *
+ *   PROOF 1  a dialog does not fall behind the window that owns it, and clicking that window does
+ *            not raise it — the kernel refuses and names the blocker
+ *   PROOF 2  input to a blocked window is SUPPRESSED, and the count says so
+ *   PROOF 3  a close is a REQUEST: the X opens a dialog, Esc refuses it, and the editor is still
+ *            there; answering closes both through the cascade
+ *   PROOF 4  the two axes are two: an APP-modal dialog blocks a sibling window of the same
+ *            process, and a WINDOW-modal one does not block an unrelated process's window
+ *
+ * WHY THE KERNEL OWNS THE STACK. A page that owned it could be asked to put a window above the
+ * modal that blocks it, and would — it has no way to know better. SerenityOS's server owns the
+ * same list and computes the blocker by walking the owner chain; this is that division
+ * (constraint 226, `docs/DECISIONS.md` D32).
+ *
+ * CONTROL ?no_owner_chain=1 — a raise moves the window alone and leaves its dialog where it was.
+ * `PLAN.md` §5's control for M9 in its own words: "remove the owner chain; the dialog must fall
+ * behind and the check must fail."
+ *
+ * CONTROL ?no_modal=1 — nothing is ever blocking, so the raise is granted and the keys arrive.
+ * What must HOLD under it: the close request, the refusal, and the cascade, which are the half of
+ * M9 that has nothing to do with modality.
+ */
+import {
+  WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODE_BLOCKING, WMODE_MODELESS, WMODE_RENDER_ABOVE,
+} from '/src/abi.mjs'
+import { WinHost } from '/src/wm/winhost.mjs'
+import {
+  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, ask, until, typeSynthetic,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  noOwnerChain: params.get('no_owner_chain') === '1',
+  noModal: params.get('no_modal') === '1',
+  liveOnly: params.get('live') === '1',
+}
+
+const EDITOR = '/src/bin/editor.mjs'
+const WINOPEN = '/src/bin/winopen.mjs'
+const TERM = '/src/bin/term.mjs'
+
+/** The driver wait, split as every page here splits it: short on the DECLARATION, long on the
+ *  INPUT. One timer cannot be both short enough not to stall a person and long enough not to fire
+ *  between a driver's `settle` and its first event. */
+const DRIVER_WAIT_MS = 2500
+const REAL_INPUT_WAIT_MS = 60000
+
+globalThis.M9.proofs = { stacking: null, suppress: null, refuse: null, scope: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M9.state = 'aborted'
+  globalThis.M9.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no modality.'
+  out.className = 'bad'
+  say(globalThis.M9.why)
+} else {
+  main().catch((e) => {
+    globalThis.M9.state = 'error'
+    globalThis.M9.why = String((e && e.stack) || e)
+    say(globalThis.M9.why)
+  })
+}
+
+async function bootHost (boot) {
+  const k = await bootKernel(boot, globalThis.M9, say)
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  return {
+    k, host, usr: mounts.usr || {}, mounts,
+    winState: () => ask(k, 'win-state'),
+    procState: () => ask(k, 'm4-state'),
+  }
+}
+
+/** The frame whose title says `what`, or null. The page knows windows by id and a proof knows them
+ *  by what they are for, so this is the one place the two are joined. */
+function frameByTitle (host, what) {
+  for (const entry of host.frames.values()) {
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** A real-looking press on a frame's title bar, synthesised. The check sends the real one through
+ *  `Input.dispatchMouseEvent`; this is the fallback, and the clause that needs a trusted event
+ *  reports NOT MEASURED when it ran. */
+function synthClick (el) {
+  const r = el.getBoundingClientRect()
+  const x = Math.round(r.left + r.width / 2)
+  const y = Math.round(r.top + r.height / 2)
+  for (const type of ['pointerdown', 'pointerup']) {
+    el.dispatchEvent(new PointerEvent(type, {
+      pointerId: 1, clientX: x, clientY: y, button: 0, buttons: type === 'pointerdown' ? 1 : 0,
+      bubbles: true, cancelable: true,
+    }))
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1 and PROOF 2: the dialog stays on top, the raise is refused, and the keys do not arrive.
+   -------------------------------------------------------------------------------------------- */
+
+async function pStacking (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    // AN UNRELATED PROCESS'S WINDOW, opened FIRST so it is at the bottom of the stack. A
+    // window-modal dialog must not block it, which is what makes the refusal below about the
+    // owner chain rather than about the whole desktop.
+    const other = await spawnProgram(s.k, WINOPEN, ['winopen', '-n', '1', '-c', '40000'])
+    await until(() => s.host.frames.size >= 1, 20000)
+    const stranger = [...s.host.frames.values()][0]
+    ev.strangerWin = stranger.id
+    ev.strangerPid = other.pid
+
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor'])
+    ev.pid = pid
+    await until(() => !!frameByTitle(s.host, 'tools'), 20000)
+    const editor = frameByTitle(s.host, 'notes')
+    const palette = frameByTitle(s.host, 'tools')
+    ev.editorWin = editor.id
+    ev.paletteWin = palette.id
+    await until(() => /type something/.test(editor.term.screen()), 10000)
+
+    /* ---- THE OWNER CHAIN, WHILE NOTHING IS BLOCKING ----------------------------------------
+     *
+     * THE CONTROL FOUND THIS GAP AND IT IS WORTH THE PARAGRAPH. With the modal already up, a
+     * raise of the editor is REFUSED — so removing the owner chain changed nothing and
+     * `--negative no-owner-chain` came out GREEN against a check that claimed to be about the
+     * chain. The chain is only observable when a raise is GRANTED, so it is measured here, before
+     * the dialog exists: the editor is buried under the stranger, raised, and its palette — which
+     * is RENDER_ABOVE and blocks nothing — must come up with it.
+     */
+    s.k.post({ t: 'win-raise', win: stranger.id })
+    await until(async () => {
+      const st = await s.winState()
+      const order = (st.wins || {}).stack || []
+      return order[order.length - 1] === stranger.id
+    }, 8000)
+    s.k.post({ t: 'win-raise', win: editor.id })
+    const rode = await until(async () => {
+      const st = await s.winState()
+      const order = (st.wins || {}).stack || []
+      return order[order.length - 1] === palette.id
+    }, 8000)
+    ev.rodeMs = Math.round(rode)
+    const withPalette = await s.winState()
+    ev.stackWithPalette = (withPalette.wins || {}).stack
+    ev.paletteMode = ((withPalette.windows || []).find((w) => w.id === ev.paletteWin) || {})
+
+    // TYPE, so the buffer is dirty and the close will ask rather than just close.
+    typeSynthetic(editor.term.el, 'hello')
+    await until(() => /hello/.test(editor.term.screen()), 5000)
+
+    // THE X, which under M9 asks and does not act.
+    editor.win.closeBtn.click()
+    const asked = await until(() => !!frameByTitle(s.host, 'Save changes'), 10000)
+    ev.dialogMs = Math.round(asked)
+    const dialog = frameByTitle(s.host, 'Save changes')
+    ev.dialogWin = dialog ? dialog.id : 0
+    ev.framesWithDialog = s.host.frames.size
+    const withDialog = await s.winState()
+    ev.stackWithDialog = (withDialog.wins || {}).stack
+    ev.modal = ((withDialog.windows || []).find((w) => w.id === ev.dialogWin) || {})
+
+    // ---- the real click, on the OWNER's title bar ----------------------------------------
+    //
+    /* THE EDITOR IS BURIED FIRST, and the control is why: the editor was already above the
+     * stranger from the palette step, so a GRANTED raise of it would have produced the same order
+     * as a refused one — `--negative no-modal` held against a clause that claimed the order had
+     * not changed, because there was nothing for it to change. With the stranger on top, a
+     * refusal keeps the order exactly and a grant moves three windows. */
+    s.k.post({ t: 'win-raise', win: stranger.id })
+    await until(async () => {
+      const st = await s.winState()
+      const order = (st.wins || {}).stack || []
+      return order[order.length - 1] === stranger.id
+    }, 8000)
+    const buried = await s.winState()
+    ev.stack = (buried.wins || {}).stack
+    ev.z = s.host.report().zIndex
+
+    // The page publishes where it is, because only the page knows: the frame is positioned by the
+    // clamp and a driver outside it has no way to compute the spot.
+    const bar = editor.win.barEl.getBoundingClientRect()
+    globalThis.M9.click = {
+      x: Math.round(bar.left + bar.width / 3), y: Math.round(bar.top + bar.height / 2),
+    }
+    globalThis.M9.phase = 'await-click'
+    const declared = await until(
+      () => globalThis.M9.driver === 'check' || s.host.report().raiseAsks > 0, DRIVER_WAIT_MS)
+    const got = declared < 0 ? -1 : await until(
+      () => s.host.report().raiseAsks > 0, REAL_INPUT_WAIT_MS)
+    ev.drivenBy = got < 0 ? 'page' : (globalThis.M9.driver === 'check' ? 'check' : 'hand')
+    if (got < 0) synthClick(editor.win.barEl)
+    globalThis.M9.phase = 'clicked'
+
+    // The kernel answers a refusal with `win-blocked`, so the wait is on that and not on a timer.
+    const refused = await until(() => !!s.host.report().lastBlocked, 8000)
+    ev.refusedMs = Math.round(refused)
+    ev.lastBlocked = s.host.report().lastBlocked
+    const after = await s.winState()
+    ev.stackAfter = (after.wins || {}).stack
+    ev.zAfter = s.host.report().zIndex
+    ev.winsStats = after.wins
+
+    // ---- PROOF 2: the keys do not arrive -------------------------------------------------
+    const before = editor.term.screen()
+    typeSynthetic(editor.term.el, 'XYZ')
+    // A BOUNDED WAIT FOR NOTHING TO HAPPEN, which is the honest shape: the assertion is that the
+    // screen did not change, so the wait is for the kernel to have had the chance to change it.
+    await until(() => false, 600)
+    ev.screenUnchanged = editor.term.screen() === before
+    const suppressed = await s.winState()
+    const editorRow = (suppressed.windows || []).find((w) => w.id === ev.editorWin) || {}
+    ev.suppressed = editorRow.suppressed
+    // `pending` AND NOT `queued`: `queued` is the LIFETIME count of events this window was given
+    // — the editor had already read five keys, a resize and a focus — and the question here is
+    // whether anything is LEFT waiting, which is the depth.
+    ev.editorPending = editorRow.pending
+    ev.editorQueuedEver = editorRow.queued
+
+    // ---- AND THE STRANGER'S WINDOW IS NOT BLOCKED ----------------------------------------
+    //
+    // A window-modal dialog affects its OWNER. If raising an unrelated process's window were
+    // refused too, the scope would be a lie and nothing above would say so.
+    s.k.post({ t: 'win-raise', win: stranger.id })
+    const raised = await until(async () => {
+      const st = await s.winState()
+      const stack = (st.wins || {}).stack || []
+      return stack[stack.length - 1] === stranger.id
+    }, 8000)
+    ev.strangerRaisedMs = Math.round(raised)
+    const end = await s.winState()
+    ev.stackEnd = (end.wins || {}).stack
+
+    const top = (list) => (list || [])[(list || []).length - 1]
+    const clauses = {
+      // THE CHAIN, measured while nothing was blocking: the palette is RENDER_ABOVE and not modal,
+      // so it rides up with its owner and refuses nothing.
+      'raising the owner brings its RENDER_ABOVE palette with it': rode >= 0
+        && ev.paletteMode.mode === WMODE_RENDER_ABOVE
+        && ev.paletteMode.scope === WMODAL_NONE,
+      'the X asked instead of acting, and the dialog appeared': asked >= 0
+        && ev.framesWithDialog === 4,
+      'the dialog is BLOCKING at window scope': ev.modal.mode === WMODE_BLOCKING
+        && ev.modal.scope === WMODAL_WINDOW,
+      'and it sits above the window that owns it': top(ev.stackWithDialog) === ev.dialogWin,
+      'which the page rendered, so a reader sees it too':
+        (ev.z[ev.dialogWin] || 0) > (ev.z[ev.editorWin] || 0),
+      'a real click on the owner was refused by the kernel':
+        ev.drivenBy === 'page' ? null : (ev.drivenBy === 'check'),
+      'and the blocker it named is the dialog': !!ev.lastBlocked
+        && ev.lastBlocked.by === ev.dialogWin && ev.lastBlocked.win === ev.editorWin,
+      /* THE WHOLE ORDER, ELEMENT BY ELEMENT, and the control is why. Checking only the TOP
+       * passed whether the raise was refused or granted: the dialog is BLOCKING, so it rides up
+       * with its owner either way and ends on top regardless. A refused raise changes NOTHING,
+       * which is what this now says. */
+      'so the order did not change at all': JSON.stringify(ev.stackAfter) ===
+        JSON.stringify(ev.stack),
+      'while an unrelated process\'s window still raises': raised >= 0
+        && top(ev.stackEnd) === ev.strangerWin,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    ev.notMeasured = Object.keys(clauses).filter((k) => clauses[k] === null)
+    globalThis.M9.proofs.stacking = { ok: ev.failed.length === 0, evidence: ev }
+
+    const sup = {
+      editorWin: ev.editorWin, suppressed: ev.suppressed, queued: ev.editorKeysSeen,
+      screenUnchanged: ev.screenUnchanged, before, after: editor.term.screen(),
+      pending: ev.editorPending, queuedEver: ev.editorQueuedEver,
+      clauses: {
+        'typing into the blocked window changed nothing on its screen': ev.screenUnchanged,
+        'because the kernel suppressed the keys, and counted them': (ev.suppressed || 0) >= 3,
+        'and nothing is left queued for it either': (ev.editorPending || 0) === 0,
+      },
+    }
+    sup.failed = Object.keys(sup.clauses).filter((k) => sup.clauses[k] === false)
+    globalThis.M9.proofs.suppress = { ok: sup.failed.length === 0, evidence: sup }
+    return s
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M9)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: the close is a request, Esc refuses it, and answering cascades.
+   -------------------------------------------------------------------------------------------- */
+
+async function pRefuse (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor'])
+    ev.pid = pid
+    await until(() => !!frameByTitle(s.host, 'notes'), 20000)
+    const editor = frameByTitle(s.host, 'notes')
+    await until(() => /type something/.test(editor.term.screen()), 10000)
+    typeSynthetic(editor.term.el, 'draft')
+    await until(() => /draft/.test(editor.term.screen()), 5000)
+
+    editor.win.closeBtn.click()
+    await until(() => !!frameByTitle(s.host, 'Save changes'), 10000)
+    const dialog = frameByTitle(s.host, 'Save changes')
+    ev.dialogWin = dialog.id
+    ev.framesWithDialog = s.host.frames.size
+
+    // ESC: THE REFUSAL. The dialog goes and the editor stays — the close was asked for and denied,
+    // which is constraint 44's whole point.
+    typeSynthetic(dialog.term.el, '\x1b')
+    const dialogGone = await until(() => !frameByTitle(s.host, 'Save changes'), 8000)
+    ev.refusedMs = Math.round(dialogGone)
+    ev.editorStillUp = !!frameByTitle(s.host, 'notes')
+    await until(() => /still editing/.test(editor.term.screen()), 5000)
+    ev.screenAfterRefusal = editor.term.screen().slice(-60)
+    // AND IT IS EDITABLE AGAIN, which is what says the suppression lifted with the modal.
+    typeSynthetic(editor.term.el, 'more')
+    const editable = await until(() => /more/.test(editor.term.screen()), 5000)
+    ev.editableAgainMs = Math.round(editable)
+
+    // Then ask again and answer it: destroying the owner takes the dialog with it (M7's cascade).
+    editor.win.closeBtn.click()
+    await until(() => !!frameByTitle(s.host, 'Save changes'), 10000)
+    const second = frameByTitle(s.host, 'Save changes')
+    typeSynthetic(second.term.el, 'y')
+    const bothGone = await until(() => s.host.frames.size === 0, 10000)
+    ev.bothGoneMs = Math.round(bothGone)
+    ev.framesAtEnd = s.host.frames.size
+    const result = await resultOf(s.k, pid, 30000)
+    ev.result = result
+
+    const clauses = {
+      // THREE FRAMES: the editor, its palette and the dialog. The palette is why this is 3 and
+      // not 2, and it is also why the cascade below destroys three windows.
+      'the X opened a dialog and closed nothing': ev.framesWithDialog === 3,
+      'Esc refused the close and the editor is still there': dialogGone >= 0
+        && ev.editorStillUp === true,
+      'and it is editable again, so the suppression lifted with the modal': editable >= 0,
+      'the program counted the request and the refusal': (result.closes || 0) >= 2
+        && (result.refusals || 0) >= 1,
+      'and answering it destroyed every owned window, through the cascade': bothGone >= 0
+        && ev.framesAtEnd === 0 && (result.destroyed || []).length === 3,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M9)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: app scope blocks a sibling, which window scope does not.
+   -------------------------------------------------------------------------------------------- */
+
+async function pScope (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor', '-a'])
+    ev.pid = pid
+    await until(() => !!frameByTitle(s.host, 'scratch'), 20000)
+    const editor = frameByTitle(s.host, 'notes')
+    const scratch = frameByTitle(s.host, 'scratch')
+    ev.editorWin = editor.id
+    ev.scratchWin = scratch.id
+    await until(() => /type something/.test(editor.term.screen()), 10000)
+    typeSynthetic(editor.term.el, 'x')
+    await until(() => /x/.test(editor.term.screen()), 5000)
+    editor.win.closeBtn.click()
+    await until(() => !!frameByTitle(s.host, 'Save changes'), 10000)
+    const dialog = frameByTitle(s.host, 'Save changes')
+    ev.dialogWin = dialog.id
+    const st = await s.winState()
+    ev.modal = ((st.windows || []).find((w) => w.id === ev.dialogWin) || {})
+
+    // THE SIBLING, WHICH AN APP-MODAL DIALOG BLOCKS. It is not the dialog's owner — the owner is
+    // the editor's window — so a window-scoped modal would let it raise, and that difference is
+    // the whole reason there are two axes.
+    s.k.post({ t: 'win-raise', win: scratch.id })
+    const refused = await until(() => !!s.host.report().lastBlocked, 8000)
+    ev.refusedMs = Math.round(refused)
+    ev.lastBlocked = s.host.report().lastBlocked
+    const after = await s.winState()
+    ev.stack = (after.wins || {}).stack
+    // AND THE SIBLING'S INPUT IS SUPPRESSED TOO, for the same reason.
+    const beforeScreen = scratch.term.screen()
+    typeSynthetic(scratch.term.el, 'q')
+    await until(() => false, 500)
+    ev.siblingScreenUnchanged = scratch.term.screen() === beforeScreen
+    const rows = await s.winState()
+    ev.siblingSuppressed = ((rows.windows || []).find((w) => w.id === ev.scratchWin) || {})
+      .suppressed
+
+    const top = (list) => (list || [])[(list || []).length - 1]
+    const clauses = {
+      'the dialog is BLOCKING at APP scope': ev.modal.mode === WMODE_BLOCKING
+        && ev.modal.scope === WMODAL_APP,
+      'raising a SIBLING window of the same process was refused': refused >= 0
+        && !!ev.lastBlocked && ev.lastBlocked.win === ev.scratchWin,
+      'and the blocker it named is the dialog': !!ev.lastBlocked
+        && ev.lastBlocked.by === ev.dialogWin,
+      'the order still has the dialog on top': top(ev.stack) === ev.dialogWin,
+      'and the sibling\'s input is suppressed as well': ev.siblingScreenUnchanged === true
+        && (ev.siblingSuppressed || 0) > 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M9)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   AND THE DESKTOP: a shell, with `editor` a command away.
+   -------------------------------------------------------------------------------------------- */
+
+async function liveDesktop (boot) {
+  const s = await bootHost(boot)
+  if (!s.usr.ok) {
+    say('REFUSING TO GO ON: /usr did not mount, so there is no /usr/bin/sh to start.')
+    globalThis.M9.state = 'error'
+    globalThis.M9.why = '/usr did not mount: ' + JSON.stringify(s.usr.why)
+    return null
+  }
+  const { pid } = await spawnProgram(s.k, TERM, ['term', '--ceiling', '3600000'])
+  const promptMs = await until(() => {
+    const e = [...s.host.frames.values()][0]
+    return e && e.term && /\$ /.test(e.term.screen())
+  }, 25000)
+  const entry = [...s.host.frames.values()][0]
+  if (entry && entry.term) entry.term.focus()
+  globalThis.M9.live = { pid }
+  if (promptMs < 0) {
+    const state = await ask(s.k, 'm4-state').catch((e) => ({ why: String(e) }))
+    const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
+    say('NO PROMPT in 25 s. The relay is pid ' + pid + ', parked in ' +
+      JSON.stringify(row && row.inflight))
+    globalThis.M9.stuck = { relay: row }
+    return s
+  }
+  say('')
+  say('A LIVE DESKTOP is open above: click the terminal and type.')
+  say('  editor             a window you type in. Press its X and it ASKS instead of closing:')
+  say('                     y saves, n discards, Esc keeps editing. While the dialog is up,')
+  say('                     click the editor\'s title bar — it will not come up, and the dialog')
+  say('                     flashes. Type into it — nothing arrives.')
+  say('  editor -a          the same, APP-modal: it blocks the editor\'s second window too')
+  say('  winopen -n 1       an unrelated process\'s window, which a window-modal dialog does')
+  say('                     NOT block. Click it while the editor is blocked: it raises.')
+  say('  cat /proc/$$/win/* every window as a file, with its scope, mode and suppressed count')
+  return s
+}
+
+/* ---------------------------------------------------------------------------------------- */
+
+async function main () {
+  const t0 = performance.now()
+  say('M9: owner, modality, close-request'
+    + (CFG.noOwnerChain ? '  [CONTROL: no_owner_chain]' : '')
+    + (CFG.noModal ? '  [CONTROL: no_modal]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.noOwnerChain) boot.noOwnerChain = true
+  if (CFG.noModal) boot.noModal = true
+  if (CFG.liveOnly) {
+    const s = await liveDesktop(boot)
+    if (s) {
+      globalThis.M9.verdict = 'live'
+      globalThis.M9.state = 'done'
+    }
+    return
+  }
+  const P = globalThis.M9.proofs
+
+  await pStacking(boot)
+  const a = P.stacking.evidence
+  say('stacking: win ' + a.editorWin + ' owns dialog ' + a.dialogWin + ' (scope ' +
+    a.modal.scope + ', mode ' + a.modal.mode + '); stack ' + JSON.stringify(a.stack) +
+    ' -> ' + JSON.stringify(a.stackAfter) + ', blocked ' + JSON.stringify(a.lastBlocked) +
+    ', driven by ' + a.drivenBy)
+  if (a.failed.length) say('  stacking FAILED: ' + a.failed.join('; '))
+  const b = P.suppress.evidence
+  say('suppress: the kernel suppressed ' + b.suppressed + ' of the editor\'s keys, ' +
+    b.pending + ' left queued (' + b.queuedEver + ' over its life); its screen ' +
+    (b.screenUnchanged ? 'did not change' : 'CHANGED'))
+  if (b.failed.length) say('  suppress FAILED: ' + b.failed.join('; '))
+
+  P.refuse = await pRefuse(boot)
+  const c = P.refuse.evidence
+  say('refuse: ' + (c.result || {}).closes + ' close request(s), ' +
+    (c.result || {}).refusals + ' refused; after Esc the editor was ' +
+    (c.editorStillUp ? 'still up' : 'GONE') + ' and editable again in ' + c.editableAgainMs +
+    ' ms; answering destroyed ' + JSON.stringify((c.result || {}).destroyed))
+  if (c.failed.length) say('  refuse FAILED: ' + c.failed.join('; '))
+
+  P.scope = await pScope(boot)
+  const d = P.scope.evidence
+  say('scope: an APP-modal dialog (scope ' + d.modal.scope + ') refused a raise of SIBLING win ' +
+    d.scratchWin + ' and suppressed ' + d.siblingSuppressed + ' of its keys')
+  if (d.failed.length) say('  scope FAILED: ' + d.failed.join('; '))
+
+  const drivenBy = (P.stacking.evidence || {}).drivenBy || 'page'
+  globalThis.M9.config = {
+    noOwnerChain: CFG.noOwnerChain, noModal: CFG.noModal, drivenBy,
+    WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODE_BLOCKING, WMODE_MODELESS, WMODE_RENDER_ABOVE,
+  }
+  globalThis.M9.drivenBy = drivenBy
+  const sections = Object.entries(P)
+  const ran = sections.filter(([, v]) => v !== null)
+  const allOk = ran.length === sections.length && ran.every(([, v]) => v.ok)
+  globalThis.M9.verdict = allOk ? (drivenBy === 'hand' ? 'hand-driven' : 'ok') : 'FAIL'
+  globalThis.M9.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  const f = globalThis.M9.fetches
+  say('program fetches: ' + f.fetches + ' over ' + f.kernels + ' kernels, ' + f.retries +
+    ' retried (' + f.timeouts + ' deadline, ' + f.transport + ' transport)')
+  say('verdict ' + globalThis.M9.verdict + ' in ' + Math.round(globalThis.M9.ms) + ' ms')
+  await liveDesktop(boot)
+  out.className = globalThis.M9.verdict === 'FAIL' ? 'bad' : 'ok'
+  globalThis.M9.state = 'done'
+}
+</script>
+</body>
+</html>

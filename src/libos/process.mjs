@@ -17,6 +17,7 @@ import {
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
   winCreate, winDestroy, winSetTitle, winSetBox, winRead, winSurface, winDraw,
+  winSetModal, winRaise,
 } from "./syscall.mjs";
 /** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
  *  A module no process had already imported would be fetched once PER SPAWNED PROCESS — the herd
@@ -59,6 +60,8 @@ const WIN = Object.freeze({
   // M8. `surface` asks the KERNEL to allocate one; `draw` sends a display list. A program is never
   // handed a canvas — see `docs/DECISIONS.md` D31 and constraint 219.
   surface: winSurface, draw: winDraw,
+  // M9. The kernel owns the stack, so raising is a call and modality is enforced rather than drawn.
+  setModal: winSetModal, raise: winRaise,
 });
 
 /** M5's two libraries. A module namespace object is non-writable per property but NOT frozen, so a

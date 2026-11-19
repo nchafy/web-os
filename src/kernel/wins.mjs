@@ -19,7 +19,10 @@
 import {
   EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, ST_RETURN,
   WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER, WEV_MAX,
-  WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES, encodeWinEvent,
+  WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES,
+  WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
+  WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
+  encodeWinEvent,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
@@ -50,6 +53,25 @@ let drawReaches = true;
 
 export function setDrawReaches(on) {
   drawReaches = !!on;
+}
+
+/** M9's FIRST NEGATIVE CONTROL, in `PLAN.md` §5's words: "remove the owner chain; the dialog must
+ *  fall behind and the check must fail". A raise moves the window ALONE and leaves the windows
+ *  that ride with it where they were — which is constraint 44's defect exactly: "without an owner
+ *  chain a dialog sits behind the window that owns it". */
+let ownerChain = true;
+
+export function setOwnerChain(on) {
+  ownerChain = !!on;
+}
+
+/** M9's SECOND: nothing is ever blocking, so a raise is always granted and no input is suppressed.
+ *  It cuts the ENFORCEMENT and leaves the close contract alone, which is how the two halves of M9
+ *  are told apart. */
+let modalBlocks = true;
+
+export function setModalBlocks(on) {
+  modalBlocks = !!on;
 }
 
 /**
@@ -89,6 +111,16 @@ export class Window {
     this.owner = spec.owner | 0;
     /** Child winids, in creation order. The destroy cascade walks this. */
     this.children = [];
+    /**
+     * M9's TWO AXES, and they are two because `MILESTONES.md`'s ordering note says an owned window
+     * needs both: `scope` is WHICH windows this one affects — none, its owner, its owner's whole
+     * app, or everything — and `mode` is WHAT happens to them. A tooltip and a save dialog are
+     * both "owned by that window" and nothing else about them is the same.
+     *
+     * Both default to the quiet value, so a window nobody set up is ordinary.
+     */
+    this.scope = WMODAL_NONE;
+    this.mode = WMODE_MODELESS;
     /** Where the page put it, as the page reports it — never as this side computed it. */
     this.box = {
       x: spec.x | 0, y: spec.y | 0,
@@ -131,6 +163,8 @@ export class Window {
       // M8: batches accepted, ops in them, and batches refused. A program that drew nothing and
       // one whose every batch was refused look identical without the third number.
       batches: 0, ops: 0, refusedDraws: 0, refusedCells: 0,
+      // M9: input events a modal blocked. See `WinMgr.feed`.
+      suppressed: 0,
     };
   }
 
@@ -348,6 +382,13 @@ export class Window {
     return 0;
   }
 
+  /** Whether this window is above its owner and stays there: a palette, a tooltip or a modal.
+   *  A MODELESS child is an ordinary window that happens to have an owner. */
+  ridesWithOwner() {
+    return this.mode === WMODE_PASSIVE || this.mode === WMODE_RENDER_ABOVE
+      || this.mode === WMODE_BLOCKING;
+  }
+
   /** A stopped window raises no error — a parked reader is a legitimate state — so this is the only
    *  way to tell a working relay from a wedged one. */
   report() {
@@ -361,6 +402,8 @@ export class Window {
       ...this.box,
       cols: this.cols,
       rows: this.rows,
+      scope: this.scope,
+      mode: this.mode,
       attached: this.attached,
       destroyed: this.destroyed,
       opens: this.opens,
@@ -382,13 +425,155 @@ export class Window {
 export class WinMgr {
   constructor() {
     this.byId = new Map();
+    /**
+     * M9's STACK: winids, BOTTOM FIRST, and the kernel's because modality has to be ENFORCED and
+     * not drawn. A page that owned the order could be asked to put a window above the modal that
+     * blocks it, and would — it has no way to know better. SerenityOS's server owns the same list
+     * for the same reason (constraint 226).
+     *
+     * The page renders it and nothing else: `win-stack` carries the whole order rather than a
+     * "raise this one" instruction, so the two sides cannot disagree about what is on top.
+     */
+    this.stack = [];
     this.nextId = 1;
     this.stats = {
       created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0,
+      // M9: raises granted, raises refused by a modal, and how many times the stack was posted.
+      raises: 0, blocked: 0, stacks: 0, suppressed: 0,
       // M8's surface accounting. `surfacePx` is what is OUTSTANDING; the refusals are counted
       // apart because a budget nobody can see refuse anything is a budget nobody believes.
       surfaces: 0, surfacePx: 0, refusedSurface: 0, batches: 0, ops: 0,
     };
+  }
+
+
+  /* ---- M9: the stack, the owner chain, and the blocker --------------------------------------
+   *
+   * EVERY ONE OF THESE IS A PURE FUNCTION OVER THE TABLE except `raise`, which posts. That is
+   * deliberate: the modality rules are the part most likely to be got wrong, so they are
+   * host-testable without a browser (`bench/m9-modal/probe.mjs`).
+   */
+
+  /** This window's ancestors, nearest first. An owner may live in ANOTHER PROCESS (M7), so this
+   *  walk crosses processes and the cycle guard is not optional — a chain is built by two
+   *  independent processes and neither can see the whole of it. */
+  ancestors(win) {
+    const out = [];
+    const seen = new Set([win.id]);
+    let at = win.owner ? this.get(win.owner) : null;
+    while (at && !seen.has(at.id)) {
+      out.push(at);
+      seen.add(at.id);
+      at = at.owner ? this.get(at.owner) : null;
+    }
+    return out;
+  }
+
+  /** This window and everything it owns, transitively. The destroy cascade's set, reused here
+   *  because "blocked by my own dialog" must not include the dialog itself. */
+  subtree(win) {
+    const out = [];
+    const walk = (w) => {
+      out.push(w);
+      for (const id of w.children) {
+        const child = this.get(id);
+        if (child && !child.destroyed && !out.includes(child)) walk(child);
+      }
+    };
+    walk(win);
+    return out;
+  }
+
+  /** The pid a window's modality is ABOUT: its owner's, or its own if it has no owner.
+   *
+   *  THE OWNER'S AND NOT ITS OWN, and that is the whole point of a broker: a picker's dialog is
+   *  owned by the REQUESTING app's window and runs in the picker's process, and it is the app that
+   *  must be blocked. Measured against the plan in `docs/research/08-hobbyist-os-survey.md`. */
+  appOf(win) {
+    const chain = this.ancestors(win);
+    return chain.length ? chain[chain.length - 1].pid : win.pid;
+  }
+
+  /**
+   * The window that BLOCKS `win`, or null. SerenityOS's `blocking_modal_window`, with this
+   * project's two axes rather than its one.
+   *
+   * A window is never blocked by itself or by anything it owns — a dialog does not block its own
+   * tooltip — which is what `subtree` is for. Returns the TOPMOST blocker, because that is the one
+   * a user should be sent to.
+   */
+  blockingFor(win) {
+    if (!modalBlocks) return null;
+    let found = null;
+    let foundAt = -1;
+    for (const b of this.live()) {
+      if (b.mode !== WMODE_BLOCKING) continue;
+      /* WHO IS NOT BLOCKED BY `b`: `b` ITSELF AND `b`'s OWN DESCENDANTS. A dialog must keep
+       * working, and so must a tooltip it owns.
+       *
+       * THE FIRST VERSION EXCLUDED `win`'s SUBTREE INSTEAD, which is the same sentence read
+       * backwards and it broke the headline case: a save dialog IS its editor's child, so the
+       * editor was excluded from being blocked by its own dialog. Measured — the editor's keys
+       * arrived, `suppressed` stayed at 0 and the raise was granted — which is why M9's own page
+       * types into the blocked window rather than trusting the stack order. */
+      if (this.subtree(b).some((w) => w.id === win.id)) continue;
+      let blocks = false;
+      if (b.scope === WMODAL_SYSTEM) blocks = true;
+      else if (b.scope === WMODAL_APP) blocks = this.appOf(b) === win.pid;
+      else if (b.scope === WMODAL_WINDOW) {
+        // Its OWNER, and the owner's ancestors with it: a dialog over a document blocks the
+        // document, and raising the document's own parent above the dialog would bury it just
+        // the same.
+        blocks = this.ancestors(b).some((a) => a.id === win.id);
+      }
+      if (!blocks) continue;
+      const at = this.stack.indexOf(b.id);
+      if (at >= foundAt) {
+        found = b;
+        foundAt = at;
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Raise a window to the top, with the windows that ride with it. Returns 0, or the BLOCKER.
+   *
+   * THE DIALOG COMES UP WITH ITS OWNER, which is constraint 44's defect in one line: "without an
+   * owner chain a dialog sits behind the window that owns it". A raise moves the window and then
+   * puts every PASSIVE, RENDER_ABOVE or BLOCKING descendant above it, in creation order — so
+   * clicking the document brings its save dialog along rather than burying it.
+   */
+  raise(win) {
+    if (win.destroyed) return null;
+    const blocker = this.blockingFor(win);
+    if (blocker) {
+      this.stats.blocked += 1;
+      // The page is told WHICH window refused, so it can send the user there rather than
+      // swallowing the click.
+      K.post({ t: "win-blocked", win: win.id, by: blocker.id });
+      return blocker;
+    }
+    const riders = ownerChain
+      ? this.subtree(win).filter((w) => w !== win && w.ridesWithOwner())
+      : [];
+    const moving = new Set([win.id, ...riders.map((w) => w.id)]);
+    this.stack = this.stack.filter((id) => !moving.has(id));
+    this.stack.push(win.id, ...riders.map((w) => w.id));
+    this.stats.raises += 1;
+    this.postStack();
+    return 0;
+  }
+
+  /** The order, bottom first, as the page must render it. */
+  postStack() {
+    this.stats.stacks += 1;
+    K.post({ t: "win-stack", ids: [...this.stack] });
+  }
+
+  /** Where a window sits, from the bottom. -1 for one that is not stacked. */
+  depthOf(id) {
+    return this.stack.indexOf(id | 0);
   }
 
   /**
@@ -501,7 +686,10 @@ export class WinMgr {
     const win = new Window(id, pid, spec);
     this.byId.set(id, win);
     if (ownerId !== 0) this.get(ownerId).children.push(id);
+    // A NEW WINDOW IS ON TOP, which is what a dialog appearing means. The post goes out below,
+    // after the page has been told the window exists.
     this.stats.created += 1;
+    this.stack.push(id);
     K.post({
       t: "win-create",
       win: id,
@@ -547,10 +735,14 @@ export class WinMgr {
       // window is gone is a leak the governor would inherit.
       this.releaseSurface(w);
       w.destroy();
+      // OUT OF THE STACK, or a destroyed window would hold a place in the order for ever and
+      // `blockingFor` would keep finding it.
+      this.stack = this.stack.filter((id) => id !== w.id);
       this.stats.destroyed += 1;
     }
     if (ids.length > 1) this.stats.cascaded += ids.length - 1;
     K.post({ t: "win-destroy", ids });
+    this.postStack();
     // AND DROP WHAT NOBODY CAN REACH, here rather than on a timer: a destroyed window whose last
     // description has already gone is a row with no reader, and `sample()` walks every row on
     // every heartbeat (constraint 18). `src/kernel/files.mjs`'s `F_WIN.close` sweeps too, which
@@ -564,11 +756,32 @@ export class WinMgr {
     return this.destroyTree(id);
   }
 
-  /** Feed one event to one window. Returns true if it was queued or delivered. */
+  /**
+   * Feed one event to one window. Returns true if it was queued or delivered.
+   *
+   * INPUT TO A BLOCKED WINDOW IS SUPPRESSED, which is what makes a modal a modal rather than a
+   * stacking rule: SerenityOS's server does the same, and without it "modal" would mean only
+   * "stays on top" and a user could type into the document behind the save dialog. Suppression is
+   * the KERNEL's because the blocker is (constraint 226).
+   *
+   * ONLY KEYS AND POINTERS. A blocked window must still learn that it was resized, that it lost
+   * focus, that it was asked to close and that it was destroyed — those are not input, and a
+   * window that missed them would be wrong about the world once the modal went away.
+   */
   feed(id, ev) {
     const w = this.get(id);
     if (!w || w.destroyed) return false;
     if (!(ev.type >= 1 && ev.type <= WEV_MAX)) return false;
+    if (ev.type === WEV_KEY || ev.type === WEV_POINTER) {
+      const blocker = this.blockingFor(w);
+      if (blocker) {
+        // COUNTED, on the window that did not get it: a program whose keys silently stopped
+        // arriving would have no way to tell that from a keyboard that stopped working.
+        w.stats.suppressed += 1;
+        this.stats.suppressed += 1;
+        return false;
+      }
+    }
     return w.push(ev);
   }
 
@@ -603,6 +816,7 @@ export class WinMgr {
   report() {
     return {
       ...this.stats,
+      stack: [...this.stack],
       live: this.live().length,
       rows: this.byId.size,
       nextId: this.nextId,

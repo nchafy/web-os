@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 225 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 228 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 31 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 32 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  225 normative constraints  ← cite these
+  CONSTRAINTS.md  228 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -116,6 +116,9 @@ www/
   m8.html         M8's four proofs — a pattern read back out of the canvas, a REAL mouse drag,
                   the surface budget, the content mode — and then a desktop where `paint` is a
                   window you draw in with the mouse
+  m9.html         M9's four proofs — the owner chain, a refused raise, input suppression, the
+                  close request — and then a desktop where `editor` will not close without
+                  asking
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result. m7 and m8 import it; the older
                   pages still carry their own copies
@@ -163,13 +166,15 @@ row below rather than restate it.
 | A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
 | What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
 | The surface budget | `SURFACE_BUDGET_PX` and `SURFACE_MAX_PX` in `src/abi.mjs`; the accounting is `WinMgr.surface`/`releaseSurface` in `src/kernel/wins.mjs` and nowhere else |
+| The z-order, and who may be raised over whom | `WinMgr.stack` and `blockingFor` in `src/kernel/wins.mjs`. The page renders the order it is sent and decides nothing (constraint 226) |
+| What a modality means | `WMODAL_*` (scope) and `WMODE_*` (behaviour) in `src/abi.mjs`. Two axes, and a design with one cannot tell a tooltip from a save dialog |
 | Which bindings a process realm loses | `TARGETS` in `src/libos/lockdown.mjs`. A check enumerates it; `bench/m6-realm/program.mjs` MUST import it rather than list the names again |
 | The takers of the per-inode lock | the `withInode` docstring in `src/kernel/store.mjs`. `scripts/fsfuzz.py`'s `INODE_TAKERS` mirrors that list and lints against it |
 | Where a provider request URL is built | `urlFor` in `src/kernel/providers.mjs`, and nowhere else |
 | The provider table | `PROVIDERS` in `src/kernel/providers.mjs`, as data |
 | What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
 | The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
-| The 225 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 228 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -321,6 +326,8 @@ scripts/check.py --prove-failure    # invert every expectation; the run MUST rep
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
 node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec
+node bench/m9-modal/probe.mjs     # M9's stack, owner chain and blocker walk
+bench/m9-modal/controls.py        # five mutations of the modality rules, scored
 bench/m8-surface/controls.py      # five mutations of the accounting, scored on which checks move
 bench/m8-surface/probe.py         # WHY the surface is kernel-owned, as a measurement (219)
 bench/m7-win/firefox.py --page m8 # M8 in a second engine; read the PNG it writes

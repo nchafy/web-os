@@ -2100,3 +2100,63 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     (which admitted a fractional op count), the content-mode refusal counted as a dead frame's, a
     probe clause that asserted "something negative" where it named an errno, and a mutation whose
     name did not match its substitution.
+
+## M9 — owner, modality, close-request
+
+226. **THE KERNEL OWNS THE STACK, BECAUSE MODALITY HAS TO BE ENFORCED AND NOT DRAWN.** A page that
+    owned the z-order could be asked to put a window above the modal that blocks it, and would —
+    it has no way to know better. So `win_raise` (53) is a syscall, the kernel computes the blocker
+    by walking the owner chain, and `win-stack` carries the WHOLE order to the page rather than a
+    "raise this one" instruction: the two sides cannot then disagree about what is on top.
+    SerenityOS's server owns the same list and computes the same thing in
+    `Window::blocking_modal_window` (`docs/research/08-hobbyist-os-survey.md`).
+
+    **INPUT SUPPRESSION IS THE OTHER HALF, and without it "modal" means only "stays on top".** A
+    key or a pointer event to a blocked window is refused and counted; a resize, a focus change, a
+    close request and a destroy notice are NOT, because a window that missed those would be wrong
+    about the world once the modal went away. The count is in
+    `/proc/<pid>/win/<winid>` as `suppressed`, because a program whose keys silently stopped
+    arriving has no other way to tell that from a keyboard that stopped working.
+227. **AN OWNED WINDOW IS TWO AXES, AND M9's OWN PLAN HAD ONE.** `modal ∈ {none, window, app,
+    system}` describes the SCOPE — which windows are affected — and SerenityOS's enforced
+    `WindowMode` describes the BEHAVIOUR: `Modeless`, `Passive`, `RenderAbove`, `Blocking`.
+    `MILESTONES.md`'s ordering correction said an owned window needs both, and a tooltip and a save
+    dialog are the proof: both are "owned by that window" and nothing else about them is the same.
+
+    | | |
+    | --- | --- |
+    | scope | `WMODAL_WINDOW` its owner and the owner's ancestors · `WMODAL_APP` every window of the OWNER's process · `WMODAL_SYSTEM` everything outside the modal's own subtree |
+    | mode | `WMODE_MODELESS` ordinary · `WMODE_PASSIVE` and `WMODE_RENDER_ABOVE` ride up with the owner and block nothing · `WMODE_BLOCKING` rides up AND refuses the raise |
+
+    **APP SCOPE ASKS THE OWNER'S PID, NOT THE DIALOG'S**, and that is the whole point of a broker: a
+    picker's dialog runs in the picker and is owned by the requesting app's window, so it is the
+    APP that must be blocked. `bench/m9-modal/controls.py --only app-scope-is-own-pid` is that
+    clause's control. A window with no owner may not be window- or app-modal — both scopes are
+    defined by walking a chain that is not there — and `win_set` answers EINVAL rather than storing
+    a modality no rule covers.
+
+    **THE RULE IS ONE SENTENCE AND IT WAS WRITTEN BACKWARDS FOR AN HOUR.** A blocking window blocks
+    nobody in ITS OWN subtree — itself and anything it owns must keep working — and beyond that its
+    scope says who. The first version excluded the RAISING window's subtree instead, which is the
+    same sentence read backwards, and it broke the headline case: a save dialog IS its editor's
+    child, so the editor was excluded from being blocked by its own dialog. **The stack order
+    looked right the whole time**, because a dialog rides up with its owner either way; what gave
+    it away was typing into the blocked window and watching the characters arrive.
+    `bench/m9-modal/controls.py --only backwards-subtree` is that mutation, and it moves 17 checks.
+228. **A CLOSE IS A REQUEST, AND THE PAGE NO LONGER ACTS ON IT.** The X posts `WEV_CLOSE` and
+    NOTHING else: the frame stands until the window's own process calls `win_destroy`. That is
+    constraint 44's second half — "without a close-request event, unsaved work is discarded
+    silently" — and SerenityOS does the same (`window_close_request`, and the client decides).
+
+    **A PROCESS THAT IGNORES IT IS NOT A TRAP, and that needed nothing new.** The close event sits
+    uncollected, so M7's not-responding detector starts its clock: the caption greys at 1,000 ms
+    and End Process appears at 5,000. The user's escape hatch is the one that was already there —
+    and it kills the PROCESS rather than removing the frame, because removing the frame would leave
+    a process running with a window it still thinks it has (constraint 14).
+
+    **M7's OWN CLOSE PROOF CHANGED WITH THIS.** It asserted that a `WEV_DESTROYED` record arrives
+    as well as the close, which was right when the PAGE destroyed the window: the program learned
+    by event. A program that destroys its own window is not told and does not need to be, so the
+    clause now asserts that the PROGRAM is what acts — by the ids `win_destroy` returns — and the
+    cross-process case, where another process's call takes your window down, is where the notice is
+    still asserted.

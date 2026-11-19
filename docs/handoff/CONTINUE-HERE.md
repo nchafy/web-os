@@ -49,19 +49,24 @@ several record a specific mistake and its correction.
 
 ## Done
 
-Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a, M6, M7 and **M8**. The spine is COMPLETE
-and the window half is two milestones in; the next is **M9: owner, modality, close-request**. Each has a record
+Harness, M0, M0a, M0b, M1, M2a, M2, M3, M4, M4b, M5, M4a, M6, M7, M8 and **M9**. The spine is
+COMPLETE and the window half is three milestones in; the next is **M10: typed clipboard and
+drag-and-drop**. Each has a record
 in `MILESTONES.md` with its actual cost and what it changed in the plan. Current gates, all green:
 
 | command | what it is |
 |---|---|
-| `scripts/check.py` | the suite — 12 checks, 460 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 42, m8 28, m6 31 |
+| `scripts/check.py` | the suite — 13 checks, 494 expectations. Measured 2026-11-19 on Chrome 157.0.8103.79: boot 30, syscall 31, m1 14, m2 92, m3 55, m4 23, m4b 54, m5 38, m4a 22, m7 43, m8 30, m9 32, m6 31 |
 | `scripts/check.py --negative win-first-fd` | M7's first control — a parked `poll` evaluates only the FIRST fd of its set. 6 red, 36 intact, and the real keystroke into window A must still arrive |
 | `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 31 intact, and every poll and `/proc` label must hold |
 | `node bench/m7-win/probe.mjs` | 128 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
 | `bench/m7-win/controls.py` | 5 mutations of `wins.mjs`, scored on WHICH checks move. One is a DECLARED CRASH (`no-floor`), because a torn record must make a program fail loudly rather than decode as noise |
 | `bench/m7-win/firefox.py` | M7 IN A SECOND ENGINE. Renders the page headless and keeps the PNG — these pages print their own log, and Mozilla removed CDP so there is no driver. A slow subresource injected into the served HTML holds the load event open until the proofs finish. Verdict ok in 18.8 s on Firefox 156 |
 | `bench/m7-win/drive.py` | the fast loop: open `www/m7.html` in a real Chrome and print its own evidence, clause by clause. `--live` leaves the desktop open; `--page m4a` drives that one |
+| `scripts/check.py --negative no-owner-chain` | M9's first control — a raise leaves the dialogs that ride with it behind. 3 red, 29 intact, and the refusal must still happen |
+| `scripts/check.py --negative no-modal` | M9's second — nothing is blocking. 11 red, 21 intact, and the WHOLE close contract must hold |
+| `node bench/m9-modal/probe.mjs` | 58 host checks over the stack, the owner chain across processes, and who blocks whom at each scope. The blocker walk was written backwards for an hour and this is where that cannot happen again |
+| `bench/m9-modal/controls.py` | 5 mutations of the modality rules. `backwards-subtree` is the defect that shipped; it moves 17 checks in both directions |
 | `scripts/check.py --negative no-draw` | M8's control — `win_draw` accepts its batch, counts it and DISCARDS it. 7 red, 21 intact, and the process must still get its surface, still report the batch, and still see the real pointer events |
 | `node bench/m8-surface/probe.mjs` | 50 host checks over the surface budget and the display-list codec: what is granted, what is refused and by which errno, what a resize charges, and what destroying a window gives back |
 | `bench/m8-surface/controls.py` | 5 mutations of the accounting, scored on WHICH checks move. `leak-on-resize` and `no-revocation` are the two that would exhaust a budget nobody exceeded |

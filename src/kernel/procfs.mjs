@@ -80,6 +80,11 @@ function winLines(win, slot) {
     `dropped:\t${win.stats.dropped}`,
     `parked:\t${win.waitingReaders.length}`,
     `level:\t${win.level}`,
+    // M9. Input a modal blocked, so a program whose keys stopped arriving can tell that from a
+    // keyboard that stopped working (constraint 226).
+    `scope:\t${win.scope}`,
+    `mode:\t${win.mode}`,
+    `suppressed:\t${win.stats.suppressed}`,
     `stalems:\t${Math.round(win.staleMs())}`,
     `queued:\t${win.stats.queued}`,
     `delivered:\t${win.stats.delivered}`,

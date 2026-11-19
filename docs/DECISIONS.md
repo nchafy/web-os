@@ -692,6 +692,40 @@ one per operation. The page holds the canvas, replays the batch, and that is the
 *Evidence: measured. `bench/m8-surface/probe.py`, Chrome 157. Constraint 219, and the correction it
 makes to `CLAUDE.md` and `PLAN.md` §5.*
 
+## D32 — the kernel owns the z-order, and a close is advisory
+
+**Decided at M9, and the first half is structural.** Modality is a rule about which window may be
+on top and which may receive input. Both of those are the page's natural business — it has the DOM
+— and neither can be left there: a page asked to raise a window above the modal that blocks it has
+no way to know better, and would. So the kernel keeps the stack, `win_raise` is a syscall, and the
+page renders an order it is handed.
+
+**What that costs.** A click now makes a round trip before anything moves — the page asks, the
+kernel decides, the page applies the order it is sent. M0 measured a round trip at ~100 µs against
+a 500 µs accept bar, so the cost is invisible beside the frame it lands in; and the alternative is
+not cheaper, it is wrong.
+
+**What it buys, beyond the rule being true.** The whole order is posted on every change rather than
+a "raise this one" instruction, so the two sides cannot drift: there is no state in the page that
+the kernel does not know about. A check reads the kernel's order AND the DOM's `z-index` and
+compares them, which is how an inert frame is told from a working one (constraint 40).
+
+**The second half is the close, and it is advisory.** The X button posts an event and does nothing
+else. The rejected answer is the one every browser gives — the frame goes and the program is told
+afterwards — and it is exactly the defect constraint 44 names: unsaved work discarded silently. The
+cost of advisory is a window a program can refuse to close for ever, and that cost is already paid
+for by M7's not-responding detector: an ignored close request is an uncollected event, so the
+caption greys and End Process appears without anything new being built.
+
+**What was NOT decided here.** Who may raise another process's window. The page asks on a user's
+click, and a process may raise its own; a management interface that could raise anybody's is the
+second, separately-gated interface `CLAUDE.md` describes for the taskbar, and M14 owns it.
+
+*Evidence: judgement, with one reference and one measurement. SerenityOS's server owns the stack
+and computes the blocker by walking the owner chain
+(`docs/research/08-hobbyist-os-survey.md`); the round-trip figure is M0's constraint 51.
+Constraints 226–228.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

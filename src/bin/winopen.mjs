@@ -228,11 +228,25 @@ export function run(env) {
             }
           }
           if (ev.type === WEV_RESIZE) account.resizes += 1;
-          // THE CLOSE REQUEST, COUNTED. M7 delivers it and the frame still goes (M9 owns the
-          // refusal), so the only way to know it arrived at all is to count it here — and it did
-          // NOT arrive until an independent critic found that `destroy` cleared the queue the
-          // page had just put it in.
-          if (ev.type === WEV_CLOSE) account.closes += 1;
+          /* THE CLOSE REQUEST, HONOURED. It is counted because it did not arrive at all until an
+           * independent critic found that `destroy` cleared the queue the page had just put it in
+           * — and since M9 it is ACTED ON here rather than by the page: the X asks, and a program
+           * that has nothing to save agrees by destroying the window (constraint 44, and
+           * `src/bin/editor.mjs` is the program that refuses). */
+          if (ev.type === WEV_CLOSE) {
+            account.closes += 1;
+            const ids = env.win.destroy(row.fd);
+            const list = Array.isArray(ids) ? ids : [];
+            account.cascades.push(list);
+            env.std.say(env, `win ${entry.win} asked to close; destroyed ${list.join(", ")}\n`);
+            held.delete(row.fd);
+            for (const [fd, other] of [...held]) {
+              if (!list.includes(other.win)) continue;
+              env.fs.close(fd);
+              held.delete(fd);
+            }
+            break;
+          }
           if (ev.type === WEV_DESTROYED) {
             account.destroyedSeen += 1;
             env.fs.close(row.fd);

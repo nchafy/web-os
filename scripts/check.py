@@ -597,6 +597,14 @@ class Control:
     #: working — the process sends them, the kernel charges them to the window, the page is told a
     #: window has a surface — so what disappears is the PIXELS and nothing else.
     NO_DRAW = "no-draw"
+    #: M9's first control, in `PLAN.md` §5's words: "remove the owner chain; the dialog must fall
+    #: behind and the check must fail". A raise moves the window ALONE and leaves the dialogs that
+    #: ride with it where they were, through the cfg.noOwnerChain hook.
+    NO_OWNER_CHAIN = "no-owner-chain"
+    #: M9's second: nothing is ever BLOCKING, so a raise is always granted and no input is
+    #: suppressed. It cuts the ENFORCEMENT and leaves the close contract alone, which is how the
+    #: two halves of M9 are told apart.
+    NO_MODAL = "no-modal"
     #: M6, half one. The realm strip does not run, so a process keeps the whole platform — and
     #: `navigator.storage` over the kernel's own volume above all (constraints 41, 53). Through the
     #: cfg.noLockdown hook, which the kernel refuses without a bench boot and which travels to the
@@ -648,6 +656,8 @@ CONTROL_RUNS = {
     Control.PTY_DETACH: ("pty-detach",),
     Control.WIN_FIRST_FD: ("win-first-fd",),
     Control.NO_DRAW: ("no-draw",),
+    Control.NO_OWNER_CHAIN: ("no-owner-chain",),
+    Control.NO_MODAL: ("no-modal",),
     Control.NO_CASCADE: ("no-cascade",),
     Control.NO_LOCKDOWN: ("no-lockdown",),
     Control.NO_CSP: ("no-csp",),
@@ -2831,7 +2841,8 @@ M7_LABELS = (
     # was queued by the page and wiped by `destroy` two messages later.
     "close ok",
     "the X button delivers WEV_CLOSE to the process",
-    "and the destroy notice arrives as well, not instead",
+    "and the program is what acts on it, by destroying the window itself",
+    "and only then does the frame go",
     # The not-responding detector, which moved here from `m4a` with the window ABI.
     "health ok",
     "the window worked before its process stopped reading",
@@ -3039,6 +3050,125 @@ _NO_DRAW_FAILS = (
     "and the page replayed exactly the ops the kernel forwarded",
     "pointer ok",
     "and the pixels under the drag changed",
+    "verdict is ok",
+)
+
+
+M9_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # THE DIALOG STAYS ON TOP AND THE OWNER CANNOT BE RAISED OVER IT. Constraint 44's defect in
+    # one line: "without an owner chain a dialog sits behind the window that owns it".
+    "stacking ok",
+    "raising the owner brings its RENDER_ABOVE palette with it",
+    "the X asked instead of acting, and the dialog appeared",
+    "the dialog is BLOCKING at window scope",
+    "and it sits above the window that owns it",
+    "which the page rendered, so a reader sees it too",
+    "a REAL click on the owner was refused by the kernel",
+    "and the blocker it named is the dialog",
+    "so the order did not change at all",
+    "while an unrelated process's window still raises",
+    # INPUT SUPPRESSION, which is what makes a modal a modal rather than a stacking rule.
+    "suppress ok",
+    "typing into the blocked window changed nothing on its screen",
+    "because the kernel suppressed the keys, and counted them",
+    "and nothing is left queued for it either",
+    # THE CLOSE IS A REQUEST. Constraint 44's other half: "without a close-request event, unsaved
+    # work is discarded silently".
+    "refuse ok",
+    "the X opened a dialog and closed nothing",
+    "Esc refused the close and the editor is still there",
+    "and it is editable again, so the suppression lifted with the modal",
+    "the program counted the request and the refusal",
+    "and answering it destroyed every owned window, through the cascade",
+    # THE TWO AXES ARE TWO, which is the correction MILESTONES' ordering note makes to M9's plan.
+    "scope ok",
+    "the dialog is BLOCKING at APP scope",
+    "raising a SIBLING window of the same process was refused",
+    "and the sibling's input is suppressed as well",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m9.html",
+)
+
+M9_DOCUMENT = "/www/m9.html"
+
+#: `await-click` is a terminal state for the ready expression, so the check can send a REAL click
+#: on the buried window. The page publishes the coordinates because only the page knows them: the
+#: frame is positioned by the clamp.
+M9_READY = ("(() => { const M = globalThis.M9 || {}; const s = M.state; "
+            "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
+            "return M.phase === 'await-click' ? 'await-click' : '' })()")
+
+M9_DONE = ("(() => { const s = globalThis.M9 && globalThis.M9.state; "
+           "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M9 = """(() => {
+  const M = globalThis.M9 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    stacking: one(P.stacking),
+    suppress: one(P.suppress),
+    refuse: one(P.refuse),
+    scope: one(P.scope),
+  }
+})()"""
+
+M9_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "stacking": (dict, type(None)),
+    "suppress": (dict, type(None)),
+    "refuse": (dict, type(None)),
+    "scope": (dict, type(None)),
+}
+
+#: What REMOVING THE OWNER CHAIN from a raise must break, and only this.
+#:
+#: Measured on Chrome 157: the dialog is created on top, so it is still above its owner until
+#: something raises the owner — and then it falls behind, which is the one thing this control is
+#: about. The refusal still happens (the modal still blocks), so what moves is the ORDER after the
+#: click and the page's rendering of it.
+_NO_OWNER_CHAIN_FAILS = (
+    "stacking ok",
+    "raising the owner brings its RENDER_ABOVE palette with it",
+    "verdict is ok",
+)
+
+#: What A WORLD WITH NO MODALITY must break.
+#:
+#: The raise is granted, so the order changes and no blocker is named; and the keys arrive, so the
+#: blocked window's screen changes and nothing is suppressed. WHAT MUST HOLD is the whole close
+#: contract — the X still asks, Esc still refuses, answering still cascades — because that half of
+#: M9 has nothing to do with modality, and the sibling's SCOPE clauses still read the axes the
+#: program set.
+_NO_MODAL_FAILS = (
+    "stacking ok",
+    "a REAL click on the owner was refused by the kernel",
+    "and the blocker it named is the dialog",
+    "so the order did not change at all",
+    "suppress ok",
+    "typing into the blocked window changed nothing on its screen",
+    "because the kernel suppressed the keys, and counted them",
+    "scope ok",
+    "raising a SIBLING window of the same process was refused",
+    "and the sibling's input is suppressed as well",
     "verdict is ok",
 )
 
@@ -3385,6 +3515,12 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "in this phase (it is a header on src/libos/, independent of COOP/COEP) and still "
                 "proves nothing here: a policy over a realm no process ever entered bounds "
                 "nothing.",
+        ), "m9": Expect(
+            UNMEASURABLE,
+            why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
+                "no kernel boots, no process runs and no window is created — and a modality over "
+                "no windows is nothing. UNMEASURABLE rather than FAIL, because a FAIL would claim "
+                "a raise was refused when nothing was ever raised.",
         ), "m8": Expect(
             UNMEASURABLE,
             why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
@@ -3890,6 +4026,52 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "keeps working",
             failed=_NO_DRAW_FAILS,
             held=held_rest(M8_LABELS, _NO_DRAW_FAILS),
+        )},
+    ),
+    "no-owner-chain": NegativeControl(
+        name="no-owner-chain",
+        why="no_owner_chain=1: a raise moves the window ALONE and leaves the dialogs that ride "
+            "with it where they were (the cfg.noOwnerChain hook, refused without a bench boot). "
+            "`PLAN.md` §5's control for M9 in its own words: 'remove the owner chain; the dialog "
+            "must fall behind and the check must fail.'\n"
+            "WHAT MUST BREAK: the order after the click. The dialog is created on top, so it is "
+            "above its owner until something raises the owner — and then it falls behind, which is "
+            "constraint 44's defect exactly: 'without an owner chain a dialog sits behind the "
+            "window that owns it.'\n"
+            "WHAT MUST HOLD: the refusal itself, because the modal still blocks — so the click is "
+            "still refused and the blocker is still named. That split is what makes this control "
+            "about the CHAIN and not about modality, which `--negative no-modal` is for.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_owner_chain", "1"),),
+        expects={"m9": Expect(
+            Outcome.FAIL,
+            why="a dialog must stop coming up with the window that owns it",
+            failed=_NO_OWNER_CHAIN_FAILS,
+            held=held_rest(M9_LABELS, _NO_OWNER_CHAIN_FAILS),
+        )},
+    ),
+    "no-modal": NegativeControl(
+        name="no-modal",
+        why="no_modal=1: nothing is ever BLOCKING (the cfg.noModal hook, refused without a bench "
+            "boot), so `blockingFor` answers null for every window.\n"
+            "WHAT MUST BREAK: the enforcement, in both of its halves. The raise is granted so the "
+            "order changes and no blocker is named, and the keys ARRIVE so the blocked editor's "
+            "screen changes and `suppressed` stays at zero. The sibling's clauses go with them.\n"
+            "WHAT MUST HOLD, and this is the point of having two controls: THE WHOLE CLOSE "
+            "CONTRACT. The X still asks instead of acting, Esc still refuses, the editor is still "
+            "editable afterwards, and answering still destroys both windows through the cascade — "
+            "because that half of M9 has nothing to do with modality. A control that broke both "
+            "halves could not tell them apart.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_modal", "1"),),
+        expects={"m9": Expect(
+            Outcome.FAIL,
+            why="a modal must stop refusing raises and stop suppressing input, while the close "
+                "request keeps working",
+            failed=_NO_MODAL_FAILS,
+            held=held_rest(M9_LABELS, _NO_MODAL_FAILS),
         )},
     ),
     "no-lockdown": NegativeControl(
@@ -7830,11 +8012,18 @@ def check_m7(env: Env) -> None:
     env.expect_that("the X button delivers WEV_CLOSE to the process",
                     (cl.get("closes") or 0) > 0,
                     {"closes": cl.get("closes"), "result": cl.get("result")})
-    # AS WELL AS, NOT INSTEAD OF: the destroy notice is the other record, and keeping the queue is
-    # what lets both arrive.
-    env.expect_that("and the destroy notice arrives as well, not instead",
-                    (cl.get("destroyedSeen") or 0) > 0,
-                    {"destroyedSeen": cl.get("destroyedSeen"), "win": cl.get("win")})
+    # AND THE PROGRAM IS WHAT ACTS ON IT, which is M9's change to this contract: the X posts the
+    # event and nothing else, so the frame stands until the program calls `win_destroy` — and the
+    # ids it reports are what prove it did. The clause that used to be here asserted a
+    # WEV_DESTROYED record, which is right only when the PAGE destroys the window; a program that
+    # destroys its own is not told, and the cross-process case is where that notice is asserted.
+    env.expect_that("and the program is what acts on it, by destroying the window itself",
+                    len(cl.get("cascades") or []) == 1
+                    and cl.get("win") in ((cl.get("cascades") or [[]])[0] or []),
+                    {"cascades": cl.get("cascades"), "win": cl.get("win")})
+    env.expect_that("and only then does the frame go",
+                    cl.get("framesAfter") == 0 and cl.get("goneMs", -1) >= 0,
+                    {"framesAfter": cl.get("framesAfter"), "goneMs": cl.get("goneMs")})
 
     # ---- PROOF 5: the not-responding detector, both edges ---------------------------------
     h = ev("health")
@@ -8081,6 +8270,236 @@ def check_m8(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m8.html", env.served_matches_disk(env.document),
                     "the m8.html served does not match www/m8.html on disk")
+
+
+@check(
+    name="m9",
+    milestone="m9",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_OWNER_CHAIN, Control.NO_MODAL),
+    labels=M9_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M9_DOCUMENT,
+    ready_expr=M9_READY,
+    ready_what="globalThis.M9 reaching done/aborted/error, or phase 'await-click' (www/m9.html)",
+    # 5 s measured over three fresh kernels. The bound is generous for the reason M5's is: a
+    # program parked in `poll` raises no error, so a wedge must end as a BROKEN check carrying the
+    # page's own state rather than as a suite that never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M9 && globalThis.M9.state",
+    refusal_want="aborted",
+    note="AN OWNED WINDOW IS TWO THINGS AT ONCE, and M9's own plan had only one of them. "
+         "`modal in {none, window, app, system}` describes the SCOPE - which windows are affected "
+         "- and SerenityOS's enforced `WindowMode` describes the BEHAVIOUR: `Modeless`, "
+         "`Passive`, `RenderAbove`, `Blocking`. `MILESTONES.md`'s ordering correction says an "
+         "owned window needs both, and a tooltip and a save dialog are the proof: both are 'owned "
+         "by that window' and nothing else about them is the same.\n"
+         "THE KERNEL OWNS THE STACK, which is the structural half of this milestone. A page that "
+         "owned the order could be asked to put a window above the modal that blocks it, and "
+         "would - it has no way to know better. So `win_raise` is a syscall, the kernel computes "
+         "the blocker by walking the owner chain, and `win-stack` carries the WHOLE order to the "
+         "page rather than a 'raise this one' instruction (constraint 226, `docs/DECISIONS.md` "
+         "D32).\n"
+         "THE CLICK IS REAL, through `Input.dispatchMouseEvent` at coordinates the page publishes "
+         "from the frame's own rectangle: the frame is positioned by the clamp, so nothing outside "
+         "the page knows where its title bar is.\n"
+         "AND THE SUPPRESSION IS WHAT MAKES A MODAL A MODAL. Typing into the blocked editor must "
+         "change nothing on its screen, the kernel's `suppressed` counter must move, and nothing "
+         "may be left queued - the order on its own would pass for a window that is merely "
+         "underneath. A resize, a close request and a destroy notice are NOT suppressed, because "
+         "a window that missed them would be wrong about the world once the modal went away.\n"
+         "THE CLOSE IS A REQUEST. The X posts WEV_CLOSE and nothing else; the editor opens a "
+         "dialog, Esc refuses the close, the editor is editable again, and answering destroys both "
+         "through M7's cascade. A process that ignores the request is not a trap and needs nothing "
+         "new: the event sits uncollected, so the not-responding detector greys the caption at "
+         "1,000 ms and offers End Process at 5,000.\n"
+         "negative control: --negative no-owner-chain raises a window without the dialogs that "
+         "ride with it - `PLAN.md` §5's own words, 'the dialog must fall behind'. --negative "
+         "no-modal makes nothing blocking: the raise is granted, the keys arrive, and the whole "
+         "close contract must still hold. --negative no-isolation must come out BROKEN: no SAB, "
+         "so no kernel and no windows.",
+)
+def check_m9(env: Env) -> None:
+    # ---- send the real click, then wait for the page to finish ----------------------------
+    phase = env.page.evaluate("globalThis.M9 && globalThis.M9.phase")
+    state = env.page.evaluate(M9_DONE)
+    if not phase and not state:
+        env.unmeasurable(
+            "www/m9.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no click was sent and nothing below was measured")
+    if phase == "await-click":
+        where = env.page.evaluate("JSON.stringify(globalThis.M9.click || null)")
+        if not where or where == "null":
+            env.unmeasurable(
+                "www/m9.html asked for a click on the buried window and published no coordinates, "
+                "so there was nowhere to send one")
+        at = json.loads(where)
+        # DECLARED BEFORE THE CLICK. The page cannot otherwise tell this check's click from a
+        # person's - both are trusted - and it would report a hand-driven session as a failed one.
+        env.page.evaluate("globalThis.M9.driver = 'check'")
+        env.page.call("Input.dispatchMouseEvent", type="mousePressed", x=at["x"], y=at["y"],
+                      button="left", buttons=1, clickCount=1)
+        env.page.call("Input.dispatchMouseEvent", type="mouseReleased", x=at["x"], y=at["y"],
+                      button="left", buttons=0, clickCount=1)
+        env.settle(M9_DONE, timeout=240.0,
+                   what="globalThis.M9.state reaching done after the click was sent")
+
+    got = env.read(READ_M9, M9_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m9.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m9.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs and no window is created - and a modal with no "
+            "windows is nothing." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m9.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("stacking", "suppress", "refuse", "scope")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    cfg = got["cfg"] or {}
+
+    # ---- PROOF 1: the dialog stays on top and the owner cannot be raised over it ----------
+    a = ev("stacking")
+    modal = a.get("modal") or {}
+    stack = a.get("stack") or []
+    after = a.get("stackAfter") or []
+    z = a.get("z") or {}
+    blocked = a.get("lastBlocked") or {}
+    env.expect_that("stacking ok", section_ok("stacking"), a)
+    # THE CHAIN, MEASURED WHILE NOTHING IS BLOCKING, and the CONTROL is what forced this clause to
+    # exist: with the modal already up a raise of the editor is REFUSED, so removing the owner
+    # chain changed nothing and `--negative no-owner-chain` came out GREEN against a check that
+    # claimed to be about the chain. A palette is RENDER_ABOVE and blocks nothing, so the raise is
+    # granted and the rider is the whole of what is asserted.
+    pal = a.get("paletteMode") or {}
+    env.expect_that("raising the owner brings its RENDER_ABOVE palette with it",
+                    a.get("rodeMs", -1) >= 0
+                    and pal.get("mode") == cfg.get("WMODE_RENDER_ABOVE")
+                    and pal.get("scope") == cfg.get("WMODAL_NONE"),
+                    {"rodeMs": a.get("rodeMs"), "stack": a.get("stackWithPalette"),
+                     "palette": pal})
+    env.expect_that("the X asked instead of acting, and the dialog appeared",
+                    a.get("dialogMs", -1) >= 0 and a.get("framesWithDialog") == 4,
+                    {"dialogMs": a.get("dialogMs"), "frames": a.get("framesWithDialog")})
+    # THE TWO AXES, read out of the kernel's own report and compared against the numbers the page
+    # imported from `src/abi.mjs` - a value written here as well would be one fact in two places.
+    env.expect_that("the dialog is BLOCKING at window scope",
+                    modal.get("mode") == cfg.get("WMODE_BLOCKING")
+                    and modal.get("scope") == cfg.get("WMODAL_WINDOW"),
+                    {"modal": modal, "cfg": cfg})
+    withDialog = a.get("stackWithDialog") or []
+    env.expect_that("and it sits above the window that owns it",
+                    withDialog and withDialog[-1] == a.get("dialogWin"),
+                    {"stack": withDialog, "dialog": a.get("dialogWin")})
+    # AND THE PAGE RENDERED IT. The kernel's order is the authority and the DOM is what the page
+    # did with it; an inert frame and a working one are the same picture (constraint 40).
+    env.expect_that("which the page rendered, so a reader sees it too",
+                    (z.get(str(a.get("dialogWin"))) or 0) > (z.get(str(a.get("editorWin"))) or 0),
+                    {"zIndex": z, "dialog": a.get("dialogWin"), "editor": a.get("editorWin")})
+    env.expect_that("a REAL click on the owner was refused by the kernel",
+                    a.get("drivenBy") == "check" and a.get("refusedMs", -1) >= 0,
+                    {"drivenBy": a.get("drivenBy"), "refusedMs": a.get("refusedMs")})
+    env.expect_that("and the blocker it named is the dialog",
+                    blocked.get("by") == a.get("dialogWin")
+                    and blocked.get("win") == a.get("editorWin"),
+                    {"blocked": blocked, "dialog": a.get("dialogWin")})
+    # THE WHOLE ORDER, ELEMENT BY ELEMENT. Checking only the top passed whether the raise was
+    # refused or granted — the dialog is BLOCKING, so it rides up with its owner either way and
+    # ends on top regardless, and `--negative no-modal` found that by holding when it should have
+    # moved. A refused raise changes NOTHING.
+    env.expect_that("so the order did not change at all", after == stack,
+                    {"before": stack, "after": after})
+    # AND THE SCOPE IS NOT A LIE: a window-modal dialog affects its OWNER. If an unrelated
+    # process's window were refused too, every clause above would still pass.
+    env.expect_that("while an unrelated process's window still raises",
+                    a.get("strangerRaisedMs", -1) >= 0
+                    and (a.get("stackEnd") or [None])[-1] == a.get("strangerWin"),
+                    {"stackEnd": a.get("stackEnd"), "stranger": a.get("strangerWin")})
+
+    # ---- PROOF 2: input to a blocked window is suppressed ---------------------------------
+    b = ev("suppress")
+    env.expect_that("suppress ok", section_ok("suppress"), b)
+    env.expect_that("typing into the blocked window changed nothing on its screen",
+                    b.get("screenUnchanged") is True,
+                    {"before": b.get("before"), "after": b.get("after")})
+    # THE KERNEL'S OWN COUNTER, because "the screen did not change" is also true of a keyboard that
+    # stopped working, and a program whose keys silently stopped arriving could not tell.
+    env.expect_that("because the kernel suppressed the keys, and counted them",
+                    (b.get("suppressed") or 0) >= 3, {"suppressed": b.get("suppressed")})
+    env.expect_that("and nothing is left queued for it either",
+                    (b.get("pending") or 0) == 0,
+                    {"pending": b.get("pending"), "queuedEver": b.get("queuedEver")})
+
+    # ---- PROOF 3: the close is a request -------------------------------------------------
+    c = ev("refuse")
+    cr = c.get("result") or {}
+    env.expect_that("refuse ok", section_ok("refuse"), c)
+    # THREE FRAMES: the editor, its palette and the dialog — and the palette is why the cascade
+    # below takes three windows rather than two.
+    env.expect_that("the X opened a dialog and closed nothing",
+                    c.get("framesWithDialog") == 3, {"frames": c.get("framesWithDialog")})
+    env.expect_that("Esc refused the close and the editor is still there",
+                    c.get("refusedMs", -1) >= 0 and c.get("editorStillUp") is True,
+                    {"refusedMs": c.get("refusedMs"), "screen": c.get("screenAfterRefusal")})
+    env.expect_that("and it is editable again, so the suppression lifted with the modal",
+                    c.get("editableAgainMs", -1) >= 0,
+                    {"editableAgainMs": c.get("editableAgainMs")})
+    env.expect_that("the program counted the request and the refusal",
+                    (cr.get("closes") or 0) >= 2 and (cr.get("refusals") or 0) >= 1,
+                    {"result": cr})
+    env.expect_that("and answering it destroyed every owned window, through the cascade",
+                    c.get("bothGoneMs", -1) >= 0 and c.get("framesAtEnd") == 0
+                    and len(cr.get("destroyed") or []) == 3,
+                    {"destroyed": cr.get("destroyed"), "frames": c.get("framesAtEnd")})
+
+    # ---- PROOF 4: app scope blocks a sibling ---------------------------------------------
+    d = ev("scope")
+    dmodal = d.get("modal") or {}
+    dblocked = d.get("lastBlocked") or {}
+    env.expect_that("scope ok", section_ok("scope"), d)
+    env.expect_that("the dialog is BLOCKING at APP scope",
+                    dmodal.get("mode") == cfg.get("WMODE_BLOCKING")
+                    and dmodal.get("scope") == cfg.get("WMODAL_APP"),
+                    {"modal": dmodal, "cfg": cfg})
+    # THE SIBLING IS NOT THE DIALOG'S OWNER, which is why this is the clause that tells the two
+    # scopes apart: a window-scoped modal would let it raise.
+    env.expect_that("raising a SIBLING window of the same process was refused",
+                    d.get("refusedMs", -1) >= 0 and dblocked.get("win") == d.get("scratchWin")
+                    and dblocked.get("by") == d.get("dialogWin"),
+                    {"blocked": dblocked, "scratch": d.get("scratchWin")})
+    env.expect_that("and the sibling's input is suppressed as well",
+                    d.get("siblingScreenUnchanged") is True
+                    and (d.get("siblingSuppressed") or 0) > 0,
+                    {"unchanged": d.get("siblingScreenUnchanged"),
+                     "suppressed": d.get("siblingSuppressed")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m9.html", env.served_matches_disk(env.document),
+                    "the m9.html served does not match www/m9.html on disk")
 
 
 @check(

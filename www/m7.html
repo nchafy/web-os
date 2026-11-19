@@ -487,11 +487,22 @@ async function pClose (boot) {
     ev.result = result
     ev.closes = result.closes
     ev.destroyedSeen = result.destroyedSeen
+    ev.cascades = result.cascades
     const clauses = {
       'the X button delivers WEV_CLOSE to the process': (result.closes || 0) > 0,
-      'and the destroy notice arrives as well, not instead':
-        (result.destroyedSeen || 0) > 0,
-      'and the frame goes': ev.framesAfter === 0 && goneMs >= 0,
+      /* AND THE PROGRAM IS WHAT ACTS ON IT. M9 made a close a REQUEST (constraint 44): the X
+       * posts the event and nothing else, so the frame is still there until the program calls
+       * `win_destroy` — which is what the ids it reports prove it did.
+       *
+       * This clause used to assert that a WEV_DESTROYED record arrived as well, and that was
+       * right when the PAGE destroyed the window: the program learned by event. A program that
+       * destroys its own window is not told about it, and does not need to be — the
+       * cross-process case, where another process's call takes your window down, is the one the
+       * notice is for and `crossproc` is where it is asserted. */
+      'and the program is what acts on it, by destroying the window itself':
+        Array.isArray(result.cascades) && result.cascades.length === 1
+        && (result.cascades[0] || []).includes(ev.win),
+      'and only then does the frame go': ev.framesAfter === 0 && goneMs >= 0,
     }
     ev.clauses = clauses
     ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)

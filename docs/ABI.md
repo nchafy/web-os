@@ -181,6 +181,7 @@ INVAL NAMETOOLONG
 `win_surface(fd, w, h)` → 0 · BADF INVAL **ENOMEM** **EHOSTGONE** — `w` × `h` DEVICE pixels, and
 the kernel allocates it
 `win_draw(fd, nops, byteregion = nops × 32 B)` → 0 · BADF INVAL **EHOSTGONE**
+`win_raise(fd)` → 0 · BADF INVAL **EPERM** (a modal blocks it) **EHOSTGONE**
 `win_poll` DOES NOT EXIST, and that is the design: the fd `win_create` returns is read with
 `read(2)` and waited on with `poll(2)`
 `clipboard_read` / `clipboard_write` → bytes / 0 · ACCES NOTSUP (gesture-gated)
@@ -276,8 +277,43 @@ modifiers. A move is sent only while a button is down, because a hover would ove
 **One content mode per window**: `write(2)` on a surfaced window is EINVAL, because the page has
 replaced the text widget with a canvas and cells have nowhere to go (constraint 221).
 
-**Still M9's and M10's.** `modal`, and the enforced refusal behind `WEV_CLOSE`. Three `dataobj_*`
-calls for a typed clipboard and drag-and-drop are M10's. Constraints 44–45.
+### Modality and the close, as M9 built them
+
+**`win_set(fd, WIN_SET_MODAL, scope, mode)` sets TWO AXES**, because an owned window is two things
+at once (constraint 227). `scope` says WHICH windows are affected and `mode` says WHAT happens to
+them; a window with no owner may not be window- or app-modal, and `win_set` answers EINVAL rather
+than storing a modality no rule covers.
+
+| scope | affects |
+| --- | --- |
+| `WMODAL_NONE` | nothing |
+| `WMODAL_WINDOW` | its owner, and the owner's ancestors |
+| `WMODAL_APP` | every window of the OWNER's process — not the dialog's, which is the whole point of a broker |
+| `WMODAL_SYSTEM` | everything outside the modal's own subtree |
+
+| mode | behaviour |
+| --- | --- |
+| `WMODE_MODELESS` | ordinary; an owned window that happens to have an owner |
+| `WMODE_PASSIVE` | rides up with its owner, blocks nothing — a tooltip |
+| `WMODE_RENDER_ABOVE` | rides up with its owner, blocks nothing — a palette |
+| `WMODE_BLOCKING` | rides up AND refuses the raise, and its scope's windows get no input |
+
+**`win_raise(fd)` is a syscall because the kernel owns the stack.** It answers **EPERM** when a
+modal blocks the window — a rule and not a transient, so there is nothing to retry — and the page
+is told which window refused, by `win-blocked`, so a click that does nothing can be explained. On a
+grant the kernel posts `win-stack` with the WHOLE order, bottom first: the page renders it and
+never decides it (constraint 226, `docs/DECISIONS.md` D32).
+
+**INPUT TO A BLOCKED WINDOW IS SUPPRESSED** — keys and pointers only. A resize, a focus change, a
+close request and a destroy notice still arrive, because a window that missed those would be wrong
+about the world once the modal went away. `/proc/<pid>/win/<winid>` publishes `scope`, `mode` and
+`suppressed`.
+
+**A CLOSE IS ADVISORY.** The X posts `WEV_CLOSE` and nothing else; the frame stands until the
+process calls `win_destroy`. A process that ignores it is caught by the not-responding detector it
+already has (constraint 228).
+
+**Still M10's.** Three `dataobj_*` calls for a typed clipboard and drag-and-drop. Constraint 45.
 
 ---
 

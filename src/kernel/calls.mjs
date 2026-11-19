@@ -15,7 +15,8 @@ import {
   F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
-  WIN_SET_TITLE, WIN_SET_BOX, WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
+  WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
+  WMODAL_MAX, WMODE_MAX,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
@@ -975,9 +976,44 @@ HANDLERS.win_set = (p, k) => {
     k.post({ t: "win-box", win: d.win.id, ...box });
     return 0;
   }
+  if (what === WIN_SET_MODAL) {
+    const scope = p.ctl[A2] | 0;
+    const mode = p.ctl[A3] | 0;
+    // BOTH AXES OR NEITHER, and both bounded: an out-of-range value would be stored and then
+    // compared against nothing, so a window would be "modal" in a way no rule covers.
+    if (scope < 0 || scope > WMODAL_MAX || mode < 0 || mode > WMODE_MAX) return -EINVAL;
+    /* A WINDOW WITH NO OWNER MAY NOT BE WINDOW- OR APP-MODAL. Both scopes are defined by walking
+     * the owner chain, so without an owner there is nothing to block — and a window that claimed
+     * to be modal and blocked nothing is worse than a refusal, because the program believes it. */
+    if ((scope === 1 || scope === 2) && d.win.owner === 0) return -EINVAL;
+    d.win.scope = scope;
+    d.win.mode = mode;
+    // THE STACK IS RE-EVALUATED, not merely recorded: a window that has just become
+    // RENDER_ABOVE or BLOCKING must get above its owner now rather than at the next click.
+    k.wins.raise(d.win);
+    k.post({ t: "win-modal", win: d.win.id, scope, mode });
+    return 0;
+  }
   // A selector nobody implements is -EINVAL, never 0: a caller checking the return would read a
   // no-op as a successful change.
   return -EINVAL;
+};
+
+/**
+ * win_raise(fd) -> 0, or -EPERM with the blocker named to the page.
+ *
+ * THE KERNEL DECIDES, which is the whole of M9: a page that owned the stack could be asked to put
+ * a window above the modal that blocks it, and would. The refusal is -EPERM and not -EBUSY: a
+ * blocked raise is not a transient to retry, it is a rule — the window stays where it is until the
+ * modal above it is answered.
+ */
+HANDLERS.win_raise = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  if (d.win.destroyed) return -EHOSTGONE;
+  const blocker = k.wins.raise(d.win);
+  if (blocker) return -EPERM;
+  return 0;
 };
 
 /**
