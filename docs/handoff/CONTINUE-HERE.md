@@ -60,6 +60,7 @@ in `MILESTONES.md` with its actual cost and what it changed in the plan. Current
 | `scripts/check.py --negative no-cascade` | M7's second — destroying a parent destroys only the parent. 11 red, 31 intact, and every poll and `/proc` label must hold |
 | `node bench/m7-win/probe.mjs` | 128 host checks over the window table and one window: the event queue and its bounded overflow, the parks, the record floor, the cascade across processes, the owner refusals, the cap, the detector's two edges |
 | `bench/m7-win/controls.py` | 5 mutations of `wins.mjs`, scored on WHICH checks move. One is a DECLARED CRASH (`no-floor`), because a torn record must make a program fail loudly rather than decode as noise |
+| `bench/m7-win/firefox.py` | M7 IN A SECOND ENGINE. Renders the page headless and keeps the PNG — these pages print their own log, and Mozilla removed CDP so there is no driver. A slow subresource injected into the served HTML holds the load event open until the proofs finish. Verdict ok in 18.8 s on Firefox 156 |
 | `bench/m7-win/drive.py` | the fast loop: open `www/m7.html` in a real Chrome and print its own evidence, clause by clause. `--live` leaves the desktop open; `--page m4a` drives that one |
 | `bench/kernel-churn/probe.py --drop` | the program fetch dropped at the TRANSPORT, which panicked the kernel before constraint 212. Every kernel must still boot AND one must report a transport retry |
 | `scripts/check.py --negative pty-detach` | M4a's control — a write to the pty master discards its bytes. 6 red, 20 intact |

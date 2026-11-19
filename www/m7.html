@@ -363,7 +363,10 @@ function typeSynthetic (term, text) {
 
 /** The window table, rendered from the kernel's own report. */
 function renderWins (rows) {
-  const cols = ['win', 'pid', 'title', 'owner', 'children', 'cells', 'pending', 'dropped',
+  // `id` AND NOT `win`: `Window.report()` calls it `id`, and asking for `win` rendered an empty
+  // column — visible in the first Firefox screenshot of this page, which is what a second engine
+  // is for even when it agrees about everything else.
+  const cols = ['id', 'pid', 'title', 'owner', 'children', 'cells', 'pending', 'dropped',
     'parked', 'level', 'staleMs']
   const head = '<tr>' + cols.map((c) => `<th class="l">${c}</th>`).join('') + '</tr>'
   const body = rows.map((r) => '<tr>' + cols.map((c) => {

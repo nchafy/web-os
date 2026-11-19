@@ -1343,7 +1343,18 @@ node bench/m7-win/probe.mjs            128 host checks (the window table, no bro
 bench/m7-win/controls.py               5 mutations, each scored on which checks move
 bench/kernel-churn/probe.py --drop     the program fetch, dropped at the transport
 bench/m7-win/drive.py                  the page in a real Chrome, with its evidence printed
+bench/m7-win/firefox.py                A SECOND ENGINE: verdict ok in 18.8 s, six of six
 ```
+
+**AND IT PASSES IN FIREFOX, which is a condition of saying it is done** (`CLAUDE.md`: the suite
+drives Chrome only, and that gap has cost two milestones). `bench/m7-win/firefox.py` renders the
+page headless and keeps the PNG, because these pages print their own log as text — Mozilla removed
+CDP, so there is no driver. The one trick is a slow subresource injected into the served HTML,
+which holds the load event open until the proofs have finished; the file on disk is untouched.
+**Firefox 156: verdict ok in 18.8 s, all six sections, a live shell at a prompt** — and standing
+alone the page types for itself, so the real-keystroke clause reports NOT MEASURED rather than
+passing on a synthetic event. It also found the one defect Chrome did not: the window table's own
+`win` column was empty, because `Window.report()` calls that field `id`.
 
 **`/dev/console` IS DELETED, WITH THE MECHANISM UNDER IT.** That is what the milestone was for: it
 was ONE window, created by the PAGE before any process existed, and a process has one futex word,
