@@ -308,6 +308,79 @@ const eventsOf = (win) => {
   check("and the second entered", eventsOf(src).map((e) => e.type), [WEV_DRAG_ENTER]);
 }
 
+// ---- the LEAVE a critic found missing, twice ------------------------------------------------
+{
+  const { wins, data } = fresh();
+  const src = wins.create(1, {});
+  const target = wins.create(2, {});
+  const dialog = wins.create(2, { owner: target.id });
+  const obj = data.create(1, fmtBit(DOBJ_TEXT));
+  data.set(obj, DOBJ_TEXT, enc.encode("hover"));
+  press(wins, src);
+  data.beginDrag(obj, src, DOBJ_EFFECT_COPY);
+  data.dragAt(target.id, 1, 1);
+  check("the target was entered", eventsOf(target).map((e) => e.type), [WEV_DRAG_ENTER]);
+  /* AND THEN A MODAL BLOCKS IT MID-GESTURE. The window may no longer be a TARGET — an ENTER
+   * offers something, and that is input — but it was already told the pointer was over it, so it
+   * must be told the pointer left. Without this its hover frame stays on screen for the rest of
+   * its life and its own enter/leave counts never balance. */
+  wins.setModal(dialog, WMODAL_WINDOW, WMODE_BLOCKING);
+  check("a sample elsewhere leaves it, even though it is now BLOCKED", data.dragAt(0), 0);
+  check("the LEAVE arrived", eventsOf(target).map((e) => e.type), [WEV_DRAG_LEAVE]);
+  check("and it is counted", data.report().leaves, 1);
+}
+{
+  const { wins, data } = fresh();
+  const src = wins.create(1, {});
+  const target = wins.create(2, {});
+  const obj = data.create(1, fmtBit(DOBJ_TEXT));
+  data.set(obj, DOBJ_TEXT, enc.encode("cancelled"));
+  press(wins, src);
+  data.beginDrag(obj, src, DOBJ_EFFECT_COPY);
+  data.dragAt(target.id, 1, 1);
+  eventsOf(target);
+  // A CANCELLATION IS THE SECOND INSTANCE. The pointer stopped reporting, so nothing will ever
+  // arrive at the window the user was hovering over — including the drop it was expecting.
+  clock += DRAG_IDLE_MS + 1;
+  data.tick();
+  check("a cancelled drag leaves the window it was over",
+    eventsOf(target).map((e) => e.type), [WEV_DRAG_LEAVE]);
+}
+{
+  const { wins, data } = fresh();
+  const src = wins.create(1, {});
+  const target = wins.create(2, {});
+  const obj = data.create(1, fmtBit(DOBJ_TEXT));
+  data.set(obj, DOBJ_TEXT, enc.encode("full"));
+  for (let i = 0; i < WIN_EVENT_CAP + 2; i += 1) {
+    wins.feed(target.id, { type: WEV_KEY, ...packKeyBytes(enc.encode("k")) });
+  }
+  press(wins, src);
+  data.beginDrag(obj, src, DOBJ_EFFECT_COPY);
+  data.dragAt(target.id, 1, 1);
+  // AND SO IS A DROP THAT COULD NOT QUEUE: effect 0 means nothing was delivered, so the window is
+  // still hovering over a gesture that is over.
+  check("a drop that was lost still ends the hover", data.dragDrop(target.id, 1, 1), 0);
+  /* THE COUNTER AND NOT THE RECORD, and the reason is the fixture: this window's queue is FULL,
+   * which is why the drop was lost — so the LEAVE cannot be delivered either. What is assertable
+   * is that the kernel TRIED, which is the difference between a session that ended the hover and
+   * one that forgot to. */
+  check("the LEAVE was attempted", data.report().leaves, 1);
+  // A DROP THAT LANDED IS ITSELF TERMINAL, so there is no LEAVE beside it.
+  const two = fresh();
+  const s2 = two.wins.create(1, {});
+  const t2 = two.wins.create(2, {});
+  const o2 = two.data.create(1, fmtBit(DOBJ_TEXT));
+  two.data.set(o2, DOBJ_TEXT, enc.encode("landed"));
+  press(two.wins, s2);
+  two.data.beginDrag(o2, s2, DOBJ_EFFECT_COPY);
+  two.data.dragAt(t2.id, 1, 1);
+  eventsOf(t2);
+  two.data.dragDrop(t2.id, 1, 1);
+  check("a drop that landed is the last record, with no LEAVE after it",
+    eventsOf(t2).map((e) => e.type), [WEV_DROP]);
+}
+
 // ---- the drop, the one-shot collection, and the source's receipt -----------------------------
 {
   const { wins, data } = fresh();

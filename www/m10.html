@@ -212,8 +212,14 @@ async function pCopy (boot) {
      * person has from a prompt. The pattern is a FIXED STRING — `grep` here is literal unless `-E`
      * is passed (constraint 138), so an anchored `^clipboard:` would match nothing and the clause
      * would report a working kernel as a broken one. `grep`'s exit status is its answer: 0 found,
-     * 1 not found. */
-    const greps = await spawnProgram(s.k, GREP, ['grep', 'clipboard:', '/proc/dataobj'])
+     * 1 not found.
+     *
+     * AND THE PATTERN IS THE OFFER, NOT THE WORD `clipboard:`. A CRITIC FOUND THAT: the header
+     * line is printed unconditionally — `clipboard:\t-` when the slot is EMPTY — so grepping the
+     * label passed against a kernel holding nothing, which is precisely the world
+     * `--negative text-only` produces. `paths,bitmap` exists in that file only if an object
+     * offering both formats is really there. */
+    const greps = await spawnProgram(s.k, GREP, ['grep', 'paths,bitmap', '/proc/dataobj'])
     ev.grep = await resultOf(s.k, greps.pid, 20000)
 
     // THE PASTE, IN A THIRD PROCESS, which draws what it got.

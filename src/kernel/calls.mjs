@@ -1224,6 +1224,17 @@ function pollOne(p, fd, events) {
     if (d.win.readable()) revents |= POLLIN;
     if (d.win.writable()) revents |= POLLOUT;
     if (d.win.hungUp()) revents |= POLLHUP;
+  } else if (d.kind === F_DATA) {
+    /* M10. A DATA OBJECT IS NOT POLLABLE, AND SAYING SO IS THE POINT. Its `read` and `write` are
+     * -EINVAL by design (the bytes are reached by `dataobj_get`), so the fallback below — which
+     * reports a file as always ready — told a program the fd was readable and then refused every
+     * read: a poll-then-read loop spins instead of parking. A critic found it in the one case that
+     * makes it reachable, a program holding a clipboard fd and its window fd in one set.
+     *
+     * POLLNVAL and not 0: 0 would make `poll` park on an fd nothing will ever make ready, and the
+     * honest answer is "this fd cannot be waited on", which POSIX reports whether or not it was
+     * asked for. */
+    revents |= POLLNVAL;
   } else {
     // A regular, generated or tmpfs file and the sink never park, so a poller must not sleep here.
     revents |= POLLIN | POLLOUT;

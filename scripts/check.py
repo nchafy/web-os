@@ -3267,6 +3267,11 @@ M10_SHAPE = {
 #: gestures run end to end and what fails is the format and the format alone.
 _TEXT_ONLY_FAILS = (
     "copy ok",
+    # AND THE `/proc` CLAUSE, which is in this list because of what it now greps for: `paths,bitmap`
+    # is in that file only if an object offering both formats is really on the clipboard, and under
+    # this control none is. Grepping the label `clipboard:` instead passed here against an empty
+    # slot, which is the mis-coupling a critic found.
+    "a program reads the clipboard out of /proc/dataobj",
     "the copy offered a path list AND the image",
     "the clipboard holds one object, with both formats",
     "and the process that copied it was killed, payload intact",
@@ -8992,6 +8997,10 @@ def check_m10(env: Env) -> None:
                      "after": a.get("afterKill"), "procs": a.get("procs")})
     # AND A PROGRAM READS IT OFF A PATH, which is the only reading of this a person has from a
     # prompt: `/proc/dataobj` is regenerated per read like everything else in `/proc`.
+    #
+    # THE PATTERN IS THE OFFER AND NOT THE WORD `clipboard:`, because that label is printed even
+    # for an empty slot — so the first version of this clause passed against a kernel holding
+    # nothing, which is the world `--negative text-only` produces. Found by a critic.
     env.expect_that("a program reads the clipboard out of /proc/dataobj",
                     (a.get("grep") or {}).get("exit") == 0
                     and ((a.get("grep") or {}).get("matched") or 0) >= 1,

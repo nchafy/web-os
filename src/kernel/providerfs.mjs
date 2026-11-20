@@ -7,6 +7,22 @@ import { SynthFS, relParts } from "./synth.mjs";
 import { DIR, FILE, FsError } from "../fs/vfs.mjs";
 import { probeProvider, readRange, PROBE, PROVIDERS } from "./providers.mjs";
 
+/**
+ * The mode a row gets when it does not name one: read and EXECUTE, no write.
+ *
+ * THE X BIT IS WHAT MAKES `/usr/bin` RUNNABLE, and M10 is why the default is no longer the only
+ * mode. `SYS_spawn` asks for execute permission (`src/kernel/exec.mjs`), so a row without it
+ * cannot be run — which is exactly right for a data file and exactly wrong for a program. Until
+ * M10 every row was a program and the distinction could not be observed; a critic pointed out that
+ * `/usr/share/logo.png` had become spawnable, and that the comment on `USR_ENTRIES` claimed the
+ * opposite.
+ */
+const DEFAULT_MODE = 0o555;
+
+/** A data file: readable, NOT executable. `spawn` on one is -EACCES, which is the refusal
+ *  `USR_ENTRIES` promises for a file that is not a program. */
+export const DATA_MODE = 0o444;
+
 /** The committed `/usr` layout: a name in the mount, and the provider path it comes from. A new
  *  file is a row here and nothing below. */
 export const USR_ENTRIES = Object.freeze([
@@ -14,8 +30,10 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "lib/process.mjs", path: "src/libos/process.mjs" }),
   Object.freeze({ name: "include/abi.mjs", path: "src/abi.mjs" }),
   // THE MOUNT NAME HAS NO EXTENSION and the provider path does: `ls` must not require knowing the
-  // implementation language. Mode comes from the mount, 0o555 for every file, which is what makes
-  // `SYS_spawn`'s execute check (src/kernel/exec.mjs) pass here and fail on a data file.
+  // implementation language. Mode comes from the mount: 0o555 for a PROGRAM and 0o444 for a DATA
+  // FILE, which is what makes `SYS_spawn`'s execute check (src/kernel/exec.mjs) pass here and fail
+  // on the `share/` rows below. The per-row mode exists because M10 added the first data files and
+  // a critic found `spawn /usr/share/logo.png` fetching 146 bytes of PNG to evaluate as a module.
   Object.freeze({ name: "bin/sh", path: "src/bin/sh.mjs" }),
   Object.freeze({ name: "bin/ls", path: "src/bin/ls.mjs" }),
   Object.freeze({ name: "bin/cat", path: "src/bin/cat.mjs" }),
@@ -45,9 +63,9 @@ export const USR_ENTRIES = Object.freeze([
    * The mount name keeps its extension where `bin/` drops it, because an extension is how a
    * userland program picks a format (`std.formatForPath`) and `bin/ls` must not have to know a
    * language to run a program. */
-  Object.freeze({ name: "share/logo.png", path: "src/share/logo.png" }),
-  Object.freeze({ name: "share/logo.rgba", path: "src/share/logo.rgba" }),
-  Object.freeze({ name: "share/readme.txt", path: "src/share/readme.txt" }),
+  Object.freeze({ name: "share/logo.png", path: "src/share/logo.png", mode: DATA_MODE }),
+  Object.freeze({ name: "share/logo.rgba", path: "src/share/logo.rgba", mode: DATA_MODE }),
+  Object.freeze({ name: "share/readme.txt", path: "src/share/readme.txt", mode: DATA_MODE }),
 ]);
 
 /** `/bench`, mounted ONLY under a bench boot (src/kernel/kernel.mjs). `SYS_spawn` loads from the
@@ -92,7 +110,8 @@ export async function mountProvider({ id, entries = USR_ENTRIES, fetchImpl = fet
       throw new FsError(error.code || "EIO", entry.path,
         `provider ${id} could not serve ${entry.name}: ${error.message}`);
     }
-    files.set(`/${entry.name}`, bytes);
+    // THE MODE IS THE ROW'S, defaulting to the executable one: see DEFAULT_MODE.
+    files.set(`/${entry.name}`, { bytes, mode: entry.mode ?? DEFAULT_MODE });
   }
 
   // The directories the manifest implies: `/usr/lib/syscall.mjs` means `/usr/lib` exists, and a
@@ -106,10 +125,11 @@ export async function mountProvider({ id, entries = USR_ENTRIES, fetchImpl = fet
   const lookup = (rel) => {
     const key = rel === "/" ? "/" : rel.replace(/\/+$/, "");
     if (dirs.has(key)) return { type: DIR, mode: 0o555 };
-    const bytes = files.get(key);
-    if (!bytes) return null;
-    // 0o555, so the bits agree with the MNT_RO mount rather than inviting a write it refuses.
-    return { type: FILE, content: bytes, mode: 0o555 };
+    const row = files.get(key);
+    if (!row) return null;
+    // NO WRITE BIT EITHER WAY, so the bits agree with the MNT_RO mount rather than inviting a
+    // write it refuses. The X bit is the row's.
+    return { type: FILE, content: row.bytes, mode: row.mode };
   };
 
   const list = (rel) => {
@@ -133,7 +153,7 @@ export async function mountProvider({ id, entries = USR_ENTRIES, fetchImpl = fet
     report: {
       provider: id,
       entries: entries.length,
-      bytes: [...files.values()].reduce((n, b) => n + b.length, 0),
+      bytes: [...files.values()].reduce((n, row) => n + row.bytes.length, 0),
       probe: probe.why,
       contentRange: probe.contentRange,
     },

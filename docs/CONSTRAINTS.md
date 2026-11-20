@@ -2406,3 +2406,63 @@ them by typing. `bench/shell-reports/repro.py` types.
     A consequence worth stating: **a text window cannot be a drag SOURCE**, because only a surface
     delivers pointer events to a process (M8). It can be a TARGET, because the page hit-tests any
     frame. A terminal reaches the clipboard instead, which is what `clip` is for.
+
+## M10's critic — six findings, six fixes
+
+An independent critic read M10 with none of this author's context and reported six findings. Every
+one was verified against the code before it was acted on, and every one became a check.
+
+249. **A `WEV_DRAG_LEAVE` IS A RETRACTION, AND A MODAL DOES NOT SUPPRESS IT.** `dragAt` resolved
+    the window it was LEAVING through the same filter that decides whether a window may be a
+    TARGET — so a window that was entered and then became BLOCKED mid-drag never got its leave. Its
+    hover frame stayed on screen for the rest of its life and its own enter/leave counts never
+    balanced again.
+
+    It is M9's own rule read correctly (constraint 226): an ENTER offers something and is input, so
+    a modal refuses it; a LEAVE retracts something already delivered, and a window that missed it
+    would be wrong about the world once the modal went away — exactly as for a resize, a close
+    request and a destroy notice.
+
+    **AND THERE WAS A SECOND INSTANCE, found by reading the first.** A session that ended WITHOUT
+    delivering a drop — an idle cancellation, or a drop whose event could not queue — left the
+    target believing the pointer was still over it. A drop that LANDED is itself terminal and needs
+    no leave beside it. `bench/m10-data/controls.py --only leave-through-targetof` and
+    `--only no-leave-on-end` are the two mutations.
+250. **A DATA FILE IN A PROVIDER MOUNT IS NOT EXECUTABLE, AND EVERY ROW WAS 0o555.**
+    `src/kernel/providerfs.mjs` served one mode for every object, and its own comment claimed that
+    this "makes `SYS_spawn`'s execute check pass here and fail on a data file". Until M10 every row
+    WAS a program, so the claim could not be observed; the first three data files falsified it.
+    `spawn /usr/share/logo.png` fetched 146 bytes of PNG for the kernel to evaluate as a module.
+
+    The manifest carries a per-row mode now — `0o555` for a program, `DATA_MODE` 0o444 for data —
+    so the comment is true again and the shell answers **EACCES** at the prompt, which is where
+    `bench/m10-data/shell.py --clip` asserts it. Not a privilege escalation (there is no privilege
+    to escalate); a mount that lied about what it would run.
+251. **A DATA-OBJECT FD IS NOT POLLABLE, AND `pollOne`'s FALLBACK SAID IT WAS ALWAYS READY.** The
+    kind's `read` and `write` are -EINVAL by design, and `poll` reported `POLLIN | POLLOUT` through
+    the arm meant for a regular file — so a program holding a clipboard fd and its window fd in one
+    set (which is what an image view does) was told the clipboard was readable and refused on every
+    read: a poll-then-read loop spins instead of parking. **POLLNVAL** and not 0, because 0 would
+    park on an fd nothing will ever make ready.
+252. **A REFUSED WRITE LEAVES NO PARTIAL PAYLOAD.** `src/abi.mjs` promises that an object nothing
+    can carry is a refusal and not a short count — "the formats are a SET and a half-written image
+    is not a smaller image" — and the libos's chunking loop was the one place that promise could be
+    broken: sixteen 64 KiB chunks accepted and the seventeenth refused -EFBIG left a TRUNCATED
+    bitmap readable under a format a receiver trusts. The loop replaces the format with zero bytes
+    before returning the errno, because "present and empty" is a state `dataobj_get` already
+    distinguishes from absent and cannot be mistaken for an image. Latent when it was found — every
+    program here frees the object on a refusal — which is the kind of thing a critic is for.
+253. **A REFUSAL IS A RESULT AND MUST BE REPORTED AS ONE.** Two paths in `src/bin/imgview.mjs`
+    refused correctly and returned before appending their row, so a bitmap offered but never
+    written, or one whose header lied about its size, produced NO row at all — and the page and the
+    check both read `shown[0]`, so the failure arrived either as a missing row or as the PREVIOUS
+    paste's row with the evidence pointing at the wrong object. Every path falls through to one
+    `push` now.
+254. **A CHECK MUST NOT GREP A LABEL THAT IS PRINTED UNCONDITIONALLY.** "a program reads the
+    clipboard out of /proc/dataobj" matched the literal `clipboard:` — which `/proc/dataobj` prints
+    even for an EMPTY slot, as `clipboard:\t-`. So the clause passed against a kernel holding
+    nothing, which is precisely the world `--negative text-only` produces, and it sat in that
+    control's HELD list. It greps the OFFER now (`paths,bitmap`), which is in that file only if an
+    object carrying both formats is really on the clipboard — and the clause moved into the
+    control's failed set, where it belongs. The same shape as constraint 226's lesson about
+    asserting the invariant rather than the symptom.

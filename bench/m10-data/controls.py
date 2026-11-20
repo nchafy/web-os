@@ -48,12 +48,17 @@ MUTATIONS = {
       if (queued) {""",
         replacement="""      const queued = target.push({ type: WEV_DROP, a: x | 0, b: y | 0, c: obj.offer });
       if (true) {""",
+        # AND THE HOVER NEVER ENDS, which is the same mutation seen from the other side: with the
+        # drop reported as delivered, the session ends believing the target got it — so the window
+        # is never told the pointer left, and nothing ever will be.
         moves=(
             "the drop reports nothing happened",
             "it is counted as lost",
             "no payload is pending",
             "and the object is back to one reference",
             "so the budget comes back",
+            "a drop that was lost still ends the hover",
+            "the LEAVE was attempted",
         ),
     ),
     "repeatable-drop": dict(
@@ -153,6 +158,36 @@ MUTATIONS = {
             # The cancellation then arrives EARLY, so the clause that asserts the ceiling fired at
             # the right time reads a tick with nothing left to cancel.
             "an idle one is cancelled",
+        ),
+    ),
+    "leave-through-targetof": dict(
+        why="the window being LEFT is resolved through `#targetOf`, which re-applies the blocked "
+            "filter - so a window that was entered and then became BLOCKED mid-drag never gets "
+            "its `WEV_DRAG_LEAVE`. A CRITIC FOUND THIS IN THE SHIPPED CODE. The receiver's hover "
+            "frame then stays on screen for the rest of its life and its own enter/leave counts "
+            "never balance. It is M9's rule read correctly: an ENTER offers something and is "
+            "input, so a modal refuses it - a LEAVE retracts something already delivered, and a "
+            "window that missed it would be wrong about the world once the modal went away.",
+        needle="""    const was = this.drag.target ? this.#liveWindow(this.drag.target) : null;""",
+        replacement="""    const was = this.drag.target ? this.#targetOf(this.drag.target) : null;""",
+        # "a sample elsewhere leaves it" is NOT declared: its assertion is `dragAt(0) === 0`,
+        # which is the new target's id and is 0 either way. The LEAVE record is the subject.
+        moves=(
+            "the LEAVE arrived",
+            "and it is counted",
+        ),
+    ),
+    "no-leave-on-end": dict(
+        why="a session that ends WITHOUT delivering a drop does not tell the window it was over. "
+            "The second instance of the same defect, found by reading the first: an idle "
+            "cancellation and a drop whose event could not queue both left the receiver believing "
+            "the pointer was still over it. A drop that LANDED is terminal and needs no leave, "
+            "which is the half this mutation must not disturb.",
+        needle="""    if (session.target && !(effect !== 0 && targetId === session.target)) {""",
+        replacement="""    if (session.target && effect === -1) {""",
+        moves=(
+            "a cancelled drag leaves the window it was over",
+            "the LEAVE was attempted",
         ),
     ),
     "blocked-is-a-target": dict(

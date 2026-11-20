@@ -35,7 +35,7 @@ checks is a wish.
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
 | M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
 | M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 41 expectations, 2 controls, 79 host checks, 8 mutations, 9 critic findings fixed |
-| M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 156 host checks, 9 mutations, 3 real-prompt runs |
+| M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 164 host checks, 11 mutations, 3 real-prompt runs, 6 critic findings fixed |
 | **M11** | **Aero glass, frame-only, plus reskin** | 5 | | ⬜ **next (option A)** |
 | M12 | The blur governor | 3 | | ⬜ A |
 | M13 | The geometry harness | 5 | | ⬜ A |
@@ -1804,10 +1804,10 @@ suite is 14 checks and 542 expectations, all green.
 ```
 scripts/check.py                       14 checks, 542 expectations (m10: 37)
 scripts/check.py --only m10 --prove-failure   37 inverted, all failed
-scripts/check.py --negative text-only  m10 fail: 16 red, 21 intact
+scripts/check.py --negative text-only  m10 fail: 17 red, 20 intact
 scripts/check.py --negative no-drop    m10 fail:  7 red, 30 intact
-node bench/m10-data/probe.mjs          156 host checks (the lifetimes, the refusals, the edges)
-bench/m10-data/controls.py             9 mutations, each scored on which checks move
+node bench/m10-data/probe.mjs          164 host checks (the lifetimes, the refusals, the edges)
+bench/m10-data/controls.py             11 mutations, each scored on which checks move
 bench/m10-data/shell.py                `files &` and `imgview &` at a REAL prompt, a REAL drag
 bench/m10-data/shell.py --row 2        ...and the SAME gesture with a text file, which is refused
 bench/m10-data/shell.py --clip         `clip copy` then `v`, which is the route a terminal has
@@ -1880,8 +1880,8 @@ the control because no PNG arrived at all; it asserts a PNG that arrived and was
 Everything that can go wrong here is a COUNT: a reference taken twice leaks the payload for the
 life of the kernel, one released twice frees an object another process is reading, and a drop
 retained for an event that was never queued holds the budget until its window dies. None of that is
-visible on a screen. `bench/m10-data/probe.mjs` is 156 checks under plain node and
-`bench/m10-data/controls.py` is nine mutations scored on which of them move — every one a plausible
+visible on a screen. `bench/m10-data/probe.mjs` is 164 checks under plain node and
+`bench/m10-data/controls.py` is eleven mutations scored on which of them move — every one a plausible
 implementation:
 
 | | |
@@ -1917,6 +1917,37 @@ a surface delivers pointer events to a process (constraint 248).
 That file exists because the two bugs a reader found in five minutes after M9 was reported done were
 both on this path and not on the page's supervisor path (constraints 238, 239). It is the discipline
 applied before the report rather than after it.
+
+### What the critic changed, and the worst of it was a LEAVE
+
+**M10 WENT TO AN INDEPENDENT CRITIC WITH NONE OF THE AUTHOR'S CONTEXT, and it returned six
+findings.** Every one was verified against the code before it was acted on; every one became a
+check. Two were user-visible:
+
+| | |
+| --- | --- |
+| a window entered and then BLOCKED never got its `WEV_DRAG_LEAVE` | `dragAt` resolved the window it was leaving through the same filter that decides whether a window may be a TARGET. Its hover frame then stays on screen for the rest of its life and its enter/leave counts never balance. M9's rule read correctly: an ENTER is input and a modal refuses it, a LEAVE RETRACTS something already delivered (249) |
+| `/usr/share/logo.png` was SPAWNABLE | every row of the provider mount was mode 0o555, and its own comment claimed the execute check would "fail on a data file". Until M10 every row was a program, so the claim could not be observed; the first three data files falsified it. Per-row modes now, and the shell answers EACCES (250) |
+
+**AND READING THE FIRST ONE FOUND A SECOND INSTANCE OF IT.** A session that ended without
+delivering a drop — an idle cancellation, or a drop whose event could not queue — also left its
+target believing the pointer was still over it. Both are mutations now
+(`--only leave-through-targetof`, `--only no-leave-on-end`), and the eleven mutations in this
+milestone are nine plus those two.
+
+The other four: a data-object fd reported itself ALWAYS READY to `poll`, through the arm meant for
+a regular file, so a program holding a clipboard fd beside its window fd spun instead of parking
+(251); the libos's chunking loop left a TRUNCATED payload when the kernel refused mid-write, which
+is the one place `src/abi.mjs`'s "a refusal and not a short count" could be broken (252); two
+refusal paths in `imgview` returned before appending their row, so a real failure arrived as the
+PREVIOUS paste's evidence (253); and "a program reads the clipboard out of /proc/dataobj" grepped a
+label that is printed even for an EMPTY clipboard — so it passed in a world with nothing on the
+clipboard, and sat in `--negative text-only`'s HELD list while doing it (254).
+
+**THAT LAST ONE IS THE SECOND MIS-COUPLED CLAUSE THIS MILESTONE SHIPPED**, after "the paste drew
+the image" was satisfied by a window drawing its own refusal. Both were assertions over a SYMPTOM
+that a working world and a broken one produce alike, and in both cases the control was the thing
+that could have caught it — one did, one did not.
 
 ### What is not done
 

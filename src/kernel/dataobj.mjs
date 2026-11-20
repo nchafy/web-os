@@ -406,11 +406,30 @@ export class DataMgr {
    * winid may receive anything is this line.
    */
   #targetOf(winid) {
+    const w = this.#liveWindow(winid);
+    if (!w) return null;
+    const wins = K.wins();
+    if (wins.blockingFor(w)) return null;
+    return w;
+  }
+
+  /**
+   * A window that still exists, WHATEVER a modal is doing to it — which is a different question
+   * from "may this be a target", and the LEAVE is why there are two.
+   *
+   * A CRITIC FOUND THIS: `dragAt` resolved the window it was leaving through `#targetOf`, so a
+   * window that was entered and then became BLOCKED mid-drag never got its `WEV_DRAG_LEAVE` — its
+   * hover frame stayed on screen for the rest of its life and its own enter/leave counts went
+   * permanently out of balance. It is M9's own rule read correctly: an ENTER offers something and
+   * is input, so a modal refuses it; a LEAVE is the RETRACTION of something already delivered, and
+   * a window that missed it would be wrong about the world once the modal went away
+   * (constraint 226).
+   */
+  #liveWindow(winid) {
     const wins = K.wins();
     if (!wins) return null;
     const w = wins.get(winid | 0);
     if (!w || w.destroyed || !w.attached) return null;
-    if (wins.blockingFor(w)) return null;
     return w;
   }
 
@@ -431,7 +450,9 @@ export class DataMgr {
     const target = this.#targetOf(winid);
     const id = target ? target.id : 0;
     if (id === this.drag.target) return id;
-    const was = this.drag.target ? this.#targetOf(this.drag.target) : null;
+    // `#liveWindow` AND NOT `#targetOf`: a window that became blocked after it was entered must
+    // still be told the pointer left it. See the docstring there.
+    const was = this.drag.target ? this.#liveWindow(this.drag.target) : null;
     if (was) {
       was.push({ type: WEV_DRAG_LEAVE });
       this.stats.leaves += 1;
@@ -510,6 +531,18 @@ export class DataMgr {
   #endDrag(effect, targetId, why) {
     const session = this.drag;
     this.drag = null;
+    /* A TARGET THAT WAS ENTERED AND GOT NO DROP IS TOLD THE POINTER LEFT, and this is the second
+     * instance of the defect a critic found one function up: an idle cancellation, or a drop whose
+     * event could not queue, used to end the session while the target still believed the pointer
+     * was over it — so its hover frame stayed on screen for the rest of its life. A DROP is itself
+     * terminal, so the LEAVE is sent only when no drop reached that window. */
+    if (session.target && !(effect !== 0 && targetId === session.target)) {
+      const over = this.#liveWindow(session.target);
+      if (over) {
+        over.push({ type: WEV_DRAG_LEAVE });
+        this.stats.leaves += 1;
+      }
+    }
     const wins = K.wins();
     const src = wins ? wins.get(session.srcWin) : null;
     if (src && !src.destroyed) {

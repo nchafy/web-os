@@ -134,6 +134,22 @@ def main(argv=None) -> int:
 
             # ---- THE CLIPBOARD ROUTE, which is the one a terminal can reach -----------------
             if args.clip:
+                # A DATA FILE IS NOT A PROGRAM, asserted at the prompt because that is where a
+                # person would find out. M10 added the first data files to `/usr`, and every row
+                # of that mount had been mode 0o555 — so `/usr/share/logo.png` was SPAWNABLE and
+                # the kernel would fetch 146 bytes of PNG to evaluate as a module. The `share/`
+                # rows are 0o444 now and the shell reports EACCES (constraint 240's neighbour,
+                # `src/kernel/providerfs.mjs`).
+                page.type_keys("/usr/share/logo.png\n")
+                time.sleep(1.0)
+                refused = page.evaluate(
+                    "document.querySelector('.terminal').textContent.slice(-300)")
+                if "EACCES" not in refused:
+                    print("A DATA FILE IS EXECUTABLE: `/usr/share/logo.png` at the prompt did not "
+                          "answer EACCES.\n%s" % refused)
+                    return 1
+                print("exec     /usr/share/logo.png -> EACCES, as a data file must")
+
                 page.type_keys("clip copy /usr/share/logo.rgba\n")
                 time.sleep(1.2)
                 page.type_keys("clip list\n")
@@ -237,8 +253,6 @@ def main(argv=None) -> int:
 
             after = json.loads(page.evaluate(STATE))
             pixel = page.evaluate(pixel_expr("imgview", d))
-            data = page.evaluate(
-                "(() => { const k = globalThis.M10 && globalThis.M10.live; return '' })()")
             shot = page.call("Page.captureScreenshot", format="png")
             pathlib.Path(args.out).write_bytes(base64.b64decode(shot["data"]))
             print("mid-drag %s" % json.dumps(mid))

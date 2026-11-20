@@ -725,7 +725,24 @@ export function dataobjSet(fd, format, bytes) {
     const chunk = Math.min(bytes.length - off, MAX_INLINE);
     const flags = off === 0 ? 0 : DOBJ_F_APPEND;
     const r = syscall(SYS_dataobj_set, fd, format, flags, 0, 0, 0, 0, 0, bytes, off, chunk);
-    if (r < 0) return r;
+    if (r < 0) {
+      /* AND A REFUSAL MID-PAYLOAD LEAVES NOTHING BEHIND IT. `src/abi.mjs` promises that an object
+       * nothing can carry is a REFUSAL and not a short count — "the formats are a SET and a
+       * half-written image is not a smaller image" — and this loop was the one place that promise
+       * could be broken: sixteen 64 KiB chunks accepted and the seventeenth refused -EFBIG left a
+       * truncated bitmap readable under a format a receiver trusts. A critic found it while it was
+       * still latent, because every program here frees the object on a refusal.
+       *
+       * The format is REPLACED WITH ZERO BYTES rather than left: "present and empty" is a state
+       * `dataobj_get` already distinguishes from absent, and it cannot be mistaken for an image. A
+       * failure to undo is reported in preference to the first errno, because then the object is
+       * in neither state the caller can reason about. */
+      if (off > 0) {
+        const undo = syscall(SYS_dataobj_set, fd, format, 0, 0, 0, 0, 0, 0, bytes, 0, 0);
+        if (undo < 0) return undo;
+      }
+      return r;
+    }
     off += chunk;
     // An EMPTY payload is one call and means "this format is present and empty", so the test is
     // after the call and not before it.

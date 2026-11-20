@@ -164,30 +164,36 @@ export function run(env) {
     const row = { source, offered: offered.map(fmtName) };
     if (offer & fmtBit(DOBJ_BITMAP)) {
       const got = env.data.get(objFd, DOBJ_BITMAP);
+      /* EVERY PATH BELOW FALLS THROUGH TO THE ONE `account.shown.push(row)`, and the two that
+       * returned early did not — a critic found it. A bitmap offered but never written (-ENOENT),
+       * or one whose header lies about its size, refused correctly and then left NO ROW: the page
+       * and the check both read `shown[0]`, so that failure arrived as a missing row or as the
+       * PREVIOUS paste's row, with the evidence pointing at the wrong object. A refusal is a
+       * result and has to be reported as one. */
+      const bmp = typeof got === "number" ? null : decodeBitmap(got);
       if (typeof got === "number") {
         refuse(`${source}: the bitmap could not be read: ${env.std.errnoName(got)}`);
-        return { ...row, refused: env.std.errnoName(got) };
-      }
-      const bmp = decodeBitmap(got);
-      if (!bmp) {
+        row.refused = env.std.errnoName(got);
+      } else if (!bmp) {
         // A PAYLOAD THAT LIES ABOUT ITS SIZE IS REFUSED, not clamped: these bytes came from
         // another process (`decodeBitmap` is the one validator).
         refuse(`${source}: ${got.length} bytes are not a whole bitmap`);
-        return { ...row, refused: "malformed" };
-      }
-      row.bitmap = { w: bmp.w, h: bmp.h, bytes: got.length };
-      if (bmp.w * bmp.h > MAX_DRAW_PX) {
-        refuse(`${source}: ${bmp.w}x${bmp.h} is more than ${MAX_DRAW_PX} fill-rects; `
-          + "a display list has no image op");
-        row.refused = "too-large";
+        row.refused = "malformed";
       } else {
-        const ops = drawBitmap(bmp);
-        if (ops < 0) {
-          refuse(`${source}: win_draw: ${env.std.errnoName(ops)}`);
-          row.refused = env.std.errnoName(ops);
+        row.bitmap = { w: bmp.w, h: bmp.h, bytes: got.length };
+        if (bmp.w * bmp.h > MAX_DRAW_PX) {
+          refuse(`${source}: ${bmp.w}x${bmp.h} is more than ${MAX_DRAW_PX} fill-rects; `
+            + "a display list has no image op");
+          row.refused = "too-large";
         } else {
-          row.ops = ops;
-          row.drawn = true;
+          const ops = drawBitmap(bmp);
+          if (ops < 0) {
+            refuse(`${source}: win_draw: ${env.std.errnoName(ops)}`);
+            row.refused = env.std.errnoName(ops);
+          } else {
+            row.ops = ops;
+            row.drawn = true;
+          }
         }
       }
     }
