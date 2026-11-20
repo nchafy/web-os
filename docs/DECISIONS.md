@@ -726,6 +726,73 @@ and computes the blocker by walking the owner chain
 (`docs/research/08-hobbyist-os-survey.md`); the round-trip figure is M0's constraint 51.
 Constraints 226–228.*
 
+## D33 — the clipboard's untyped calls are deleted, and a data object is a file description
+
+**Decided at M10.** `docs/ABI.md`'s host group carried `clipboard_read` / `clipboard_write` →
+bytes / 0 with no format argument, inherited from `docs/research/gap-03.md`. The review that asked
+for drag-and-drop named that as the real defect in the same breath: a receiver is "structurally
+unable to distinguish a pasted PNG from pasted UTF-8". **Rejected:** keeping the untyped pair beside
+a typed one, which would have left two ways to put bytes on the clipboard and one of them wrong.
+The pair is deleted; the ABI is 71 calls and says so.
+
+**The clipboard and a drag are ONE OBJECT published to two destinations.** That is why there are
+five calls and not eight: `offer(fd, where, …)` and `open(where, …)` differ by an argument, and a
+second pair of near-identical calls would be one fact with two renderers. The rejected shape is
+`clipboard_write(did)` plus `drag_begin(winid, did, effects)` — the review's own sketch — which is
+two spellings of "publish this".
+
+**A data object is an FD, which is the decision that carries the lifetimes.** The payload must
+outlive its creator in both gestures: a clipboard whose bytes lived in the copying process is empty
+the moment that process exits, and a drag must survive its source dying mid-gesture. **Rejected:** a
+bare `did` integer with a per-process table beside the fd table, which is a second fd table with its
+own teardown path to get wrong. With `F_DATA`, `close(2)`, `dup`, spawn inheritance and reap
+teardown already release it, and a process still holds only integers (constraint 15).
+
+**What that costs:** `read(2)` and `write(2)` on the fd have to be refused, and -EINVAL on an fd
+that is otherwise ordinary is a surprise. It is the right surprise: an untyped read of a typed
+object is the defect being removed, and the kind refuses rather than choosing a format for the
+caller.
+
+**What was NOT decided here.** A registerable format table. The review asked for one; the offer is
+a bitmask in a single register because a drop target must decide whether it can accept DURING the
+gesture, before any bytes exist, and a registry needs a call to enumerate that nothing yet has a use
+for. Four formats, closed, dense from 1 — and the departure is recorded rather than quiet.
+
+*Evidence: judgement, over two sources. `docs/designs/REVIEW-FINDINGS.md` §2 for the defect, and
+Windows' own shell clipboard for the shape — a data object with a format tag, and CF_HDROP as a
+NUL-separated path list (https://learn.microsoft.com/en-us/windows/win32/shell/clipboard).
+Constraints 240–242, 246, 247.*
+
+## D34 — a drag has no `DRAG_OVER`, and the kernel owns the session
+
+**Decided at M10, on arithmetic rather than taste.** Every drag-and-drop API this one borrows from
+streams a position event while the pointer moves. A drag IS a pointer with a button down, so an
+event per motion sample arrives at full rate — and `WIN_EVENT_CAP` is 256 records, about a second of
+moves (constraint 223). `push` drops the NEWEST event, so **the record discarded would be the drop
+itself**: the feature would eat the thing it exists to deliver. **Rejected:** a coalescing queue per
+window, which is a second queue discipline for one event type; and a lower-rate OVER, which is a
+sample rate nobody can name a correct value for. Enter, leave and drop are edges — at most three per
+target per gesture.
+
+**The session is the KERNEL's, and the page reports only where the pointer is.** The page has the
+DOM, so it is the only side that can hit-test a pointer against a frame; the kernel has the window
+table, so it is the only side that knows a window is blocked, what the payload is and who may
+receive it. **Rejected:** letting the page name the target outright, which is M9's mistake in a new
+place — a page asked to deliver a drop to a window behind a modal has no way to know better, and
+would. So `drag-at` and `drag-drop` are reports, the kernel resolves them, and `win-drag-target`
+carries the answer back for the page to render.
+
+**And a drag needs a button the kernel saw go down.** There is one pointer and therefore one
+session, so an ungated one is expensive: a program that could begin a drag unprompted would hold the
+session until a pointerup that is never coming and refuse every other drag with -EBUSY until then.
+The gate asks the kernel's own record of the pointer rather than trusting an argument, and the
+session is bounded by IDLE time rather than by its own age — which is constraint 239's correction
+made before the same mistake happened twice.
+
+*Evidence: measured for the queue (constraint 223's 256 records against a pointer's sample rate),
+judgement for the division, and one source: SerenityOS's server owns the equivalent state
+(`docs/research/08-hobbyist-os-survey.md`). Constraints 243, 244.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

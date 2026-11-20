@@ -121,6 +121,21 @@ export class Surface {
     };
   }
 
+  /** THE INVERSE of `pointAt`: where a surface pixel is on the page, in client coordinates.
+   *
+   *  It exists because a DRAG has to be driven at a point inside a window's own picture, and only
+   *  the page knows where that is — the canvas is positioned by the clamp and scaled by CSS. A
+   *  driver that computed it from a frame's box would be a second reading of the same scale, and
+   *  the two would disagree the first time a surface was not the size of its client area. */
+  clientAt(x, y) {
+    const r = this.el.getBoundingClientRect();
+    if (!(r.width > 0) || !(r.height > 0)) return null;
+    return {
+      x: Math.round(r.left + (x + 0.5) * (r.width / this.w)),
+      y: Math.round(r.top + (y + 0.5) * (r.height / this.h)),
+    };
+  }
+
   destroy() {
     this.el.remove();
   }

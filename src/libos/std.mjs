@@ -6,7 +6,10 @@
 // closed over. Constraint 15's seam is that a process holds only integers, and a helper library
 // caching a file description is the first thing that would break it.
 
-import { E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName } from "../abi.mjs";
+import {
+  E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName,
+  DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
+} from "../abi.mjs";
 
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
@@ -220,3 +223,33 @@ export function wholeNumber(s) {
 
 /** A usage error. 127 is the shell's own "command not found" and is not a program's to return. */
 export const EXIT_USAGE = 2;
+
+/**
+ * M10. WHICH DATA FORMAT A FILE'S BYTES ARE, by extension — the file association, as data.
+ *
+ * IT IS USERLAND AND IT IS ONE TABLE. The kernel knows a format id and nothing about names, so the
+ * mapping is a convention programs share — and three programs need it (`clip` copies a file,
+ * `files` offers one, `imgview` is told what arrived). A second copy is how `clip` and `files` come
+ * to disagree about what a `.rgba` is, which is a drag that offers a format the receiver cannot
+ * read (constraint 240).
+ *
+ * `/usr`'s own mount drops the extension from a PROGRAM's name and keeps it on a data file, which
+ * is what makes this table usable at all (`src/kernel/providerfs.mjs`).
+ */
+export const FORMAT_BY_EXT = Object.freeze({
+  txt: DOBJ_TEXT,
+  md: DOBJ_TEXT,
+  png: DOBJ_PNG,
+  rgba: DOBJ_BITMAP,
+});
+
+/** The format a path's bytes are, or 0 for one no rule covers. 0 and not a guess: a program that
+ *  offered TEXT for an unknown extension would put arbitrary bytes under a format a receiver will
+ *  decode as UTF-8. */
+export function formatForPath(path) {
+  const name = String(path).split("/").pop() || "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return 0;
+  const ext = name.slice(dot + 1).toLowerCase();
+  return Object.prototype.hasOwnProperty.call(FORMAT_BY_EXT, ext) ? FORMAT_BY_EXT[ext] : 0;
+}

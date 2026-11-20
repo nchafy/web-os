@@ -7,9 +7,12 @@ Research and plan first, kernel second — deliberately, and in that order. The 
 ([webxp](https://github.com/nchafy/webxp)) was built first and designed afterwards, and became a very
 good window manager that was not an operating system.
 
-M0 to M6 are done: the syscall channel, the process table, the journalled filesystem, the mount table
-with `/proc`, `/dev`, `/tmp` and `/usr`, pipes, a pty with a line discipline, a shell with eleven
-programs, a real window, and the process realm stripped of its ambient capabilities.
+M0 to M10 are done: the syscall channel, the process table, the journalled filesystem, the mount
+table with `/proc`, `/dev`, `/tmp`, `/usr` and `/usr/share`, pipes, a pty with a line discipline, a
+shell with fourteen programs, the process realm stripped of its ambient capabilities — and the
+window half: a window that IS a file description, a kernel-owned surface a process draws on by
+sending a display list, modality and an advisory close, and a typed clipboard and drag-and-drop you
+can drive with a real mouse.
 
 ```sh
 scripts/serve.py          # then open http://127.0.0.1:8000/www/
@@ -72,7 +75,7 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   as nested workers, and the SAB ABI, measured closed-loop at N ∈ {1, 4, 16, 64, 128}. ACCEPT.
   `bench/syscall-contention/`, and `scripts/check.py --negative kernel-stall` keeps the negative
   control re-runnable.
-- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and twenty negative controls over ten checks and 394 expectations.
+- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and twenty-eight negative controls over fourteen checks and 542 expectations.
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
 - **There is a working terminal, and you can watch M6 from inside it.** `scripts/serve.py`, then
@@ -95,7 +98,8 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 
 ## Mockups
 
-The spine is built — M0 through M6, with the window half (M7 onward) still ahead. The intended shape of what is not yet built is drawn and rendered:
+The spine and four milestones of the window half are built — M0 through M10, with the Aero skin
+(M11 onward) still ahead. The intended shape of what is not yet built is drawn and rendered:
 
 - [`mockups/milestones.html`](mockups/milestones.html) — what is on screen at each milestone, M0
   through M14. Honest about the first five having no user interface at all.

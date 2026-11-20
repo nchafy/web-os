@@ -22,6 +22,7 @@ import {
   WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
+  WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
   encodeWinEvent,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
@@ -436,8 +437,24 @@ export class WinMgr {
      */
     this.stack = [];
     this.nextId = 1;
+    /**
+     * M10. WHERE THE POINTER IS AND WHETHER A BUTTON IS DOWN, as the kernel's own record of the
+     * events the page fed it. `{win, down}`.
+     *
+     * IT LIVES HERE BECAUSE `feed` IS HERE: this is the one place a pointer event enters the
+     * kernel, so a second tracker in `dataobj.mjs` would be the same fact with two writers. What
+     * reads it is `DataMgr.beginDrag`, which refuses a drag no button started — a program that
+     * could begin one unprompted would hold the single session until a pointerup that is never
+     * coming (constraint 244).
+     *
+     * A SUPPRESSED PRESS DOES NOT COUNT, which is why the update is below the blocker test: a
+     * press a modal refused never reached a program, so it cannot be the gesture a program claims.
+     */
+    this.pointer = { win: 0, down: false };
     this.stats = {
       created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0,
+      // M10: pointer presses recorded, and drag-event records the PAGE tried to feed (see `feed`).
+      presses: 0, forgedDrags: 0,
       // M9: raises granted, raises refused by a modal, and how many times the stack was posted.
       raises: 0, blocked: 0, stacks: 0, suppressed: 0,
       // M8's surface accounting. `surfacePx` is what is OUTSTANDING; the refusals are counted
@@ -820,6 +837,12 @@ export class WinMgr {
       // window is gone is a leak the governor would inherit.
       this.releaseSurface(w);
       w.destroy();
+      /* AND ITS UNCOLLECTED DROP GOES WITH IT. A payload dropped on a window that never read the
+       * event is held by the kernel, and a window that is gone can never collect it — so the
+       * reference is released here, where the window's other resources are. Injected rather than
+       * imported, like `pollWake`: `src/kernel/dataobj.mjs` reads the window table through its own
+       * getter and an import here would be the cycle. */
+      if (K.windowGone) K.windowGone(w.id);
       // OUT OF THE STACK, or a destroyed window would hold a place in the order for ever and
       // `blockingFor` would keep finding it.
       this.stack = this.stack.filter((id) => id !== w.id);
@@ -857,6 +880,17 @@ export class WinMgr {
     const w = this.get(id);
     if (!w || w.destroyed) return false;
     if (!(ev.type >= 1 && ev.type <= WEV_MAX)) return false;
+    /* M10. A DRAG RECORD IS THE KERNEL'S TO PRODUCE, AND THIS IS THE PAGE'S ROUTE, so the four of
+     * them are refused here and counted. The page reports WHERE the pointer is (`drag-at`,
+     * `drag-drop`); which window is the target, whether it may be one, and what the payload is are
+     * `src/kernel/dataobj.mjs`'s — the same division M9 made for the stack. Without this line a
+     * page could post a `WEV_DROP` naming an offer no object carries, and a target would ask for a
+     * drop that does not exist. */
+    if (ev.type === WEV_DRAG_ENTER || ev.type === WEV_DRAG_LEAVE || ev.type === WEV_DROP
+      || ev.type === WEV_DRAG_DONE) {
+      this.stats.forgedDrags += 1;
+      return false;
+    }
     if (ev.type === WEV_KEY || ev.type === WEV_POINTER) {
       const blocker = this.blockingFor(w);
       if (blocker) {
@@ -864,7 +898,25 @@ export class WinMgr {
         // arriving would have no way to tell that from a keyboard that stopped working.
         w.stats.suppressed += 1;
         this.stats.suppressed += 1;
+        /* AND A SUPPRESSED POINTER EVENT CLEARS THE GATE, which is the fail-closed reading: the
+         * kernel no longer knows where the pointer is, so no program may claim a gesture on it.
+         * The hole without this is a stale `down`: press in window A, move over a BLOCKED window
+         * B and release there, and B's up is suppressed too — so the kernel would still believe a
+         * button was held in A, and A's process could begin a drag with nothing pressed
+         * (constraint 244). */
+        if (ev.type === WEV_POINTER) this.pointer = { win: 0, down: false };
         return false;
+      }
+    }
+    /* THE POINTER'S OWN STATE, recorded from the event that carries it and nowhere else. Below the
+     * suppression on purpose: a press a modal refused is not a gesture a program may build a drag
+     * on (constraint 244). */
+    if (ev.type === WEV_POINTER) {
+      if (ev.mods & WPTR_DOWN) {
+        this.pointer = { win: w.id, down: true };
+        this.stats.presses += 1;
+      } else if (ev.mods & WPTR_UP) {
+        this.pointer = { win: w.id, down: false };
       }
     }
     return w.push(ev);

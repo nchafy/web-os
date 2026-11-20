@@ -157,6 +157,42 @@ export function makeProcFS(ctx) {
     return [...t.live].map((s) => s.pid).sort((a, b) => a - b);
   };
 
+  /**
+   * `/proc/dataobj`: every live data object, the clipboard slot, the drag session and the drops
+   * nobody has collected. REGENERATED PER READ like everything else here.
+   *
+   * IT IS NOT UNDER A PID, and that is the point: the clipboard outlives the process that filled it
+   * and a drag outlives the process that started it, so a file under `/proc/<pid>` could not name
+   * either once its creator was reaped (constraint 241). The CREATOR is a column instead.
+   *
+   * A program needs this for the reason it needs `/proc/<pid>/win/<winid>`: a paste that found
+   * nothing and a paste that found the wrong format are the same silence from inside a process.
+   */
+  const dataText = () => {
+    const mgr = ctx.data ? ctx.data() : null;
+    if (!mgr) return "";
+    const r = mgr.report();
+    const lines = [
+      `objects:\t${r.rows}`,
+      `bytes:\t${r.bytes}`,
+      `clipboard:\t${r.clipboard ? `${r.clipboard.obj} ${r.clipboard.formats.join(",")}` : "-"}`,
+      `drag:\t${r.drag ? `obj ${r.drag.obj} from win ${r.drag.win} over win ${r.drag.target}` : "-"}`,
+      `pending:\t${r.pending.map((x) => `win ${x.win}=obj ${x.obj}`).join(" ") || "-"}`,
+      `copies:\t${r.copies}`,
+      `pastes:\t${r.pastes}`,
+      `drops:\t${r.drops}`,
+      // A TAB-SEPARATED ROW PER OBJECT, so `grep` and `cut` work on it and no reader needs a
+      // parser — which is the rule `/proc/<pid>/status` is written to.
+      "",
+      "obj\tpid\trefs\tbytes\tsealed\tformats",
+    ];
+    for (const o of r.objects) {
+      lines.push([o.id, o.pid, o.refs, o.bytes, o.sealed ? 1 : 0, o.names.join(",")].join("\t"));
+    }
+    lines.push("");
+    return lines.join("\n");
+  };
+
   /** `/proc/mounts`: the mount table, one row per line. */
   const mountsText = () => {
     const m = ctx.mounts();
@@ -173,6 +209,9 @@ export function makeProcFS(ctx) {
     if (parts.length === 1 && parts[0] === "mounts") {
       // A mount can be added or removed, so a published size would go stale.
       return { type: FILE, content: mountsText(), volatile: true };
+    }
+    if (parts.length === 1 && parts[0] === "dataobj") {
+      return { type: FILE, content: dataText(), volatile: true };
     }
 
     // A non-numeric first component is ENOENT, not a parse error.
@@ -218,7 +257,7 @@ export function makeProcFS(ctx) {
 
   const list = (rel) => {
     const parts = relParts(rel);
-    if (parts.length === 0) return [...livePids().map(String), "mounts"];
+    if (parts.length === 0) return [...livePids().map(String), "dataobj", "mounts"];
     const pid = pidOf(parts[0]);
     if (pid === null) return null;
     const slot = slotOf(pid);

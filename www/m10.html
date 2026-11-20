@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M10 — typed clipboard and drag-and-drop</title>
+<style>
+/* STRUCTURAL ONLY, as every page here is: the Aero frame and the glass are M11. */
+body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+#log { margin:8px; white-space:pre-wrap }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:470px; margin:8px; border:1px solid #334; overflow:hidden }
+.window { position:absolute; display:flex; flex-direction:column; background:#1b1e24;
+  border:1px solid #556; box-sizing:border-box }
+.window-title { display:flex; align-items:center; gap:8px; padding:2px 4px; background:#2a2f38;
+  cursor:move; flex:0 0 auto }
+.window-title h2 { font:inherit; font-weight:600; margin:0; flex:1 1 auto }
+.is-not-responding .window-title { background:#3a3030; color:#bbb }
+.is-blocking { outline:2px solid #d8d14a }
+.is-blocking .window-title { background:#4a4620 }
+.window[data-window-mode="3"] { border-color:#d8d14a }
+/* M10. THE WINDOW THE KERNEL SAYS IS THE DROP TARGET. The page renders the target it is handed and
+   decides nothing — only the kernel knows whether a window is blocked (constraint 226's rule). */
+.window[data-drop-target="1"] { outline:2px dashed #9fd4a8 }
+.title-buttons { display:flex; gap:4px }
+.title-box { font:inherit; background:#39404b; color:inherit; border:1px solid #667;
+  cursor:pointer }
+.window-body { flex:1 1 auto; min-height:0; display:flex }
+.terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
+  background:#000; color:#ddd; font:inherit }
+.terminal:focus { outline:1px solid #6a8 }
+.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
+  background:#0b0d11; image-rendering:pixelated }
+.surface:focus { outline:1px solid #6a8 }
+/* The drag image follows the pointer. `src/wm/winhost.mjs` sets its position and
+   `pointer-events:none`; the look is the page's. */
+.drag-image { background:#2a2f38; border:1px solid #9fd4a8; color:#dde; padding:1px 5px;
+  font:inherit; opacity:0.9 }
+</style>
+</head>
+<body>
+<pre id="log">M10 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M10 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M10's page harness: A TYPED CLIPBOARD AND DRAG-AND-DROP.
+ *
+ *   PROOF 1  copy: an IMAGE crosses two processes through the clipboard and is DRAWN — and the
+ *            process that copied it has already exited, so the payload is the kernel's
+ *   PROOF 2  drag: a REAL MOUSE drags a file row from one process's window onto another's, the
+ *            bytes arrive under the format the source declared, and the pixels change
+ *   PROOF 3  refuse: a TEXT-only object offered to an image view is refused BY NAME, and no path
+ *            is rendered as a picture — which is what "typed" means
+ *   PROOF 4  the payload is accounted and the page cannot forge a drop
+ *
+ * WHY THE KERNEL OWNS THE PAYLOAD. A clipboard whose bytes lived in the copying process would be
+ * empty the moment that process exited, and a drag whose bytes lived in the source could not
+ * survive the source dying mid-gesture — which `docs/designs/REVIEW-FINDINGS.md` §2 names as the
+ * requirement. So the object is refcounted and kernel-side, reached through an fd (constraint 241).
+ *
+ * CONTROL ?no_typed=1 — every object offers TEXT and nothing else. `PLAN.md` §5's control for M10
+ * in its own words: "offer only the text format; the image paste must fail cleanly, not silently
+ * paste a path". Proofs 1 and 2 must lose their image; PROOF 3 must HOLD, because a clean refusal
+ * is exactly what it asserts.
+ *
+ * CONTROL ?no_drop=1 — a drop is never delivered. Proof 2 must fail entirely and PROOF 1 must
+ * hold, because the clipboard has nothing to do with the drag.
+ */
+import {
+  DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
+  WEV_DROP, WEV_DRAG_ENTER, fmtBit, pixelColor,
+} from '/src/abi.mjs'
+import { WinHost } from '/src/wm/winhost.mjs'
+import {
+  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, ask, until,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  noTyped: params.get('no_typed') === '1',
+  noDrop: params.get('no_drop') === '1',
+  liveOnly: params.get('live') === '1',
+}
+
+const CLIP = '/src/bin/clip.mjs'
+const FILES = '/src/bin/files.mjs'
+const IMGVIEW = '/src/bin/imgview.mjs'
+const GREP = '/src/bin/grep.mjs'
+const TERM = '/src/bin/term.mjs'
+
+/** The committed assets M10's proofs are about. A real PNG nothing here can decode, and the same
+ *  image as a bitmap a display list can draw (`src/share/`, mounted by
+ *  `src/kernel/providerfs.mjs`). */
+const BITMAP_FILE = '/usr/share/logo.rgba'
+const PNG_FILE = '/usr/share/logo.png'
+
+/** The logo's own corner pixel, which is the one a mirrored or upside-down render would move.
+ *  `pixelColor` renders it the way `getImageData` reports one, so neither side writes the format
+ *  out (constraint 224). */
+const AMBER = pixelColor(0xd8d14aff)
+const BLUE = pixelColor(0x4a9bd8ff)
+
+const DRIVER_WAIT_MS = 2500
+const REAL_INPUT_WAIT_MS = 60000
+
+globalThis.M10.proofs = { copy: null, drag: null, refuse: null, account: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M10.state = 'aborted'
+  globalThis.M10.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No kernel, no windows, no clipboard.'
+  out.className = 'bad'
+  say(globalThis.M10.why)
+} else {
+  main().catch((e) => {
+    globalThis.M10.state = 'error'
+    globalThis.M10.why = String((e && e.stack) || e)
+    say(globalThis.M10.why)
+  })
+}
+
+async function bootHost (boot) {
+  const k = await bootKernel(boot, globalThis.M10, say)
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  return {
+    k, host, usr: mounts.usr || {}, mounts,
+    winState: () => ask(k, 'win-state'),
+    dataState: () => ask(k, 'data-state'),
+  }
+}
+
+/** The frame whose title contains `what`, or null. A proof knows a window by what it is for and the
+ *  page knows it by id; this is the one place the two are joined. */
+function frameByTitle (host, what) {
+  for (const entry of host.frames.values()) {
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE, which is what says the program got past `win_surface`: an
+ *  entry with no surface is a frame whose canvas has not been built yet, and reading a pixel off it
+ *  would throw. */
+async function surfaced (host, title, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title)
+    return !!(e && e.surface)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: an IMAGE through the clipboard, between two processes, the first one already gone.
+   -------------------------------------------------------------------------------------------- */
+
+async function pCopy (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    // `clip copy` PUBLISHES AND EXITS. Its result arriving is what says the process is gone, which
+    // is the state that makes the paste below a claim about the KERNEL's payload and not about a
+    // live process's memory (constraint 241).
+    const copier = await spawnProgram(s.k, CLIP, ['clip', 'copy', BITMAP_FILE])
+    const copied = await resultOf(s.k, copier.pid, 30000)
+    ev.copier = copied
+    ev.formats = copied.formats || []
+    ev.copiedBytes = copied.bytes
+    const after = await s.dataState()
+    ev.afterCopy = after.data
+    ev.clipboard = (after.data || {}).clipboard
+    ev.objects = ((after.data || {}).objects || []).length
+    ev.bytesHeld = (after.data || {}).bytes
+    ev.refsHeld = (((after.data || {}).objects || [])[0] || {}).refs
+
+    /* ---- AND THE PROCESS THAT COPIED IT IS KILLED ------------------------------------------
+     *
+     * NOT MERELY FINISHED: a page-spawned program that returns is not reaped — its result is
+     * collected and its fd table stands — so "its `run` returned" is a much weaker claim than the
+     * one this proof is about. End Process is the kernel's own teardown path (the one M7's hatch
+     * uses), and it CLOSES EVERY FD: if the clipboard's payload were the copier's, this is where it
+     * would disappear (constraint 241).
+     */
+    s.k.post({ t: 'end-process', pid: copier.pid })
+    const gone = await until(async () => {
+      const procs = ((await ask(s.k, 'm4-state')).procs || []).map((x) => x.pid)
+      return !procs.includes(copier.pid)
+    }, 10000)
+    ev.copierGoneMs = Math.round(gone)
+    ev.procs = ((await ask(s.k, 'm4-state')).procs || []).map((x) => x.pid)
+    const survived = await s.dataState()
+    ev.afterKill = {
+      bytes: (survived.data || {}).bytes,
+      clipboard: (survived.data || {}).clipboard,
+      refs: (((survived.data || {}).objects || [])[0] || {}).refs,
+    }
+
+    /* AND A PROGRAM SEES IT THROUGH `/proc`, on a real path, which is the only reading of this a
+     * person has from a prompt. The pattern is a FIXED STRING — `grep` here is literal unless `-E`
+     * is passed (constraint 138), so an anchored `^clipboard:` would match nothing and the clause
+     * would report a working kernel as a broken one. `grep`'s exit status is its answer: 0 found,
+     * 1 not found. */
+    const greps = await spawnProgram(s.k, GREP, ['grep', 'clipboard:', '/proc/dataobj'])
+    ev.grep = await resultOf(s.k, greps.pid, 20000)
+
+    // THE PASTE, IN A THIRD PROCESS, which draws what it got.
+    const viewer = await spawnProgram(s.k, IMGVIEW, ['imgview', '-p'])
+    ev.viewerPid = viewer.pid
+    const view = await surfaced(s.host, 'imgview')
+    if (!view) {
+      ev.why = 'imgview never surfaced'
+    } else {
+      ev.viewWin = view.id
+      // THE PIXELS, read back out of the canvas the browser painted — not the ops the process sent.
+      // An inert canvas and a working one are the same picture (constraint 40).
+      const drew = await until(() => view.surface.ops > 2, 20000)
+      ev.drewMs = Math.round(drew)
+      ev.surface = view.surface.report()
+      /* THE LOGO IS DRAWN SCALED AND CENTRED, so the pixel to read is derived from the bitmap's
+       * own size rather than written as a number: 16x16 at scale 12 in a 200x200 surface puts the
+       * corner pixel at (4,4) and the middle of the image at the middle of the surface. */
+      const w = ev.surface.w
+      const scale = Math.floor(w / 16)
+      const x0 = Math.floor((w - 16 * scale) / 2)
+      ev.corner = view.surface.pixel(x0 + 2, x0 + 2)
+      ev.edge = view.surface.pixel(x0 + scale + 2, x0 + 2)
+      ev.cornerAt = { x: x0 + 2, y: x0 + 2 }
+      /* AND THE RECEIVER'S OWN ACCOUNT, which is the only place the FORMAT the bytes arrived under
+       * is readable. Without it "the paste drew" is satisfied by a receiver drawing its own
+       * REFUSAL — measured: under `?no_typed=1` the clause stayed green against five ops of pink
+       * band, because any drawing at all satisfied it (CLAUDE.md: a check must assert the
+       * invariant, not the symptom). */
+      typeInto(view, 'q')
+      ev.viewer = await resultOf(s.k, viewer.pid, 30000)
+      ev.shown = (ev.viewer.shown || [])[0] || null
+    }
+
+    const clauses = {
+      // THE COPY DECLARED TWO FORMATS: the path list, and the file's own format from the one
+      // association table (`std.formatForPath`).
+      'the copy offered a path list AND the image': JSON.stringify(ev.formats) ===
+        JSON.stringify(['paths', 'bitmap']),
+      'the clipboard holds one object, with both formats': !!ev.clipboard
+        && JSON.stringify(ev.clipboard.formats) === JSON.stringify(['paths', 'bitmap']),
+      // THE PROCESS THAT COPIED IT IS GONE — killed, not merely finished. Without this clause the
+      // proof would also pass for a clipboard that was a handle into a live process's memory.
+      'and the process that copied it was killed, payload intact': (copied.exit === 0)
+        && ev.copierGoneMs >= 0 && !ev.procs.includes(copier.pid)
+        && (ev.afterKill || {}).bytes === ev.bytesHeld
+        && (ev.afterKill || {}).refs === 1,
+      'a program reads the clipboard out of /proc/dataobj': (ev.grep || {}).exit === 0
+        && ((ev.grep || {}).matched || 0) >= 1,
+      'the paste drew the image': !!ev.viewWin && ev.drewMs >= 0 && !!ev.shown
+        && ev.shown.source === 'clipboard' && ev.shown.drawn === true
+        && !!ev.shown.bitmap && ev.shown.bitmap.w === 16 && ev.shown.bitmap.h === 16,
+      // THE CORNER PIXEL, which is the one an upside-down or mirrored render would move. Asserted
+      // beside its neighbour so "it is amber everywhere" cannot pass.
+      'and the pixels are the logo\'s own': ev.corner === AMBER && ev.edge === BLUE,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M10)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: a REAL MOUSE drags a row from one process's window into another's.
+   -------------------------------------------------------------------------------------------- */
+
+async function pDrag (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const src = await spawnProgram(s.k, FILES, ['files', '/usr/share'])
+    ev.srcPid = src.pid
+    const files = await surfaced(s.host, 'files')
+    if (!files) throw new Error('files never surfaced')
+    ev.filesWin = files.id
+    const viewer = await spawnProgram(s.k, IMGVIEW, ['imgview'])
+    ev.viewerPid = viewer.pid
+    const view = await surfaced(s.host, 'imgview')
+    if (!view) throw new Error('imgview never surfaced')
+    ev.viewWin = view.id
+    ev.opsBefore = view.surface.report().ops
+
+    /* WHICH ROW IS THE BITMAP. `files` prints its rows and returns them, but it has not returned
+     * yet — so the page derives the row from the SAME directory listing and the same ordering the
+     * program uses: sorted by name, `logo.png` `logo.rgba` `readme.txt`. The row index is published
+     * and the check asserts the bytes that arrive, so a wrong guess here fails loudly rather than
+     * passing against the wrong file. */
+    const ROW_H = 22
+    const ROW_GAP = 4
+    const PAD = 6
+    const row = 1          // logo.rgba, second of the three
+    const rowMid = PAD + row * (ROW_H + ROW_GAP) + ROW_H / 2
+    const from = files.surface.clientAt(120, rowMid)
+    const to = view.surface.clientAt(100, 100)
+    ev.rowMid = rowMid
+
+    /* ---- BOTH EDGES OF THE DRAG THRESHOLD ---------------------------------------------------
+     *
+     * A PRESS ALONE MUST NOT START A DRAG, or every click on a row would begin a gesture the next
+     * release cancels. The threshold is 3 surface pixels (`src/bin/files.mjs`), so a 1 px move is
+     * the edge below it — driven here with synthesized pointer events, because what is being tested
+     * is the PROGRAM's arithmetic and not the browser's capture.
+     */
+    const nudge = { x: from.x + 1, y: from.y }
+    synthPointer(files.surface.el, 'pointerdown', from)
+    synthPointer(files.surface.el, 'pointermove', nudge, 1)
+    await until(() => false, 300)
+    ev.dragAfterNudge = (await s.dataState()).data.drag
+    synthPointer(files.surface.el, 'pointerup', nudge, 0)
+    await until(() => false, 200)
+
+    // ---- THE REAL GESTURE, which only a driver outside the page can send -------------------
+    globalThis.M10.drag = { from, to }
+    /* `await-pointer` IS THE NAME `bench/m7-win/drive.py` ALREADY KNOWS, and the same phase M8's
+     * page uses for the same reason: one driver reads one vocabulary, so a page that invented a
+     * third name for "send a real drag" would need the driver taught about it. */
+    globalThis.M10.phase = 'await-pointer'
+    const declared = await until(() => globalThis.M10.driver === 'check', DRIVER_WAIT_MS)
+    ev.drivenBy = declared < 0 ? 'page' : 'check'
+    if (declared >= 0) {
+      /* EITHER THE DRIVER SAYS SO OR THE GESTURE SHOWS. `scripts/check.py` sets `dragDone` when
+       * its drag returns; `drive.py` does not, and a page that insisted on the flag would stall
+       * for the whole input timeout under the tool a defect is diagnosed with. The host's own
+       * release count is the second reading, and it is the one that cannot be claimed without a
+       * pointer. */
+      await until(() => globalThis.M10.dragDone === true
+        || s.host.report().dragDrops > 0, REAL_INPUT_WAIT_MS)
+    } else {
+      // THE FALLBACK IS SYNTHESIZED AND SAYS SO. The clause that needs a real mouse reports NOT
+      // MEASURED when this ran, for the reason M9's click does.
+      synthPointer(files.surface.el, 'pointerdown', from)
+      for (let i = 1; i <= 8; i += 1) {
+        synthPointer(files.surface.el, 'pointermove', {
+          x: Math.round(from.x + (to.x - from.x) * (i / 8)),
+          y: Math.round(from.y + (to.y - from.y) * (i / 8)),
+        }, 1)
+        await until(() => false, 20)
+      }
+      synthPointer(files.surface.el, 'pointerup', to, 0)
+    }
+
+    const drew = await until(() => view.surface.report().ops > ev.opsBefore + 2, 20000)
+    ev.drewMs = Math.round(drew)
+    ev.surface = view.surface.report()
+    const w = ev.surface.w
+    const scale = Math.floor(w / 16)
+    const x0 = Math.floor((w - 16 * scale) / 2)
+    ev.corner = view.surface.pixel(x0 + 2, x0 + 2)
+    ev.edge = view.surface.pixel(x0 + scale + 2, x0 + 2)
+    ev.hostDrag = { ...s.host.report().lastDrag ? s.host.report().lastDrag : {} }
+    ev.hostStats = {
+      drags: s.host.report().drags, dragAts: s.host.report().dragAts,
+      dragDrops: s.host.report().dragDrops, dragTargets: s.host.report().dragTargets,
+    }
+    const data = (await s.dataState()).data
+    ev.data = {
+      drags: data.drags, enters: data.enters, leaves: data.leaves, drops: data.drops,
+      dropsLost: data.dropsLost, pending: data.pending, bytes: data.bytes,
+    }
+
+    // THE RECEIVER'S OWN ACCOUNT, which is the only place the FORMAT the bytes arrived under is
+    // readable: ask it to quit and read what it returns.
+    typeInto(view, 'q')
+    const got = await resultOf(s.k, viewer.pid, 30000)
+    ev.viewer = got
+    ev.shown = (got.shown || [])[0] || null
+    typeInto(files, 'q')
+    ev.source = await resultOf(s.k, src.pid, 30000)
+
+    const clauses = {
+      // A 1 PX MOVE STARTS NOTHING, which is the threshold's lower edge.
+      'a press and a 1 px move start no drag': ev.dragAfterNudge === null,
+      'the kernel ran exactly one drag session': (ev.data.drags || 0) === 1,
+      /* THE TARGET'S OWN COUNT, and the kernel's global one is NOT it: the gesture begins inside
+       * the SOURCE's window, so the first sample enters that one — a drag's own window is a
+       * legitimate target. What this proof is about is that the RECEIVER was entered exactly once,
+       * which is the number it keeps itself. */
+      'the target was entered once': ((ev.viewer || {}).enters || 0) === 1
+        && (ev.data.enters || 0) >= 1 && (ev.hostStats.dragTargets || 0) >= 1,
+      'the drop was delivered': (ev.data.drops || 0) === 1 && (ev.data.dropsLost || 0) === 0,
+      // THE SOURCE'S RECEIPT, which a MOVE source cannot do without.
+      'and the source was told the effect': ((ev.source || {}).effects || []).length === 1
+        && ((ev.source || {}).effects || [{}])[0].effect === DOBJ_EFFECT_COPY,
+      // THE BYTES ARRIVED UNDER THE FORMAT THE SOURCE DECLARED. This is the milestone's own proof
+      // sentence: "assert the bytes arrived under the image format".
+      'the bytes arrived under the image format': !!ev.shown && ev.shown.source === 'drop'
+        && !!ev.shown.bitmap && ev.shown.bitmap.w === 16 && ev.shown.bitmap.h === 16,
+      'the receiver drew them': !!ev.shown && ev.shown.drawn === true && ev.drewMs >= 0,
+      'and the pixels on its canvas are the logo\'s': ev.corner === AMBER && ev.edge === BLUE,
+      // AND THE PAYLOAD IS GONE AFTERWARDS: the drop's fd was closed, which is what gives the
+      // budget back.
+      'the payload was released once the receiver closed it': (ev.data.bytes || 0) === 0
+        && (ev.data.pending || []).length === 0,
+      // A REAL MOUSE OR NOTHING: a synthesized drag exercises this page and not the browser's own
+      // capture, so the clause says NOT MEASURED rather than passing.
+      'driven by a REAL mouse': ev.drivenBy === 'page' ? null : true,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    ev.notMeasured = Object.keys(clauses).filter((k) => clauses[k] === null)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M10)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: a TEXT-only object is refused by name, and no path is rendered as a picture.
+   -------------------------------------------------------------------------------------------- */
+
+async function pRefuse (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    /* `clip copy` ON A TEXT FILE OFFERS `paths` + `text` AND NO IMAGE. That is the object an image
+     * view must refuse — and the refusal is the kernel's own -ENOTSUP, asked for on purpose so the
+     * errno in the report is not this program's opinion (constraint 247). */
+    const copier = await spawnProgram(s.k, CLIP, ['clip', 'copy', '/usr/share/readme.txt'])
+    ev.copier = await resultOf(s.k, copier.pid, 30000)
+    ev.formats = ev.copier.formats || []
+    const viewer = await spawnProgram(s.k, IMGVIEW, ['imgview', '-p'])
+    const view = await surfaced(s.host, 'imgview')
+    if (!view) throw new Error('imgview never surfaced')
+    ev.viewWin = view.id
+    const refused = await until(() => view.surface.report().ops >= 3, 20000)
+    ev.refusedMs = Math.round(refused)
+    ev.surface = view.surface.report()
+    typeInto(view, 'q')
+    ev.viewer = await resultOf(s.k, viewer.pid, 30000)
+    ev.shown = (ev.viewer.shown || [])[0] || null
+    ev.refusals = ev.viewer.refusals || []
+
+    const clauses = {
+      'a text file is copied as text, with no image format': ev.formats.includes('text')
+        && !ev.formats.includes('bitmap') && !ev.formats.includes('png'),
+      // THE REFUSAL IS BY NAME AND IT IS THE KERNEL'S ERRNO.
+      'the image view refused it as ENOTSUP': !!ev.shown && ev.shown.refused === 'ENOTSUP',
+      'and said what the object DID offer': ev.refusals.length >= 1
+        && /text/.test(ev.refusals[0] || ''),
+      // AND THE THING THAT MUST NOT HAPPEN: no image, and nothing drawn that could be mistaken for
+      // one. `PLAN.md` §5: "the image paste must fail cleanly, not silently paste a path".
+      'nothing was drawn as an image': !!ev.shown && ev.shown.drawn !== true
+        && !ev.shown.bitmap && !ev.shown.png,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M10)
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: the payload is accounted, and the page cannot forge a drop.
+   -------------------------------------------------------------------------------------------- */
+
+async function pAccount (boot) {
+  const s = await bootHost(boot)
+  const ev = {}
+  try {
+    const copier = await spawnProgram(s.k, CLIP, ['clip', 'copy', PNG_FILE])
+    ev.copier = await resultOf(s.k, copier.pid, 30000)
+    const held = (await s.dataState()).data
+    ev.heldBytes = held.bytes
+    ev.heldRows = held.rows
+    ev.formats = ev.copier.formats || []
+
+    /* A PNG IS CARRIED WITHOUT BEING UNDERSTOOD, which is what an OPAQUE format means: nothing in
+     * this system decodes PNG, so the receiver reports its header and proves the bytes are intact
+     * rather than rendering them. */
+    const viewer = await spawnProgram(s.k, IMGVIEW, ['imgview', '-p'])
+    const view = await surfaced(s.host, 'imgview')
+    if (!view) throw new Error('imgview never surfaced')
+
+    /* ---- AND THE PAGE CANNOT FORGE A DROP --------------------------------------------------
+     *
+     * `win-in` is the page's route into a window's event queue, and the four drag records are the
+     * KERNEL's to produce. Without that refusal a page could post a `WEV_DROP` naming an offer no
+     * object carries, and a target would ask for a drop that does not exist. The page reports where
+     * the pointer is; what a drag IS belongs to the kernel (constraint 243).
+     *
+     * DRIVEN WHILE THE WINDOW IS STILL LIVE, and the order matters: `feed` refuses a destroyed
+     * window BEFORE it looks at the event type, so forging at a window whose process had already
+     * exited would be refused for the wrong reason and the counter would not move.
+     */
+    const fedBefore = s.host.report().fed
+    const before = (await s.winState()).wins
+    s.k.post({
+      t: 'win-in',
+      win: view.id,
+      evs: [{ type: WEV_DROP, a: 1, b: 2, c: fmtBit(DOBJ_BITMAP) },
+        { type: WEV_DRAG_ENTER, a: 1, b: 2, c: fmtBit(DOBJ_BITMAP) }],
+    })
+    // `win-fed` IS AN EVENT AND NOT A REPLY — `www/pagekernel.mjs` lists it as unsolicited, so
+    // nothing may `expect` it. The host's own receipt is what moves, and something reading that
+    // receipt is how M4a's silent input loss was caught (constraint 160).
+    const fedMs = await until(() => s.host.report().fed.offered >= fedBefore.offered + 2, 8000)
+    ev.fedMs = Math.round(fedMs)
+    ev.forged = {
+      offered: s.host.report().fed.offered - fedBefore.offered,
+      queued: s.host.report().fed.queued - fedBefore.queued,
+    }
+    const after = (await s.winState()).wins
+    ev.forgedCount = (after.forgedDrags || 0) - (before.forgedDrags || 0)
+    ev.pendingAfterForge = (await s.dataState()).data.pending
+
+    typeInto(view, 'q')
+    ev.viewer = await resultOf(s.k, viewer.pid, 30000)
+    ev.shown = (ev.viewer.shown || [])[0] || null
+
+    const end = (await s.dataState()).data
+    ev.endBytes = end.bytes
+    ev.endRows = end.rows
+
+    const clauses = {
+      'a PNG is copied as an opaque payload': ev.formats.includes('png'),
+      'the kernel holds its bytes while anything references it': (ev.heldBytes || 0) > 0
+        && (ev.heldRows || 0) === 1,
+      // THE HEADER, WHICH IS WHAT SAYS THE BYTES ARRIVED INTACT. Nothing here decodes PNG.
+      'the receiver reads its header and reports the size': !!ev.shown && !!ev.shown.png
+        && ev.shown.png.w === 16 && ev.shown.png.h === 16 && ev.shown.png.bytes > 0,
+      'and it refuses to draw what it cannot decode': !!ev.shown && ev.shown.drawn !== true,
+      'the page cannot feed a drag record': ev.fedMs >= 0 && ev.forged.offered === 2
+        && ev.forged.queued === 0 && ev.forgedCount === 2
+        && (ev.pendingAfterForge || []).length === 0,
+    }
+    ev.clauses = clauses
+    ev.failed = Object.keys(clauses).filter((k) => clauses[k] === false)
+    return { ok: ev.failed.length === 0, evidence: ev }
+  } finally {
+    for (const entry of [...s.host.frames.values()]) entry.win.destroy()
+    await shutdownKernel(s.k, globalThis.M10)
+  }
+}
+
+/** A synthesized pointer event on a surface. IT REACHES THIS HANDLER AND NOTHING IN FRONT OF IT:
+ *  `setPointerCapture` throws for a pointer id no live pointer owns, which is why the clause that
+ *  needs a real gesture reports NOT MEASURED when this is what ran. */
+function synthPointer (el, type, at, buttons = 1) {
+  el.dispatchEvent(new PointerEvent(type, {
+    pointerId: 1, clientX: at.x, clientY: at.y, button: 0, buttons,
+    bubbles: true, cancelable: true,
+  }))
+}
+
+/** A key into a surfaced window, through the element the surface's own handler is on. */
+function typeInto (entry, text) {
+  const el = entry.surface ? entry.surface.el : entry.term.el
+  for (const ch of text) {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true, cancelable: true }))
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   AND THE DESKTOP: a shell, with both gestures a command away.
+   -------------------------------------------------------------------------------------------- */
+
+async function liveDesktop (boot) {
+  const s = await bootHost(boot)
+  if (!s.usr.ok) {
+    say('REFUSING TO GO ON: /usr did not mount, so there is no /usr/bin/sh to start.')
+    globalThis.M10.state = 'error'
+    globalThis.M10.why = '/usr did not mount: ' + JSON.stringify(s.usr.why)
+    return null
+  }
+  const { pid } = await spawnProgram(s.k, TERM, ['term', '--ceiling', '3600000'])
+  const promptMs = await until(() => {
+    const e = [...s.host.frames.values()][0]
+    return e && e.term && /\$ /.test(e.term.screen())
+  }, 25000)
+  const entry = [...s.host.frames.values()][0]
+  if (entry && entry.term) entry.term.focus()
+  globalThis.M10.live = { pid }
+  if (promptMs < 0) {
+    const state = await ask(s.k, 'm4-state').catch((e) => ({ why: String(e) }))
+    const row = ((state && state.procs) || []).find((p) => p.pid === pid) || null
+    say('NO PROMPT in 25 s. The relay is pid ' + pid + ', parked in ' +
+      JSON.stringify(row && row.inflight))
+    globalThis.M10.stuck = { relay: row }
+    return s
+  }
+  say('')
+  say('A LIVE DESKTOP is open above: click the terminal and type.')
+  say('  files &            a window of file rows. PRESS A ROW AND DRAG IT onto another window.')
+  say('  imgview &          a window to drop one INTO. The row\'s bytes arrive under the format')
+  say('                     the source declared; drop readme.txt on it and it refuses BY NAME')
+  say('                     instead of drawing a filename as a picture.')
+  say('  clip copy FILE     publish a file: the path list, and the file\'s own format')
+  say('  clip list          what the clipboard offers, and how big each one is')
+  say('  clip paste         its text or its path list, on stdout')
+  say('  echo hi | clip copy -   the clipboard from a pipeline')
+  say('  press v in imgview paste the clipboard into it. Copy logo.rgba and press v.')
+  say('  cat /proc/dataobj  every live object, the clipboard, the drag session and the budget')
+  say('  term &             another terminal, to watch one program from the other')
+  return s
+}
+
+/* ---------------------------------------------------------------------------------------- */
+
+async function main () {
+  const t0 = performance.now()
+  say('M10: typed clipboard and drag-and-drop'
+    + (CFG.noTyped ? '  [CONTROL: no_typed]' : '')
+    + (CFG.noDrop ? '  [CONTROL: no_drop]' : ''))
+  const boot = { bench: 1 }
+  if (CFG.noTyped) boot.noTyped = true
+  if (CFG.noDrop) boot.noDrop = true
+  if (CFG.liveOnly) {
+    const s = await liveDesktop(boot)
+    if (s) {
+      globalThis.M10.verdict = 'live'
+      globalThis.M10.state = 'done'
+    }
+    return
+  }
+  const P = globalThis.M10.proofs
+
+  P.copy = await pCopy(boot)
+  const a = P.copy.evidence
+  say('copy: ' + JSON.stringify(a.formats) + ' published by pid ' +
+    ((a.copier || {}).pid || '?') + ' which then exited; the paste drew ' +
+    ((a.surface || {}).ops || 0) + ' ops; corner pixel ' + a.corner)
+  if (a.failed.length) say('  copy FAILED: ' + a.failed.join('; '))
+
+  P.drag = await pDrag(boot)
+  const b = P.drag.evidence
+  say('drag: ' + (b.drivenBy === 'check' ? 'a REAL mouse' : 'a synthesized pointer') +
+    ' moved row ' + b.rowMid + ' from win ' + b.filesWin + ' to win ' + b.viewWin +
+    '; kernel ' + JSON.stringify(b.data) + '; arrived as ' +
+    JSON.stringify((b.shown || {}).bitmap || null))
+  if (b.failed.length) say('  drag FAILED: ' + b.failed.join('; '))
+
+  P.refuse = await pRefuse(boot)
+  const c = P.refuse.evidence
+  say('refuse: ' + JSON.stringify(c.formats) + ' offered to an image view -> ' +
+    ((c.shown || {}).refused || '?') + '; ' + JSON.stringify(c.refusals))
+  if (c.failed.length) say('  refuse FAILED: ' + c.failed.join('; '))
+
+  P.account = await pAccount(boot)
+  const d = P.account.evidence
+  say('account: ' + d.heldBytes + ' bytes held in ' + d.heldRows + ' object(s); PNG header ' +
+    JSON.stringify((d.shown || {}).png || null) + '; forged drag records ' +
+    JSON.stringify(d.forged))
+  if (d.failed.length) say('  account FAILED: ' + d.failed.join('; '))
+
+  const drivenBy = (P.drag.evidence || {}).drivenBy || 'page'
+  globalThis.M10.config = {
+    noTyped: CFG.noTyped, noDrop: CFG.noDrop, drivenBy,
+    DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
+    AMBER, BLUE,
+  }
+  globalThis.M10.drivenBy = drivenBy
+  const sections = Object.entries(P)
+  const ran = sections.filter(([, v]) => v !== null)
+  const allOk = ran.length === sections.length && ran.every(([, v]) => v.ok)
+  globalThis.M10.verdict = allOk ? (drivenBy === 'page' ? 'page-driven' : 'ok') : 'FAIL'
+  globalThis.M10.ms = performance.now() - t0
+  for (const [name, v] of sections) {
+    say((v === null ? '  --  ' : (v.ok ? '  ok  ' : ' FAIL ')) + name)
+  }
+  const f = globalThis.M10.fetches
+  say('program fetches: ' + f.fetches + ' over ' + f.kernels + ' kernels, ' + f.retries +
+    ' retried (' + f.timeouts + ' deadline, ' + f.transport + ' transport)')
+  say('verdict ' + globalThis.M10.verdict + ' in ' + Math.round(globalThis.M10.ms) + ' ms')
+  await liveDesktop(boot)
+  out.className = globalThis.M10.verdict === 'FAIL' ? 'bad' : 'ok'
+  globalThis.M10.state = 'done'
+}
+</script>
+</body>
+</html>

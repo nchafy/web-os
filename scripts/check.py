@@ -628,6 +628,17 @@ class Control:
     #: A SERVER switch rather than a query parameter, because a policy is a response header — the
     #: same shape as `no-isolation`, and for the same reason.
     NO_CSP = "no-csp"
+    #: M10's first control, in `PLAN.md` section 5's words: "offer only the text format; the
+    #: image paste must fail cleanly, not silently paste a path". Every data object offers TEXT and
+    #: nothing else, whatever its creator asked for, through the cfg.noTyped hook which the kernel
+    #: refuses without a bench boot. The GESTURES still work - the clipboard still publishes, the
+    #: drag still runs, the drop still lands - and what disappears is the TYPE, which is the whole
+    #: claim of a typed clipboard (constraint 247).
+    TEXT_ONLY = "text-only"
+    #: M10's second: a drop is never delivered, through the cfg.noDrop hook. The drag half stops
+    #: and the CLIPBOARD half must keep working, which is how the milestone's two gestures are told
+    #: apart - the same split M9's pair makes between its two halves.
+    NO_DROP = "no-drop"
     #: A MOUNTPOINT IS A REAL DIRECTORY ON THE VOLUME BENEATH IT, and it was not. Reported by a
     #: reader who typed `ls /` and got nothing; `cd /usr/..` answered ENOENT on the same cause
     #: (constraint 238).
@@ -3156,6 +3167,139 @@ M9_SHAPE = {
     "scope": (dict, type(None)),
 }
 
+M10_LABELS = (
+    "cell reported",
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # AN IMAGE THROUGH THE CLIPBOARD, BETWEEN PROCESSES, WITH THE SOURCE KILLED. Constraint 45's
+    # first half: "a single untyped byte blob cannot carry an image between two apps".
+    "copy ok",
+    "the copy offered a path list AND the image",
+    "the clipboard holds one object, with both formats",
+    "and the process that copied it was killed, payload intact",
+    "a program reads the clipboard out of /proc/dataobj",
+    "the paste drew the image",
+    "and the pixels are the logo's own",
+    # THE DRAG, WITH A REAL MOUSE, BETWEEN TWO PROCESSES' WINDOWS. Constraint 45's second half.
+    "drag ok",
+    "a press and a 1 px move start no drag",
+    "the kernel ran exactly one drag session",
+    "the target was entered once",
+    "the drop was delivered",
+    "and the source was told the effect",
+    "the bytes arrived under the image format",
+    "the receiver drew them",
+    "and the pixels on its canvas are the logo's",
+    "the payload was released once the receiver closed it",
+    "driven by a REAL mouse",
+    # AND THE REFUSAL, which is what "typed" MEANS: a path list is not an image.
+    "refuse ok",
+    "a text file is copied as text, with no image format",
+    "the image view refused it as ENOTSUP",
+    "and said what the object DID offer",
+    "nothing was drawn as an image",
+    # THE PAYLOAD IS ACCOUNTED, AND THE PAGE CANNOT FORGE A DROP.
+    "account ok",
+    "a PNG is copied as an opaque payload",
+    "the kernel holds its bytes while anything references it",
+    "the receiver reads its header and reports the size",
+    "and it refuses to draw what it cannot decode",
+    "the page cannot feed a drag record",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m10.html",
+)
+
+M10_DOCUMENT = "/www/m10.html"
+
+#: `await-pointer` is a terminal state for the ready expression, so the check can send a REAL drag
+#: between two windows. The page publishes the coordinates because only the page knows them: a
+#: surface is positioned by the clamp and scaled by CSS. It is the same phase name `www/m8.html`
+#: uses, so one driver reads one vocabulary.
+M10_READY = ("(() => { const M = globalThis.M10 || {}; const s = M.state; "
+             "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
+             "return M.phase === 'await-pointer' ? 'await-pointer' : '' })()")
+
+M10_DONE = ("(() => { const s = globalThis.M10 && globalThis.M10.state; "
+            "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M10 = """(() => {
+  const M = globalThis.M10 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    copy: one(P.copy),
+    drag: one(P.drag),
+    refuse: one(P.refuse),
+    account: one(P.account),
+  }
+})()"""
+
+M10_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list,
+    "copy": (dict, type(None)),
+    "drag": (dict, type(None)),
+    "refuse": (dict, type(None)),
+    "account": (dict, type(None)),
+}
+
+#: What AN OBJECT THAT OFFERS ONLY TEXT must break, and only this.
+#:
+#: Measured on Chrome 157, and the first version of this control was WRONG in a way worth keeping
+#: on the record: it broke everything. Two programs treated a refused format as fatal, so under
+#: text-only `clip` published nothing and `files` never started a drag - the clipboard was empty,
+#: the gesture never ran, and twenty-one of twenty-five clauses went red. A control satisfied by
+#: that verifies nothing about TYPES. Both programs write what the kernel GRANTED now, so the
+#: gestures run end to end and what fails is the format and the format alone.
+_TEXT_ONLY_FAILS = (
+    "copy ok",
+    "the copy offered a path list AND the image",
+    "the clipboard holds one object, with both formats",
+    "and the process that copied it was killed, payload intact",
+    "the paste drew the image",
+    "and the pixels are the logo's own",
+    "drag ok",
+    "the bytes arrived under the image format",
+    "the receiver drew them",
+    "and the pixels on its canvas are the logo's",
+    "account ok",
+    "a PNG is copied as an opaque payload",
+    "the kernel holds its bytes while anything references it",
+    "the receiver reads its header and reports the size",
+    "and it refuses to draw what it cannot decode",
+    "verdict is ok",
+)
+
+#: What A WORLD WHERE NO DROP IS DELIVERED must break.
+#:
+#: The session still begins, the target is still entered and the page still renders the highlight -
+#: all of which is the GESTURE - and the payload simply never reaches anybody. WHAT MUST HOLD is
+#: the whole clipboard half and the whole refusal half, because neither has anything to do with a
+#: drop. A control that broke both gestures could not say which one it removed.
+_NO_DROP_FAILS = (
+    "drag ok",
+    "the drop was delivered",
+    "and the source was told the effect",
+    "the bytes arrived under the image format",
+    "the receiver drew them",
+    "and the pixels on its canvas are the logo's",
+    "verdict is ok",
+)
+
 #: What REMOVING THE OWNER CHAIN from a raise must break, and only this.
 #:
 #: Measured on Chrome 157: the dialog is created on top, so it is still above its owner until
@@ -3551,6 +3695,13 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "in this phase (it is a header on src/libos/, independent of COOP/COEP) and still "
                 "proves nothing here: a policy over a realm no process ever entered bounds "
                 "nothing.",
+        ), "m10": Expect(
+            UNMEASURABLE,
+            why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
+                "no kernel boots, no process runs, no window is created and there is no clipboard "
+                "to put anything on. UNMEASURABLE rather than FAIL, because a FAIL would claim "
+                "bytes were offered under a format and arrived wrong - and nothing was offered at "
+                "all.",
         ), "m9": Expect(
             UNMEASURABLE,
             why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
@@ -4164,6 +4315,55 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "volume, while the module loader stays bounded",
             failed=_NO_LOCKDOWN_FAILS,
             held=held_rest(M6_LABELS, _NO_LOCKDOWN_FAILS),
+        )},
+    ),
+    "text-only": NegativeControl(
+        name="text-only",
+        why="no_typed=1: every data object offers TEXT and nothing else, whatever its creator "
+            "asked for (the cfg.noTyped hook, refused without a bench boot). `PLAN.md` section "
+            "5's control for M10 in its own words: 'offer only the text format; the image paste "
+            "must fail cleanly, not silently paste a path.'\n"
+            "WHAT MUST BREAK: every IMAGE. The copy carries no bitmap, the paste draws no logo, "
+            "the drop arrives with nothing an image view can use, and the PNG cannot be carried "
+            "at all.\n"
+            "WHAT MUST HOLD, and this is what makes it a control about TYPES rather than a broken "
+            "world: both GESTURES run end to end. The clipboard still publishes and a program "
+            "still reads it out of `/proc/dataobj`; the real mouse still opens exactly one drag "
+            "session, the target is still entered once, the drop is still delivered and the source "
+            "is still told the effect. And the whole REFUSAL proof holds - a clean ENOTSUP naming "
+            "what the object did offer is precisely what this control's world should produce.\n"
+            "WHAT IT IS ABOUT: an untyped clipboard would hand the receiver whatever bytes it had "
+            "and let it guess, and a receiver that guessed would render a filename as a picture. "
+            "Nothing else in this suite can tell the two apart.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_typed", "1"),),
+        expects={"m10": Expect(
+            Outcome.FAIL,
+            why="the images must stop arriving while both gestures keep working",
+            failed=_TEXT_ONLY_FAILS,
+            held=held_rest(M10_LABELS, _TEXT_ONLY_FAILS),
+        )},
+    ),
+    "no-drop": NegativeControl(
+        name="no-drop",
+        why="no_drop=1: a drop is never delivered (the cfg.noDrop hook, refused without a bench "
+            "boot). The session runs, the target highlights, the gesture ends - and no `WEV_DROP` "
+            "reaches anybody and no payload is left to collect.\n"
+            "WHAT MUST BREAK: the drag's delivery. No drop, no effect reported to the source, no "
+            "bytes under the image format and no pixels on the receiver's canvas.\n"
+            "WHAT MUST HOLD: THE WHOLE CLIPBOARD HALF, and the refusal with it. Copying an image "
+            "and pasting it in another process has nothing to do with a drop, so if this control "
+            "moved those clauses it would not be telling the milestone's two gestures apart - "
+            "which is the only reason there are two controls.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_drop", "1"),),
+        expects={"m10": Expect(
+            Outcome.FAIL,
+            why="the drop must stop arriving while the clipboard keeps working",
+            failed=_NO_DROP_FAILS,
+            held=held_rest(M10_LABELS, _NO_DROP_FAILS),
         )},
     ),
     "no-csp": NegativeControl(
@@ -8664,6 +8864,267 @@ def check_m9(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m9.html", env.served_matches_disk(env.document),
                     "the m9.html served does not match www/m9.html on disk")
+
+
+@check(
+    name="m10",
+    milestone="m10",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.TEXT_ONLY, Control.NO_DROP),
+    labels=M10_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M10_DOCUMENT,
+    ready_expr=M10_READY,
+    ready_what="globalThis.M10 reaching done/aborted/error, or phase 'await-pointer' "
+               "(www/m10.html)",
+    # 9 s measured over five fresh kernels: four proofs, nine processes, two surfaces and a real
+    # drag. The bound is generous for M5's reason - a program parked in `poll` raises no error, so
+    # a wedge must end as a BROKEN check carrying the page's own state rather than as a suite that
+    # never returns.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M10 && globalThis.M10.state",
+    refusal_want="aborted",
+    note="A CLIPBOARD CALL WITH NO FORMAT TAG IS AN ABI DEFECT, not a missing feature, and that "
+         "is what this milestone removes. `docs/designs/REVIEW-FINDINGS.md` section 2: "
+         "`clipboard_write(bytes)` 'leaves a receiver structurally unable to distinguish a pasted "
+         "PNG from pasted UTF-8'. So the untyped pair is deleted and five `dataobj_*` calls "
+         "replace it - create, set, get, offer, open - and the clipboard and a drag are the same "
+         "object published to two places (constraint 240).\n"
+         "THE PAYLOAD IS THE KERNEL'S, which is the whole reason either gesture works. A "
+         "clipboard whose bytes lived in the copying process would be empty the moment that "
+         "process exited: this check KILLS the copier with End Process and pastes afterwards. A "
+         "drag whose bytes lived in the source could not survive the source dying mid-gesture, "
+         "which the review names as the requirement (constraint 241).\n"
+         "THE DRAG IS A REAL MOUSE, through `Input.dispatchMouseEvent` at coordinates the page "
+         "publishes from its own canvas rectangle - a surface is positioned by the clamp and "
+         "scaled by CSS, so nothing outside the page knows where a file row is. A synthesized "
+         "drag exercises the page and not the browser's pointer capture, so the clause that needs "
+         "a trusted gesture reports NOT MEASURED rather than passing.\n"
+         "AND THE PIXELS ARE READ BACK. 'The bytes arrived' is asserted from the receiver's own "
+         "report of the FORMAT they arrived under, and the picture is asserted from "
+         "`getImageData` on the canvas the browser painted - the logo's amber corner pixel beside "
+         "its blue neighbour, so 'it is amber everywhere' cannot pass (constraints 40, 224).\n"
+         "negative control: --negative text-only makes every object offer TEXT alone - "
+         "`PLAN.md` section 5's own words, 'the image paste must fail cleanly, not silently paste "
+         "a path'. Both gestures must still run end to end and the REFUSAL proof must hold. "
+         "--negative no-drop delivers no drop at all: the clipboard half must be untouched. "
+         "--negative no-isolation must come out BROKEN: no SAB, so no kernel, no windows and no "
+         "clipboard.",
+)
+def check_m10(env: Env) -> None:
+    # ---- send the real drag, then wait for the page to finish ------------------------------
+    phase = env.page.evaluate("globalThis.M10 && globalThis.M10.phase")
+    state = env.page.evaluate(M10_DONE)
+    if not phase and not state:
+        env.unmeasurable(
+            "www/m10.html satisfied its ready expression and then reported neither a phase nor a "
+            "terminal state, so no drag was sent and nothing below was measured")
+    if phase == "await-pointer":
+        where = env.page.evaluate("JSON.stringify(globalThis.M10.drag || null)")
+        if not where or where == "null":
+            env.unmeasurable(
+                "www/m10.html asked for a drag between two windows and published no coordinates, "
+                "so there was nowhere to send one")
+        d = json.loads(where)
+        # DECLARED BEFORE THE DRAG. The page cannot otherwise tell this check's gesture from a
+        # person's - both are trusted - and it would report a hand-driven session as a failed one.
+        env.page.evaluate("globalThis.M10.driver = 'check'")
+        mouse_drag(env.page, d["from"], d["to"])
+        env.page.evaluate("globalThis.M10.dragDone = true")
+        env.settle(M10_DONE, timeout=240.0,
+                   what="globalThis.M10.state reaching done after the drag was sent")
+
+    got = env.read(READ_M10, M10_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m10.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m10.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is created and there is no clipboard to "
+            "put anything on." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m10.html never reached a terminal state (state=%r)" % got["state"])
+
+    sections = ("copy", "drag", "refuse", "account")
+    env.expect_that(
+        "cell reported",
+        all(got[name] is not None for name in sections),
+        "sections absent: %s" % ", ".join(n for n in sections if got[n] is None))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    cfg = got["cfg"] or {}
+
+    # ---- PROOF 1: an image through the clipboard, across processes, the copier killed -------
+    a = ev("copy")
+    env.expect_that("copy ok", section_ok("copy"), a)
+    # TWO FORMATS FROM ONE FILE: the path list a file manager wants and the bytes an image view
+    # wants. Windows' own answer, and the reason is a receiver that can read only one of them.
+    env.expect_that("the copy offered a path list AND the image",
+                    (a.get("formats") or []) == ["paths", "bitmap"],
+                    {"formats": a.get("formats"), "copier": a.get("copier")})
+    clip = a.get("clipboard") or {}
+    env.expect_that("the clipboard holds one object, with both formats",
+                    (clip.get("formats") or []) == ["paths", "bitmap"],
+                    {"clipboard": clip, "objects": a.get("objects")})
+    # THE COPIER IS KILLED AND THE PAYLOAD IS INTACT. End Process is the kernel's own teardown
+    # path and it closes every fd: if the clipboard's bytes were the copier's, this is where they
+    # would disappear (constraint 241). Without this clause the proof would also pass for a
+    # clipboard that was a handle into a live process's memory.
+    env.expect_that("and the process that copied it was killed, payload intact",
+                    a.get("copierGoneMs", -1) >= 0
+                    and (a.get("afterKill") or {}).get("bytes") == a.get("bytesHeld")
+                    and (a.get("afterKill") or {}).get("refs") == 1,
+                    {"gone": a.get("copierGoneMs"), "held": a.get("bytesHeld"),
+                     "after": a.get("afterKill"), "procs": a.get("procs")})
+    # AND A PROGRAM READS IT OFF A PATH, which is the only reading of this a person has from a
+    # prompt: `/proc/dataobj` is regenerated per read like everything else in `/proc`.
+    env.expect_that("a program reads the clipboard out of /proc/dataobj",
+                    (a.get("grep") or {}).get("exit") == 0
+                    and ((a.get("grep") or {}).get("matched") or 0) >= 1,
+                    {"grep": a.get("grep")})
+    shown = a.get("shown") or {}
+    env.expect_that("the paste drew the image",
+                    a.get("drewMs", -1) >= 0 and shown.get("source") == "clipboard"
+                    and shown.get("drawn") is True
+                    and (shown.get("bitmap") or {}).get("w") == 16,
+                    {"drewMs": a.get("drewMs"), "shown": shown, "surface": a.get("surface")})
+    # THE CORNER PIXEL, read back out of the canvas the browser painted. It is the one an
+    # upside-down or mirrored render would move, and it is asserted BESIDE its neighbour so a
+    # window filled with one colour cannot pass (constraint 40).
+    env.expect_that("and the pixels are the logo's own",
+                    a.get("corner") == cfg.get("AMBER") and a.get("edge") == cfg.get("BLUE"),
+                    {"corner": a.get("corner"), "edge": a.get("edge"), "cfg": cfg,
+                     "at": a.get("cornerAt")})
+
+    # ---- PROOF 2: a REAL mouse drags a row from one process's window into another's ---------
+    b = ev("drag")
+    data = b.get("data") or {}
+    env.expect_that("drag ok", section_ok("drag"), b)
+    # THE THRESHOLD'S LOWER EDGE. A press alone must not start a drag, or every click on a row
+    # would begin a gesture the next release cancels.
+    env.expect_that("a press and a 1 px move start no drag",
+                    b.get("dragAfterNudge") is None,
+                    {"dragAfterNudge": b.get("dragAfterNudge")})
+    env.expect_that("the kernel ran exactly one drag session", data.get("drags") == 1,
+                    {"data": data, "host": b.get("hostStats")})
+    # THE RECEIVER'S OWN COUNT. The kernel's global one is not it: the gesture begins inside the
+    # SOURCE's window, so the first sample enters that one - a drag's own window is a legitimate
+    # target.
+    env.expect_that("the target was entered once",
+                    ((b.get("viewer") or {}).get("enters") or 0) == 1
+                    and (data.get("enters") or 0) >= 1,
+                    {"viewerEnters": (b.get("viewer") or {}).get("enters"), "data": data})
+    env.expect_that("the drop was delivered",
+                    data.get("drops") == 1 and data.get("dropsLost") == 0,
+                    {"data": data})
+    # THE SOURCE'S RECEIPT, which a MOVE source cannot do without: effect 0 means the bytes went
+    # nowhere and the original must stay.
+    effects = ((b.get("source") or {}).get("effects") or [])
+    env.expect_that("and the source was told the effect",
+                    len(effects) == 1
+                    and effects[0].get("effect") == cfg.get("DOBJ_EFFECT_COPY"),
+                    {"effects": effects, "cfg": cfg})
+    # THE MILESTONE'S OWN PROOF SENTENCE: "assert the bytes arrived under the image format".
+    drop = b.get("shown") or {}
+    env.expect_that("the bytes arrived under the image format",
+                    drop.get("source") == "drop"
+                    and (drop.get("bitmap") or {}).get("w") == 16
+                    and (drop.get("bitmap") or {}).get("h") == 16
+                    and (drop.get("bitmap") or {}).get("bytes", 0) > 0,
+                    {"shown": drop, "viewer": b.get("viewer")})
+    env.expect_that("the receiver drew them",
+                    drop.get("drawn") is True and b.get("drewMs", -1) >= 0,
+                    {"shown": drop, "drewMs": b.get("drewMs"), "surface": b.get("surface")})
+    env.expect_that("and the pixels on its canvas are the logo's",
+                    b.get("corner") == cfg.get("AMBER") and b.get("edge") == cfg.get("BLUE"),
+                    {"corner": b.get("corner"), "edge": b.get("edge")})
+    # AND THE PAYLOAD GOES BACK. The drop's fd was closed by the receiver, which is where a
+    # kernel-owned allocation returns to the budget.
+    env.expect_that("the payload was released once the receiver closed it",
+                    data.get("bytes") == 0 and (data.get("pending") or []) == [],
+                    {"data": data})
+    env.expect_that("driven by a REAL mouse", b.get("drivenBy") == "check",
+                    {"drivenBy": b.get("drivenBy")})
+
+    # ---- PROOF 3: a text-only object is refused by name, and no path is drawn ---------------
+    c = ev("refuse")
+    env.expect_that("refuse ok", section_ok("refuse"), c)
+    env.expect_that("a text file is copied as text, with no image format",
+                    "text" in (c.get("formats") or [])
+                    and "bitmap" not in (c.get("formats") or [])
+                    and "png" not in (c.get("formats") or []),
+                    {"formats": c.get("formats")})
+    # THE REFUSAL IS THE KERNEL'S ERRNO AND NOT THE PROGRAM'S OPINION: `imgview` asks for the
+    # bitmap on purpose so the name in its report is the one the kernel answered (constraint 247).
+    env.expect_that("the image view refused it as ENOTSUP",
+                    (c.get("shown") or {}).get("refused") == "ENOTSUP",
+                    {"shown": c.get("shown")})
+    env.expect_that("and said what the object DID offer",
+                    len(c.get("refusals") or []) >= 1
+                    and "text" in (c.get("refusals") or [""])[0],
+                    {"refusals": c.get("refusals")})
+    # AND THE THING THAT MUST NOT HAPPEN. `PLAN.md` section 5: "the image paste must fail cleanly,
+    # not silently paste a path".
+    env.expect_that("nothing was drawn as an image",
+                    (c.get("shown") or {}).get("drawn") is not True
+                    and not (c.get("shown") or {}).get("bitmap")
+                    and not (c.get("shown") or {}).get("png"),
+                    {"shown": c.get("shown"), "surface": c.get("surface")})
+
+    # ---- PROOF 4: the payload is accounted, and the page cannot forge a drop ----------------
+    e = ev("account")
+    env.expect_that("account ok", section_ok("account"), e)
+    env.expect_that("a PNG is copied as an opaque payload",
+                    "png" in (e.get("formats") or []),
+                    {"formats": e.get("formats")})
+    env.expect_that("the kernel holds its bytes while anything references it",
+                    (e.get("heldBytes") or 0) > 0 and e.get("heldRows") == 1,
+                    {"bytes": e.get("heldBytes"), "rows": e.get("heldRows")})
+    # NOTHING HERE DECODES PNG, and that is the point: the header is what says the opaque bytes
+    # crossed two processes intact.
+    png = (e.get("shown") or {}).get("png") or {}
+    env.expect_that("the receiver reads its header and reports the size",
+                    png.get("w") == 16 and png.get("h") == 16 and png.get("bytes", 0) > 0,
+                    {"png": png, "shown": e.get("shown")})
+    # ASSERTED OF A PNG THAT ARRIVED, not of a window that drew nothing. The first version read
+    # only `drawn is not True`, which HELD under `--negative text-only` where no PNG arrives at
+    # all - the control found it, and a clause satisfied by an empty clipboard asserts the symptom
+    # rather than the invariant (CLAUDE.md, verification).
+    env.expect_that("and it refuses to draw what it cannot decode",
+                    bool(png) and (e.get("shown") or {}).get("drawn") is not True,
+                    {"shown": e.get("shown"), "png": png})
+    # THE PAGE REPORTS WHERE THE POINTER IS; WHAT A DRAG IS BELONGS TO THE KERNEL. Without the
+    # refusal in `feed` a page could post a WEV_DROP naming an offer no object carries, and a
+    # target would ask for a drop that does not exist (constraint 243).
+    forged = e.get("forged") or {}
+    env.expect_that("the page cannot feed a drag record",
+                    forged.get("offered") == 2 and forged.get("queued") == 0
+                    and e.get("forgedCount") == 2
+                    and (e.get("pendingAfterForge") or []) == [],
+                    {"forged": forged, "count": e.get("forgedCount"),
+                     "pending": e.get("pendingAfterForge")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m10.html", env.served_matches_disk(env.document),
+                    "the m10.html served does not match www/m10.html on disk")
 
 
 @check(

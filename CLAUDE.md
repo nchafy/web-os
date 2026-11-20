@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 239 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
-| 3 | `docs/ABI.md` | The 68-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
+| 2 | `docs/CONSTRAINTS.md` | 248 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 32 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  239 normative constraints  ← cite these
+  CONSTRAINTS.md  248 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -96,16 +96,21 @@ src/
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
     wins.mjs      M7: a window IS a file description. The event ring, the owner chain, the
                   destroy cascade, the not-responding detector. It replaced M4a's console
+    dataobj.mjs   M10: the typed data object, the ONE clipboard slot and the ONE drag session.
+                  Refcounted payloads a process reaches by fd, so teardown releases them
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
     lockdown.mjs  M6: what a program's realm loses, as data. Fails CLOSED and says why
   bin/            the programs in /usr/bin, one file each. `true.mjs` states the program contract
+  share/          the data files `/usr/share` mounts: a PNG nothing here decodes, the same
+                  image as a DOBJ_BITMAP payload, and a text file. M10's proofs need real bytes
   wm/             userland window manager
     window.mjs    the frame, ported unstyled from ../webxp. Geometry, clamp, drag, arrow keys
     terminal.mjs  the terminal widget. IT DOES NOT ECHO — constraint 161
     winhost.mjs   the page's half of EVERY window: one frame per kernel window, and the one
                   route from a browser event into a window's event queue
     surface.mjs   M8: the ONE renderer of a display list. A canvas per surfaced window, and
-                  the only place a drawing op becomes a drawing call
+                  the only place a drawing op becomes a drawing call. `clientAt` is the declared
+                  inverse of `pointAt`, which is what lets a driver drag from inside a picture
 www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
@@ -119,6 +124,9 @@ www/
   m9.html         M9's four proofs — the owner chain, a refused raise, input suppression, the
                   close request — and then a desktop where `editor` will not close without
                   asking
+  m10.html        M10's four proofs — an image through the clipboard with its source KILLED, a
+                  REAL mouse dragging a file row between two processes, a typed refusal, and the
+                  budget — then a desktop with `files`, `imgview` and `clip`
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result. m7 and m8 import it; the older
                   pages still carry their own copies
@@ -174,13 +182,20 @@ row below rather than restate it.
 | The provider table | `PROVIDERS` in `src/kernel/providers.mjs`, as data |
 | What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
 | The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
-| The 239 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| A data format, its offer bit and its name | `DOBJ_*` + `fmtBit`/`fmtsOf`/`fmtName` and `DOBJ_FORMATS`/`DOBJ_FMT_ALL` in `src/abi.mjs`. The offer is a BITMASK in one register, so the packing has one definition and three readers: the kernel builds it, an event record carries it, a target tests it |
+| The `DOBJ_BITMAP` payload's header | `BMP_*` + `encodeBitmap`/`decodeBitmap` in `src/abi.mjs`. `8 + w*h*4` written a second time is the drift this exists to stop |
+| Which format a file's bytes are | `FORMAT_BY_EXT` + `formatForPath` in `src/libos/std.mjs`. A USERLAND convention — the kernel knows no names — and three programs need it, so a second copy is how `clip` and `files` come to disagree about a `.rgba` |
+| A data object's lifetime, the clipboard slot and the drag session | `src/kernel/dataobj.mjs`, and nowhere else. `WinMgr.pointer` is the one record of whether a button is down, because `feed` is the one place a pointer event enters the kernel |
+| Where a drop landed, in a window's own unit | `WinHost.#dropPointAt` in `src/wm/winhost.mjs`: surface pixels for a surfaced window, CELLS for a text one — the two units `WEV_POINTER` and `WEV_RESIZE` already use |
+| The 248 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
 `src/fs/vfs.mjs` and `src/bin/ls.mjs`; the `crossOriginIsolated` abort gate and `out`/`say` are
 pasted into nine `www/*.html` pages; `class Serving` and `chrome_full_version` are duplicated
-between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; and four files hand-roll
+between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; `src/bin/files.mjs`'s row
+geometry is restated in `bench/m10-data/shell.py`, which is outside the process and cannot import
+it — a drift there arrives as the WRONG FILE being dragged, which the run prints; and four files hand-roll
 the CDP connect sequence that `scripts/cdp.py` already provides.
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 
@@ -237,8 +252,25 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   5 µs write. This is POSIX's own contract. (23)
 - **A bad superblock mounts read-only and reports.** It never reseeds. webxp reseeds; that is the
   defect being fixed, and it is silent data loss presented as success. (28)
+- **A published data object is SEALED, and `dataobj_set` on it answers -EPERM.** Two processes
+  reading one object must not be shown different bytes, so a source cannot rewrite what it put on
+  the clipboard. (242)
+- **A drop whose event did not queue is NOT retained.** A target with a full queue drops its newest
+  event — the drop — so retaining the payload would charge the budget for a collection that can
+  never happen, and a MOVE source would be told to delete the original. Effect 0, counted. (245)
 - **A credential is an argument on every path call, not instance state.** Otherwise every process
   shares one identity and the mode bits are decoration. (29)
+- **A clipboard payload and a drag payload are KERNEL-OWNED, and a process holds an fd.** Both
+  gestures need the bytes to outlive the process that made them — a clipboard whose payload lived in
+  the copying process is empty the moment it exits, and a drag must survive its source dying
+  mid-gesture. So a data object is `F_DATA`: teardown releases it and a process still holds only
+  integers. `read(2)` and `write(2)` on one are -EINVAL, because an untyped read of a typed object is
+  the ABI defect M10 removed. (240, 241)
+- **The drag SESSION is the kernel's; the page reports only where the pointer is.** The page
+  hit-tests — it has the DOM — and the kernel decides which window may be a target, because only it
+  knows a window is blocked. `WinMgr.feed` REFUSES the four drag records from the page's own route.
+  There is no `DRAG_OVER`: an event per motion sample laps a 256-record queue in about a second and
+  `push` drops the newest, which would be the drop itself. (243, 244)
 - **The window surface is KERNEL-OWNED, and a process draws by sending a display list.** This
   file said the opposite until M8 measured it: a transferred `OffscreenCanvas` does not arrive at
   a process that is spinning OR parked in `Atomics.wait`, only at one that awaits a macrotask — so
@@ -326,6 +358,11 @@ scripts/check.py --prove-failure    # invert every expectation; the run MUST rep
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
 node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec
+node bench/m10-data/probe.mjs     # M10's object lifetimes, format refusals and drag edges
+bench/m10-data/controls.py        # nine mutations of them, scored on which checks move
+bench/m10-data/shell.py           # `files &` and `imgview &` at a REAL prompt, and a REAL drag
+bench/m10-data/shell.py --row 2   # ...the SAME gesture with a text file, which must be refused
+bench/m10-data/shell.py --clip    # `clip copy` then `v`, which is the route a terminal has
 node bench/m9-modal/probe.mjs     # M9's stack, owner chain and blocker walk
 bench/m9-modal/controls.py        # five mutations of the modality rules, scored
 bench/m9-modal/shell.py           # type `editor` at a REAL prompt and press its X; --clean inverts it

@@ -18,6 +18,7 @@ import {
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
   winCreate, winDestroy, winSetTitle, winSetBox, winRead, winSurface, winDraw,
   winSetModal, winRaise,
+  dataobjCreate, dataobjSet, dataobjGet, dataobjToClipboard, dataobjDrag, dataobjOpen,
 } from "./syscall.mjs";
 /** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
  *  A module no process had already imported would be fetched once PER SPAWNED PROCESS — the herd
@@ -62,6 +63,19 @@ const WIN = Object.freeze({
   surface: winSurface, draw: winDraw,
   // M9. The kernel owns the stack, so raising is a call and modality is enforced rather than drawn.
   setModal: winSetModal, raise: winRaise,
+});
+
+/**
+ * M10's typed clipboard and drag-and-drop, on `env.data`. FIVE CALLS and one object: the clipboard
+ * is `toClipboard` plus `open(DOBJ_WHERE_CLIPBOARD)`, and a drag is `drag` plus
+ * `open(DOBJ_WHERE_DROP)` — the same payload published to two places (constraint 240).
+ *
+ * `clipboard_read`/`clipboard_write` are NOT here. They took bytes with no format tag, which left a
+ * receiver unable to tell a pasted PNG from pasted UTF-8; that is the defect this group replaces.
+ */
+const DATA = Object.freeze({
+  create: dataobjCreate, set: dataobjSet, get: dataobjGet,
+  toClipboard: dataobjToClipboard, drag: dataobjDrag, open: dataobjOpen,
 });
 
 /** M5's two libraries. A module namespace object is non-writable per property but NOT frozen, so a
@@ -217,6 +231,7 @@ async function onCommand(m) {
       proc: PROC,
       tty: TTY,
       win: WIN,
+      data: DATA,
       // Frozen: these are MODULE objects shared by every program this worker runs.
       std: STD,
       shlex: SHLEX,

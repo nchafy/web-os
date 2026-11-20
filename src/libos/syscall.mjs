@@ -21,6 +21,8 @@ import {
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, SYS_win_raise,
+  SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
+  DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_F_APPEND, fmtBit,
   WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, decodeWinEvents,
   DLOP_BYTES, DL_MAX_OPS, encodeDrawOp,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
@@ -693,6 +695,82 @@ export function winRead(fd, max = 32) {
   // decoded record must not be a view onto it.
   const bytes = new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n));
   return decodeWinEvents(bytes, n);
+}
+
+/* M10's data-object calls. A TYPED PAYLOAD AND NOT A BYTE BLOB: `dataobj_get` takes the format it
+   wants and is REFUSED by name for one the object never offered, which is the whole difference
+   between this and the `clipboard_read` it replaces (constraint 240). */
+
+/** dataobj_create(formats) -> {fd, offer}, or a negative errno. `formats` is a LIST OF FORMAT IDS
+ *  and the mask is built here through `src/abi.mjs`'s one packing, so no program writes a bit
+ *  shift. The offer that comes back is the one the KERNEL settled on, which may be narrower. */
+export function dataobjCreate(formats = []) {
+  let mask = 0;
+  for (const f of formats) mask |= fmtBit(f);
+  const r = syscall(SYS_dataobj_create, mask);
+  if (r < 0) return r;
+  return { fd: r, offer: r1of() };
+}
+
+/**
+ * Write one format's bytes, looping at MAX_INLINE. 0, or the first negative errno.
+ *
+ * THE LOOP IS LAYER 2's, exactly as `write`'s is: the first chunk REPLACES and every later one
+ * APPENDS, so a 300 KiB PNG is five calls rather than a refusal. A program that wrote the loop
+ * itself would get the first-chunk flag wrong once and silently append to a stale payload.
+ */
+export function dataobjSet(fd, format, bytes) {
+  let off = 0;
+  for (;;) {
+    const chunk = Math.min(bytes.length - off, MAX_INLINE);
+    const flags = off === 0 ? 0 : DOBJ_F_APPEND;
+    const r = syscall(SYS_dataobj_set, fd, format, flags, 0, 0, 0, 0, 0, bytes, off, chunk);
+    if (r < 0) return r;
+    off += chunk;
+    // An EMPTY payload is one call and means "this format is present and empty", so the test is
+    // after the call and not before it.
+    if (off >= bytes.length) return 0;
+  }
+}
+
+/** Read one format WHOLE, or a negative errno. The total travels in r1, so the loop knows how much
+ *  there is rather than reading until a short count — which cannot distinguish a final chunk from
+ *  an object whose source stopped writing. */
+export function dataobjGet(fd, format) {
+  const first = syscall(SYS_dataobj_get, fd, format, 0);
+  if (first < 0) return first;
+  const total = r1of();
+  const out = new Uint8Array(total);
+  out.set(u8.subarray(DATA_OFF, DATA_OFF + first), 0);
+  let off = first;
+  while (off < total) {
+    const n = syscall(SYS_dataobj_get, fd, format, off);
+    if (n < 0) return n;
+    if (n === 0) break;
+    out.set(u8.subarray(DATA_OFF, DATA_OFF + n), off);
+    off += n;
+  }
+  return off === total ? out : -EIO;
+}
+
+/** Publish to the clipboard. The object is SEALED by this and `dataobjSet` answers -EPERM
+ *  afterwards: two readers of one object must not be shown different bytes. */
+export function dataobjToClipboard(fd) {
+  return syscall(SYS_dataobj_offer, fd, DOBJ_WHERE_CLIPBOARD);
+}
+
+/** Begin a drag from `winFd`, carrying this object. -EPERM unless the kernel saw a button go down
+ *  in that window, and -EBUSY while another drag is live (constraint 244). */
+export function dataobjDrag(fd, winFd, effects) {
+  return syscall(SYS_dataobj_offer, fd, DOBJ_WHERE_DRAG, winFd, effects | 0);
+}
+
+/** An fd onto the clipboard's object, or onto a drop delivered to `winFd`. `{fd, offer}`, or a
+ *  negative errno — -ENOENT for an empty clipboard and for a window with no uncollected drop. */
+export function dataobjOpen(where, winFd = 0) {
+  const r = syscall(SYS_dataobj_open, where, winFd);
+  if (r < 0) return r;
+  return { fd: r, offer: r1of() };
 }
 
 export function statfs() {

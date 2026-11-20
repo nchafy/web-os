@@ -140,6 +140,19 @@ whether the frame budget allows it, rather than reacting during a drag. Constrai
 the message. Chosen because the alternative — mapping the process's own heap — is the one transport
 already measured dead. Constraint 8.
 
+**data object** — M10. A kernel-owned, refcounted, FORMAT-TAGGED payload that a process reaches by
+fd (`F_DATA`). The clipboard and a drag are the same object published to two destinations, which is
+why there are five calls and not eight. `read(2)` and `write(2)` on one are -EINVAL: an untyped read
+of a typed object is the ABI defect it replaced. Constraints 240, 241.
+
+**the offer** — the set of formats a data object carries, as a BITMASK in one word. It travels in a
+register and in an event record's `c` field, because a drop target has to decide whether it can
+accept DURING the gesture, before any bytes exist. Closed table, dense from 1: text, paths, PNG,
+bitmap. Constraint 240.
+
+**sealed** — what publishing does to a data object. From then on `dataobj_set` answers -EPERM, so
+two processes reading one object cannot be shown different bytes. Constraint 242.
+
 **libos** — `src/libos/`, the code that runs *inside* a process: the synchronous syscall stubs and
 the realm lockdown. The trust boundary in file form.
 

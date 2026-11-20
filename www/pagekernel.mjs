@@ -22,6 +22,10 @@ export const UNSOLICITED = new Set([
   // M9. The stack, the refusal and the modality change are all events: the kernel posts them when
   // it decides, not when asked, so nothing ever `expect`s one.
   "win-stack", "win-blocked", "win-modal",
+  // M10. The drag session and the clipboard are events for the same reason: the kernel posts them
+  // when it decides, and nothing `expect`s one. `data-state` is the only data reply, because
+  // something asks for it by name.
+  "win-drag", "win-drag-target", "win-drag-end", "clipboard",
 ]);
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

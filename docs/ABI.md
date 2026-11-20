@@ -1,14 +1,18 @@
 # The ABI
 
-68 calls in six groups. This is the interface of the operating system — everything else is built
-on it, and a change here is a change to the system's contract.
+**71 calls in six groups**, and the number changed with M10: the two untyped `clipboard_*` calls
+are DELETED and five typed `dataobj_*` calls replace them (constraint 240). This is the interface of
+the operating system — everything else is built on it, and a change here is a change to the
+system's contract.
 
 Derived in `research/gap-03.md`, which carries the citation for every borrowed shape. This file is
 the normative statement; the research file is the evidence. Where they disagree, this one is wrong
 and should be corrected here.
 
-Option A does not implement all 68 in v1 — see `../MILESTONES.md` for the subset per milestone,
-and note that A's realised surface is **~40 calls**, not the 34 of the original candidate design.
+Option A does not implement all 71 in v1 — see `../MILESTONES.md` for the subset per milestone,
+and note that A's realised surface is **59 calls** as of M10, not the 34 of the original candidate
+design and not the ~40 `PLAN.md` §5 costed. `SYS_NAME` in `src/abi.mjs` is the list; the number here
+is derived from it and `selfTest()` asserts the two agree.
 
 ---
 
@@ -184,7 +188,17 @@ the kernel allocates it
 `win_raise(fd)` → 0 · BADF INVAL **EPERM** (a modal blocks it) **EHOSTGONE**
 `win_poll` DOES NOT EXIST, and that is the design: the fd `win_create` returns is read with
 `read(2)` and waited on with `poll(2)`
-`clipboard_read` / `clipboard_write` → bytes / 0 · ACCES NOTSUP (gesture-gated)
+`dataobj_create(offerMask)` → **fd** in r0, the offer the kernel SETTLED ON in r1 · INVAL EMFILE
+`dataobj_set(fd, format, flags)` → bytes written, payload in the byte region · BADF INVAL **NOTSUP**
+(never offered) **PERM** (published, therefore sealed) **FBIG** **NOMEM**
+`dataobj_get(fd, format, offset)` → this chunk's count in r0, the format's TOTAL length in r1 ·
+BADF INVAL **NOTSUP** **ENOENT** (offered, not yet written)
+`dataobj_offer(fd, where, winfd, effects)` → 0 · BADF INVAL **PERM** (no button down) **BUSY** (one
+drag at a time) **EHOSTGONE**
+`dataobj_open(where, winfd)` → **fd** in r0, the object's offer in r1 · INVAL **ENOENT** (empty
+clipboard, or no uncollected drop) EMFILE
+`clipboard_read` / `clipboard_write` **DO NOT EXIST**: they took bytes with no format tag, which is
+the ABI defect `docs/designs/REVIEW-FINDINGS.md` §2 named (constraint 240)
 `notify(specB)` → id · ACCES
 `tty_get(fd)` / `tty_set(fd, termiosB)` — ICANON ECHO ISIG, VMIN VTIME VINTR VQUIT VSUSP ·
 NOTTY BADF INVAL
@@ -222,6 +236,9 @@ number of records and answers **EINVAL** — never a short read — for a buffer
 | `WEV_CLOSE` | the X button was pressed. M7 DELIVERS it and the frame still goes; M9 is what lets the process refuse |
 | `WEV_FOCUS` | `a` = 1 entering, 0 leaving |
 | `WEV_DESTROYED` | `a` = the winid that went. The last record a destroyed window holds, so a process whose window was destroyed by ANOTHER process's call learns why rather than reading a bare errno |
+| `WEV_DRAG_ENTER` / `WEV_DROP` | M10. `a`, `b` = the position in the window's own unit — surface pixels for a surfaced window, CELLS for a text one (constraint 248) — and **`c` = the OFFER MASK**, so a target can decide whether it can accept before any bytes exist |
+| `WEV_DRAG_LEAVE` | the pointer left. No payload: a target that got an ENTER must get this, or its highlight never goes away |
+| `WEV_DRAG_DONE` | to the SOURCE's window: `a` = the effect that took place (0 for nothing), `b` = the target winid or 0. A MOVE source cannot know whether to delete the original without it |
 
 **The queue is bounded and the overflow is defined**: `WIN_EVENT_CAP` records per window, the
 NEWEST dropped and counted, published as `dropped` in `/proc/<pid>/win/<winid>`. That is M1's
@@ -313,7 +330,58 @@ about the world once the modal went away. `/proc/<pid>/win/<winid>` publishes `s
 process calls `win_destroy`. A process that ignores it is caught by the not-responding detector it
 already has (constraint 228).
 
-**Still M10's.** Three `dataobj_*` calls for a typed clipboard and drag-and-drop. Constraint 45.
+### The data group, as M10 built it
+
+**FIVE CALLS, AND THE CLIPBOARD AND A DRAG ARE ONE OBJECT PUBLISHED TO TWO PLACES.** `create` and
+`set` fill it, `get` reads one format out of it, `offer` publishes it to `DOBJ_WHERE_CLIPBOARD` or
+`DOBJ_WHERE_DRAG`, and `open` takes an fd onto whatever is at `DOBJ_WHERE_CLIPBOARD` or waiting at
+`DOBJ_WHERE_DROP`. One enum serves both directions and each call refuses the other's value by name,
+so a caller that confused them is told rather than answered 0 (constraint 240).
+
+**A DATA OBJECT IS A FILE DESCRIPTION**, `F_DATA`, for the reason a window is one: it is a
+kernel-owned thing a process must be able to release, and `terminate()` runs no cleanup — so the fd
+table's existing refcount and teardown sweep are what free it, and a process still holds only
+integers (constraints 15, 241). **`read(2)` and `write(2)` on one are -EINVAL**, which is the
+deleted clipboard call's defect stated as code: an untyped read of a typed object is the thing this
+group exists to remove.
+
+| format | carries |
+| --- | --- |
+| `DOBJ_TEXT` | UTF-8 |
+| `DOBJ_PATHS` | Windows' CF_HDROP as this filesystem spells it: ABSOLUTE paths, NUL-separated, no trailing NUL |
+| `DOBJ_PNG` | opaque PNG bytes. Nothing here decodes PNG — it is the proof that bytes of a format the system does not understand cross two processes untouched |
+| `DOBJ_BITMAP` | `[u32 w][u32 h]` then RGBA8 rows, top row first. The one image format a display list can draw, one `DL_FILL_RECT` per pixel |
+
+**THE OFFER IS A BITMASK, DECLARED AT CREATE AND NEVER WIDENED**, and it travels in a register and
+in an event record's `c` field — because a drop target must decide whether it can accept DURING the
+gesture, before any bytes exist. `fmtBit` / `fmtsOf` / `fmtName` in `src/abi.mjs` are the one
+packing. The table is CLOSED rather than registerable, which is a departure from the review that
+asked for this and is recorded as one (constraint 240).
+
+**PUBLISHING SEALS**, so `dataobj_set` afterwards is -EPERM: two processes reading one object must
+not be shown different bytes (constraint 242).
+
+**A PAYLOAD LARGER THAN ONE BYTE REGION IS WRITTEN WITH `DOBJ_F_APPEND`** and read back by looping
+on an offset against the total in r1 — `write(2)`'s short-count contract, both directions
+(decision 4). `DOBJ_MAX_BYTES` is the object's ceiling (-EFBIG) and `DOBJ_BUDGET_BYTES` the
+system's (-ENOMEM): two facts, two errnos (constraint 246).
+
+**THE DRAG SESSION IS THE KERNEL'S, AND THE PAGE REPORTS ONLY WHERE THE POINTER IS.** `drag-at` and
+`drag-drop` are page messages, not syscalls; the kernel resolves them to a target — refusing a
+window a modal blocks — and posts `win-drag`, `win-drag-target` and `win-drag-end` so the page
+renders a target it was handed. **There is no `DRAG_OVER`**, on queue arithmetic: 256 records is
+about a second of motion samples and `push` drops the newest, which would be the drop itself
+(constraint 243). A drag needs a button the kernel saw go down (-EPERM otherwise), there is one at
+a time (-EBUSY), and it is bounded by IDLE time rather than by its own age (constraint 244).
+
+**THE PAYLOAD OUTLIVES ITS SOURCE, which is the whole point of putting it in the kernel.** The
+clipboard slot holds a reference, so copy-then-quit-then-paste works; a live session holds one, so a
+source that dies mid-drag still delivers. A drop is retained ONLY if its event actually queued, and
+is collected exactly once (constraints 241, 245).
+
+**`/proc/dataobj`** publishes every live object, the clipboard, the session and the budget. Not
+under a pid, because the clipboard outlives the process that filled it — the creator is a column
+instead.
 
 ---
 

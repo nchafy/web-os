@@ -149,7 +149,22 @@ const INTS = {
   // SerenityOS's server computes the blocker by walking the owner chain and suppresses input to
   // the blocked windows; this is the same division (constraint 226).
   SYS_win_raise: 53,
-  NSYS: 54,
+  // M10. THE TYPED DATA OBJECT, which is the clipboard and drag-and-drop both: one kernel-owned,
+  // refcounted, format-tagged payload, reached through an fd. `clipboard_read`/`clipboard_write`
+  // were in docs/ABI.md's host group taking BYTES with no format tag, and that is the ABI defect
+  // `docs/designs/REVIEW-FINDINGS.md` §2 named — a receiver cannot tell a pasted PNG from a pasted
+  // UTF-8 string, so they are DELETED rather than kept beside these (constraint 240).
+  //
+  // FIVE CALLS AND NOT THREE. `create`/`set`/`get` is what `PLAN.md` §5 costed; `offer` and `open`
+  // are what makes the object reach another process at all — and they are two rather than four
+  // because the clipboard and a drag differ only in WHERE the object was published, which is an
+  // argument (constraint 240).
+  SYS_dataobj_create: 54,
+  SYS_dataobj_set: 55,
+  SYS_dataobj_get: 56,
+  SYS_dataobj_offer: 57,
+  SYS_dataobj_open: 58,
+  NSYS: 59,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -163,6 +178,12 @@ const INTS = {
   // the MASTER, which behave oppositely (src/kernel/pty.mjs).
   F_SINK: 0, F_FILE: 1, F_PIPE_R: 2, F_PIPE_W: 3, F_TTY: 4, F_WIN: 5, F_SYNTH: 6, F_TMP: 7,
   F_PTY_M: 8,
+  // M10. A DATA OBJECT IS A FILE DESCRIPTION for the reason a window is one: it is a kernel-owned
+  // thing a process must be able to release, and `terminate()` offers no chance to finish — so the
+  // fd table's existing refcount and teardown sweep are what free it (constraints 15, 241). It is
+  // the one kind whose `read` and `write` are -EINVAL: an untyped read of a typed object is the
+  // defect the whole milestone exists to remove (constraint 240).
+  F_DATA: 9,
 
   // Constraint 17: the process table carries a hard cap. 128 is M0's; 1,000 is the design limit.
   PROC_CAP: 128,
@@ -392,7 +413,27 @@ const INTS = {
   //: reads -7 back as 4,294,967,289. `pointerAt` below is the one place that is undone; a program
   //: that read `ev.a` directly and clamped it would get a wildly wrong answer (constraint 225).
   WEV_POINTER: 6,
-  WEV_MAX: 6,
+  //: M10's drag events. FOUR AND NOT FIVE: there is NO `DRAG_OVER`, which every drag-and-drop API
+  //: this one borrows from has, and the reason is arithmetic rather than taste. A drag is a pointer
+  //: with a button down, so an OVER per motion sample streams at full rate — and `WIN_EVENT_CAP` is
+  //: 256 records, about a second of moves (constraint 223). A target that only wanted the drop
+  //: would fill its queue with OVER records and `push` drops the NEWEST, so THE DROP ITSELF would
+  //: be the record discarded. Enter, leave and drop are edges, and there are at most three of them
+  //: per target per gesture (constraint 243).
+  //:
+  //: ENTER and DROP carry the position in `a`,`b` and THE OFFER MASK in `c`, so a target can decide
+  //: whether it can accept before any bytes exist — which is what a typed clipboard is for. The
+  //: position's UNIT follows the window's content mode: surface pixels for a surfaced window, CELLS
+  //: for a text one, which are the two units `WEV_POINTER` and `WEV_RESIZE` already use
+  //: (constraint 248).
+  WEV_DRAG_ENTER: 7,
+  WEV_DRAG_LEAVE: 8,
+  WEV_DROP: 9,
+  //: To the SOURCE's window when the gesture ends: `a` is the effect that took place (0 for
+  //: nothing), `b` the target winid or 0. Without it a MOVE source cannot know whether to delete
+  //: what it moved.
+  WEV_DRAG_DONE: 10,
+  WEV_MAX: 10,
 
   //: `mods` on a WEV_POINTER. A move with no button held is a hover, which is the zero case.
   WPTR_DOWN: 0x10,
@@ -504,6 +545,82 @@ const INTS = {
    *  DOM the way an unbounded worker count exhausts the renderer (constraint 17's shape). */
   WIN_CAP: 32,
 
+  /**
+   * M10's FORMATS. A CLOSED, DENSE TABLE AND NOT A REGISTRY, and the review that asked for this
+   * asked for a registerable one — so the departure is stated here rather than discovered. The
+   * reason is the OFFER: a drop target has to decide whether it can accept a payload during the
+   * gesture, before any bytes exist, so the offer travels as ONE WORD in a register and in an event
+   * record's `c` field. A bitmask of 31 formats is what fits there; a registry needs a call to
+   * enumerate, which nothing yet has a use for (constraint 240).
+   *
+   * 0 IS NOT A FORMAT, so a zeroed register and an uninitialised event field are not one.
+   */
+  DOBJ_TEXT: 1,
+  //: Windows' CF_HDROP, as this filesystem spells it: absolute paths, NUL-separated, no trailing
+  //: NUL. The format that makes "drag a file" expressible at all.
+  DOBJ_PATHS: 2,
+  //: OPAQUE bytes of a PNG. The kernel does not decode it and neither does any program here — the
+  //: point of a typed clipboard is that an unreadable format is REFUSED by name rather than pasted
+  //: as a path (constraint 247).
+  DOBJ_PNG: 3,
+  //: Windows' CF_BITMAP: a `[u32 w][u32 h]` header and then w x h RGBA8 rows, top row first. The
+  //: one image format anything here can actually RENDER, because a display list has no image op.
+  DOBJ_BITMAP: 4,
+  DOBJ_FMT_MAX: 4,
+
+  //: The bitmap payload's header, declared where the format is. A second reader computing `8 +
+  //: w*h*4` for itself is the drift this table exists to stop.
+  BMP_W: 0, BMP_H: 4, BITMAP_HEADER: 8,
+
+  /**
+   * WHERE an object is published, and where one is opened FROM. ONE ENUM for both because the
+   * clipboard is a value of each; `offer` refuses DROP and `open` refuses DRAG, by name, rather
+   * than each call carrying half a table.
+   */
+  DOBJ_WHERE_CLIPBOARD: 1,
+  DOBJ_WHERE_DRAG: 2,
+  DOBJ_WHERE_DROP: 3,
+  DOBJ_WHERE_MAX: 3,
+
+  //: `dataobj_set`'s flags. Absent, a set REPLACES that format's bytes; with it, it appends — which
+  //: is how a payload larger than one byte region is written, the same short-count loop `write(2)`
+  //: uses (docs/ABI.md decision 4).
+  DOBJ_F_APPEND: 1,
+
+  //: The drop effects a source allows and a drop reports, as bits. There is no NEGOTIATION — a
+  //: target cannot answer "I would take a copy but not a move" — because nothing here has two
+  //: answers yet; see MILESTONES' M10 "what is not done".
+  DOBJ_EFFECT_COPY: 1,
+  DOBJ_EFFECT_MOVE: 2,
+
+  /** One object's payload ceiling, over all its formats. -EFBIG above it: an object nothing can
+   *  carry is a refusal and not a short count, because the formats are a SET and a half-written
+   *  image is not a smaller image. */
+  DOBJ_MAX_BYTES: 1024 * 1024,
+
+  /** Every live object's payload, together. -ENOMEM above it, which is M8's budget argument applied
+   *  to the other kernel-owned allocation: the kernel refuses what it cannot account rather than
+   *  discovering the ceiling as a dead tab (constraint 246). */
+  DOBJ_BUDGET_BYTES: 8 * 1024 * 1024,
+
+  /** Live objects PER PROCESS, which is `WIN_CAP`'s shape and for its reason: a global cap would
+   *  let one program's leak refuse every other program's copy, and a process that created them
+   *  without limit would grow the kernel's own map the way an unbounded worker count grows the
+   *  renderer (constraint 17's shape). */
+  DOBJ_CAP: 32,
+
+  /**
+   * How long a drag session may go WITHOUT A POINTER REPORT before the kernel cancels it, releases
+   * the payload and tells the source nothing happened.
+   *
+   * IT BOUNDS IDLE TIME AND NOT THE GESTURE, which is `term`'s correction applied before the same
+   * bug happens here (constraint 239): a slow careful drag across a desktop is a gesture that lasts
+   * as long as the user wants, and every motion sample re-arms this. What it catches is a session
+   * whose pointer is GONE — a page that stopped reporting, a frame torn down mid-drag — because one
+   * live session refuses the next with -EBUSY and a stuck one would refuse every drag for ever.
+   */
+  DRAG_IDLE_MS: 5000,
+
   // `spawn`'s file actions, posix_spawn-shaped. The two a shell needs and no more: a case that
   // does not exist yet must not get a parameter (CLAUDE.md, general enough and no further).
   SPAWN_DUP2: 1,
@@ -526,7 +643,9 @@ export const {
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl, SYS_chdir,
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
-  SYS_win_raise, NSYS,
+  SYS_win_raise,
+  SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
+  NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
   S_IFMT, S_IFREG, S_IFDIR, S_IFLNK,
@@ -536,7 +655,7 @@ export const {
   DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DE_INO, DE_TYPE, DE_NLEN, DIRENT_HEADER,
   BOOT_LOCK_BUDGET_MS, BOOT_LOCK_FIRST_MS, JOURNAL_IDLE_MS,
   ST_RETURN, ST_INTR, ST_KDOWN,
-  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP, F_PTY_M,
+  F_SINK, F_FILE, F_PIPE_R, F_PIPE_W, F_TTY, F_WIN, F_SYNTH, F_TMP, F_PTY_M, F_DATA,
   PROC_CAP, A_SHM, CALLID_WRAP,
   REARM_MS, HB_PERIOD_MS, HB_MISS_LIMIT,
   GLOBAL_BYTES, G_HEARTBEAT, G_HB_PERIOD_MS, G_KSTATE, G_EPOCH, G_INFLIGHT,
@@ -561,6 +680,12 @@ export const {
   TIOCGPGRP, TIOCSPGRP,
   WEV_BYTES, WEV_TYPE, WEV_MODS, WEV_A, WEV_B, WEV_C,
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
+  WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE,
+  DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_FMT_MAX,
+  BMP_W, BMP_H, BITMAP_HEADER,
+  DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_WHERE_MAX,
+  DOBJ_F_APPEND, DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE,
+  DOBJ_MAX_BYTES, DOBJ_BUDGET_BYTES, DOBJ_CAP, DRAG_IDLE_MS,
   WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_F_NONE, WIN_CAP,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
@@ -630,6 +755,7 @@ export const SYS_NAME = Object.freeze([
   "pty_open", "tty_get", "tty_set", "tty_winsize_get", "tty_winsize_set", "poll", "ioctl",
   "chdir",
   "win_create", "win_destroy", "win_set", "win_surface", "win_draw", "win_raise",
+  "dataobj_create", "dataobj_set", "dataobj_get", "dataobj_offer", "dataobj_open",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -1148,6 +1274,75 @@ export function decodeDrawOps(bytes, length = bytes.length) {
   return out;
 }
 
+/* M10's format table, as the three functions every side needs. THE OFFER IS A BITMASK and the bit
+   for a format is computed HERE: the kernel builds a mask from a process's request, the event record
+   carries it to a target, and the target tests it — three readers of one packing (constraint 240). */
+
+/** The offer bit for one format id, or 0 for an id outside the table. 0 for an unknown format is
+ *  deliberate: a mask ORed from unknown ids is EMPTY rather than wrong, so a refusal names the
+ *  format instead of a plausible-looking mask reaching a target. */
+export function fmtBit(format) {
+  const f = format | 0;
+  if (f < 1 || f > DOBJ_FMT_MAX) return 0;
+  return 1 << (f - 1);
+}
+
+/** Every format id in the table, ascending. DERIVED from `DOBJ_FMT_MAX`, so adding a format is one
+ *  edit and this list cannot be the copy that goes stale. */
+export const DOBJ_FORMATS = Object.freeze(
+  Array.from({ length: DOBJ_FMT_MAX }, (_, i) => i + 1),
+);
+
+/** Every bit set, for a program that offers the lot. Derived, never written as 0b1111. */
+export const DOBJ_FMT_ALL = DOBJ_FORMATS.reduce((m, f) => m | fmtBit(f), 0);
+
+/** A format's printed name. One renderer, so `/proc`, a program's output and a check's message
+ *  cannot disagree about what format 2 is called. */
+export const DOBJ_FMT_NAME = Object.freeze({
+  [DOBJ_TEXT]: "text",
+  [DOBJ_PATHS]: "paths",
+  [DOBJ_PNG]: "png",
+  [DOBJ_BITMAP]: "bitmap",
+});
+
+export function fmtName(format) {
+  return DOBJ_FMT_NAME[format | 0] || `fmt?${format | 0}`;
+}
+
+/** The format ids a mask carries, ascending. The inverse of ORing `fmtBit`, declared beside it. */
+export function fmtsOf(mask) {
+  return DOBJ_FORMATS.filter((f) => (mask & fmtBit(f)) !== 0);
+}
+
+/** A `DOBJ_BITMAP` payload's header. ONE PLACE, because the program that writes a bitmap, the one
+ *  that draws it and the check that measures it each need the same arithmetic — and `8 + w*h*4`
+ *  written three times is the drift this exists to stop. Null for anything that is not a whole
+ *  bitmap: a payload claiming 4096x4096 in 40 bytes is corrupt, not clamped (keyBytesOf's rule). */
+export function decodeBitmap(bytes) {
+  if (!bytes || bytes.length < BITMAP_HEADER) return null;
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const w = dv.getUint32(BMP_W, true);
+  const h = dv.getUint32(BMP_H, true);
+  if (w <= 0 || h <= 0) return null;
+  if (bytes.length !== BITMAP_HEADER + w * h * 4) return null;
+  return { w, h, pixels: bytes.subarray(BITMAP_HEADER) };
+}
+
+/** The inverse. `pixels` is RGBA8, top row first, and a length that does not match (w, h) is a
+ *  throw here rather than a short bitmap on somebody's screen. */
+export function encodeBitmap(w, h, pixels) {
+  const want = w * h * 4;
+  if (pixels.length !== want) {
+    throw new Error(`encodeBitmap: ${pixels.length} bytes for ${w}x${h}, want ${want}`);
+  }
+  const out = new Uint8Array(BITMAP_HEADER + want);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(BMP_W, w >>> 0, true);
+  dv.setUint32(BMP_H, h >>> 0, true);
+  out.set(pixels, BITMAP_HEADER);
+  return out;
+}
+
 /** `0xRRGGBBAA` unpacked. THE ONE PLACE THOSE BYTES ARE TAKEN APART, so a process's idea of a
  *  colour, the canvas's and a check's cannot drift. */
 export function unpackColor(rgba) {
@@ -1440,7 +1635,8 @@ export function selfTest() {
   if (keyBytesOf({ ...eround, type: WEV_RESIZE }).length !== 0) {
     fail("a resize event yielded key bytes");
   }
-  const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER];
+  const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER,
+    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE];
   if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
   if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
   if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
@@ -1509,6 +1705,68 @@ export function selfTest() {
   }
   if (WIN_SET_MODAL === WIN_SET_TITLE || WIN_SET_MODAL === WIN_SET_BOX) {
     fail("two win_set selectors collide");
+  }
+
+  /* M10's FORMAT TABLE. The offer is a bitmask in ONE word, so the table must be dense from 1 and
+   * must fit: the derivation is what is asserted, never a written-out 0b1111. */
+  if (DOBJ_FORMATS.length !== DOBJ_FMT_MAX) fail("the format table is not dense from 1");
+  if (DOBJ_FORMATS[0] !== 1) fail("format 0 exists: a zeroed register would name a format");
+  if (fmtBit(0) !== 0 || fmtBit(DOBJ_FMT_MAX + 1) !== 0 || fmtBit(-1) !== 0) {
+    fail("fmtBit answered a bit for a format outside the table");
+  }
+  for (const f of DOBJ_FORMATS) {
+    const b = fmtBit(f);
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`the offer bit for format ${f} is not a single bit`);
+    if ((DOBJ_FMT_ALL & b) === 0) fail(`DOBJ_FMT_ALL is missing format ${f}`);
+    if (!DOBJ_FMT_NAME[f]) fail(`format ${f} has no name`);
+  }
+  if (DOBJ_FMT_ALL >>> 0 >= 2 ** 31) fail("the offer mask does not fit an i32 register");
+  if (fmtsOf(DOBJ_FMT_ALL).join(",") !== DOBJ_FORMATS.join(",")) {
+    fail("fmtsOf does not invert the mask fmtBit builds");
+  }
+  if (fmtsOf(fmtBit(DOBJ_PNG)).join(",") !== String(DOBJ_PNG)) fail("a one-format mask is not one");
+  if (fmtsOf(0).length !== 0) fail("an empty offer carries a format");
+  if (fmtName(DOBJ_BITMAP) !== "bitmap" || fmtName(99) === "bitmap") fail("fmtName is wrong");
+  if (new Set([DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP]).size !== 4) {
+    fail("two formats collide");
+  }
+  const wheres = [DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP];
+  if (new Set(wheres).size !== 3 || Math.min(...wheres) !== 1
+      || Math.max(...wheres) !== DOBJ_WHERE_MAX) {
+    fail("the publish/open destinations are not dense from 1");
+  }
+  for (const b of [DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE, DOBJ_F_APPEND]) {
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`${b} is not a single bit`);
+  }
+  if (DOBJ_EFFECT_COPY === DOBJ_EFFECT_MOVE) fail("the two drop effects are one bit");
+  if (DOBJ_MAX_BYTES > DOBJ_BUDGET_BYTES) fail("one object may exceed the whole budget");
+  if (DOBJ_MAX_BYTES <= MAX_INLINE) {
+    fail("an object cannot hold more than one byte region, so DOBJ_F_APPEND is pointless");
+  }
+  if (DRAG_IDLE_MS <= 0) fail("a drag session with no idle bound can never be cancelled");
+  // The bitmap header, pinned to LITERAL offsets and round-tripped. A round trip alone cannot
+  // catch a swapped w/h — both sides read the same constants — so the bytes are asserted too.
+  if (BMP_W !== 0 || BMP_H !== 4 || BITMAP_HEADER !== 8) fail("the bitmap header layout moved");
+  {
+    const px = new Uint8Array(2 * 1 * 4);
+    px[0] = 0x11; px[4] = 0x22;
+    const bmp = encodeBitmap(2, 1, px);
+    if (bmp[BMP_W] !== 2 || bmp[BMP_H] !== 1) fail("the bitmap header bytes are in the wrong order");
+    const round = decodeBitmap(bmp);
+    if (!round || round.w !== 2 || round.h !== 1 || round.pixels.length !== 8) {
+      fail(`a bitmap round-trips as ${JSON.stringify(round && { w: round.w, h: round.h })}`);
+    }
+    if (round.pixels[0] !== 0x11 || round.pixels[4] !== 0x22) fail("bitmap pixels moved");
+    // THE REFUSALS, which are the half that matters: these bytes come from another process.
+    if (decodeBitmap(new Uint8Array(0)) !== null) fail("an empty bitmap decoded");
+    if (decodeBitmap(bmp.subarray(0, BITMAP_HEADER + 4)) !== null) fail("a short bitmap decoded");
+    const liar = new Uint8Array(BITMAP_HEADER + 4);
+    new DataView(liar.buffer).setUint32(BMP_W, 64, true);
+    new DataView(liar.buffer).setUint32(BMP_H, 64, true);
+    if (decodeBitmap(liar) !== null) fail("a bitmap that lies about its size decoded");
+    let threw = false;
+    try { encodeBitmap(2, 2, px); } catch { threw = true; }
+    if (!threw) fail("encodeBitmap accepted a pixel count that is not w*h*4");
   }
 
   const wmods = [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT];

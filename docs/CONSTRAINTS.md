@@ -2295,3 +2295,114 @@ them by typing. `bench/shell-reports/repro.py` types.
     **AND THE DESKTOP SAYS SO.** `term &` is in the hint block of every live page now, because a
     capability nobody is told about is one nobody has: the complaint was not only that a second
     terminal died, it was that there was no way to watch one program from another.
+
+## M10 — the typed data object: clipboard and drag-and-drop
+
+240. **A CLIPBOARD CALL WITH NO FORMAT TAG IS AN ABI DEFECT, AND `clipboard_read` /
+    `clipboard_write` ARE DELETED.** `docs/designs/REVIEW-FINDINGS.md` §2 is the finding, and its
+    sharpest line is not about dragging: `clipboard_write(bytes)` "leaves a receiver structurally
+    unable to distinguish a pasted PNG from pasted UTF-8". Five `dataobj_*` calls replace the two —
+    `create`, `set`, `get`, `offer`, `open` — and the clipboard and a drag are THE SAME OBJECT
+    published to two destinations, which is why `offer` and `open` are two calls and not four.
+
+    **THE OFFER IS A BITMASK AND THE FORMAT TABLE IS CLOSED**, which is a deliberate departure from
+    the review's "registerable format table". A drop target has to decide whether it can accept a
+    payload DURING the gesture, before any bytes exist, so the offer travels as one word in a
+    register and in an event record's `c` field; a registry needs a call to enumerate and nothing
+    yet has a use for one. Four formats: `DOBJ_TEXT`, `DOBJ_PATHS` (Windows' CF_HDROP — absolute
+    paths, NUL-separated), `DOBJ_PNG` (opaque) and `DOBJ_BITMAP` (`[u32 w][u32 h]` then RGBA8).
+    `src/abi.mjs` is the one place the packing lives.
+241. **THE PAYLOAD IS KERNEL-OWNED, AND A DATA OBJECT IS A FILE DESCRIPTION.** Both gestures need
+    the payload to outlive the process that made it, for reasons that are one sentence each: a
+    clipboard whose bytes lived in the copying process is empty the moment that process exits, and
+    the review's own requirement is that "the payload must be kernel-owned so a drag survives the
+    source process entering DYING mid-drag".
+
+    So the object is refcounted kernel-side and a process holds an FD — which means `close(2)`,
+    `dup(2)`, spawn inheritance and reap teardown already release it and a process still holds only
+    integers (constraint 15). The references are the fds, plus the clipboard slot, plus a live drag
+    session, plus any uncollected drop. `www/m10.html` KILLS the copier with End Process and pastes
+    afterwards; `bench/m10-data/probe.mjs` destroys the source's window mid-drag and the drop still
+    lands.
+
+    **`read(2)` AND `write(2)` ON ONE ARE -EINVAL**, which is the ABI defect stated as code: an
+    untyped read of a typed object is the thing this milestone removes, so the bytes are reached by
+    `dataobj_get(fd, format)` and the kind refuses rather than choosing a format for the caller.
+242. **PUBLISHING SEALS.** From the moment an object reaches the clipboard or a drag session,
+    `dataobj_set` answers **-EPERM**: two processes reading one object must not be shown different
+    bytes, and a source that could rewrite a published payload would make "kernel-owned" a
+    bookkeeping detail rather than a guarantee. -EPERM and not a silent no-op, because a program
+    that believed its write landed would publish one thing and mean another.
+243. **THERE IS NO `DRAG_OVER`, AND THE REASON IS ARITHMETIC.** Every drag-and-drop API this one
+    borrows from streams a position event while the pointer moves. A drag IS a pointer with a
+    button down, so an event per motion sample arrives at full rate — and `WIN_EVENT_CAP` is 256
+    records, about a second of moves (constraint 223). `push` drops the NEWEST event, so **the
+    record discarded would be the DROP itself**. Enter, leave and drop are EDGES: at most three per
+    target per gesture. A target that needs continuous feedback can have it when a program needs it.
+
+    **AND THE FOUR DRAG RECORDS ARE THE KERNEL'S TO PRODUCE.** `WinMgr.feed` is the page's route
+    into a window's event queue and it REFUSES them, counted. The page reports where the pointer is
+    (`drag-at`, `drag-drop`); which window is the target, whether it may be one, and what the
+    payload is belong to `src/kernel/dataobj.mjs` — the same division M9 made for the stack
+    (constraint 226). Without the refusal a page could post a `WEV_DROP` naming an offer no object
+    carries, and a target would ask for a drop that does not exist.
+244. **A DRAG NEEDS A BUTTON THE KERNEL SAW GO DOWN, AND IT IS BOUNDED BY IDLE TIME.** There is one
+    pointer, so there is one drag session, and a second is **-EBUSY**. That makes an ungated session
+    expensive: a program that could begin one unprompted would hold it until a pointerup that is
+    never coming and refuse every other drag until then. So `dataobj_offer(DOBJ_WHERE_DRAG)` asks
+    the kernel's OWN record of the pointer — `WinMgr.pointer`, written by the pointer events the
+    page already feeds, and written BELOW the modal suppression so a press a modal refused is not a
+    gesture a program may build on — and answers **-EPERM** when no button is down in that window.
+
+    **AND A SUPPRESSED POINTER EVENT CLEARS THE GATE.** Found by reading the code rather than by a
+    failing check, and it is a fail-open hole in a fail-closed rule: press in window A, move over a
+    window a modal BLOCKS, and release there — the release is suppressed too, so the kernel would
+    still believe a button was held in A and A's process could begin a drag with nothing pressed. A
+    suppressed pointer event means the kernel no longer knows where the pointer is, so it records
+    exactly that. `bench/m10-data/probe.mjs` asserts both edges: the stale drag is refused, and a
+    fresh press arms the gate again.
+
+    **THE BOUND IS ON IDLE TIME AND NOT ON THE GESTURE**, which is constraint 239's correction made
+    before the same mistake happened twice: a slow careful drag lasts as long as the user wants and
+    every motion sample re-arms `DRAG_IDLE_MS`. What it catches is a session whose pointer is gone.
+    Both edges are checked in `bench/m10-data/probe.mjs`, and
+    `bench/m10-data/controls.py --only session-age-bound` is the mutation that bounds the age
+    instead.
+245. **A DROP IS NOT RETAINED IF ITS EVENT DID NOT QUEUE.** The obvious implementation retains the
+    payload, records the pending drop and reports the effect, and only then looks at whether the
+    target took the record. A target whose queue is full drops its newest event — the drop — so the
+    payload would be held for a collection that can never happen, charged against the budget until
+    that window died, and the source would be told an effect took place: a MOVE source would then
+    delete the original. The honest answer is the one a source can act on: nothing was dropped,
+    effect 0, counted as `dropsLost`.
+
+    **AND A DROP IS ONE-SHOT.** The pending reference is handed to the opener, so a target cannot
+    re-open a drop it has already collected; an uncollected one is released when its window goes.
+246. **THE PAYLOAD IS ACCOUNTED, AND THE TWO CEILINGS ARE TWO ERRNOS.** `DOBJ_MAX_BYTES` is one
+    object's own ceiling and answers **-EFBIG**; `DOBJ_BUDGET_BYTES` is every live object's together
+    and answers **-ENOMEM** — M8's budget argument applied to the other kernel-owned allocation
+    (constraint 220), and -ENOMEM rather than -EAGAIN because a ceiling is not a transient. One
+    errno for both is the defect M3's `truncate` shipped when it answered ENOENT where it owed
+    EROFS: a program told "the system is full" by its own mistake retries for ever.
+    `DOBJ_CAP` bounds live objects PER PROCESS, which is `WIN_CAP`'s shape and for its reason.
+247. **A FORMAT THAT WAS NEVER OFFERED IS -ENOTSUP; AN UNKNOWN FORMAT IS -EINVAL; AND ONE THAT IS
+    OFFERED AND NOT YET WRITTEN IS -ENOENT.** Three refusals and three errnos, because they are
+    three facts: the first will never be readable, the second is not a format at all, and the third
+    may become readable. This is where the milestone's claim lives — an image view that asked for a
+    bitmap and was handed a path list is `PLAN.md` §5's own control, "the image paste must fail
+    cleanly, not silently paste a path".
+
+    **AND A PROGRAM WRITES WHAT THE KERNEL GRANTED, NOT WHAT IT ASKED FOR.** `dataobj_create`
+    returns the offer it settled on and it may be narrower. The first version of
+    `--negative text-only` broke everything because two programs treated a refused format as fatal:
+    the clipboard was empty, the gesture never ran, and 21 of 25 clauses went red — a control
+    satisfied by that verifies nothing about types. It must also never SUBSTITUTE: writing the path
+    as TEXT because TEXT is what was granted is precisely the failure being prevented.
+248. **A DROP'S POSITION IS IN THE WINDOW'S OWN UNIT: surface pixels for a surfaced window, CELLS
+    for a text one.** Those are the two units this ABI already has — `WEV_POINTER` is surface pixels
+    and `WEV_RESIZE` is cells — and a third would be a coordinate system no program asked for. One
+    renderer in `src/wm/winhost.mjs`, beside the hit test that produced it.
+
+    A consequence worth stating: **a text window cannot be a drag SOURCE**, because only a surface
+    delivers pointer events to a process (M8). It can be a TARGET, because the page hit-tests any
+    frame. A terminal reaches the clipboard instead, which is what `clip` is for.

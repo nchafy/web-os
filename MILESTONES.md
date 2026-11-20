@@ -35,8 +35,8 @@ checks is a wish.
 | M7 | A window is a file description | 4 | 1 | ✅ done — **ACCEPT**, 42 expectations, 2 controls, 128 host checks, 5 mutations, 6 review findings fixed |
 | M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
 | M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 41 expectations, 2 controls, 79 host checks, 8 mutations, 9 critic findings fixed |
-| **M10** | **Typed clipboard and drag-and-drop** | 4 | | ⬜ **next (option A)** |
-| M11 | Aero glass, frame-only, plus reskin | 5 | | ⬜ A |
+| M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 156 host checks, 9 mutations, 3 real-prompt runs |
+| **M11** | **Aero glass, frame-only, plus reskin** | 5 | | ⬜ **next (option A)** |
 | M12 | The blur governor | 3 | | ⬜ A |
 | M13 | The geometry harness | 5 | | ⬜ A |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
@@ -1788,6 +1788,150 @@ path, and a person reaches them by typing.
 
 `bench/shell-reports/repro.py` is where both are driven at a real prompt, and it is the file to
 extend the next time a milestone is reported done and a reader finds something in five minutes.
+
+---
+
+## M10 — a typed clipboard and drag-and-drop · done · 0.5 days · ~3,400 LoC
+
+**ACCEPT.** `clip copy /usr/share/logo.rgba` at a real prompt, `imgview &`, press `v` — and the
+logo is on the canvas, drawn one `DL_FILL_RECT` per pixel from bytes the kernel carried. `files &`
+beside it, and a REAL MOUSE drags a file row from one process's window into another's: the title
+reads "dragging logo.rgba", the kernel names the target, the page draws the highlight, and the
+receiver reports a 16x16 bitmap and paints it. Drag `readme.txt` instead and it refuses BY NAME
+rather than drawing a filename as a picture. 37 expectations over five fresh kernels in 5.3 s. The
+suite is 14 checks and 542 expectations, all green.
+
+```
+scripts/check.py                       14 checks, 542 expectations (m10: 37)
+scripts/check.py --only m10 --prove-failure   37 inverted, all failed
+scripts/check.py --negative text-only  m10 fail: 16 red, 21 intact
+scripts/check.py --negative no-drop    m10 fail:  7 red, 30 intact
+node bench/m10-data/probe.mjs          156 host checks (the lifetimes, the refusals, the edges)
+bench/m10-data/controls.py             9 mutations, each scored on which checks move
+bench/m10-data/shell.py                `files &` and `imgview &` at a REAL prompt, a REAL drag
+bench/m10-data/shell.py --row 2        ...and the SAME gesture with a text file, which is refused
+bench/m10-data/shell.py --clip         `clip copy` then `v`, which is the route a terminal has
+bench/m7-win/firefox.py --page m10     all four proofs in a second engine
+```
+
+### The defect was in the ABI, not in the feature list
+
+`docs/designs/REVIEW-FINDINGS.md` §2 asked for drag-and-drop, and the line that actually decided
+this milestone's shape was about the clipboard: `clipboard_write(bytes)` "leaves a receiver
+structurally unable to distinguish a pasted PNG from pasted UTF-8". That is a defect in a published
+call, not a missing feature — so the two untyped `clipboard_*` calls are **DELETED** and five typed
+`dataobj_*` calls replace them (constraint 240). The ABI is 71 calls now and says so.
+
+**THE CLIPBOARD AND A DRAG ARE ONE OBJECT PUBLISHED TO TWO PLACES**, which is why `offer` and `open`
+are two calls rather than four: they differ by an argument, and one knob controls one behaviour.
+
+**AND THE PAYLOAD IS KERNEL-OWNED, which is what makes either gesture work at all.** A clipboard
+whose bytes lived in the copying process is empty the moment that process exits; the review's own
+requirement is that a drag survive its source "entering DYING mid-drag". So an object is refcounted
+kernel-side and a process holds an **fd** — `F_DATA` — which means `close(2)`, `dup`, spawn
+inheritance and reap teardown already release it and a process still holds only integers
+(constraints 15, 241). `read(2)` and `write(2)` on one are -EINVAL, which is the deleted call's
+defect stated as code.
+
+**Built.** `src/kernel/dataobj.mjs` (the objects, the clipboard slot, the drag session, the budget),
+five handlers in `src/kernel/calls.mjs`, the `F_DATA` row in `src/kernel/files.mjs`, the format
+table and codecs in `src/abi.mjs`, `/proc/dataobj`, `env.data` in the libos, the page's half of the
+gesture in `src/wm/winhost.mjs`, `Surface.clientAt`, `/usr/bin/clip`, `/usr/bin/files`,
+`/usr/bin/imgview`, the first three data files in `/usr/share`, and `www/m10.html`.
+
+### The four proofs, and what each control moved
+
+| | Proof | |
+| --- | --- | --- |
+| 1 | the clipboard carries an IMAGE across processes | `clip` publishes a path list AND a bitmap, is KILLED with End Process, and a third process pastes and draws it — the logo's amber corner pixel beside its blue neighbour, read back out of the canvas |
+| 2 | a REAL MOUSE drags a row between two processes' windows | one session, one enter, one drop; the bytes arrive under the IMAGE format, the receiver draws them, the source is told the effect, and the payload is released when the receiver closes its fd |
+| 3 | a text-only object offered to an image view is refused BY NAME | -ENOTSUP, naming what the object did offer, and NOTHING is drawn as an image |
+| 4 | the payload is accounted and the page cannot forge a drop | a PNG is carried without being decoded (its IHDR is read back), the budget holds while anything references it, and two `WEV_DROP` records fed through the page's own route are refused and counted |
+
+**`--negative text-only`** makes every object offer TEXT alone — `PLAN.md` §5's own words, "offer
+only the text format; the image paste must fail cleanly, not silently paste a path". 16 red, 21
+intact: **both gestures still run end to end** — the clipboard publishes, a program reads it out of
+`/proc/dataobj`, the real mouse opens one session, the target is entered once, the drop is delivered
+and the source is told the effect — and the whole REFUSAL proof holds, because a clean ENOTSUP is
+exactly what that world should produce. **`--negative no-drop`** delivers no drop: 7 red, 30 intact,
+and what holds is the entire clipboard half. A control that broke both gestures could not say which
+one it removed.
+
+### What the controls found, and the first one broke the world
+
+**THE FIRST `text-only` RUN TURNED 21 OF 25 CLAUSES RED, and that was a defect in two programs
+rather than a control working.** `clip` and `files` treated a refused format as fatal, so under
+text-only `clip` published nothing and `files` never started a drag: the clipboard was empty, the
+gesture never ran, and the control was satisfied by a world with no clipboard in it. A control
+satisfied by that verifies nothing about TYPES.
+
+Both programs **write what the kernel GRANTED, not what they asked for** now — `dataobj_create`
+returns the offer it settled on and it may be narrower — and they never SUBSTITUTE: writing the path
+as TEXT because TEXT is what was granted is precisely the failure being prevented (constraint 247).
+
+**AND IT FOUND A CLAUSE THAT COULD NOT SEE ITS OWN SUBJECT.** "the paste drew the image" asserted
+only that the surface's op count had moved — which an image view drawing its own REFUSAL satisfies,
+measured: five ops of pink band under the control, clause green. It asserts the receiver's own
+report of the format now. A second one, "and it refuses to draw what it cannot decode", HELD under
+the control because no PNG arrived at all; it asserts a PNG that arrived and was not drawn.
+
+### The arithmetic the browser cannot reach, and the nine mutations over it
+
+Everything that can go wrong here is a COUNT: a reference taken twice leaks the payload for the
+life of the kernel, one released twice frees an object another process is reading, and a drop
+retained for an event that was never queued holds the budget until its window dies. None of that is
+visible on a screen. `bench/m10-data/probe.mjs` is 156 checks under plain node and
+`bench/m10-data/controls.py` is nine mutations scored on which of them move — every one a plausible
+implementation:
+
+| | |
+| --- | --- |
+| `leak-on-lost-drop` | retain the payload before looking at whether the target queued the record — the obvious order, and the one that charges the budget for a collection that can never happen (constraint 245) |
+| `repeatable-drop` | leave a collected drop in the pending map, so one open hands out a reference per call |
+| `unsealed-publish` | publishing does not seal, so a source rewrites bytes two processes are reading |
+| `no-gesture-gate` | a drag with no button down, which then holds the one session until the idle bound fires |
+| `drag-over-per-sample` | an event per motion sample, which laps a 256-record queue in about a second and drops the DROP |
+| `session-age-bound` | bound the gesture's AGE rather than its idle time — `term`'s own bug (constraint 239) |
+| `blocked-is-a-target` | a window behind a modal may be dropped on |
+| `offer-not-narrowed` | store the offer as asked, so a bit nobody defines reaches a target |
+| `one-budget-for-two-ceilings` | -ENOMEM for the object's own ceiling as well as the system's |
+
+**ONE MUTATION KILLED THE PROBE, which is the trap this repo has walked into twice.**
+`session-age-bound` cancels the session on the first tick, and the probe read `report().drag.idleMs`
+directly — so it died on the failure it was testing for and reported nothing. A safe accessor, the
+same fix m9's probe needed.
+
+**AND THE PROBE CAUGHT A REAL BUG BEFORE ANY BROWSER RAN: `DataMgr` had TWO METHODS NAMED `get`.**
+The table lookup and the payload reader, in one class body — the later one silently replaces the
+first in JavaScript, so the lookup simply disappeared and the first symptom was a TypeError inside a
+check about something else. The payload reader is `fetch` now, and the note is in the file.
+
+### It runs from a prompt, which is the path a reader takes
+
+`bench/m10-data/shell.py` types `files &` and `imgview &` at a REAL prompt and drags between them
+with a REAL mouse, and reads the receiver's canvas back. **`--row 2` is its negative control and it
+is the SAME GESTURE** — the third row is `readme.txt`, so the image view must refuse it and draw
+nothing. **`--clip` is the route a terminal has**, since a text window cannot be a drag source: only
+a surface delivers pointer events to a process (constraint 248).
+
+That file exists because the two bugs a reader found in five minutes after M9 was reported done were
+both on this path and not on the page's supervisor path (constraints 238, 239). It is the discipline
+applied before the report rather than after it.
+
+### What is not done
+
+**A DROP TARGET CANNOT NEGOTIATE.** Windows' `IDropTarget` answers a drop effect — "I would take a
+copy but not a move" — and there is nothing here with two answers yet, so the effect reported to a
+source is the source's own preference order, COPY before MOVE. **There is no `DRAG_OVER`** and the
+reason is arithmetic rather than scope (constraint 243); a target that needs continuous feedback can
+have it when a program needs it. **Nothing decodes PNG**, so an image view reads its IHDR and
+reports the size rather than drawing it; the picture a reader sees comes from `DOBJ_BITMAP`, which
+is the one image format fill-rects can draw. **There is no bridge to the HOST clipboard** — the
+browser's own clipboard is gesture-gated and asynchronous, and this one is a kernel slot. **The
+format table is closed**, which the review that asked for this asked to be registerable; the offer
+is a bitmask in one register because a target must decide mid-gesture, and that is recorded as the
+departure it is. **And a file manager cannot MOVE a file yet**: `files` offers COPY only, so nothing
+exercises the effect a `DOBJ_EFFECT_MOVE` source would have to act on.
 
 ---
 

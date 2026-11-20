@@ -33,6 +33,21 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "bin/winopen", path: "src/bin/winopen.mjs" }),
   Object.freeze({ name: "bin/paint", path: "src/bin/paint.mjs" }),
   Object.freeze({ name: "bin/editor", path: "src/bin/editor.mjs" }),
+  // M10: the clipboard from a prompt, a drag SOURCE and a drop TARGET.
+  Object.freeze({ name: "bin/clip", path: "src/bin/clip.mjs" }),
+  Object.freeze({ name: "bin/files", path: "src/bin/files.mjs" }),
+  Object.freeze({ name: "bin/imgview", path: "src/bin/imgview.mjs" }),
+  /* `/usr/share`: THE FIRST DATA FILES IN THIS FILESYSTEM, and M10 is why they exist. A typed
+   * clipboard has nothing to prove against text a program made up — the claim is that bytes of a
+   * format nothing here can decode (a PNG) cross two processes untouched, and that an image a
+   * display list CAN draw arrives as pixels rather than as a path. Both need a real file.
+   *
+   * The mount name keeps its extension where `bin/` drops it, because an extension is how a
+   * userland program picks a format (`std.formatForPath`) and `bin/ls` must not have to know a
+   * language to run a program. */
+  Object.freeze({ name: "share/logo.png", path: "src/share/logo.png" }),
+  Object.freeze({ name: "share/logo.rgba", path: "src/share/logo.rgba" }),
+  Object.freeze({ name: "share/readme.txt", path: "src/share/readme.txt" }),
 ]);
 
 /** `/bench`, mounted ONLY under a bench boot (src/kernel/kernel.mjs). `SYS_spawn` loads from the

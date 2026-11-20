@@ -17,7 +17,7 @@ import {
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
 import {
-  makeSink, installTruncateOverflow, installStore, installWins, KIND_OPS,
+  makeSink, installTruncateOverflow, installStore, installWins, installData, KIND_OPS,
 } from "./files.mjs";
 import {
   buildCalls, installStall, PENDING, pollWake, pollForget, pollPending, setPollFirstOnly,
@@ -39,6 +39,9 @@ import {
   WinMgr, installWindowKernel, setCascade, setDrawReaches, setOwnerChain, setModalBlocks,
   NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
+import {
+  DataMgr, installDataKernel, setTypedFormats, setDropReaches,
+} from "./dataobj.mjs";
 
 const RUNTIME_URL = "/src/libos/process.mjs";
 
@@ -86,6 +89,10 @@ let lateRaises = 0;
  *  an empty table, which is a state `win_create` can change — unlike M4a's single console, which
  *  the PAGE had to create before any process could open it. */
 let WINDOWS = null;
+/** M10. The typed data objects, the one clipboard slot and the one drag session. Built beside the
+ *  window table because a drag is a gesture over windows: `src/kernel/dataobj.mjs` reads the window
+ *  table through a getter, and this file is the only place both exist. */
+let DATA = null;
 /** The exec loader, and the kernel's OWN byte region, registered with the I/O worker under a
  *  NEGATIVE id so it can never collide with a process's. One buffer, locked around the reads that
  *  use it: two `SYS_spawn` calls are two `later()` bodies interleaving at every await. */
@@ -843,6 +850,17 @@ function tick() {
   Atomics.store(g, G_HEARTBEAT, ++hb);
   // The not-responding detector rides this timer rather than keeping its own.
   windowSample();
+  dragSample();
+}
+
+/** M10. A drag session whose pointer has stopped reporting is cancelled, and the cancellation is
+ *  REPORTED: one live session refuses the next with -EBUSY, so a stuck one would refuse every drag
+ *  for the life of the kernel. It rides the heartbeat for the reason the detector does — a timer
+ *  per session is a timer per gesture (constraint 244). */
+function dragSample() {
+  if (!DATA) return;
+  const idle = DATA.tick();
+  if (idle >= 0) noteOut(`a drag session was cancelled after ${idle} ms with no pointer report`);
 }
 
 /**
@@ -1468,6 +1486,8 @@ async function handle(m) {
           // A getter, called per read: `/proc` is regenerated per read and never caches, and the
           // window table it reports is the live one.
           wins: () => WINDOWS,
+          // M10's object table, for `/proc/dataobj`. A getter, like the two above it.
+          data: () => DATA,
           // M3's first negative control. False in every real boot.
           cache: cfg.procCache === true,
         });
@@ -1567,6 +1587,8 @@ async function handle(m) {
         // M7's window table, and the one post the window calls make: `win_create` and `win_set`
         // tell the page to build or change a frame. A getter for the reason the mount table is one.
         get wins() { return WINDOWS; },
+        // M10's object table, a getter for the same reason.
+        get data() { return DATA; },
         post,
       });
       // EVERY CONTROL HOOK BELOW IS GATED ON bench=1: a control requiring a hand edit is a control
@@ -1585,14 +1607,22 @@ async function handle(m) {
       installPtyKernel({ reply, signalGroup });
       // A window needs a wake nothing else will give: an event from the page passes through no
       // reply (constraint 160).
+      WINDOWS = new WinMgr();
+      installWins(WINDOWS);
+      /* M10. `wins` is a GETTER for the reason the mount table is one: the window table is built
+       * on the line above and a captured value would be whatever existed at install time. The
+       * window manager calls back the other way through `windowGone`, so an uncollected drop is
+       * released where the window's other resources are. */
+      installDataKernel({ post, now, wins: () => WINDOWS });
+      DATA = new DataMgr();
+      installData(DATA);
       installWindowKernel({
         reply,
         post,
         now,
         pollWake: () => pollWakeAll(),
+        windowGone: (id) => DATA.windowGone(id),
       });
-      WINDOWS = new WinMgr();
-      installWins(WINDOWS);
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
       // `noIsig` clears ISIG on every new pty, so Ctrl-C arrives as data. `noPollWake` stops
@@ -1635,6 +1665,18 @@ async function handle(m) {
       if (cfg.noModal) {
         if (cfg.bench !== 1) throw new Error("noModal requires bench=1");
         setModalBlocks(false);
+      }
+      /* M10's two, and they split the milestone's two gestures the way M9's pair splits its two
+       * halves. `noTyped` makes every object offer TEXT and nothing else — `PLAN.md` §5's own
+       * control, "offer only the text format; the image paste must fail cleanly" — and `noDrop`
+       * delivers no drop at all, so the CLIPBOARD must keep working while the DRAG stops. */
+      if (cfg.noTyped) {
+        if (cfg.bench !== 1) throw new Error("noTyped requires bench=1");
+        setTypedFormats(false);
+      }
+      if (cfg.noDrop) {
+        if (cfg.bench !== 1) throw new Error("noDrop requires bench=1");
+        setDropReaches(false);
       }
       // `ptyDetach` makes a master write accept its bytes and discard them, so only the pty stops.
       if (cfg.ptyDetach) {
@@ -1772,6 +1814,13 @@ async function handle(m) {
     case "win-gone":
     case "win-raise":
     case "win-state":
+    /* M10's two page reports and its one query. THEY ARE THE PAGE'S AND NOBODY ELSE'S, for the
+     * reason the four above are: a process's messages arrive on its own MessagePort, so a process
+     * cannot report a drop over another process's window. What the page sends is WHERE THE POINTER
+     * IS; which window may receive a drop is the kernel's (constraint 243). */
+    case "drag-at":
+    case "drag-drop":
+    case "data-state":
       /* THE ONE GUARD FOR ALL FOUR. `WINDOWS` is built in the `boot` case, and `handle()` turns a
        * throw into a `panic` — so a page that posted any of these before awaiting `up` killed the
        * kernel with a TypeError instead of being told what it did wrong. The console these
@@ -1839,6 +1888,21 @@ async function handle(m) {
       WINDOWS.raise(toRaise);
       return;
     }
+    case "drag-at":
+      /* ONE REPORT PER MOTION SAMPLE, AND NO ANSWER TO IT. The kernel posts `win-drag-target` when
+       * the target CHANGES and nothing otherwise: a reply per sample would double the message
+       * traffic of a gesture that already streams, and the page has nothing to do with an answer
+       * that says what it just said (constraint 243). */
+      DATA.dragAt(m.win | 0, m.x | 0, m.y | 0);
+      return;
+    case "drag-drop":
+      // The effect comes back in `win-drag-end`, which the source's own event carries too, so
+      // there is no second post here either.
+      DATA.dragDrop(m.win | 0, m.x | 0, m.y | 0);
+      return;
+    case "data-state":
+      post({ t: "data-state", data: DATA.report() });
+      return;
     case "win-state":
       post({
         t: "win-state",

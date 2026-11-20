@@ -2,7 +2,7 @@
 // UNDER it, in the I/O worker; nothing here knows a handle exists.
 
 import {
-  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN,
+  F_SINK, F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, F_DATA,
   EBADF, EINVAL, ESPIPE, EMFILE, O_APPEND, OPEN_MAX, MAX_INLINE, fnv1a, FNV1A_BASIS,
 } from "../abi.mjs";
 // store.mjs imports nothing from this file, so this is not a cycle.
@@ -281,6 +281,44 @@ registerKind(F_WIN, {
     // order: a window destroyed while an fd is still open keeps its row until this close, and a
     // row nobody can reach is one more the heartbeat sweep walks (constraint 18).
     WINS.sweep();
+    return 0;
+  },
+});
+
+/** M10's object table, injected at boot like the two above it. */
+let DATA = null;
+
+export function installData(mgr) {
+  DATA = mgr;
+}
+
+/**
+ * F_DATA: a typed data object as a file description (M10, `src/kernel/dataobj.mjs`).
+ *
+ * `read` AND `write` ARE -EINVAL, AND THAT IS THE DESIGN. An untyped read of a typed object is the
+ * exact defect this milestone removes — `clipboard_read` returning bytes with no format tag left a
+ * receiver unable to tell a pasted PNG from pasted UTF-8 (constraint 240) — so the bytes are
+ * reached by `dataobj_get(fd, format)` and this row refuses rather than picking a format for the
+ * caller. -EINVAL and not -ENOSYS: the fd is fine, the operation is wrong for it, which is what
+ * `winOf` answers for the same shape of mistake.
+ *
+ * `close` RELEASES ONE REFERENCE, which is the whole reason an object is an fd: `terminate()` runs
+ * no cleanup, so a process's payloads come back through the fd table's own teardown sweep and a
+ * process holds only an integer (constraints 15, 241).
+ */
+registerKind(F_DATA, {
+  read() {
+    return -EINVAL;
+  },
+  write() {
+    return -EINVAL;
+  },
+  fsync() {
+    return 0;
+  },
+  close(d) {
+    if (!DATA) return 0;
+    DATA.release(d.obj);
     return 0;
   },
 });

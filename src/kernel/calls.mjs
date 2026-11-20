@@ -12,7 +12,8 @@ import {
   O_ACCMODE, O_RDONLY, O_WRONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END,
   S_IFREG, S_IFDIR, S_IFLNK, FILESTAT_BYTES, DIRENT_HEADER, DT_DIR, DT_REG, DT_LNK, DT_UNKNOWN,
-  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, EXDEV, ENOTTY,
+  F_FILE, F_SYNTH, F_TMP, F_PIPE_R, F_PIPE_W, F_TTY, F_PTY_M, F_WIN, F_DATA, EXDEV, ENOTTY,
+  DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_F_APPEND,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
@@ -1052,6 +1053,139 @@ HANDLERS.win_draw = (p, k) => {
   // read applies in the other direction.
   if (length !== nops * DLOP_BYTES) return -EINVAL;
   return k.wins.draw(d.win, p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+};
+
+/* ----------------------------------------------------------------------------------------------
+   M10: the typed data object. FIVE CALLS — create, set, get, offer, open — and the two gestures a
+   desktop is made of are both built from them: the clipboard is `offer` to one destination and
+   `open` from it, and a drag is `offer` to the other (`src/kernel/dataobj.mjs`, constraint 240).
+
+   `clipboard_read` and `clipboard_write` are NOT here and are deleted from docs/ABI.md: a clipboard
+   call taking bytes with no format tag is the ABI defect this milestone exists to fix.
+   ---------------------------------------------------------------------------------------------- */
+
+/** The object behind an fd, or a negative errno. EBADF for no fd and EINVAL for an fd on something
+ *  that is not a data object — `winOf`'s rule, for the same reason. */
+function objOf(p, fd) {
+  const d = p.fds.get(fd);
+  if (!d) return -EBADF;
+  if (d.kind !== F_DATA) return -EINVAL;
+  return d;
+}
+
+/** One F_DATA description, installed at the lowest free fd. The object's reference is already the
+ *  caller's — `create` and `openFrom` each hand one over — so a failure to seat it RELEASES rather
+ *  than leaking the payload for the life of the kernel. */
+function seatObject(p, k, obj) {
+  const fd = p.fds.add({ kind: F_DATA, refs: 1, flags: O_RDWR, obj, inflight: 0 });
+  if (fd < 0) {
+    k.data.stats.opensLost += 1;
+    k.data.release(obj);
+    return fd;
+  }
+  return fd;
+}
+
+/**
+ * dataobj_create(offerMask) -> fd, with the mask the kernel settled on in r1.
+ *
+ * THE MASK COMES BACK because the kernel may narrow it: every bit outside the format table is
+ * dropped, and M10's negative control forces TEXT alone. A program told only "ok" would believe it
+ * had offered an image.
+ */
+HANDLERS.dataobj_create = (p, k) => {
+  const obj = k.data.create(p.pid, p.ctl[A0] | 0);
+  if (typeof obj === "number") return obj;
+  const fd = seatObject(p, k, obj);
+  if (fd < 0) return fd;
+  p.r1 = obj.offer;
+  return fd;
+};
+
+/**
+ * dataobj_set(fd, format, flags) -> bytes written, with the payload in the byte region.
+ *
+ * AN EMPTY WRITE IS LEGAL and means "this format is present and empty", which is not the same as a
+ * format that was offered and never written (-ENOENT on a get). A length outside the region is
+ * -EINVAL, which is constraint 9 and the bound `win_draw` was missing.
+ */
+HANDLERS.dataobj_set = (p, k) => {
+  const d = objOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const length = Atomics.load(p.ctl, LEN_I32);
+  if (length < 0 || length > MAX_INLINE) return -EINVAL;
+  const flags = p.ctl[A2] | 0;
+  // A flag nobody implements is -EINVAL, never ignored: a caller that passed a bit expecting
+  // behaviour must not be told the write succeeded as if it had none.
+  if (flags & ~DOBJ_F_APPEND) return -EINVAL;
+  return k.data.set(d.obj, p.ctl[A1] | 0, p.bytes.subarray(DATA_OFF, DATA_OFF + length), flags);
+};
+
+/**
+ * dataobj_get(fd, format, offset) -> the bytes in this chunk, with the format's TOTAL length in r1.
+ *
+ * THE TOTAL IS THE SECOND RETURN, so a payload larger than one byte region is read by looping on an
+ * offset rather than by a program guessing. r0 is capped at MAX_INLINE and the libos does the loop.
+ */
+HANDLERS.dataobj_get = (p, k) => {
+  const d = objOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const got = k.data.fetch(d.obj, p.ctl[A1] | 0, p.ctl[A2] | 0);
+  if (typeof got === "number") return got;
+  const chunk = got.bytes.subarray(0, Math.min(got.bytes.length, MAX_INLINE));
+  const wrote = replyBytes(p, chunk);
+  if (wrote < 0) return wrote;
+  p.r1 = got.total;
+  return chunk.length;
+};
+
+/**
+ * dataobj_offer(fd, where, winfd, effects) -> 0.
+ *
+ * PUBLISHING IS WHAT SEALS AN OBJECT. From here on `dataobj_set` answers -EPERM, because two
+ * processes reading one object must not be shown different bytes (constraint 242).
+ *
+ * `DOBJ_WHERE_DROP` IS REFUSED BY NAME: a drop is where an object is opened FROM, never a place to
+ * publish to, and one enum for both directions is what lets each call say which half it serves.
+ */
+HANDLERS.dataobj_offer = (p, k) => {
+  const d = objOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  const where = p.ctl[A1] | 0;
+  if (where === DOBJ_WHERE_CLIPBOARD) return k.data.toClipboard(d.obj);
+  if (where === DOBJ_WHERE_DRAG) {
+    const w = winOf(p, p.ctl[A2]);
+    if (typeof w === "number") return w;
+    if (w.win.destroyed) return -EHOSTGONE;
+    return k.data.beginDrag(d.obj, w.win, p.ctl[A3] | 0);
+  }
+  return -EINVAL;
+};
+
+/**
+ * dataobj_open(where, winfd) -> fd, with the object's offer mask in r1.
+ *
+ * THE OFFER COMES BACK WITH THE FD, so a program that pasted can ask "is there an image in this?"
+ * without a call per format — the same word a drop event carries in `c`.
+ *
+ * `DOBJ_WHERE_DRAG` is refused by name, for the reason `offer` refuses DROP.
+ */
+HANDLERS.dataobj_open = (p, k) => {
+  const where = p.ctl[A0] | 0;
+  let win = null;
+  if (where === DOBJ_WHERE_DROP) {
+    const w = winOf(p, p.ctl[A1]);
+    if (typeof w === "number") return w;
+    win = w.win;
+  } else if (where !== DOBJ_WHERE_CLIPBOARD) {
+    return -EINVAL;
+  }
+  const obj = k.data.openFrom(where, win);
+  if (typeof obj === "number") return obj;
+  const fd = seatObject(p, k, obj);
+  if (fd < 0) return fd;
+  p.r1 = obj.offer;
+  return fd;
 };
 
 /**

@@ -68,7 +68,24 @@ export class WinHost {
       // M8: surfaces created, batches replayed, ops in them, and pointer events sent back.
       surfaces: 0, batches: 0, ops: 0, pointers: 0,
       // M9: stacks applied, raises asked for, and raises the kernel refused.
-      stacks: 0, raiseAsks: 0, blocked: 0 };
+      stacks: 0, raiseAsks: 0, blocked: 0,
+      // M10: drags begun, pointer reports sent, releases sent, target changes rendered, and
+      // clipboard publishes seen.
+      drags: 0, dragAts: 0, dragDrops: 0, dragTargets: 0, copies: 0 };
+    /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
+     *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
+    this.drag = null;
+    /** The winid the kernel says is the current drop target, or 0. RENDERED AND NOT COMPUTED: the
+     *  page hit-tests, but only the kernel knows a window is blocked, so a highlight the page chose
+     *  for itself would promise a drop that will not happen (constraint 226's rule). */
+    this.dragTarget = 0;
+    /** The last drag the kernel ended, and what it reported: `{effect, target, why}`. */
+    this.lastDrag = null;
+    /** What the clipboard holds, as the kernel announced it. For a reader; nothing here acts on it. */
+    this.clipboard = null;
+    /** The drag image: one element per host, built on the first drag and hidden between them. A
+     *  cursor is a picture, so it is the page's — the kernel owns no pixels. */
+    this.dragEl = null;
     /** The last stack the kernel sent, bottom first, and the last refusal it reported. A check
      *  reads these rather than the DOM's own order, because the kernel's order is the authority
      *  and the DOM is only what this file did with it. */
@@ -99,6 +116,15 @@ export class WinHost {
     if (m.t === "win-stack") { this.#stack(m); return true; }
     if (m.t === "win-blocked") { this.#blocked(m); return true; }
     if (m.t === "win-modal") { this.#modal(m); return true; }
+    // M10. The drag session, as the kernel decided it: it began, the target changed, it ended.
+    if (m.t === "win-drag") { this.#dragBegan(m); return true; }
+    if (m.t === "win-drag-target") { this.#dragTarget(m); return true; }
+    if (m.t === "win-drag-end") { this.#dragEnded(m); return true; }
+    if (m.t === "clipboard") {
+      this.clipboard = { obj: m.obj | 0, formats: (m.formats || []).map(Number) };
+      this.stats.copies += 1;
+      return true;
+    }
     if (m.t === "win-fed") {
       this.fed.offered += m.offered | 0;
       this.fed.queued += m.queued | 0;
@@ -304,11 +330,26 @@ export class WinHost {
     el.addEventListener("pointermove", (e) => {
       if (!e.buttons) return;
       send(WPTR_MOVE, e);
+      // M10. THE SAME CAPTURE CARRIES THE DRAG. `setPointerCapture` above is what makes a move
+      // that left the canvas keep arriving, which is exactly what a drag across the desktop needs
+      // — so there is no second capture and no page-wide listener.
+      this.#dragMove(entry, e);
     });
-    el.addEventListener("pointerup", (e) => send(WPTR_UP, e));
+    el.addEventListener("pointerup", (e) => {
+      // THE UP GOES FIRST, so the kernel's record of the pointer is down=false before the drop is
+      // reported: the next drag must need a new press (constraint 244).
+      send(WPTR_UP, e);
+      this.#dragRelease(entry, e);
+    });
     // A cancelled pointer is an UP as far as a program is concerned: a drag the browser took away
     // must not leave a program drawing for ever.
-    el.addEventListener("pointercancel", (e) => send(WPTR_UP, e));
+    el.addEventListener("pointercancel", (e) => {
+      send(WPTR_UP, e);
+      // AND IT ENDS THE DRAG AS A RELEASE OVER NOTHING. A cancelled pointer is a gesture the
+      // browser took away, so reporting it as a drop wherever the pointer happened to be would
+      // deliver a payload the user never let go of.
+      this.#dragRelease(entry, e, true);
+    });
     // A surface takes the keyboard too, through the same path a terminal's keys take.
     el.addEventListener("keydown", (e) => {
       const bytes = bytesForKey(e);
@@ -468,6 +509,113 @@ export class WinHost {
     this.#applyBlocked();
   }
 
+  /* ---- M10: the drag gesture, which is the page's half of it ---------------------------------
+   *
+   * THE DIVISION IS M9's, APPLIED TO A SECOND GESTURE. The page has the DOM, so it is the only
+   * side that can hit-test a pointer against a frame; the kernel has the window table, so it is the
+   * only side that knows a window is blocked, what the payload is, and who may receive it. So this
+   * file reports WHERE and renders WHAT IT IS TOLD, and `src/kernel/dataobj.mjs` decides
+   * (constraints 226, 243).
+   */
+
+  /** The frame under a point, TOP FIRST IN THE KERNEL'S OWN ORDER — not the DOM's, because the DOM
+   *  order is only what `#stack` did with the order it was handed. The CLIENT AREA and not the
+   *  frame: a title bar is not a drop area. */
+  #frameAt(clientX, clientY) {
+    for (let i = this.order.length - 1; i >= 0; i -= 1) {
+      const entry = this.get(this.order[i]);
+      if (!entry) continue;
+      const r = entry.win.bodyEl.getBoundingClientRect();
+      if (clientX >= r.left && clientX < r.right && clientY >= r.top && clientY < r.bottom) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Where a drop landed INSIDE a window, in that window's own unit: SURFACE PIXELS for a surfaced
+   * window and CHARACTER CELLS for a text one.
+   *
+   * ONE FUNCTION, because those are the two units this ABI already has — `WEV_POINTER` is surface
+   * pixels and `WEV_RESIZE` is cells — and a third would be a coordinate system no program asked
+   * for. A program's own inside is the only frame of reference it has (constraint 248).
+   */
+  #dropPointAt(entry, event) {
+    if (entry.surface) return entry.surface.pointAt(event) || { x: 0, y: 0 };
+    const r = entry.win.bodyEl.getBoundingClientRect();
+    return {
+      x: Math.floor((event.clientX - r.left) / this.cell.w),
+      y: Math.floor((event.clientY - r.top) / this.cell.h),
+    };
+  }
+
+  /** The kernel accepted a `dataobj_offer(DOBJ_WHERE_DRAG)`: a gesture is live. The drag image is
+   *  the page's, because a cursor is a picture and the kernel owns no pixels. */
+  #dragBegan(m) {
+    this.drag = {
+      win: m.win | 0, obj: m.obj | 0, offer: m.offer | 0,
+      formats: (m.formats || []).map(Number), effects: m.effects | 0,
+    };
+    this.stats.drags += 1;
+    if (!this.dragEl) {
+      this.dragEl = document.createElement("div");
+      this.dragEl.className = "drag-image";
+      this.dragEl.dataset.dragImage = "1";
+      // POSITION IS BEHAVIOUR AND LOOK IS THE PAGE'S: the geometry is set here because this file
+      // is what follows the pointer, and `pointer-events:none` is load-bearing rather than
+      // decorative — a drag image that swallowed the pointer would hit-test as the target.
+      this.dragEl.style.position = "fixed";
+      this.dragEl.style.pointerEvents = "none";
+      this.dragEl.style.zIndex = "9999";
+      document.body.append(this.dragEl);
+    }
+    this.dragEl.textContent = `obj ${this.drag.obj}`;
+    this.dragEl.hidden = false;
+  }
+
+  /** The kernel says the target changed. A window the kernel REFUSED as a target — blocked, or
+   *  gone — arrives here as 0, which is why this is rendered rather than computed. */
+  #dragTarget(m) {
+    this.dragTarget = m.win | 0;
+    this.stats.dragTargets += 1;
+    for (const [id, entry] of this.frames) {
+      if (id === this.dragTarget) entry.win.el.dataset.dropTarget = "1";
+      else delete entry.win.el.dataset.dropTarget;
+    }
+  }
+
+  #dragEnded(m) {
+    this.lastDrag = { effect: m.effect | 0, target: m.target | 0, why: String(m.why || "") };
+    this.drag = null;
+    this.dragTarget = 0;
+    for (const entry of this.frames.values()) delete entry.win.el.dataset.dropTarget;
+    if (this.dragEl) this.dragEl.hidden = true;
+  }
+
+  /** One pointer report per motion sample. The kernel answers nothing unless the target changed. */
+  #dragMove(entry, event) {
+    if (!this.drag || this.drag.win !== entry.id) return;
+    if (this.dragEl) {
+      this.dragEl.style.left = `${event.clientX + 12}px`;
+      this.dragEl.style.top = `${event.clientY + 12}px`;
+    }
+    const over = this.#frameAt(event.clientX, event.clientY);
+    const at = over ? this.#dropPointAt(over, event) : { x: 0, y: 0 };
+    this.stats.dragAts += 1;
+    this.post({ t: "drag-at", win: over ? over.id : 0, x: at.x, y: at.y });
+  }
+
+  /** The pointer was released. `cancelled` reports it over NOTHING, because a gesture the browser
+   *  took away is not a drop the user made. */
+  #dragRelease(entry, event, cancelled = false) {
+    if (!this.drag || this.drag.win !== entry.id) return;
+    const over = cancelled ? null : this.#frameAt(event.clientX, event.clientY);
+    const at = over ? this.#dropPointAt(over, event) : { x: 0, y: 0 };
+    this.stats.dragDrops += 1;
+    this.post({ t: "drag-drop", win: over ? over.id : 0, x: at.x, y: at.y });
+  }
+
   /** Every surface's own report, keyed by winid. What a check reads to ask how many ops the page
    *  actually replayed — as against how many the process sent, which is the kernel's count. */
   surfaces() {
@@ -508,6 +656,16 @@ export class WinHost {
       zIndex: Object.fromEntries([...this.frames].map(
         ([id, e]) => [id, Number(e.win.el.style.zIndex || 0)])),
       cell: this.cell,
+      // M10. The drag as the kernel announced it, the target as this file RENDERED it, and the
+      // end it reported. Two readings of the target on purpose, for `frameBlocked`'s reason: the
+      // second is what a reader actually sees.
+      drag: this.drag ? { ...this.drag } : null,
+      dragTarget: this.dragTarget,
+      frameDropTarget: [...this.frames]
+        .filter(([, e]) => e.win.el.dataset.dropTarget === "1").map(([id]) => id),
+      lastDrag: this.lastDrag,
+      clipboard: this.clipboard,
+      dragImage: this.dragEl ? !this.dragEl.hidden : false,
       live: [...this.frames.keys()],
       created: this.created,
       destroyed: this.destroyed,

@@ -334,7 +334,7 @@ the lazy dog
   proof:'Click the owner\'s caption behind a modal — it must not raise. Close with unsaved state — the app must get to refuse.',
   neg:'Remove the owner chain — the dialog must fall behind, and the check must fail.' },
 
- { id:'M10', grp:'Window half (A)', t:'Typed clipboard, drag-and-drop', d:'4 d', tag:'option A',
+ { id:'M10', built:'/www/m10.html', builtWhat:'four proofs, then a desktop: `files` and `imgview` — drag a row from one into the other, or `clip copy` and press v', grp:'Window half (A)', t:'Typed clipboard, drag-and-drop', d:'4 d', tag:'option A',
   lede:'No candidate design had either. Four independent architectures, and all four forgot the two gestures that make a set of windows read as one system rather than several websites.',
   screen:{kind:'desk',windows:[
     {cls:'plain',x:22,y:20,w:250,h:250,title:'Explorer — ~/Pictures',
@@ -350,8 +350,12 @@ the lazy dog
     extra:`<pre class="term" style="position:absolute;left:0;bottom:0;right:0;height:76px;background:rgba(8,18,30,.88)"><i>dataobj_create(['text/plain','text/uri-list','image/png']) -&gt; did 3</i>
 <i>dataobj_set(3, 'image/png', &lt;48213 B&gt;)</i>
 <u>the receiver asked for image/png and got bytes, not a file path</u></pre>`},
-  real:['dataobj_create / dataobj_set / dataobj_get','Seeded formats: text, file list, image','A drag is a data object plus a cursor','Kernel-owned, therefore cross-process'],
-  proof:'Drag a PNG from Explorer into a viewer and assert the bytes arrived <i>under the image format</i>.',
+  real:['dataobj_create / set / get / <b>offer</b> / <b>open</b> — five, not three: publishing and collecting are what make it cross a process',
+   'The untyped <code>clipboard_read</code>/<code>clipboard_write</code> pair DELETED',
+   'Formats are <b>integer ids in a bitmask</b>, not MIME strings: a drop target must decide mid-gesture, from one register',
+   'The payload is an <b>fd</b> — so teardown releases it, and the clipboard outlives the process that filled it',
+   'No DRAG_OVER: an event per motion sample laps a 256-record queue and the DROP is what gets dropped'],
+  proof:'Drag a file row from <code>files</code> into <code>imgview</code> with a REAL mouse and assert the bytes arrived <i>under the image format</i>; copy an image, kill the copier, and paste it.',
   neg:'Offer only the text format — the image paste must fail <b>cleanly</b>, not silently paste a file path.' },
 
  { id:'M11', grp:'Window half (A)', t:'Aero glass, frame-only', d:'5 d', tag:'the look',
@@ -702,9 +706,11 @@ function show(i){
       <div><div class="card proof"><h3>Proof</h3>${m.proof}</div>
         <div class="card neg" style="margin-top:12px"><h3>Negative control</h3>${m.neg}</div></div>
     </div>
-    <p class="foot">Mockup, not a screenshot. <b>M0 to M9 are built</b> — those carry a BUILT
+    <p class="foot">Mockup, not a screenshot. <b>M0 to M10 are built</b> — those carry a BUILT
     line above with the page that proves them, and the page is what to believe; everything from
-    M10 on is still a drawing. Milestones, proofs and negative controls come from
+    M11 on is still a drawing. Where a built milestone's drawing and its page disagree, the
+    drawing is the older intent: M10 drew an Explorer and a viewer, and what exists is
+    <code>files</code> and <code>imgview</code>. Milestones, proofs and negative controls come from
     <code>MILESTONES.md</code>; measured figures from <code>docs/research/gap-04.md</code> and
     <code>bench/feasibility/results.json</code>.
     Five of the first six milestones have no user interface at all, which is the honest reason
