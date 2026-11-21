@@ -149,6 +149,13 @@ from cdp import CDPError, Session  # noqa: E402
 from serve import (  # noqa: E402
     ISOLATION_HEADERS, PROCESS_REALM_CSP, PROCESS_REALM_PREFIX, Handler, Server,
 )
+# M11's pixel reader. A `backdrop-filter` is applied by the compositor and is unreachable from
+# script — `getImageData` reads a canvas and a DOM rasteriser applies no filter at all — so the one
+# honest source for "did the glass blur" is a screenshot. `bench/m11-glass/probe.py` imports the
+# same three functions, so the threshold it chose and the assertion made here are one arithmetic.
+from png import (  # noqa: E402
+    Image as Png, band_profile, local_range, transition,
+)
 
 #: Pinned to the machine every figure in docs/CONSTRAINTS.md was measured on: dpr 2, desktop.
 #: cdp.py's emulate_device defaults mobile=True (cdp.py:236-238), which is wrong for a desktop
@@ -643,6 +650,39 @@ class Control:
     #: reader who typed `ls /` and got nothing; `cd /usr/..` answered ENOENT on the same cause
     #: (constraint 238).
     NO_MOUNTPOINTS = "no-mountpoints"
+    #: M11's own control, and NOT the one `PLAN.md` §5 named. Every glass strip keeps its
+    #: isolation, its brightness and its additive layers, and its standard deviation goes to zero:
+    #: `blur(0px)`. Only the blur is cut.
+    #:
+    #: `PLAN.md` asks for `backdrop-filter: none`, which is `--negative no-glass` below and is the
+    #: weaker cut. `docs/designs/REVIEW-FINDINGS.md` §8 measured why: removing the property also
+    #: removes the isolated group the `plus-lighter` layers blend into, so it moves the pixel by a
+    #: measured (31,46,71) for a reason that has nothing to do with blurring. Both are registered
+    #: because the comparison IS the finding.
+    #:
+    #: It is a STYLE override and touches no kernel code, which is what keeps it inside M11: the
+    #: frame's structure is what M7-M10 check, and a control that changed it would move labels in
+    #: four other milestones and prove nothing about the glass.
+    NO_BLUR = "no-blur"
+    #: `backdrop-filter: none` — the control `PLAN.md` §5 named for M11, kept so the record shows
+    #: what it does and does not catch. It takes the filter away entirely, so the strips stop
+    #: filtering at all and proof 1's "every strip filters" clause goes red with proof 3's pixels.
+    NO_GLASS = "no-glass"
+    #: A WRAPPER around every window carrying `opacity:.99`. The strips are untouched and still ask
+    #: for blur(9px); an ancestor with opacity below 1 establishes a backdrop root and severs the
+    #: chain, so the blur silently stops. THE FAILURE WITH NO SYMPTOM, and the one the usual
+    #: window-manager instinct causes — fading a window wrapper on open and close.
+    SEVER = "sever"
+    #: The caption's text-shadow goes. Over a blurred backdrop of unknown luminance a glyph has no
+    #: contrast ratio without a halo, and the white side of the seam is where that shows: measured,
+    #: the local contrast collapses from 9.3:1 and 8.9:1 to 2.1:1 and 1.7:1.
+    NO_HALO = "no-halo"
+    #: CONSTRAINT 50 AS A RUNNABLE WORLD: the desktop's black/white step becomes one flat colour.
+    #: `blur(flat) == flat`, so the sampled pixel is then identical with the filter on and off and
+    #: every pixel clause would pass against a system with no blur at all. This is the control that
+    #: shows those clauses are coupled to the SEAM rather than to a constant — which inversion
+    #: cannot show, because an assertion over a constant still inverts and still fires.
+    FLAT_DESK = "flat-desk"
     ONCE = "once"
 
 
@@ -677,6 +717,11 @@ CONTROL_RUNS = {
     Control.NO_LOCKDOWN: ("no-lockdown",),
     Control.NO_CSP: ("no-csp",),
     Control.NO_MOUNTPOINTS: ("no-mountpoints",),
+    Control.NO_BLUR: ("no-blur",),
+    Control.NO_GLASS: ("no-glass",),
+    Control.SEVER: ("sever",),
+    Control.NO_HALO: ("no-halo",),
+    Control.FLAT_DESK: ("flat-desk",),
 }
 
 
@@ -3351,6 +3396,235 @@ _NO_MODAL_FAILS = (
 )
 
 
+# ======================================================================================
+# M11 — Aero glass, frame-only
+# ======================================================================================
+
+M11_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "two windows, both framed",
+    # PROOF 1. `backdrop-filter` filters the element's BORDER BOX, so a ring is only a ring if it
+    # is several boxes that sum to one. One glass node with an opaque client child hides the blur
+    # and saves none of it (constraint 49, `docs/designs/REVIEW-FINDINGS.md` §3).
+    "ring ok",
+    "the frame is FOUR separately filtered strips",
+    "and their summed border boxes are what aero.ringArea says",
+    "while the frame itself and the client area filter NOTHING",
+    "so the ring is ~10x cheaper than the same window as one glass node",
+    # PROOF 2. The failure with no symptom.
+    "chain ok",
+    "no ancestor of any strip severs the blur chain",
+    "and both additive layers sit INSIDE a strip, on plus-lighter",
+    # PROOF 3. The milestone's own proof, and the only clauses a screenshot can settle.
+    "blur ok",
+    "the caption straddles a hard black/white seam",
+    "and the band sampled is clear of the title glyphs",
+    "the BARE backdrop reads as a hard step, so the seam is real",
+    "and the glass reads as a SPREAD ramp, which a step cannot fake",
+    "while the band is not flat, which blur(flat) would be",
+    # PROOF 4. The halo, measured as local contrast rather than as a declared colour pair.
+    "legible ok",
+    "the caption carries a halo, and its glyphs cross the seam",
+    "the caption is legible over the BLACK side of the seam",
+    "and over the WHITE side, which no single text colour manages",
+    # PROOF 5.
+    "inert ok",
+    "minimize and maximize are drawn, disabled and say so",
+    "and a REAL mouse drag from either of them does not move the window",
+    "while the close box is still live",
+    "and End Process is not offered on a window that is responding",
+    # PROOF 6.
+    "focus ok",
+    "an inactive window passes MORE backdrop through, not less",
+    "and tints it LESS, which one opacity value cannot express",
+    "and the remap is 0.4*b + 0.6, measured off the computed filter",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m11.html",
+)
+
+M11_DOCUMENT = "/www/m11.html"
+
+M11_READY = ("(() => { const M = globalThis.M11 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+M11_DONE = M11_READY
+
+READ_M11 = """(() => {
+  const M = globalThis.M11 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    live: [...document.querySelectorAll('.window')].length,
+    ring: one(P.ring),
+    chain: one(P.chain),
+    blur: one(P.blur),
+    legible: one(P.legible),
+    inert: one(P.inert),
+    focus: one(P.focus),
+  }
+})()"""
+
+#: The first window's placed box, straight off the dataset `src/wm/window.mjs` publishes — so
+#: a drag's effect is read from what the frame actually did rather than from a page variable.
+READ_M11_BOX = ("(() => { const w = document.querySelector('.window'); return w ? "
+                "[w.dataset.x, w.dataset.y, w.dataset.w, w.dataset.h].join(',') : '' })()")
+
+M11_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list, "live": int,
+    "ring": (dict, type(None)),
+    "chain": (dict, type(None)),
+    "blur": (dict, type(None)),
+    "legible": (dict, type(None)),
+    "inert": (dict, type(None)),
+    "focus": (dict, type(None)),
+}
+
+#: How far either side of the seam the band runs, in CSS px, and how many device rows it averages.
+#:
+#: 8 is inside one standard deviation of a 9 px blur, which is the steep part of the ramp; a wider
+#: run reaches the flat tails where a one-LSB wobble is not a defect. 6 rows because the compositor
+#: dithers, and averaging is honest when the seam is VERTICAL: every row sees the same horizontal
+#: profile, so the mean is of repeated measurements rather than of different ones.
+M11_REACH_CSS = 8
+M11_BAND_ROWS = 6
+
+#: THE THRESHOLD THAT SEPARATES A BLUR FROM A STEP, and the reason it is not "monotonic".
+#:
+#: `PLAN.md` §5 asks M11 for "a monotonic gradient". MEASURED, A HARD STEP IS MONOTONIC: the bare
+#: seam, the `blur(0px)` control, the `backdrop-filter: none` control and a severed chain all report
+#: a monotonic rise (`bench/m11-glass/probe.py`). What separates them is CONCENTRATION — the share
+#: of the whole transition that falls between one adjacent pair of samples. A step puts all of it
+#: there and reads 1.00; a blur spreads it.
+#:
+#: Measured on Chrome 157 at dpr 2, over `www/m11.html`'s own caption:
+#:
+#:     glass, headless      0.078      glass, headed        0.077
+#:     blur(0px)            0.963      backdrop-filter:none 0.982
+#:     severed chain        0.982      bare seam            1.000
+#:
+#: 0.35 sits in the empty middle with a factor of four either side, so neither a slower software
+#: rasteriser nor a sharper GPU one moves the answer.
+M11_SPREAD_MAX = 0.35
+#: And the bare seam must read as a step, or "spread" could be satisfied by a FLAT backdrop — which
+#: is constraint 50 exactly. This is the reference the threshold above is relative to.
+M11_STEP_MIN = 0.80
+#: A flat band has no transition to spread. Measured span of the real glass band: 30.8 luma.
+M11_SPAN_MIN = 8.0
+#: WCAG AA for text. Measured 9.3:1 over the black side and 8.9:1 over the white one; with the halo
+#: removed, 2.1:1 and 1.7:1.
+M11_CONTRAST_MIN = 4.5
+
+#: What A WORLD WITH NO BLUR must break, and only this.
+#:
+#: MEASURED, AND THIS IS THE WHOLE POINT OF THE MILESTONE: under `--negative no-blur` the PAGE's own
+#: six proofs all stay green. The geometry is unchanged, the chain is intact, the halo is there, the
+#: buttons are still inert and the focus pair still moves. Nothing reachable from script can see
+#: that the blur is gone — `getImageData` reads a canvas and a DOM rasteriser applies no filter — so
+#: the screenshot clauses are the only thing in this suite that can catch it.
+#:
+#: IT IS ONE LABEL, and the first draft of this tuple had three. The other two HELD, measured, and
+#: both for reasons worth keeping: the band is not FLAT under this control, it is a step with a span
+#: of 49 luma, so the flatness clause is about a different world (`--negative flat-desk`); and the
+#: page's own `verdict` stays `ok` because nothing the page can read has changed. So exactly one
+#: assertion in this entire suite can tell that the glass stopped blurring. That is the milestone,
+#: and a wider tuple would have hidden it.
+_NO_BLUR_FAILS = (
+    "and the glass reads as a SPREAD ramp, which a step cannot fake",
+)
+
+#: What A FLAT BACKDROP breaks — CONSTRAINT 50 ITSELF, as a runnable world.
+#:
+#: `blur(flat) == flat`, so over a flat desktop the caption's band is flat whether or not anything
+#: blurred: the sampled pixel is identical with the filter on and off. Every pixel clause here would
+#: then pass against a system with no blur at all, which is "the same class of defect as constraint
+#: 39" in constraint 50's own words.
+#:
+#: This control is what shows the pixel clauses are COUPLED TO THE SEAM rather than to a constant.
+#: Inversion alone cannot: an assertion over a constant still inverts and still fires.
+#:
+#: AND RUNNING IT FOUND A DEFECT IN THIS CHECK, which is the reason it is worth its cost. The SPREAD
+#: clause HELD over a flat desktop. It should not have: with nothing to blur there is no ramp. The
+#: cause is `.aero-light`, the viewport-anchored specular highlight — a `background-attachment:
+#: fixed` gradient, so it varies horizontally across the band ON ITS OWN, and that variation reads
+#: as a spread transition with no backdrop involved at all. The highlight was satisfying the blur
+#: assertion.
+#:
+#: So the SPAN clause is not redundant with the spread clause: it is the one that couples this check
+#: to the seam, and without it `--negative flat-desk` would have reported a blurred desktop that
+#: was not there. Both are asserted, and this tuple records which of them actually fires.
+_FLAT_DESK_FAILS = (
+    "the BARE backdrop reads as a hard step, so the seam is real",
+    "while the band is not flat, which blur(flat) would be",
+)
+
+#: What `backdrop-filter: none` breaks — the control `PLAN.md` named. It is a SUPERSET of no-blur's
+#: subset, which is the finding: it takes the filter away entirely, so the strips stop filtering and
+#: proof 1's "nothing else filters" clause and the page's own ring verdict go with the pixels.
+#: Measured, it moves SEVEN labels against no-blur's one, and the extra six are all collateral:
+#: taking the property away stops the strips filtering (proof 1), and it necessarily takes the
+#: active/inactive brightness remap with it, because the remap IS a term in the filter (proof 6).
+#: no-blur can keep the remap and cut only the standard deviation; `none` cannot. That is the
+#: precise sense in which it is the blunter instrument.
+_NO_GLASS_FAILS = (
+    "ring ok",
+    "the frame is FOUR separately filtered strips",
+    "and the glass reads as a SPREAD ramp, which a step cannot fake",
+    "focus ok",
+    "an inactive window passes MORE backdrop through, not less",
+    "and the remap is 0.4*b + 0.6, measured off the computed filter",
+    "verdict is ok",
+)
+
+#: What A SEVERED CHAIN breaks. The strips still ask for blur(9px) and the geometry is untouched —
+#: the ring is still the ring — so what goes is the chain assertion and the pixels. That split is
+#: what makes this control about the ANCESTOR and not about the filter.
+#: The band is NOT flat under this control — the seam is still there and still shows through the
+#: unfiltered translucent strip as a step with a span of 97 luma — so the flatness clause holds and
+#: belongs to `--negative flat-desk`.
+_SEVER_FAILS = (
+    "chain ok",
+    "no ancestor of any strip severs the blur chain",
+    "and the glass reads as a SPREAD ramp, which a step cannot fake",
+    "verdict is ok",
+)
+
+#: What REMOVING THE HALO breaks: the legibility clauses and nothing else. The glass still blurs,
+#: the ring is still the ring, the chain is intact. A caption over an unknown backdrop is legible by
+#: its glow or by nothing.
+#: IT MOVES THE WHITE SIDE AND NOT THE BLACK ONE, measured — and that asymmetry is the argument
+#: for the halo rather than an accident of this control.
+#:
+#: The caption's glyphs are white. Over the DARK side of the seam they have real contrast on their
+#: own, so removing the glow leaves them legible there (6.0:1 measured, above AA). Over the BRIGHT
+#: side they are white-on-white and have none (1.3:1), and the glow is the only thing that was
+#: giving them an edge. So this control demonstrates the claim the label makes: no single text
+#: colour manages both sides, which is why Windows 7 answers with DrawThemeTextEx and a glow.
+#:
+#: An earlier draft of this tuple listed the black side too. It held, and the gate said so.
+_NO_HALO_FAILS = (
+    "legible ok",
+    "the caption carries a halo, and its glyphs cross the seam",
+    "and over the WHITE side, which no single text colour manages",
+    "verdict is ok",
+)
+
+
 M4A_LABELS = (
     "cell reported",
     "page isolated",
@@ -3713,6 +3987,15 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "no kernel boots, no process runs and no window is created — and a modality over "
                 "no windows is nothing. UNMEASURABLE rather than FAIL, because a FAIL would claim "
                 "a raise was refused when nothing was ever raised.",
+        ), "m11": Expect(
+            UNMEASURABLE,
+            why="the same mechanism, and the sharpest case of it: without COOP/COEP there is no "
+                "SAB, so no kernel boots, no process runs and no window is framed. The GLASS "
+                "could still be drawn — it is plain CSS, and a page with no kernel at all would "
+                "render a convincing Aero frame over a seam and satisfy every pixel clause here. "
+                "That is exactly why www/m11.html refuses before it installs the skin. "
+                "UNMEASURABLE rather than FAIL, because a FAIL would claim a window was framed by "
+                "a process and found unblurred.",
         ), "m8": Expect(
             UNMEASURABLE,
             why="the same mechanism as every kernel check: without COOP/COEP there is no SAB, so "
@@ -4243,6 +4526,142 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "keeps working",
             failed=_NO_DRAW_FAILS,
             held=held_rest(M8_LABELS, _NO_DRAW_FAILS),
+        )},
+    ),
+    "no-blur": NegativeControl(
+        name="no-blur",
+        why="no_blur=1: every glass strip keeps its isolation, its brightness and its additive "
+            "layers, and its standard deviation goes to zero — `blur(0px)`. A STYLE override, so "
+            "no kernel code and no frame structure changes.\n"
+            "WHAT MUST BREAK: the three screenshot clauses, and nothing else in the suite. The "
+            "caption's transition concentration goes from 0.078 to 0.963 — measured — which is to "
+            "say the hard seam stops being spread and reads as the step it is.\n"
+            "WHAT MUST HOLD, AND THIS IS THE MILESTONE: THE PAGE'S OWN SIX PROOFS ALL STAY GREEN. "
+            "The ring is still four filtered boxes summing to `aero.ringArea`, no ancestor severs "
+            "the chain, the halo is still there and still legible both sides, minimize and "
+            "maximize are still inert, and the active/inactive pair still moves in opposite "
+            "directions. Nothing reachable from script can see that the blur is gone, because a "
+            "`backdrop-filter` is applied by the compositor: `getImageData` reads a canvas and a "
+            "DOM rasteriser applies no filter at all.\n"
+            "WHAT IT IS ABOUT: `blur(flat) == flat`, so over a flat backdrop this control would "
+            "change no pixel at all and the check would report Aero fidelity on a system with no "
+            "blur (constraint 50). The seam is what makes it fire. It is ALSO the control "
+            "`PLAN.md` §5 did not name — see `--negative no-glass`, which is the weaker one.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_blur", "1"),),
+        expects={"m11": Expect(
+            Outcome.FAIL,
+            why="the glass must stop blurring while every structural property of the frame holds",
+            failed=_NO_BLUR_FAILS,
+            held=held_rest(M11_LABELS, _NO_BLUR_FAILS),
+        )},
+    ),
+    "no-glass": NegativeControl(
+        name="no-glass",
+        why="no_glass=1: `backdrop-filter: none` on every strip. THE CONTROL `PLAN.md` §5 NAMED "
+            "for M11 — 'set backdrop-filter: none; the gradient assertion must fail' — registered "
+            "so the record shows what it does and does not catch.\n"
+            "WHAT MUST BREAK: the pixels, and ALSO proof 1's 'nothing else filters' clause and the "
+            "page's own ring verdict, because taking the property away stops the strips filtering "
+            "at all. That is the difference between the two controls and it is why both exist: "
+            "this one is a SUPERSET of no-blur's subset, so it cannot tell a missing blur from a "
+            "missing filter.\n"
+            "WHAT MUST HOLD: the chain, the halo and its contrast, the inert buttons, and the "
+            "focus pair.\n"
+            "WHY IT IS THE WEAKER CUT, measured: `docs/designs/REVIEW-FINDINGS.md` §8 found that "
+            "removing the property also removes the isolated group the `plus-lighter` layers blend "
+            "into, shifting the sampled pixel by (31,46,71) for a reason that has nothing to do "
+            "with blurring. Over a flat backdrop it therefore passes a pixel-equality proof while "
+            "catching none of blur(0px), a no-op filter, or a severed chain.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_glass", "1"),),
+        expects={"m11": Expect(
+            Outcome.FAIL,
+            why="the strips must stop filtering, which takes the ring clause with the pixels",
+            failed=_NO_GLASS_FAILS,
+            held=held_rest(M11_LABELS, _NO_GLASS_FAILS),
+        )},
+    ),
+    "sever": NegativeControl(
+        name="sever",
+        why="sever=1: each window is wrapped in an element carrying `opacity:.99`. The strips are "
+            "UNTOUCHED and still ask for blur(9px); an ancestor with opacity below 1 establishes a "
+            "backdrop root, which cuts every descendant's `backdrop-filter` off from the desktop.\n"
+            "WHAT MUST BREAK: the chain assertion and the pixels. The concentration goes to 0.982 "
+            "— measured — while the computed `backdrop-filter` on every strip still reads "
+            "`blur(9px) brightness(0.49) saturate(1.25)`, which is the whole horror of it.\n"
+            "WHAT MUST HOLD: the ring, because the GEOMETRY is untouched — four strips still sum "
+            "to `aero.ringArea` — plus the halo, the inert buttons and the focus pair. That split "
+            "is what makes this control about the ANCESTOR rather than about the filter.\n"
+            "WHAT IT IS ABOUT: THE FAILURE WITH NO SYMPTOM. The usual window-manager instinct is "
+            "to fade a window wrapper's opacity on open and close, and a per-window wrapper is "
+            "exactly where that lands. The glass goes flat, every window reads as a grey film, and "
+            "the frame-rate budget gets EASIER because there are no blurred pixels to pay for — so "
+            "nothing else in this suite would report a thing.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("sever", "1"),),
+        expects={"m11": Expect(
+            Outcome.FAIL,
+            why="an ancestor must sever the chain while the strips still ask for a blur",
+            failed=_SEVER_FAILS,
+            held=held_rest(M11_LABELS, _SEVER_FAILS),
+        )},
+    ),
+    "no-halo": NegativeControl(
+        name="no-halo",
+        why="no_halo=1: the caption's `text-shadow` goes, and nothing else changes.\n"
+            "WHAT MUST BREAK: the legibility pair. Measured, the local contrast inside the glyph "
+            "band collapses from 9.3:1 to 2.1:1 over the black side of the seam and from 8.9:1 to "
+            "1.7:1 over the white side — both under WCAG AA, and the white side is the one that "
+            "shows why one text colour cannot answer for both.\n"
+            "WHAT MUST HOLD: the glass still blurs, the ring is still the ring, the chain is "
+            "intact, the buttons are still inert and the focus pair still moves.\n"
+            "WHAT IT IS ABOUT: a caption crosses black and white in one drag, so no (colour, "
+            "background) pair HAS a contrast ratio and a check that read a declared `color` "
+            "against a declared `background` would pass on any stylesheet — webxp's own defect "
+            "(constraint 39). Windows 7 answers with DrawThemeTextEx and a glow; this control is "
+            "the world where that answer is absent.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_halo", "1"),),
+        expects={"m11": Expect(
+            Outcome.FAIL,
+            why="the caption must stop being legible over the bright side of the seam",
+            failed=_NO_HALO_FAILS,
+            held=held_rest(M11_LABELS, _NO_HALO_FAILS),
+        )},
+    ),
+    "flat-desk": NegativeControl(
+        name="flat-desk",
+        why="flat_desk=1: the desktop's hard black/white step becomes ONE FLAT COLOUR. Nothing "
+            "else changes — the glass still blurs, at the same sigma, over the same strips.\n"
+            "WHAT MUST BREAK: the two clauses that are about the BACKDROP. The bare reference "
+            "stops being a step, and the caption's band stops having a transition to spread — "
+            "`blur(flat) == flat`, so the band is flat whether or not anything blurred.\n"
+            "WHAT MUST HOLD, and one of these surprised me: all six of the page's own structural "
+            "proofs and the verdict, because the geometry, the chain, the halo and the focus pair "
+            "have nothing to do with the backdrop — AND BOTH LEGIBILITY CLAUSES, because the "
+            "halo gives a glyph local contrast against whatever is behind it, so a flat grey "
+            "desktop is still a desktop the caption is legible over. An earlier draft of this "
+            "prose claimed the contrast collapses; it does not, and the declared set is what was "
+            "measured.\n"
+            "WHAT IT IS ABOUT: CONSTRAINT 50 ITSELF — 'an Aero pixel check MUST sample across a "
+            "high-contrast backdrop edge and assert the gradient. Over a flat backdrop "
+            "blur(flat) == flat, so the assertion passes identically with backdrop-filter: none — "
+            "the same class of defect as constraint 39.' This is the only run that shows the pixel "
+            "clauses are coupled to the SEAM rather than to a constant, and `--prove-failure` "
+            "cannot show it: an assertion over a constant still inverts and still fires.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("flat_desk", "1"),),
+        expects={"m11": Expect(
+            Outcome.FAIL,
+            why="with nothing to blur, every pixel clause must go red while the structure holds",
+            failed=_FLAT_DESK_FAILS,
+            held=held_rest(M11_LABELS, _FLAT_DESK_FAILS),
         )},
     ),
     "no-owner-chain": NegativeControl(
@@ -9134,6 +9553,300 @@ def check_m10(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m10.html", env.served_matches_disk(env.document),
                     "the m10.html served does not match www/m10.html on disk")
+
+
+@check(
+    name="m11",
+    milestone="m11",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_BLUR, Control.NO_GLASS,
+              Control.SEVER, Control.NO_HALO, Control.FLAT_DESK),
+    labels=M11_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M11_DOCUMENT,
+    ready_expr=M11_READY,
+    ready_what="globalThis.M11 reaching done/aborted/error (www/m11.html)",
+    # One kernel, one process, two windows and no threshold waited on, so this is among the
+    # fastest window checks. The bound is generous for M5's reason: a program parked in `poll`
+    # raises no error, so a wedge must end as a BROKEN check carrying the page's own state.
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M11 && globalThis.M11.state",
+    refusal_want="aborted",
+    note="AERO GLASS, FRAME-ONLY, AND THE FRAME IS FOUR FILTERED STRIPS. `backdrop-filter` filters "
+         "an element's BORDER BOX, so one glass node with an opaque client child hides the blur "
+         "and saves none of it: measured at 640x440, four strips filter 27,260 CSS px^2 against "
+         "281,600 for the box, which is 531 windows to gap-04's 58 M wall against 51. The box "
+         "figure reproduces gap-04's own measured ~51 exactly, which is what makes the ring figure "
+         "trustworthy. So `docs/DECISIONS.md` D13's '~11x cheaper' is true of the ring and false "
+         "of the box, and `bench/m11-glass/probe.py` is the measurement that settled it before any "
+         "of this was built (constraint 49, `docs/designs/REVIEW-FINDINGS.md` §3).\n"
+         "THE PIXELS COME OUT OF A SCREENSHOT, because they cannot come from anywhere else: a "
+         "`backdrop-filter` is applied by the compositor, `getImageData` reads a canvas, and a DOM "
+         "rasteriser applies no filter at all. `scripts/png.py` decodes it and samples the band; "
+         "the page publishes WHERE to sample in device pixels and never claims to have read it.\n"
+         "THE BACKDROP IS A HARD BLACK/WHITE SEAM, which is constraint 50: over a flat backdrop "
+         "`blur(flat) == flat` and every assertion here would pass with the blur switched off. The "
+         "seam is placed at the midpoint of the caption's own rendered TEXT, so glass and glyphs "
+         "both straddle it, and the bare backdrop is sampled too — without that reference, "
+         "'spread' could be satisfied by a flat desktop.\n"
+         "AND THE ASSERTION IS NOT 'MONOTONIC'. `PLAN.md` §5 asks for a monotonic gradient and "
+         "MEASURED, A HARD STEP IS MONOTONIC: the bare seam, blur(0px), `none` and a severed chain "
+         "all report a monotonic rise. What separates a ramp from a step is the CONCENTRATION of "
+         "the transition — 0.078 for real glass against 1.000 for the bare step.\n"
+         "THE CAPTION IS LEGIBLE BY ITS HALO, not by a colour. The same caption crosses black and "
+         "white in one drag, so no (colour, background) pair has a contrast ratio; Windows 7 "
+         "answers with a glow and the measurement is LOCAL contrast inside the glyph band, each "
+         "side of the seam. Reading a declared `color` against a declared `background` is webxp's "
+         "own defect (constraint 39).\n"
+         "negative control: --negative no-blur keeps the isolation, the brightness and the "
+         "additive layers and sets the standard deviation to zero. THE PAGE'S OWN SIX PROOFS ALL "
+         "STAY GREEN under it — the geometry, the chain, the halo, the inert buttons and the focus "
+         "pair are all unchanged — so the three screenshot clauses are the only thing in this "
+         "suite that can catch a missing blur. That is the milestone. "
+         "--negative no-glass is `backdrop-filter: none`, the control `PLAN.md` named, and it is "
+         "the WEAKER cut: `REVIEW-FINDINGS` §8 measured that removing the property also removes "
+         "the isolated group the additive layers blend into, so it moves the pixel for a reason "
+         "unrelated to blurring. --negative sever puts `opacity:.99` on a wrapper and leaves the "
+         "strips asking for blur(9px): the failure with no symptom. --negative no-halo collapses "
+         "the caption's local contrast from 9.3:1 and 8.9:1 to 2.1:1 and 1.7:1. "
+         "--negative no-isolation must come out BROKEN: no SAB, so no kernel and no window.",
+)
+def check_m11(env: Env) -> None:
+    got = env.read(READ_M11, M11_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m11.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m11.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs and no window is framed — and the glass could "
+            "still be DRAWN, which is exactly why the page refuses before it draws any."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m11.html never reached a terminal state (state=%r)" % got["state"])
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+    # TWO WINDOWS, because proof 6 cannot express "inactive" with one — and because a page that
+    # framed nothing would satisfy several structural clauses vacuously.
+    env.expect_that("two windows, both framed", got["live"] >= 2,
+                    {"framesInTheDom": got["live"], "faults": got["faults"][:3]})
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF 1: the filtered area IS the ring --------------------------------------------
+    r = ev("ring")
+    env.expect_that("ring ok", section_ok("ring"), r)
+    env.expect_that("the frame is FOUR separately filtered strips",
+                    r.get("stripCount") == 4 and r.get("everyStripFilters") is True,
+                    {"strips": r.get("parts"), "count": r.get("stripCount")})
+    # AGAINST THE ONE FORMULA. M12's admission controller must call `aero.ringArea` rather than
+    # restate it: a second copy is how a governor comes to account a frame nobody renders, which is
+    # the ~17x under-read constraint 49 exists to forbid.
+    env.expect_that("and their summed border boxes are what aero.ringArea says",
+                    r.get("agreesWithFormula") is True,
+                    {"rendered": r.get("renderedRingArea"), "formula": r.get("formulaRingArea"),
+                     "box": r.get("box")})
+    # AND THE CLAUSE THAT STOPS IT BEING VACUOUS: if the frame or the client area filtered too,
+    # their border boxes would be the whole window and the ring would be a lie.
+    env.expect_that("while the frame itself and the client area filter NOTHING",
+                    r.get("frameFilter") == "none" and r.get("clientFilter") == "none"
+                    and r.get("clientOpaque") is True,
+                    {"frame": r.get("frameFilter"), "client": r.get("clientFilter"),
+                     "clientBackground": r.get("clientBackground")})
+    at = r.get("at640x440") or {}
+    env.expect_that("so the ring is ~10x cheaper than the same window as one glass node",
+                    (at.get("cheaperBy") or 0) >= 10.0 and (r.get("cheaperBy") or 0) > 5,
+                    {"at640x440": at, "atThisWindow": r.get("cheaperBy"), "box": r.get("box")})
+
+    # ---- PROOF 2: nothing severs the blur chain ---------------------------------------------
+    c = ev("chain")
+    env.expect_that("chain ok", section_ok("chain"), c)
+    env.expect_that("no ancestor of any strip severs the blur chain",
+                    (c.get("stripsChecked") or 0) >= 8 and not c.get("severed"),
+                    {"checked": c.get("stripsChecked"), "severed": c.get("severed")})
+    env.expect_that("and both additive layers sit INSIDE a strip, on plus-lighter",
+                    (c.get("layerCount") or 0) >= 16
+                    and c.get("everyLayerInsideAStrip") is True
+                    and c.get("everyLayerAdditive") is True,
+                    {"layers": c.get("layerCount"),
+                     "inside": c.get("everyLayerInsideAStrip"),
+                     "additive": c.get("everyLayerAdditive")})
+
+    # ---- PROOF 3: the glass blurs, read out of the composited pixels -----------------------
+    b = ev("blur")
+    env.expect_that("blur ok", section_ok("blur"), b)
+    env.expect_that("the caption straddles a hard black/white seam",
+                    b.get("straddles") is True and bool(b.get("capFilter")),
+                    {"seamDeviceX": b.get("seamDeviceX"), "caption": b.get("caption"),
+                     "filter": b.get("capFilter")})
+    # Sampled at the caption's vertical middle the run crosses the title's glyph edges, which are
+    # hard steps: measured, 0.74 against 0.078 for the same glass clear of them. That would have
+    # put the threshold on the wrong side of the answer.
+    env.expect_that("and the band sampled is clear of the title glyphs",
+                    b.get("bandIsTextFree") is True,
+                    {"bandY": b.get("bandY"), "rows": b.get("bandRows"),
+                     "textTop": b.get("textTop")})
+
+    shot = env.shoot("m11-glass")
+    try:
+        img = Png.decode(shot.read_bytes())
+    except Exception as error:                 # noqa: BLE001 - named, never swallowed
+        env.unmeasurable("the screenshot at %s could not be decoded (%s), so no pixel below was "
+                         "measured" % (_relative(shot), error))
+    # VIEWPORT_SCALE, which is what this suite actually emulates. `DEVICE_SCALE` does not
+    # exist, so the fallback raised NameError instead of falling back — reachable whenever
+    # the page reports `done` with no blur evidence, which `?live=1` does by construction.
+    dpr = b.get("dpr") or VIEWPORT_SCALE
+    seam = int(b.get("seamDeviceX") or 0)
+
+    def band(y, rows):
+        """One sample run across the seam, or None if it fell outside the image — which is a
+        geometry bug in the page, not a measurement, so it is reported rather than clamped."""
+        try:
+            _, lumas = band_profile(img, seam_x=seam, y=int(y), rows=int(rows),
+                                    dpr=dpr, reach_css=M11_REACH_CSS)
+        except Exception:                      # noqa: BLE001 - the decoder raises on a bad read
+            return None
+        return transition(lumas)
+
+    # THE DEPTH THE PAGE PUBLISHED, not a constant here. A caption's text-free gap is about 7 device
+    # rows at dpr 2 and 3 at dpr 1, so the page places the band in the gap it measured and says how
+    # deep it made it; a fixed depth here would sample into the glyphs on any other display.
+    rows = int(b.get("bandRows") or M11_BAND_ROWS)
+    glass = band(b.get("bandY") or 0, rows)
+    # The bare band has no text anywhere near it, so it keeps the full depth.
+    bare = band((b.get("bareY") or 0) - M11_BAND_ROWS // 2, M11_BAND_ROWS)
+
+    # THE REFERENCE FIRST. Without it "spread" could be satisfied by a flat backdrop, which is
+    # exactly the defect constraint 50 names — so the bare seam has to read as a step before the
+    # glass reading means anything.
+    env.expect_that("the BARE backdrop reads as a hard step, so the seam is real",
+                    bare is not None and bare.concentration >= M11_STEP_MIN
+                    and bare.span >= 64.0,
+                    {"bare": bare.as_dict() if bare else None, "want": {
+                        "concentrationAtLeast": M11_STEP_MIN, "spanAtLeast": 64.0},
+                     "seamDeviceX": seam, "shot": _relative(shot)})
+    env.expect_that("and the glass reads as a SPREAD ramp, which a step cannot fake",
+                    glass is not None and glass.concentration <= M11_SPREAD_MAX,
+                    {"glass": glass.as_dict() if glass else None,
+                     "want": {"concentrationAtMost": M11_SPREAD_MAX},
+                     "control": b.get("control"), "shot": _relative(shot)})
+    # And the band must have something to spread. A flat band has a concentration of 1.0 by this
+    # arithmetic's own convention, but asserting the span says so in the register a reader needs.
+    env.expect_that("while the band is not flat, which blur(flat) would be",
+                    glass is not None and glass.span >= M11_SPAN_MIN,
+                    {"span": glass.span if glass else None, "want": {"spanAtLeast": M11_SPAN_MIN},
+                     "lumas": glass.as_dict()["lumas"] if glass else None})
+
+    # ---- PROOF 4: the caption is legible at both ends of the seam --------------------------
+    g = ev("legible")
+    env.expect_that("legible ok", section_ok("legible"), g)
+    env.expect_that("the caption carries a halo, and its glyphs cross the seam",
+                    g.get("hasHalo") is True and g.get("glyphsStraddle") is True,
+                    {"textShadow": g.get("textShadow"), "color": g.get("color"),
+                     "text": g.get("text"), "textRect": g.get("textRect")})
+    sides = {}
+    for side in ("dark", "light"):
+        box = g.get(side)
+        try:
+            sides[side] = local_range(img, box) if box else None
+        except Exception:                      # noqa: BLE001
+            sides[side] = None
+    env.expect_that("the caption is legible over the BLACK side of the seam",
+                    bool(sides["dark"]) and (sides["dark"]["ratio"] or 0) >= M11_CONTRAST_MIN,
+                    {"dark": sides["dark"], "want": {"ratioAtLeast": M11_CONTRAST_MIN},
+                     "box": g.get("dark")})
+    # THE SIDE THAT NEEDS THE HALO. White glyphs over a bright blurred backdrop have no contrast at
+    # all without a dark glow, which is why one text colour cannot answer for both.
+    env.expect_that("and over the WHITE side, which no single text colour manages",
+                    bool(sides["light"]) and (sides["light"]["ratio"] or 0) >= M11_CONTRAST_MIN,
+                    {"light": sides["light"], "want": {"ratioAtLeast": M11_CONTRAST_MIN},
+                     "box": g.get("light")})
+
+    # ---- PROOF 5: minimize and maximize are drawn and inert --------------------------------
+    i = ev("inert")
+    env.expect_that("inert ok", section_ok("inert"), i)
+    buttons = i.get("buttons") or []
+    env.expect_that("minimize and maximize are drawn, disabled and say so",
+                    len(buttons) == 2
+                    and all(x.get("disabled") and x.get("displayed") and x.get("ariaLabel")
+                            for x in buttons),
+                    {"buttons": buttons})
+    # A REAL MOUSE DRAG FROM EACH OF THEM, and `btn.click()` on its own proved nothing:
+    # `HTMLElement.click()` returns early for a disabled form control, so no event was dispatched
+    # and "the box did not move" could not have failed however the buttons behaved. A press, some
+    # movement and a release is the gesture that actually moves a window — and it is also what
+    # tests that the press does not fall through to the caption underneath and start a drag there.
+    moved = []
+    for row in (i.get("buttons") or []):
+        at = row.get("at") or {}
+        if not at:
+            continue
+        before_box = env.page.evaluate(READ_M11_BOX)
+        # `mouse_drag` takes mappings, not tuples.
+        mouse_drag(env.page, at, {"x": at["x"] + 40, "y": at["y"] + 24})
+        after_box = env.page.evaluate(READ_M11_BOX)
+        moved.append({"button": row.get("name"), "from": at,
+                      "before": before_box, "after": after_box,
+                      "same": before_box == after_box})
+    env.expect_that("and a REAL mouse drag from either of them does not move the window",
+                    len(moved) == 2 and all(m["same"] for m in moved),
+                    {"drags": moved,
+                     "pageClickBox": {"before": i.get("before"), "after": i.get("after")}})
+    env.expect_that("while the close box is still live", i.get("closeEnabled") is True,
+                    {"closeEnabled": i.get("closeEnabled"), "width": i.get("closeWidth")})
+    # AND END PROCESS IS NOT OFFERED ON A HEALTHY WINDOW. `src/wm/window.mjs` sets `hidden`
+    # correctly and M7 asserts on that; an AUTHOR `display` declaration beats the UA stylesheet's
+    # `[hidden] { display: none }`, and `.title-box` carries `display: grid` — so this skin offered
+    # the kill affordance on every healthy window from the moment it existed, and M7's check could
+    # not see it because M7's page is unskinned. Found by looking at a screenshot of the real
+    # desktop, which is why the clause reads the COMPUTED style and not the attribute.
+    env.expect_that("and End Process is not offered on a window that is responding",
+                    i.get("endNotOffered") is True,
+                    {"hiddenAttribute": i.get("endHiddenAttr"), "display": i.get("endDisplay"),
+                     "health": i.get("health")})
+
+    # ---- PROOF 6: inactive glass is brighter and less tinted -------------------------------
+    f = ev("focus")
+    env.expect_that("focus ok", section_ok("focus"), f)
+    # `documentHasFocus` travels with this one so a failure names its cause: `:focus-within` matches
+    # nothing in an unfocused document, so without it BOTH windows read inactive and the pair cannot
+    # be compared. The suite drives Chrome with focus emulation on; headless Firefox does not, and
+    # `bench/m7-win/firefox.py --page m11` reports exactly that.
+    env.expect_that("an inactive window passes MORE backdrop through, not less",
+                    f.get("inactivePassesMoreBackdrop") is True
+                    and f.get("focusIsDistinct") is True,
+                    {"active": f.get("activeBlurBalance"),
+                     "inactive": f.get("inactiveBlurBalance"),
+                     "focusIsDistinct": f.get("focusIsDistinct"),
+                     "documentHasFocus": f.get("documentHasFocus")})
+    env.expect_that("and tints it LESS, which one opacity value cannot express",
+                    f.get("inactiveTintsLess") is True,
+                    {"activeAlpha": f.get("activeTintAlpha"),
+                     "inactiveAlpha": f.get("inactiveTintAlpha"),
+                     "scale": f.get("expectedTintScale")})
+    env.expect_that("and the remap is 0.4*b + 0.6, measured off the computed filter",
+                    f.get("matchesTheRemap") is True,
+                    {"got": f.get("inactiveBlurBalance"),
+                     "want": f.get("expectedInactiveBlurBalance")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m11.html", env.served_matches_disk(env.document),
+                    "the m11.html served does not match www/m11.html on disk")
 
 
 @check(

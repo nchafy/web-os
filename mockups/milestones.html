@@ -358,8 +358,8 @@ the lazy dog
   proof:'Drag a file row from <code>files</code> into <code>imgview</code> with a REAL mouse and assert the bytes arrived <i>under the image format</i>; copy an image, kill the copier, and paste it.',
   neg:'Offer only the text format — the image paste must fail <b>cleanly</b>, not silently paste a file path.' },
 
- { id:'M11', grp:'Window half (A)', t:'Aero glass, frame-only', d:'5 d', tag:'the look',
-  lede:'Glass on the caption and border ring; the client area stays opaque. Both more faithful to Windows 7 — whose own rule allows glass only in small regions touching the frame without text — and about 11× cheaper.',
+ { id:'M11', built:'/www/m11.html', builtWhat:'six proofs over a HARD BLACK/WHITE SEAM, then a live Aero desktop — `?live=1` skips straight to it', grp:'Window half (A)', t:'Aero glass, frame-only', d:'5 d', tag:'the look',
+  lede:'Glass on the caption and border ring; the client area stays opaque. Both more faithful to Windows 7 — whose own rule allows glass only in small regions touching the frame without text — and 10.33× cheaper, measured, but ONLY as four separately filtered strips: backdrop-filter filters the border box, so one glass node with an opaque client child hides the blur and saves none of it.',
   screen:{kind:'aero',windows:[
     {cls:'glass',x:30,y:26,w:400,h:230,title:'Terminal',body:T(`
 user@web-os:~$ uname -a
@@ -374,10 +374,10 @@ a blurred backdrop:
   colorization  0.08
   over rgb(116,184,252)`)}],
    taskbar:[{l:'Terminal',on:true},{l:'editor'}]},
-  real:['backdrop-filter blur(9px) + plus-lighter tint','Monitor-anchored highlight, parallax 0.1','webxp chrome reskinned from XP Luna','Opaque client area'],
-  proof:'Sample a 16 px column across a black/white backdrop seam behind the caption and assert a <b>monotonic gradient</b>.',
-  neg:'Set <code>backdrop-filter: none</code> — the gradient assertion must fail.',
-  warn:'A flat backdrop cannot test glass: <code>blur(flat) == flat</code>, so the assertion passes with the blur switched off. Same defect class as webxp\'s contrast check that compared black against itself and passed on any stylesheet.' },
+  real:['Four separately filtered strips — the only ring that IS a ring','backdrop-filter blur(9px) + plus-lighter additive tint','Monitor-anchored highlight (parallax 0.0, not Aero\'s 0.1)','Opaque client area; minimize and maximize drawn and DISABLED','Inactive glass passes MORE backdrop through, and tints it less'],
+  proof:'Sample a 16 px band across a black/white backdrop seam behind the caption and assert the transition is <b>SPREAD</b> — concentration 0.078 for real glass against 1.000 for the bare step. The pixels come out of a screenshot, because a <code>backdrop-filter</code> is applied by the compositor and is unreachable from script.',
+  neg:'<code>blur(0px)</code>, which keeps the isolation and cuts only the blur — and under it <b>all six of the page\'s own proofs stay green</b>, so one assertion in the whole suite can tell. Four more: <code>backdrop-filter: none</code>, a wrapper at <code>opacity:.99</code>, the caption glow removed, and no seam at all.',
+  warn:'A flat backdrop cannot test glass: <code>blur(flat) == flat</code>, so the assertion passes with the blur switched off. <b>And "monotonic" cannot either — a hard step is monotonic</b>, measured, so the plan\'s own stated proof was satisfied by every one of its own controls. Worse, <code>--negative flat-desk</code> caught the viewport-anchored highlight satisfying the SPREAD assertion by itself, over a desktop with nothing to blur.' },
 
  { id:'M12', grp:'Window half (A)', t:'The blur governor', d:'3 d', tag:'the look',
   lede:'An admission controller over every area-changing event, not a drag hook — and it accounts the border box, not the visible ring. The gate is 52 glass terminals, not 5 maximized windows.',

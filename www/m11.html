@@ -1,0 +1,802 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M11 — Aero glass, frame-only</title>
+<style>
+/* STRUCTURAL ONLY. Everything about how a window LOOKS comes from `src/wm/aero.mjs`, installed by
+   the module below — this block lays out the log and the desktop and nothing else. That split is
+   the milestone: a page that styled its own windows would be a page whose glass check was testing
+   the page. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, and that is the fix for a measured defect rather than a layout preference: this
+   log grows as the proofs run, and every device rect the page publishes is read BEFORE the driver
+   takes its screenshot. A growing <pre> moved the desktop down between the two, so the driver
+   sampled bands that were no longer where it was told they were — and still produced numbers.
+   A fixed box cannot move the desktop. */
+#log { margin:8px; white-space:pre-wrap; height:150px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:520px; margin:8px; overflow:hidden }
+/* THE SEAM IS THE SUBJECT, not decoration. Over a flat backdrop `blur(flat) == flat`, so every
+   assertion below would pass identically with the blur switched off (constraint 50) — the same
+   defect class as webxp's contrast check that compared black against itself and passed on any
+   stylesheet. So the desktop carries one HARD black/white step and the proofs sample across it.
+   Its position is written by the script, from the caption's own rect: a step at a place the
+   caption does not cross would make the proof vacuous. */
+#seam { position:absolute; inset:0; background:#000 }
+#seam[hidden] { display:none }
+</style>
+</head>
+<body>
+<pre id="log">M11 starting…</pre>
+<div id="desktop"><div id="seam"></div></div>
+<script>
+  globalThis.M11 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M11's page harness: AERO GLASS, FRAME-ONLY.
+ *
+ *   PROOF 1  the frame's filtered area IS the ring, and the ring is ~10x less than the box — read
+ *            off the rendered strips and compared against `aero.ringArea`, the one formula
+ *   PROOF 2  nothing between a glass strip and the backdrop root SEVERS the blur chain
+ *   PROOF 3  the glass BLURS: the caption publishes a sample band across the seam and
+ *            `scripts/check.py` reads the composited pixels back out of a screenshot
+ *   PROOF 4  the caption is legible on BOTH sides of the seam — by the halo, not by a colour
+ *   PROOF 5  minimize and maximize are drawn and INERT, and say so
+ *   PROOF 6  inactive glass passes MORE backdrop through and tints it LESS: two numbers moving in
+ *            opposite directions, which one opacity value cannot express
+ *
+ * WHY THE PIXELS ARE NOT READ HERE. A `backdrop-filter` is applied by the compositor and is
+ * unreachable from script: `getImageData` reads a canvas, and a DOM rasteriser applies no filter at
+ * all. So this page publishes GEOMETRY — where to sample, in device pixels — and the driver samples
+ * `Page.captureScreenshot` through `scripts/png.py`. A page claiming to have read its own glass
+ * would be reporting a number it cannot obtain.
+ *
+ * THE CONTROLS, and why there are four:
+ *
+ *   ?no_blur=1   every strip keeps its isolation, its brightness and its additive layers, and
+ *                loses ONLY the blur (`blur(0px)`). This is M11's own control.
+ *   ?no_glass=1  `backdrop-filter: none`, which is what `PLAN.md` §5 names. Kept because the
+ *                comparison is the finding: `docs/designs/REVIEW-FINDINGS.md` §8 measured that
+ *                removing the property also removes the isolated group the additive layers blend
+ *                into, so it moves the pixel for a reason unrelated to blurring.
+ *   ?sever=1     the strips are untouched and still ask for blur(9px); a WRAPPER around every
+ *                window carries `opacity:.99`. The blur silently stops — the failure with no
+ *                symptom, and the one a fade animation causes.
+ *   ?no_halo=1   the caption's text-shadow goes. Over an unknown backdrop a glyph has no contrast
+ *                ratio without it, and the white side of the seam is where that shows.
+ */
+import { WinHost } from '/src/wm/winhost.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import {
+  bootKernel, spawnProgram, ask, until, sleep,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const seam = document.getElementById('seam')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  noBlur: params.get('no_blur') === '1',
+  noGlass: params.get('no_glass') === '1',
+  sever: params.get('sever') === '1',
+  noHalo: params.get('no_halo') === '1',
+  flatDesk: params.get('flat_desk') === '1',
+  liveOnly: params.get('live') === '1',
+}
+globalThis.M11.config = CFG
+
+const TERM = '/src/bin/term.mjs'
+/* THE PROOFS USE `winopen` AND NOT `term`. Two windows are needed — proof 6 cannot express
+ * "inactive" with one — and `winopen -n 2` is one process holding both, where two terminals would
+ * be two processes each spawning a shell on a pty. None of that is M11's subject, and every part of
+ * it is something that can fail for a reason the glass had nothing to do with. */
+const WINOPEN = '/src/bin/winopen.mjs'
+
+globalThis.M11.proofs = { ring: null, chain: null, blur: null, legible: null,
+  inert: null, focus: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M11.state = 'aborted'
+  globalThis.M11.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no glass.'
+  out.className = 'bad'
+  say(globalThis.M11.why)
+} else {
+  main().catch((e) => {
+    globalThis.M11.state = 'error'
+    globalThis.M11.why = String((e && e.stack) || e)
+    say(globalThis.M11.why)
+  })
+}
+
+/* ---- the controls, applied to the SKIN and never to the frame -----------------------------
+ *
+ * Every one of them is a style override. That is the point: the structure is what M7-M10 check and
+ * the skin is what M11 checks, so a control that changed the structure would move labels in four
+ * other milestones and prove nothing about the glass.
+ */
+function installSkin () {
+  aero.install(desktop)
+  const extra = []
+  const active = (filter) => '.aero-desktop .aero-strip { backdrop-filter: ' + filter + ' }'
+  const inactive = (filter) =>
+    '.aero-desktop .window:not(:focus-within) .aero-strip { backdrop-filter: ' + filter + ' }'
+  if (CFG.noBlur) {
+    /* ONLY THE BLUR, which is what makes this the strict control. The isolation, the brightness
+     * and the additive layers all stay, AND THE ACTIVE/INACTIVE BRIGHTNESS PAIR STAYS TOO —
+     * measured, a single rule covering both states flattened the pair and failed proof 6 as a
+     * side effect, so the control moved a label it was not about. A control satisfied by any
+     * failure verifies nothing (constraint 39's neighbourhood; `CLAUDE.md` §Verification). */
+    extra.push(active('blur(0px) brightness(' + aero.BLUR_BALANCE + ') saturate(1.25)'))
+    extra.push(inactive(
+      'blur(0px) brightness(' + aero.inactiveBlurBalance().toFixed(3) + ') saturate(1.1)'))
+  }
+  if (CFG.noGlass) {
+    // The weaker cut, and it takes the filter away entirely — so the strips stop filtering at all
+    // and proof 1's "every strip filters" clause goes with proof 3. That is a NAMED consequence,
+    // not a surprise: it is the difference between the two controls.
+    extra.push(active('none'))
+    extra.push(inactive('none'))
+  }
+  if (CFG.noHalo) extra.push('.aero-desktop .window-title h2 { text-shadow: none }')
+  if (extra.length) {
+    const s = document.createElement('style')
+    s.id = 'aero-control'
+    s.textContent = extra.join('\n')
+    document.head.append(s)
+  }
+}
+
+/** The `?sever=1` world: every window gets a wrapper carrying `opacity:.99` — one of the five
+ *  properties that establishes a backdrop root, applied exactly where a real window manager would
+ *  put it, because a per-window wrapper is what a fade animation wants. */
+function severAll (host) {
+  if (!CFG.sever) return
+  for (const entry of host.frames.values()) {
+    const el = entry.win.el
+    if (el.parentElement && el.parentElement.classList.contains('sever-wrap')) continue
+    const holder = document.createElement('div')
+    holder.className = 'sever-wrap'
+    holder.style.position = 'absolute'
+    holder.style.inset = '0'
+    holder.style.opacity = '.99'
+    el.parentElement.insertBefore(holder, el)
+    holder.append(el)
+  }
+}
+
+/** A kernel with a window host attached, and the skin installed. */
+async function bootHost (boot) {
+  const k = await bootKernel(boot, globalThis.M11, say)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m); severAll(host) })
+  return { k, host }
+}
+
+/** A rect in DEVICE pixels, which is the unit a screenshot is in. Rounded INWARD so a sample at
+ *  the reported extent is inside the element and clear of its antialiased edge. */
+function deviceRect (el) {
+  const r = el.getBoundingClientRect()
+  const dpr = window.devicePixelRatio
+  return {
+    x: Math.ceil(r.left * dpr), y: Math.ceil(r.top * dpr),
+    w: Math.floor(r.width * dpr), h: Math.floor(r.height * dpr),
+    cssX: r.left, cssY: r.top, cssW: r.width, cssH: r.height,
+  }
+}
+
+/** The rect of a heading's RENDERED TEXT, not of its box. The box is `flex: 1` and stretches to the
+ *  caption's width; the glyphs occupy a fraction of it, and the glyphs are what has to cross the
+ *  seam for proof 4 to mean anything. A `Range` over the text node is the only honest source. */
+function textRect (el) {
+  const node = el.firstChild
+  if (!node || node.nodeType !== Node.TEXT_NODE) return null
+  const range = document.createRange()
+  range.selectNodeContents(node)
+  const r = range.getBoundingClientRect()
+  range.detach?.()
+  const dpr = window.devicePixelRatio
+  return {
+    x: Math.ceil(r.left * dpr), y: Math.ceil(r.top * dpr),
+    w: Math.floor(r.width * dpr), h: Math.floor(r.height * dpr),
+    cssX: r.left, cssW: r.width,
+  }
+}
+
+/**
+ * PUT THE HARD STEP WHERE THE GLYPHS ARE.
+ *
+ * The windows cannot be placed — a program asks for its own geometry and `win_create` is the
+ * kernel's — so the seam moves to them rather than the other way round. The step goes at the
+ * midpoint of the caption's own rendered TEXT, which puts glass on both sides of it and glyphs on
+ * both sides of it at once. A step the caption does not cross would make every assertion below
+ * vacuous, and `straddles` is asserted rather than assumed.
+ */
+function placeSeam (heading) {
+  const tr = textRect(heading)
+  const deskCss = desktop.getBoundingClientRect()
+  const mid = tr
+    ? (tr.cssX + tr.cssW / 2) - deskCss.left
+    : deskCss.width / 2
+  const x = Math.round(Math.max(1, Math.min(deskCss.width - 1, mid)))
+  /* CONSTRAINT 50, AS A SWITCH. `?flat_desk=1` replaces the hard step with one flat colour, and
+   * `blur(flat) == flat` — so the sampled pixel becomes identical with the filter on and off and
+   * every pixel assertion would pass against a system with no blur at all. It is the only run that
+   * shows the pixel clauses are coupled to the SEAM rather than to a constant, which
+   * `--prove-failure` cannot show: an assertion over a constant still inverts and still fires. */
+  seam.style.background = CFG.flatDesk
+    ? '#7f7f7f'
+    : 'linear-gradient(to right, #000 0 ' + x + 'px, #fff ' + x + 'px 100%)'
+  return x
+}
+
+const capOf = (win) => win.el.querySelector('.aero-cap')
+const stripsOf = (win) => [...win.el.querySelectorAll('.aero-strip')]
+
+/**
+ * Whether anything between `el` and the backdrop root severs the blur chain.
+ *
+ * READ OFF THE COMPUTED STYLE OF EVERY ANCESTOR IN TURN, because that is the only place the hazard
+ * is visible: the glass element itself is correct in every severed case, and the stylesheet text
+ * cannot say what a wrapper some other code inserted is carrying
+ * (`docs/research/06-aero-spec.md` §Gotchas).
+ */
+function severedBy (el) {
+  const bad = []
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    const s = getComputedStyle(node)
+    const why = []
+    if (s.filter !== 'none') why.push('filter:' + s.filter)
+    if (parseFloat(s.opacity) < 1) why.push('opacity:' + s.opacity)
+    if (s.clipPath !== 'none') why.push('clip-path:' + s.clipPath)
+    if (s.mixBlendMode !== 'normal') why.push('mix-blend-mode:' + s.mixBlendMode)
+    if (s.backdropFilter && s.backdropFilter !== 'none') {
+      why.push('backdrop-filter:' + s.backdropFilter)
+    }
+    if (s.maskImage && s.maskImage !== 'none') why.push('mask-image:' + s.maskImage)
+    if (why.length) bad.push({ at: node.id || node.className || node.tagName, why })
+    if (node === document.documentElement) break
+  }
+  return bad
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: the filtered area IS the ring.
+
+   `backdrop-filter` filters the element's BORDER BOX, so a frame is only cheap if it is several
+   boxes that sum to the ring. One glass node with an opaque client child hides the blur and saves
+   none of it — which is why `docs/DECISIONS.md` D13's "~11x cheaper" is a claim about THIS geometry
+   and false about that one (constraint 49, `docs/designs/REVIEW-FINDINGS.md` §3).
+
+   Measured off the RENDERED strips and compared against `aero.ringArea`, which M12's admission
+   controller must call rather than restate: a second copy of the formula is how a governor comes to
+   account a frame nobody renders.
+   -------------------------------------------------------------------------------------------- */
+function proofRing (entry) {
+  const win = entry.win
+  const box = win.placed
+  const parts = stripsOf(win).map((el) => {
+    const r = el.getBoundingClientRect()
+    return {
+      which: el.dataset.strip || 'cap',
+      w: Math.round(r.width), h: Math.round(r.height),
+      area: Math.round(r.width * r.height),
+      filter: getComputedStyle(el).backdropFilter,
+    }
+  })
+  const rendered = parts.reduce((s, p) => s + p.area, 0)
+  const formula = aero.ringArea(box.w, box.h)
+  const boxArea = aero.boxArea(box.w, box.h)
+  const bodyStyle = getComputedStyle(win.bodyEl)
+  const frameStyle = getComputedStyle(win.el)
+
+  const evidence = {
+    box, parts, renderedRingArea: rendered, formulaRingArea: formula, boxArea,
+    // Rounding only: the rects are fractional and the formula is integral, so one px^2 per strip.
+    agreesWithFormula: Math.abs(rendered - formula) <= parts.length,
+    cheaperBy: rendered > 0 ? Number((boxArea / rendered).toFixed(2)) : null,
+    stripCount: parts.length,
+    everyStripFilters: parts.every((p) => p.filter && p.filter !== 'none'),
+    // The client area must be OPAQUE and must not be a glass node: a glassed client area is both
+    // less faithful to Windows 7's own rule and the whole of the cost this geometry avoids.
+    clientFilter: bodyStyle.backdropFilter,
+    clientBackground: bodyStyle.backgroundColor,
+    clientOpaque: !/rgba\([^)]*,\s*0?\.\d+\s*\)/.test(bodyStyle.backgroundColor)
+      && bodyStyle.backgroundColor !== 'rgba(0, 0, 0, 0)',
+    // And the FRAME must not filter either, or its border box is the window and the ring is a lie.
+    frameFilter: frameStyle.backdropFilter,
+    // The ratio at the size every document quotes, from the SAME formula, so the page's number and
+    // `docs/DECISIONS.md` D13's are visibly one arithmetic rather than two.
+    at640x440: {
+      ring: aero.ringArea(640, 440), box: aero.boxArea(640, 440),
+      cheaperBy: Number((aero.boxArea(640, 440) / aero.ringArea(640, 440)).toFixed(2)),
+    },
+  }
+  evidence.ok = evidence.stripCount === 4 && evidence.agreesWithFormula
+    && evidence.everyStripFilters && evidence.clientFilter === 'none'
+    && evidence.clientOpaque && evidence.frameFilter === 'none' && evidence.cheaperBy > 5
+  globalThis.M11.proofs.ring = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'ring: ' + rendered + ' CSS px^2 over ' +
+    evidence.stripCount + ' strips, formula ' + formula + ', box ' + boxArea +
+    ' (' + evidence.cheaperBy + 'x cheaper)')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: nothing severs the blur chain.
+
+   An ancestor carrying opacity<1, a filter, a mask, a clip-path or a mix-blend-mode becomes a
+   backdrop root and cuts every descendant's `backdrop-filter` off from the desktop. The failure has
+   NO SYMPTOM except flat glass, and the usual window-manager instinct — fade the window wrapper's
+   opacity on open and close — is exactly what causes it. So this is a STRUCTURAL assertion, and
+   `?sever=1` is the world in which it must fire.
+   -------------------------------------------------------------------------------------------- */
+function proofChain (host) {
+  const rows = []
+  const layers = []
+  for (const entry of host.frames.values()) {
+    for (const el of stripsOf(entry.win)) {
+      rows.push({
+        win: entry.id, strip: el.dataset.strip || 'cap',
+        filter: getComputedStyle(el).backdropFilter,
+        severedBy: severedBy(el),
+      })
+    }
+    // The additive layers must be DESCENDANTS of a strip. As ancestors they would sever it; as
+    // descendants they are measured to leave the blur fully working.
+    for (const el of entry.win.el.querySelectorAll('.aero-sheen, .aero-light')) {
+      layers.push({
+        win: entry.id, cls: el.className,
+        blend: getComputedStyle(el).mixBlendMode,
+        insideAStrip: Boolean(el.closest('.aero-strip')),
+      })
+    }
+  }
+  const evidence = {
+    stripsChecked: rows.length,
+    severed: rows.filter((r) => r.severedBy.length),
+    layerCount: layers.length,
+    everyLayerInsideAStrip: layers.length > 0 && layers.every((l) => l.insideAStrip),
+    everyLayerAdditive: layers.length > 0 && layers.every((l) => l.blend === 'plus-lighter'),
+    sample: rows.slice(0, 4),
+  }
+  evidence.ok = rows.length > 0 && evidence.severed.length === 0
+    && evidence.everyLayerInsideAStrip && evidence.everyLayerAdditive
+  globalThis.M11.proofs.chain = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'chain: ' + rows.length + ' strips, ' +
+    evidence.severed.length + ' severed, ' + layers.length + ' additive layers')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: the glass blurs — the sample band, published for the driver.
+
+   WHY "SPREAD" AND NOT "MONOTONIC". `PLAN.md` §5 asks for a monotonic gradient, and measured, A
+   HARD STEP IS MONOTONIC: the bare seam, the blur(0px) control, the `none` control and the severed
+   chain all report a monotonic rise (`bench/m11-glass/probe.py`). What separates a blur from a step
+   is that the step's whole span falls between two adjacent samples and the blur's does not — so the
+   driver asserts the CONCENTRATION of the transition, against the bare seam as its reference.
+   -------------------------------------------------------------------------------------------- */
+function proofBlur (entry, seamCssX) {
+  const win = entry.win
+  const cap = capOf(win)
+  const dpr = window.devicePixelRatio
+  const deskRect = deviceRect(desktop)
+  const capRect = deviceRect(cap)
+  const seamDev = deskRect.x + Math.round(seamCssX * dpr)
+
+  // The caption must STRADDLE the seam with room for the blur to spread on both sides, or the band
+  // samples one colour and the proof is vacuous. 3 sigma is where a Gaussian is spent.
+  const reach = Math.round(3 * aero.BLUR_SIGMA * dpr)
+  const straddles = seamDev - reach > capRect.x && seamDev + reach < capRect.x + capRect.w
+
+  /* THE BAND IS ABOVE THE GLYPHS, and that is the measurement and not a detail. Sampled at the
+   * caption's vertical middle the run crosses the title text, whose glyph edges are hard steps —
+   * measured, a concentration of 0.74 against 0.14 for the same glass sampled clear of them, which
+   * would have put the threshold on the wrong side of the answer. The backdrop seam is VERTICAL, so
+   * every row of the caption sees the same horizontal profile and a text-free row is the same
+   * measurement without the contamination.
+   *
+   * It is also what Windows 7's own rule asks for: glass belongs in "small regions touching the
+   * window frame WITHOUT TEXT", so glass-without-text is the thing to sample. */
+  /* DERIVED FROM THE TEXT'S OWN RECT, not from a constant. `capRect.y + 4` worked in Chrome and
+   * OVERLAPPED THE GLYPHS IN FIREFOX, which reported `band text-free false` — a second engine's
+   * line box is not this engine's, and a caption's text is centred by metrics neither of them
+   * publishes. So the band is placed in the measured gap between the caption's top edge and the
+   * top of its rendered text, and if that gap is too small the proof SAYS SO instead of sampling
+   * into the glyphs. */
+  const textDev = textRect(win.headingEl)
+  /* A caption is taller than its text, so there are TWO text-free gaps — above the glyphs and
+   * below them — and which one is bigger is a property of the engine's line box, not of this
+   * design. Both are measured and the larger is used. 2 device px of margin at each end keeps the
+   * band clear of the frame's own 1 px inset highlight and of the glyph tops. */
+  const MARGIN = 2
+  /* Below two rows there is nothing to average, so the proof FAILS instead of sampling into the
+   * glyphs and reporting their edges as a blur. */
+  const MIN_ROWS = 2
+  const above = { y: capRect.y + MARGIN,
+    h: textDev ? (textDev.y - MARGIN) - (capRect.y + MARGIN) : capRect.h - 2 * MARGIN }
+  const below = textDev
+    ? { y: textDev.y + textDev.h + MARGIN,
+      h: (capRect.y + capRect.h - MARGIN) - (textDev.y + textDev.h + MARGIN) }
+    : { y: capRect.y + MARGIN, h: -1 }
+  /* ABOVE THE GLYPHS, PREFERRED, and the gap below is a fallback rather than a free choice —
+   * measured, with `bench/m11-glass/scan.py`, which reports the concentration of every row of a
+   * caption:
+   *
+   *     caption rows  0- 8 CSS   conc 0.077-0.097   clean glass
+   *     caption rows  9-10 CSS   conc 0.137-0.171   the glyph tops beginning to tell
+   *     caption rows 11-21 CSS   conc 0.48 -0.95    THE GLYPHS
+   *     caption rows 22-27 CSS   conc 0.52 -0.74    still contaminated, and WORSENING downward
+   *
+   * The last band is the surprise and the reason this is not symmetric: the caption's `text-shadow`
+   * halo is a 10 px blur, so it spills ~10 CSS px BELOW the glyph box — past the caption's own
+   * bottom edge — and it carries the glyphs' horizontal structure with it. The region below the
+   * text is inside the text. Above it, only ascender tops reach up, and the measurement is clean
+   * from the caption's first row.
+   *
+   * So the halo's reach is part of the text's footprint, and `textRect` is only the glyph box. */
+  const chosen = above.h >= MIN_ROWS ? above : below
+  const gap = chosen.h
+  /* THE BAND IS AS DEEP AS THE GAP ALLOWS, and a fixed depth was wrong. A 29 CSS px caption holds
+   * roughly 7 text-free device rows each side of its glyphs at dpr 2 and only 3 at dpr 1 — measured,
+   * `bench/m7-win/firefox.py --page m11` renders at dpr 1 and reported `gaps 3/3` against a band
+   * asking for 6 rows, so the proof failed on an engine where the glass was fine.
+   *
+   * The rows exist to average out compositor dither, so fewer of them is a noisier measurement
+   * rather than a wrong one. */
+  const bandRows = Math.max(MIN_ROWS, Math.min(6, gap))
+  const bandY = gap >= bandRows
+    ? chosen.y + Math.floor((chosen.h - bandRows) / 2)
+    : chosen.y
+  const evidence = {
+    dpr,
+    seamCssX,
+    seamDeviceX: seamDev,
+    desk: deskRect,
+    caption: capRect,
+    bandY,
+    bandRows,
+    // Asserted, never assumed: a band that overlapped the glyphs would measure their edges.
+    // The band is text-free when it lies entirely on one side of the glyphs.
+    /* THE GAP HAD TO FIT, AND THE BAND HAS TO BE IN THE CAPTION. Without the first clause, a
+     * caption whose text leaves no room either side fell through to the gap BELOW and placed the
+     * band past the caption's own bottom edge, inside the opaque client area — where
+     * "text-free" is true, because the client area has no glyphs in it. The proof then went green
+     * on a band sampling the wrong element, and the only thing that fired was the span clause,
+     * naming the wrong cause. */
+    bandFits: gap >= MIN_ROWS,
+    bandInsideCaption: bandY >= capRect.y && bandY + bandRows <= capRect.y + capRect.h,
+    bandIsTextFree: !textDev
+      || bandY + bandRows <= textDev.y || bandY >= textDev.y + textDev.h,
+    textTop: textDev ? textDev.y : null,
+    textHeight: textDev ? textDev.h : null,
+    captionTextGap: gap,
+    gapAbove: above.h,
+    gapBelow: below.h,
+    sigma: aero.BLUR_SIGMA,
+    reachCssPx: 3 * aero.BLUR_SIGMA,
+    straddles,
+    capFilter: getComputedStyle(cap).backdropFilter,
+    // A reference band on BARE backdrop, below every window: the hard step, for the driver to
+    // compare against. Without it a "spread" threshold would be a number this page chose.
+    bareY: deskRect.y + deskRect.h - 20,
+    control: CFG.noBlur ? 'no_blur'
+      : CFG.noGlass ? 'no_glass'
+        : CFG.sever ? 'sever'
+          : CFG.noHalo ? 'no_halo'
+            : CFG.flatDesk ? 'flat_desk' : '',
+  }
+  evidence.ok = straddles && Boolean(evidence.capFilter) && evidence.bandIsTextFree
+    && evidence.bandFits && evidence.bandInsideCaption
+  globalThis.M11.proofs.blur = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'blur: caption straddles the seam at device x ' + seamDev +
+    ', filter ' + evidence.capFilter + ', band text-free ' + evidence.bandIsTextFree +
+    ' (cap y ' + capRect.y + ' h ' + capRect.h + ', text y ' + evidence.textTop +
+    ' h ' + evidence.textHeight + ', gaps ' + above.h + '/' + below.h + ', band y ' + bandY + ')')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: the caption is legible on both sides of the seam.
+
+   Caption text sits over a blurred backdrop whose luminance is unknown — the same caption crosses
+   black and white in one drag — so NO SINGLE TEXT COLOUR HAS A CONTRAST RATIO. Windows 7 solves it
+   with DrawThemeTextEx and a glow; so does this. A halo of the opposite luminance gives the glyph
+   LOCAL contrast wherever it lands.
+
+   So the measurement is the LOCAL luminance range inside the glyph band, on each side of the seam,
+   and the driver takes it. Asserting a declared `color` against a declared `background` would be
+   webxp's own defect: a contrast assertion that compared black against itself and passed on any
+   stylesheet (constraint 39).
+   -------------------------------------------------------------------------------------------- */
+function proofLegible (entry, blurEv) {
+  const heading = entry.win.headingEl
+  const tr = textRect(heading)
+  const style = getComputedStyle(heading)
+  const seamDev = blurEv.seamDeviceX
+  const evidence = {
+    text: heading.textContent,
+    textRect: tr,
+    color: style.color,
+    // The halo is the MECHANISM, so its absence is a failure here rather than a cosmetic
+    // difference. `?no_halo=1` is the world where this is false.
+    textShadow: style.textShadow,
+    hasHalo: Boolean(style.textShadow) && style.textShadow !== 'none',
+    glyphsStraddle: Boolean(tr) && tr.x < seamDev && tr.x + tr.w > seamDev,
+  }
+  if (tr) {
+    // Two bands inside the rendered text, one each side of the step, each clamped to the text's
+    // own extent so neither can sample empty caption.
+    const left = Math.max(tr.x, seamDev - Math.floor(tr.w / 2))
+    evidence.dark = { x: left, y: tr.y, w: Math.max(4, seamDev - left - 1), h: tr.h }
+    const right = seamDev + 1
+    evidence.light = {
+      x: right, y: tr.y,
+      w: Math.max(4, Math.min(tr.x + tr.w, seamDev + Math.floor(tr.w / 2)) - right), h: tr.h,
+    }
+  }
+  evidence.ok = evidence.hasHalo && evidence.text.length > 0 && evidence.glyphsStraddle
+  globalThis.M11.proofs.legible = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'legible: halo ' +
+    (evidence.hasHalo ? 'present' : 'ABSENT') + ', glyphs straddle the seam ' +
+    evidence.glyphsStraddle)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: minimize and maximize are drawn and INERT.
+
+   Windows 7's own rule for an inapplicable caption command is disabled rather than hidden. There is
+   nothing to minimize INTO until M14's taskbar and no snap state to maximize TO until M14's Aero
+   Snap, and the window ABI carries no state property at all — `WIN_SET_TITLE`, `WIN_SET_BOX`,
+   `WIN_SET_MODAL` and nothing else. So they are drawn, disabled, and CLICKED here: the box must not
+   move, and `disabled` must be what stops it, because a button that merely has no handler looks
+   live to a reader.
+   -------------------------------------------------------------------------------------------- */
+function proofInert (entry) {
+  const win = entry.win
+  const before = { ...win.placed }
+  const rows = []
+  const dpr = window.devicePixelRatio
+  for (const [name, btn] of [['min', win.minBtn], ['max', win.maxBtn]]) {
+    const style = getComputedStyle(btn)
+    /* `btn.click()` IS NOT THE GESTURE, and on its own it proved nothing: `HTMLElement.click()`
+     * returns early for a disabled form control, so no event was dispatched at all and "the box did
+     * not move" could not have failed however the buttons behaved. It is kept because a click that
+     * DID fire a handler would still be a defect, and `scripts/check.py` drives a REAL mouse drag
+     * from each button's centre — which is the gesture that can actually move a window, and which
+     * also tests that the press does not fall through to the caption underneath. */
+    btn.click()
+    const r = btn.getBoundingClientRect()
+    rows.push({
+      // Viewport CSS coordinates, which is the unit `Input.dispatchMouseEvent` takes.
+      at: { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) },
+      name,
+      disabled: btn.disabled === true,
+      ariaLabel: btn.getAttribute('aria-label'),
+      // Visible, not hidden: a reader must be able to see the command exists.
+      displayed: style.display !== 'none' && style.visibility !== 'hidden' && !btn.hidden,
+      cursor: style.cursor,
+      width: Math.round(btn.getBoundingClientRect().width),
+    })
+  }
+  const after = { ...win.placed }
+  /* AND THE END PROCESS BOX MUST STILL BE HIDDEN ON A HEALTHY WINDOW. `src/wm/window.mjs` sets the
+   * `hidden` attribute correctly and M7 asserts on that — but an AUTHOR `display` declaration beats
+   * the UA stylesheet's `[hidden] { display: none }`, and `.title-box` carries `display: grid`. So
+   * the skin offered End Process on every healthy window the moment it existed, and M7's own check
+   * could not see it: M7's page is unskinned, so it asserts on a frame the rule never touched.
+   * Read off the COMPUTED style, because the attribute was never the thing that was wrong. */
+  const endStyle = getComputedStyle(win.endBtn)
+  const evidence = {
+    buttons: rows, before, after,
+    endHiddenAttr: win.endBtn.hidden === true,
+    endDisplay: endStyle.display,
+    endNotOffered: win.endBtn.hidden === true && endStyle.display === 'none',
+    health: win.health,
+    boxUnchanged: before.x === after.x && before.y === after.y
+      && before.w === after.w && before.h === after.h,
+    // And the close box IS live, or "inert" would be a statement about a frame with no live
+    // buttons at all.
+    closeEnabled: win.closeBtn.disabled !== true,
+    closeWidth: Math.round(win.closeBtn.getBoundingClientRect().width),
+  }
+  evidence.ok = rows.length === 2 && rows.every((r) => r.disabled && r.displayed)
+    && evidence.boxUnchanged && evidence.closeEnabled && evidence.endNotOffered
+  globalThis.M11.proofs.inert = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'inert: min/max disabled and visible, box unchanged ' +
+    evidence.boxUnchanged + ', End Process not offered ' + evidence.endNotOffered)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 6: inactive glass is BRIGHTER and LESS TINTED, not dimmer.
+
+   Measured in the research and easy to get backwards: an inactive window's colorization is
+   multiplied by 0.4 and its blur balance is remapped to 0.4*b + 0.6, so 0.49 becomes 0.796 — MORE
+   of the backdrop passes through. One opacity value cannot express two numbers moving in opposite
+   directions, which is why focus drives a pair.
+   -------------------------------------------------------------------------------------------- */
+async function proofFocus (host, first) {
+  const all = [...host.frames.values()]
+  const second = all[all.length - 1]
+  // THE LENGTH FIRST. With no frames `second` is undefined and `second.id` threw a TypeError that
+  // `main()`'s catch turned into state 'error' — so the check reported UNMEASURABLE with a stack
+  // trace instead of this proof's own evidence. Reachable whenever a window goes between the
+  // `until` above and here: `winopen` hitting its ceiling, or its process faulting.
+  if (all.length < 2 || second.id === first.id) {
+    const evidence = { ok: false, why: 'only one window; nothing to be inactive', live: all.length }
+    globalThis.M11.proofs.focus = { ok: false, evidence }
+    say('BAD focus: ' + evidence.why)
+    return
+  }
+  // Focus the SECOND, so the FIRST becomes inactive. Through the widget's own element, which is
+  // where a user's click would land.
+  const focusable = second.term ? second.term.el : (second.surface ? second.surface.el : second.win.el)
+  focusable.focus()
+  await sleep(60)
+
+  const read = (entry) => {
+    const cap = capOf(entry.win)
+    const sheen = cap.querySelector('.aero-sheen')
+    return {
+      win: entry.id,
+      focusWithin: entry.win.el.matches(':focus-within'),
+      filter: getComputedStyle(cap).backdropFilter,
+      sheen: getComputedStyle(sheen).backgroundColor,
+      blend: getComputedStyle(sheen).mixBlendMode,
+    }
+  }
+  const active = read(second)
+  const inactive = read(first)
+  /** The `brightness(x)` term out of a filter string — the blur balance, and what has to RISE when
+   *  a window loses focus. */
+  const brightness = (s) => {
+    const m = /brightness\(([0-9.]+)\)/.exec(s || '')
+    return m ? Number(m[1]) : null
+  }
+  /** A colour's alpha, which is what has to FALL. An `rgb()` with no alpha is 1. */
+  const alpha = (s) => {
+    const m = /rgba\([^)]*?,\s*([0-9.]+)\s*\)/.exec(s || '')
+    return m ? Number(m[1]) : 1
+  }
+  const evidence = {
+    active, inactive,
+    /* WHETHER THE DOCUMENT HAS THE KEYBOARD AT ALL, which is the difference between "this proof
+     * failed" and "this proof could not be taken". `:focus-within` matches nothing in a document
+     * that is not focused, so in an engine or a harness that gives the page no focus BOTH windows
+     * read as inactive and the pair cannot be compared.
+     *
+     * REPORTED, NOT EXCUSED. The clause still fails — a proof that cannot reach its subject must
+     * fail (`CLAUDE.md` §Verification: "a harness MUST fail when it cannot reach, or is not
+     * reading, what it was pointed at") — and this field is what tells a reader which of the two
+     * happened. `scripts/check.py` drives Chrome with focus emulation on, so the suite takes the
+     * measurement; headless Firefox does not, and `bench/m7-win/firefox.py --page m11` reports
+     * exactly this. */
+    documentHasFocus: document.hasFocus(),
+    activeBlurBalance: brightness(active.filter),
+    inactiveBlurBalance: brightness(inactive.filter),
+    activeTintAlpha: alpha(active.sheen),
+    inactiveTintAlpha: alpha(inactive.sheen),
+    expectedInactiveBlurBalance: Number(aero.inactiveBlurBalance().toFixed(3)),
+    expectedTintScale: aero.INACTIVE_COLOR_SCALE,
+  }
+  evidence.focusIsDistinct = active.focusWithin === true && inactive.focusWithin === false
+  evidence.inactivePassesMoreBackdrop =
+    evidence.inactiveBlurBalance !== null && evidence.activeBlurBalance !== null
+    && evidence.inactiveBlurBalance > evidence.activeBlurBalance
+  evidence.inactiveTintsLess = evidence.inactiveTintAlpha < evidence.activeTintAlpha
+  evidence.matchesTheRemap =
+    Math.abs((evidence.inactiveBlurBalance ?? -1) - evidence.expectedInactiveBlurBalance) < 0.002
+  evidence.ok = evidence.focusIsDistinct && evidence.inactivePassesMoreBackdrop
+    && evidence.inactiveTintsLess && evidence.matchesTheRemap
+  globalThis.M11.proofs.focus = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'focus: blur balance ' + evidence.activeBlurBalance +
+    ' -> ' + evidence.inactiveBlurBalance + ', tint ' + evidence.activeTintAlpha +
+    ' -> ' + evidence.inactiveTintAlpha +
+    (evidence.documentHasFocus ? '' :
+      ' — the DOCUMENT has no focus, so :focus-within matches nothing and the pair cannot be ' +
+      'compared in this engine or harness'))
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+/** A shell on a real pty in a real Aero window, with the seam gone and the skin's own background
+ *  underneath. `?live=1` skips the proofs and comes straight here. */
+async function live () {
+  seam.hidden = true
+  const { k, host } = await bootHost({ label: 'live' })
+  installSkin()
+  // `term` and not `sh`: the terminal owns the pty master and spawns `/usr/bin/sh` itself, and a
+  // shell with no pty has nothing to read. The ceiling is the one a HUMAN needs — the default is
+  // sized for a check (constraint 239).
+  const pid = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => host.frames.size >= 1, 10000)
+  const entry = host.newest()
+  if (entry && entry.term) entry.term.focus()
+  say('')
+  say('A LIVE AERO DESKTOP. Type at the prompt. `winopen` for more windows, `paint` for a')
+  say('surface, `editor` for a window that will not close without asking.')
+  say('Each window is four filtered strips: caption, left, right, bottom — ' +
+    aero.ringArea(560, 360) + ' CSS px^2 against ' + aero.boxArea(560, 360) + ' for one glass node.')
+  globalThis.M11.phase = 'live'
+  globalThis.M11.livePid = pid
+}
+
+async function main () {
+  if (CFG.liveOnly) {
+    globalThis.M11.state = 'done'
+    globalThis.M11.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noBlur ? 'CONTROL: no_blur (blur(0px), isolation kept).'
+    : CFG.noGlass ? 'CONTROL: no_glass (backdrop-filter: none).'
+      : CFG.sever ? 'CONTROL: sever (a wrapper at opacity .99).'
+        : CFG.noHalo ? 'CONTROL: no_halo (the caption glow goes).'
+          : CFG.flatDesk ? 'CONTROL: flat_desk (no seam; blur(flat) == flat).' : ''
+  say('M11 — Aero glass, frame-only. ' + which)
+  say('sigma ' + aero.BLUR_SIGMA + 'px, blurBalance ' + aero.BLUR_BALANCE +
+    ', afterglow ' + aero.AFTERGLOW_BALANCE + ', colorization ' + aero.COLOR_BALANCE +
+    ' over rgb(' + aero.COLORIZATION.r + ',' + aero.COLORIZATION.g + ',' + aero.COLORIZATION.b + ')')
+
+  const { k, host } = await bootHost({ label: 'm11' })
+  installSkin()
+  globalThis.M11.kernelIsolated = true
+  // Read once, so a page that booted a kernel which never mounted says so rather than looking
+  // clean. The mount table is M3's and nothing here depends on it beyond the kernel being alive.
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
+  globalThis.M11.mounts = Object.keys(mounts)
+
+  // TWO WINDOWS, because proof 6 needs one of them to be inactive and a desktop with one window
+  // cannot express "inactive" at all.
+  const win = await spawnProgram(k, WINOPEN, ['winopen', '-n', '2', '-c', '120000'])
+  await until(() => host.frames.size >= 2, 10000)
+  // THE FIRST, by winid: `newest()` is the one that just opened, and proof 6 needs the OTHER one.
+  const order = [...host.frames.values()].sort((a, b) => a.id - b.id)
+  const first = order[0]
+  globalThis.M11.pids = [win.pid]
+
+  /* FOCUS THE SUBJECT FIRST. `WinHost` focuses each window as it is created, so after two
+   * creates the focus is on the SECOND — and proofs 1, 3 and 4 would then describe the inactive
+   * skin while the verdict and the screenshot are read as describing the active one. Measured:
+   * the blur proof reported brightness(0.796), which is the inactive remap. */
+  if (first.term) first.term.focus()
+  // The windows exist, so the step can go where the glyphs are.
+  const seamCssX = placeSeam(first.win.headingEl)
+  // One frame, so the new background has composited before anything is measured or photographed.
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+
+  proofRing(first)
+  proofChain(host)
+  proofBlur(first, seamCssX)
+  proofLegible(first, globalThis.M11.proofs.blur.evidence)
+  proofInert(first)
+  await proofFocus(host, first)
+
+  // Proof 6 moved the focus, so the window the driver photographs is the INACTIVE one. Put it back,
+  // or the screenshot shows the inactive skin while proof 3 described the active one.
+  if (first.term) first.term.focus()
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
+
+  const proofs = globalThis.M11.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M11.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M11.verdict)
+  /* THE SKIN AND THE WINDOWS STAY UP. The driver samples a SCREENSHOT after this state is reached,
+   * so tearing the kernel down here would leave it photographing an empty desktop — which would
+   * still produce a number, and that is the failure mode to avoid. */
+  globalThis.M11.state = 'done'
+  globalThis.M11.phase = 'rendered'
+}
+</script>
+</body>
+</html>

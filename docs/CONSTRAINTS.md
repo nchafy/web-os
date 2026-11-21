@@ -2466,3 +2466,90 @@ one was verified against the code before it was acted on, and every one became a
     object carrying both formats is really on the clipboard — and the clause moved into the
     control's failed set, where it belongs. The same shape as constraint 226's lesson about
     asserting the invariant rather than the symptom.
+
+## What M11 measured
+
+Every figure in 255–259 was produced by `bench/m11-glass/probe.py` on **Chrome 157.0.8103.79**,
+macOS Darwin 25.6.0, Apple M2 Pro, dpr 2, in both headless (`--disable-gpu`, SwiftShader) and headed
+modes — stated because the two engines are different measurements and both were taken.
+
+255. **FRAME-ONLY GLASS IS ONLY FRAME-ONLY AS FOUR SEPARATELY FILTERED STRIPS.** `backdrop-filter`
+    filters the element's border box, so one glass node with an opaque client child painted over
+    its middle hides the blur and saves none of it. Measured at 640×440: four strips (caption,
+    left, right, bottom) filter **27,260 CSS px²** across 4 glass nodes, against **281,600** for
+    the same window as one node — **10.33×**, and 531 windows to gap-04's ~58 M device-px wall
+    against 51. The box figure reproduces gap-04's own measured "~51 windows of 640×440" exactly,
+    which is what makes the ring figure trustworthy: one accounting over two geometries. So
+    `docs/DECISIONS.md` D13's "~11× cheaper" is true of the ring and FALSE of the box, and
+    constraint 49's requirement that a governor account the border box is satisfiable only in the
+    ring geometry. The area has ONE definition, `ringArea` in `src/wm/aero.mjs`, which M12's
+    admission controller MUST call rather than restate. The bill is four offscreen buffers and four
+    filter passes per window instead of one, and **that is unmeasured at scale** — gap-04 found area
+    to be the predictor and layer count free up to 60 layers, where four strips at 52 windows is
+    208. `designs/REVIEW-FINDINGS.md` §3.
+256. **A MONOTONIC GRADIENT DOES NOT DISTINGUISH A BLUR FROM A STEP, SO IT MUST NOT BE THE
+    ASSERTION.** `PLAN.md` §5 specifies M11's proof as a monotonic gradient across a backdrop seam.
+    Measured, A HARD STEP IS MONOTONIC: the bare seam, a `blur(0px)` control, a
+    `backdrop-filter: none` control and a severed blur chain all report a monotonic rise, so the
+    assertion is satisfied by every one of its own negative controls — constraint 39's defect under
+    a new name. The figure that separates them is **concentration**: the share of the whole
+    transition falling between one adjacent pair of samples. Measured: glass 0.078 headless and
+    0.077 headed, `blur(0px)` 0.963, `none` 0.982, severed 0.982, bare seam 1.000. `transition` in
+    `scripts/png.py` is its one definition, imported by both the bench and the suite.
+257. **`backdrop-filter: none` IS THE WRONG NEGATIVE CONTROL FOR GLASS; `blur(0px)` IS THE RIGHT
+    ONE.** Removing the property also removes the isolated group the `plus-lighter` layers blend
+    into, so it moves the sampled pixel for a reason unrelated to blurring — (31,46,71) measured in
+    `designs/REVIEW-FINDINGS.md` §8 — and it cannot keep the active/inactive brightness remap,
+    because the remap IS a term in the filter. `blur(0px)` keeps the isolation, the brightness and
+    the remap and cuts only the standard deviation: measured, it moves ONE expectation where `none`
+    moves seven. Both are registered in `scripts/check.py`, because the comparison is the finding.
+258. **AERO'S AFTERGLOW TERM IS NOT EXPRESSIBLE IN CSS AND IS APPROXIMATED AS A FLAT CONSTANT.** The
+    term is `luminance709(blurredRGB) * afterglowRGB`, which depends on the blurred backdrop's own
+    luminance; `backdrop-filter` yields one filtered copy and a `plus-lighter` sibling layer sees a
+    colour, never the pixels beneath it. A second backdrop-filtered node would give a desaturated
+    copy, but its backdrop would be the FIRST node's output rather than the desktop, so the layering
+    is wrong and the cost doubles. The afterglow and colorization terms are therefore summed into
+    one additive layer — exact under that approximation, since Windows 7 uses the same Sky colour
+    for both. What is lost: glass over a bright backdrop should afterglow more than glass over a
+    dark one, and does not. `ADDITIVE_ALPHA` in `src/wm/aero.mjs` carries the derivation.
+259. **A VIEWPORT-ANCHORED HIGHLIGHT VARIES ACROSS A SAMPLE BAND ON ITS OWN, AND CAN SATISFY A BLUR
+    ASSERTION BY ITSELF.** Aero's specular streak is monitor-anchored, so it is a
+    `background-attachment: fixed` gradient — which means it has a horizontal gradient of its own
+    across any band sampled through it. Found by `scripts/check.py --negative flat-desk`: over a
+    FLAT desktop, where there is nothing to blur, the spread assertion still HELD because the
+    highlight supplied the ramp. A glass pixel check therefore needs a SPAN assertion as well as a
+    spread one, and the span is what couples it to the seam. `--prove-failure` cannot find this: an
+    assertion over a constant still inverts and still fires. This is constraint 50's trap
+    reappearing inside the check written to satisfy constraint 50.
+260. **AN AUTHOR `display` DECLARATION DEFEATS THE `hidden` ATTRIBUTE, AND A SKIN IS WHERE THAT
+    BITES.** `[hidden] { display: none }` lives in the UA stylesheet, so any author rule setting
+    `display` on the same element wins. M11's `.title-box { display: grid }` therefore offered M7's
+    End Process affordance on every healthy window from the moment the skin existed — the escape
+    hatch for a wedged process, permanently visible and so meaningless. **M7's own check could not
+    see it**: `src/wm/window.mjs` sets the attribute correctly and M7 asserts on exactly that, and
+    M7's page is unskinned, so it asserts on a frame the rule never touches. A visibility assertion
+    MUST read the COMPUTED style, never the attribute, and a skin MUST restate
+    `[hidden] { display: none }` for any element it gives a `display` to. Found by looking at a
+    screenshot of the real desktop, which is also the lesson: `bench/m11-glass/shell.py`.
+261. **A CONTRAST RATIO MUST LINEARIZE BEFORE IT DIVIDES, OR IT IS NOT WCAG'S AND IS GENEROUS.**
+    Feeding gamma-encoded luma into `(L1 + 0.05)/(L2 + 0.05)` overstates contrast by enough to
+    cross the threshold it is checked against: a glyph/halo pair at luma (128, 0) reads 11.0:1
+    unlinearized and 5.3:1 correctly, and (255, 128) reads 2.6:1 against 1.8:1 — both straddle AA's
+    4.5. `_relative_luminance` in `scripts/png.py` applies the sRGB transfer function, and names the
+    weight-then-linearize approximation it still makes. Correcting it also sharpened a control:
+    `--negative no-halo` moves only the BRIGHT side of the seam, because white glyphs over the dark
+    half have adequate contrast unaided (6.0:1) and over the bright half have none (1.3:1) — which
+    is the argument for the glow, stated by a measurement instead of by assertion.
+262. **A SIGNED `max` OVER A DIFFERENCE SERIES IS A HOLE IN WHATEVER GATE READS IT.** M11's
+    `concentration` is `largest jump / span`, and taking `max(jumps)` rather than
+    `max(abs(jumps))` returns a negative number for any band whose luminance falls left to right —
+    which then satisfies `concentration <= threshold` unconditionally. Half of all possible sample
+    runs passed the gate by construction, and which direction a seam ramps is a fact about which
+    side of it the sample started rather than about whether anything blurred.
+263. **A CLICK ON A DISABLED CONTROL DISPATCHES NOTHING, SO AN ASSERTION AFTER ONE CANNOT FAIL.**
+    `HTMLElement.click()` returns early for a disabled form control, so "the box did not move after
+    clicking minimize" was true however the buttons behaved. A caption button's inertness MUST be
+    driven as REAL input — a press, movement and a release — because that is the gesture that can
+    move a window and the one that tests whether the press falls through to the caption underneath.
+    Shown capable of failing with `pointer-events: none` on `.title-box`: the drag moved the window
+    by exactly its own vector. Constraint 40's rule for windows, applied to a button.

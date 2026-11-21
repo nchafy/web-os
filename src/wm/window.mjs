@@ -1,5 +1,11 @@
-// A window: a frame, a title bar you can drag, and a client area. Unstyled; M11 does the skin and
-// M9 does modality.
+// A window: a frame, a title bar you can drag, and a client area.
+//
+// THE FRAME IS FOUR GLASS STRIPS AND A CLIENT AREA (M11). `backdrop-filter` filters an element's
+// border box, so a ring is only a ring if it is four separately filtered boxes — measured at
+// 10.33x cheaper than one glass node over the same window (`src/wm/aero.mjs`, which carries the
+// numbers and the stylesheet). This file builds the structure and names nothing about how it looks;
+// a page that does not install the skin gets four zero-sized strips and the frame it had before,
+// which is what lets M7's geometry checks keep running against an unskinned window.
 //
 // THERE IS NO SYSCALL IN THIS FILE: a window agent cannot `Atomics.wait` (constraint 1), so this
 // module draws and listens while `www/m4a.html` holds the one route to the kernel. Every gesture
@@ -78,11 +84,16 @@ export class Win {
     // A labelled `section` is a region, the closest honest match: a window is not a dialog.
     el.setAttribute("aria-labelledby", `${this.id}-title`);
 
+    /* THE CAPTION IS A GLASS STRIP AND IS STILL `.window-title`. One element with two skins: the
+     * skinned pages filter it, the unskinned ones lay it out as the flex row they always did. A
+     * second element would have been a second thing to keep in step with every check that reads
+     * the caption. */
     const bar = document.createElement("div");
-    bar.className = "window-title";
+    bar.className = "window-title aero-strip aero-cap";
     // The bar IS the move handle, so it must be reachable without a pointer (WCAG SC 2.1.1).
     bar.tabIndex = 0;
     bar.setAttribute("role", "toolbar");
+    this.#glassLayers(bar);
 
     const heading = document.createElement("h2");
     heading.id = `${this.id}-title`;
@@ -97,15 +108,36 @@ export class Win {
       if (this.onEndProcess) this.onEndProcess();
     });
     this.endBtn.hidden = true;
-    this.closeBtn = this.#titleButton("✕", "window-close", () => this.close());
-    boxes.append(this.endBtn, this.closeBtn);
+    /* MINIMIZE AND MAXIMIZE ARE DRAWN AND INERT, which is Windows 7's own rule for an inapplicable
+     * caption command — disabled rather than hidden. There is nothing to minimize INTO until M14's
+     * taskbar and no snap state to maximize TO until M14's Aero Snap, and the window ABI carries no
+     * state property at all (`WIN_SET_TITLE`, `WIN_SET_BOX`, `WIN_SET_MODAL` and nothing else).
+     * A live-looking button that silently did nothing is the defect; `disabled` is the fact, and
+     * `scripts/check.py`'s m11 check asserts the box does not move when they are clicked. */
+    this.minBtn = this.#titleButton("—", "window-min", null, { disabled: true, label: "Minimize" });
+    this.maxBtn = this.#titleButton("□", "window-max", null, { disabled: true, label: "Maximize" });
+    this.closeBtn = this.#titleButton("✕", "window-close", () => this.close(), { label: "Close" });
+    boxes.append(this.endBtn, this.minBtn, this.maxBtn, this.closeBtn);
 
     const body = document.createElement("div");
     body.className = "window-body";
     this.bodyEl = body;
 
     bar.append(heading, boxes);
-    el.append(bar, body);
+    /** The three edge strips. Each is its own filtered border box, which is what makes the four of
+     *  them sum to the ring rather than to the window. */
+    this.edgeEls = ["aero-left", "aero-right", "aero-bottom"].map((side) => {
+      const edge = document.createElement("div");
+      edge.className = `aero-strip ${side}`;
+      edge.dataset.strip = side.replace("aero-", "");
+      // Out of flow, so an unskinned page's flex caption and body are laid out exactly as before
+      // and these contribute nothing. Positioning is behaviour; the look is the skin's.
+      edge.style.position = "absolute";
+      edge.setAttribute("aria-hidden", "true");
+      this.#glassLayers(edge);
+      return edge;
+    });
+    el.append(bar, ...this.edgeEls, body);
     bar.addEventListener("pointerdown", (e) => this.#startDrag(e));
     bar.addEventListener("keydown", (e) => this.#barKey(e));
     this.el = el;
@@ -113,13 +145,34 @@ export class Win {
     this.surfaceEl.append(el);
   }
 
-  #titleButton(glyph, cls, onClick) {
+  /** The two additive layers every strip carries: the summed afterglow-plus-colorization term, and
+   *  the viewport-anchored highlight.
+   *
+   *  THEY ARE DESCENDANTS OF THE STRIP AND NEVER ANCESTORS OF IT. `mix-blend-mode` on an ancestor
+   *  establishes a backdrop root and severs the blur chain, which has no symptom except flat glass;
+   *  as descendants it is measured to leave the blur fully working
+   *  (`docs/designs/REVIEW-FINDINGS.md` §8, `bench/m11-glass/probe.py`'s `severed` specimen). */
+  #glassLayers(strip) {
+    for (const cls of ["aero-sheen", "aero-light"]) {
+      const layer = document.createElement("div");
+      layer.className = cls;
+      layer.style.position = "absolute";
+      layer.setAttribute("aria-hidden", "true");
+      strip.append(layer);
+    }
+  }
+
+  #titleButton(glyph, cls, onClick, { disabled = false, label = "" } = {}) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = `title-box ${cls}`;
     b.textContent = glyph;
-    b.setAttribute("aria-label", glyph);
-    b.addEventListener("click", onClick);
+    b.setAttribute("aria-label", label || glyph);
+    if (disabled) {
+      b.disabled = true;
+      b.dataset.inert = "1";
+    }
+    if (onClick) b.addEventListener("click", onClick);
     return b;
   }
 

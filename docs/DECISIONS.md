@@ -793,6 +793,68 @@ made before the same mistake happened twice.
 judgement for the division, and one source: SerenityOS's server owns the equivalent state
 (`docs/research/08-hobbyist-os-survey.md`). Constraints 243, 244.*
 
+## D35 — the glass frame is four separately filtered strips, not one node with an opaque child
+
+**Decided:** the caption and the three edges are four elements, each carrying its own
+`backdrop-filter`. **Rejected:** one glass node at full window size with an opaque client area
+painted over its middle.
+
+The rejected form is what "frame-only glass" reads as in a stylesheet, and it is not frame-only in
+the unit that costs. `backdrop-filter` filters the element's **border box**, so an opaque child
+hides the blur and saves none of it. Measured at 640×440 before the skin was written
+(`bench/m11-glass/probe.py`):
+
+| geometry | filtered CSS px² | nodes | windows to the ~58 M wall |
+| --- | --- | --- | --- |
+| one box node | 281,600 | 1 | 51 |
+| four strips | 27,260 | 4 | 531 |
+
+The box figure reproduces gap-04's own measured "~51 windows of 640×440" exactly, which is what
+licenses the ring figure: one accounting applied to two geometries, with the known case as its
+control.
+
+**This corrects D13's headline number rather than adding to it.** D13 says frame-only glass is
+"~11× cheaper"; that is true of the ring (10.33× measured) and false of the box, and D13 never said
+which geometry it meant. Constraint 49's requirement that a governor account the border box is
+satisfiable *only* in the ring geometry — in the box geometry the border box is the window, and
+there is nothing for frame-only to save.
+
+**What it costs, and what is unmeasured.** Four offscreen buffers and four filter passes per window
+instead of one. gap-04 measured *area* as the predictor and layer count as free up to 60 layers;
+four strips at 52 windows is 208 layers, past anything measured. M12's gate must look at this
+first, because the governor's own arithmetic is a sum over `ringArea` and a per-layer cost it does
+not model would be invisible to it.
+
+*Evidence: measured. Constraints 49, 255; `designs/REVIEW-FINDINGS.md` §3; `MILESTONES.md` M11.*
+
+## D36 — a glass check asserts that the transition is SPREAD, not that it is monotonic
+
+**Decided:** the pixel proof asserts *concentration* — the share of a luminance transition falling
+between one adjacent pair of samples — plus a span floor. **Rejected:** `PLAN.md` §5's "assert a
+monotonic gradient", and its `backdrop-filter: none` negative control.
+
+Both were rejected on measurement, and both would have produced a check that could not fail.
+
+**A hard step is monotonic.** The bare seam, a `blur(0px)` control, a `backdrop-filter: none`
+control and a severed blur chain all report a monotonic rise — so every one of the proof's own
+negative controls satisfies it. Concentration separates them cleanly: 0.078 for real glass against
+1.000 for the bare step, with the threshold at 0.35 and a factor of four of margin either side.
+
+**`backdrop-filter: none` is the weaker control.** Removing the property also removes the isolated
+group the `plus-lighter` layers blend into, so it moves the pixel for a reason unrelated to blurring
+(`designs/REVIEW-FINDINGS.md` §8 measured (31,46,71)), and it cannot preserve the active/inactive
+brightness remap because the remap is a term in the filter. `blur(0px)` cuts only the standard
+deviation and moves **one** expectation where `none` moves seven. Both are registered; the
+comparison is the finding.
+
+**And the span floor is not redundant with the spread test**, which only running the controls
+revealed. Over a flat desktop the spread assertion HELD, because the viewport-anchored specular
+highlight is a `background-attachment: fixed` gradient and supplies a ramp of its own across any
+band sampled through it. The span is what couples the check to the seam. `--prove-failure` could not
+have found that: an assertion over a constant still inverts and still fires.
+
+*Evidence: measured. Constraints 50, 256, 257, 259; `MILESTONES.md` M11.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

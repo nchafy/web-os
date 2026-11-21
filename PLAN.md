@@ -314,13 +314,36 @@ device-file write cannot transfer an `OffscreenCanvas`.
 | M8 | **The surface.** Without it no syscall puts a pixel inside a window, and every app that is not the terminal is a frame around nothing (constraint 43). **The transferred `OffscreenCanvas` this row used to specify was measured and rejected**: it cannot reach a process that is spinning or parked, so it cannot be the reply to the call that asked for it, and a surface given away cannot be accounted or revoked (constraint 219, `docs/DECISIONS.md` D31). The surface is kernel-owned and a process draws by sending a display list. | 3 | a process draws a known 4×4 pattern; screenshot and assert the pixels | draw nothing; the pattern assertion must fail |
 | M9 | **Owner, modality, close-request.** `owner:winid`, `modal ∈ {none,window,app,system}`, and a `WIN_CLOSE_REQUEST` the X button posts rather than acts on (constraint 44). | 3 | click the owner's caption behind a modal — it must not raise; close with unsaved state — the app must get to refuse | remove the owner chain; the dialog must fall behind and the check must fail |
 | M10 | **Typed clipboard and drag-and-drop**, kernel-owned. `dataobj_create(formats[])`, `dataobj_set(did,format,bytes)`, `dataobj_get(did,format)`, seeded with text, a file list and an image (constraint 45). **No candidate design had either**, and they are the two gestures that make a set of windows read as one system. **Built as FIVE calls, not three** — `offer` and `open` are what make the object reach another process at all, and the two untyped `clipboard_*` calls were deleted rather than kept beside them (`MILESTONES.md` M10, constraint 240). | 4 | drag a PNG from Explorer into an image view and assert the bytes arrived under the image format; copy an image and paste it | offer only the text format; the image paste must fail cleanly, not silently paste a path |
-| M11 | **Aero glass, frame-only**, plus the reskin of `window.mjs`/`desktop.mjs`/`dialogs.mjs`/`widgets.mjs`/`contextmenu.mjs` from XP Luna. Glass on caption and border ring, opaque client area — both more faithful to Win7, whose own rule allows glass only in "small regions touching the window frame without text", and ~11× cheaper. | 5 | **sample a 16 px column across a black/white backdrop seam behind the caption and assert a monotonic gradient** | set `backdrop-filter: none`; the gradient assertion must fail |
+| M11 | **Aero glass, frame-only.** Glass on caption and border ring, opaque client area — both more faithful to Win7, whose own rule allows glass only in "small regions touching the window frame without text", and ~11× cheaper. **Two things in this row were wrong and were corrected by measurement; see below.** The ring must be FOUR separately filtered strips, because `backdrop-filter` filters the border box and one glass node with an opaque child saves nothing (255, D35). The reskin list names four webxp files that do not exist in this repository. | 5 | sample a 16 px band across a black/white backdrop seam behind the caption and assert the transition is **SPREAD** — a hard step is monotonic, measured, so monotonicity is satisfied by every one of this row's own controls (256) | `blur(0px)`, **not** `backdrop-filter: none`: removing the property also removes the isolated group the additive layers blend into, so it moves the pixel for a reason unrelated to blurring (257). Both are registered; `none` moves seven expectations where `blur(0px)` moves one |
 | M12 | **The blur governor** as an admission controller over every area-changing event — open, maximize, snap, restore, un-minimize, peek — degrading by z-order from the bottom, accounting the **border box** (constraint 49). | 3 | **drive it into its degrade branch**: open 52 glass terminals at 640×440 (53.7 M device px), assert the flatten count is non-zero and that frame rate holds ≥110 fps | disable the governor at the same geometry; frame rate must drop below 110 fps |
 | M13 | **The geometry harness** — the 23 new geometry checks. This is the only proof M7–M12 have, and it is new work, not a port (§3). | 5 | `--prove-failure` inverts every one and the run must report failures | — |
 | M14 | **Aero Snap, Superbar, jump lists, tray.** Snap arms at 1 px of pointer-to-edge, releases at 20 px of drag-out, 50 px side-move to restore a top-maximized window. Both edges of every threshold get checked, because a threshold on a continuous input without hysteresis oscillates. | 6 | drag to 1 px and assert the snap; drag out 19 px and assert it holds; 21 px and assert it releases | remove the hysteresis band; the 19 px case must start failing |
 | — | **Icons and fonts.** Win7 icons and glass bitmaps **must be redrawn** — shipping Microsoft assets is not an option. Segoe UI is not redistributable, Selawik is **not** documented as metric-compatible, so every layout is measured against both (constraint 37). | 4 | contrast and fit re-checked on every surface the glass sits under | — |
 
 **37 days. With the 2.5 setup days and the 30-day spine: 70.**
+
+**What M11 corrected in its own row, both before any of it was written.** `bench/m11-glass/probe.py`
+measured the geometry and the control, for M0's reason: the riskiest assumption first.
+
+1. **"~11× cheaper" is a claim about a geometry this row did not name.** `backdrop-filter` filters
+   the element's *border box*, so frame-only glass is only frame-only as four separately filtered
+   strips. At 640×440: four strips filter 27,260 CSS px² against 281,600 for the same window as one
+   glass node with an opaque client child — 10.33×, and 531 windows to the ~58 M wall against 51.
+   The box figure reproduces gap-04's own measured "~51 windows of 640×440" exactly, which is the
+   control that licenses the ring figure. Constraint 49's border-box governor is satisfiable *only*
+   in the ring geometry. Recorded as constraint 255 and **D35**.
+2. **The proof and the control, as written, were both unable to fail.** A hard step is monotonic —
+   the bare seam, `blur(0px)`, `backdrop-filter: none` and a severed blur chain all pass a
+   monotonicity test — so the stated assertion is satisfied by every one of its own negative
+   controls, which is constraint 39's defect. And `backdrop-filter: none` was already measured in
+   `docs/designs/REVIEW-FINDINGS.md` §8 to move the sampled pixel by (31,46,71) for reasons
+   unrelated to blurring. Constraints 256 and 257, and **D36**.
+
+**And M11 leaves M12 one thing to measure first.** Four strips is four offscreen buffers and four
+filter passes per window instead of one. gap-04 found *area* to be the predictor and layer count
+free up to 60 layers; four strips at 52 windows is 208. The governor's arithmetic is a sum over
+`aero.ringArea`, so a per-layer cost it does not model would be invisible to it — and no frame-rate
+figure can come from the suite, which is headless on SwiftShader.
 
 ---
 

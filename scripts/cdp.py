@@ -320,9 +320,16 @@ class Browser:
     believable and keeps a run out of the developer's own Chrome state.
     """
 
-    def __init__(self, *, extra_args: tuple[str, ...] = (), timeout: float = 30.0) -> None:
+    def __init__(self, *, extra_args: tuple[str, ...] = (), timeout: float = 30.0,
+                 headless: bool = True) -> None:
         self.timeout = timeout
         self._extra_args = extra_args
+        #: Headless is the default and is what the suite runs. A HEADED window exists for the one
+        #: question headless cannot answer honestly: `--disable-gpu` plus SwiftShader composites
+        #: correctly but not at the speed a real GPU does, and gap-04's whole Aero budget was
+        #: measured in a headed window at 120 Hz. A frame-rate figure taken headless would be a
+        #: number about SwiftShader wearing the name of a number about Aero.
+        self._headless = headless
         self._process: subprocess.Popen[bytes] | None = None
         self._profile: Path | None = None
         self._sockets: list[WebSocket] = []
@@ -346,14 +353,16 @@ class Browser:
 
     def _launch(self, chrome: str) -> None:
         self._profile = Path(tempfile.mkdtemp(prefix="showup-chrome-"))
+        # The two flags a headed run must NOT carry. `--disable-gpu` is the whole point of asking
+        # for a window: it routes compositing through SwiftShader, which is correct and slow.
+        mode = ["--headless=new", "--disable-gpu"] if self._headless else []
         self._process = subprocess.Popen(
             [
                 chrome,
-                "--headless=new",
+                *mode,
                 # Port 0 asks the OS for a free one; a fixed port collides across runs.
                 "--remote-debugging-port=0",
                 f"--user-data-dir={self._profile}",
-                "--disable-gpu",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--hide-scrollbars",

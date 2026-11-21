@@ -1,0 +1,264 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>M11 — is the glass real, and what does its geometry cost?</title>
+<!--
+  The specimen board for `bench/m11-glass/probe.py`. It renders ONE high-contrast backdrop and
+  several glass variants over it, as SIBLINGS under one backdrop root, and publishes each
+  specimen's device-pixel rect so the driver samples a measured rectangle rather than a guessed one.
+
+  THE BACKDROP IS A HARD BLACK/WHITE SEAM, which is constraint 50: over a flat backdrop
+  `blur(flat) == flat`, so every assertion below would pass with the blur switched off.
+
+  Nothing here asserts. The driver samples the screenshot and decides; this file only renders and
+  reports geometry, because the question is what the COMPOSITOR did and the page cannot see that.
+-->
+<style>
+  html, body { margin:0; background:#101014; color:#dde;
+               font:13px/1.45 ui-monospace, Menlo, monospace }
+  /* The desk is the one BACKDROP ROOT every specimen blurs. It is NOT a stacking-context trick:
+     `html` is already a backdrop root, and the specimens are its descendants, so the chain reaches
+     the seam below. An ancestor carrying opacity / filter / mask / clip-path / mix-blend-mode
+     would sever it — which is what the `severed` specimen exists to demonstrate. */
+  #desk { position:relative; width:900px; height:1180px; overflow:hidden; margin:12px }
+  /* The seam: left half black, right half white, a single hard step at SEAM_X. */
+  #seam { position:absolute; inset:0;
+          background:linear-gradient(to right, #000 0 50%, #fff 50% 100%) }
+  .spec { position:absolute; box-sizing:border-box }
+  /* The recipe, as constraint 34 states it and `docs/research/06-aero-spec.md` sources it:
+     blur 9px (CSS blur() takes a standard deviation, so the DWM figure ports with no conversion),
+     then an additive tint and an additive luminance-afterglow layer. The two additive layers are
+     DESCENDANTS and never ancestors — measured in `docs/designs/REVIEW-FINDINGS.md` §8: two
+     plus-lighter descendants leave the blur working, an ancestor severs it. */
+  .glass { backdrop-filter: blur(9px) saturate(1.3);
+           background: rgba(116,184,252,.08) }
+  .glass > .tint { position:absolute; inset:0; pointer-events:none;
+                   background: rgba(116,184,252,.43);
+                   mix-blend-mode: plus-lighter }
+  /* blur(0px), NOT `backdrop-filter: none`. The two are not the same control: removing the
+     property also removes the isolated group the plus-lighter children blend into, so `none`
+     shifts the pixel by a measured (31,46,71) for a reason that has nothing to do with blurring
+     (REVIEW-FINDINGS §8 correction 1). blur(0px) keeps the isolation and changes only the blur. */
+  .noblur { backdrop-filter: blur(0px) saturate(1.3) }
+  .nofilter { backdrop-filter: none }
+  /* The severed chain, which is the failure a structural assertion has to catch: the GLASS element
+     is untouched and still asks for blur(9px); its PARENT carries opacity .99. */
+  #severed-wrap { position:absolute; opacity:.99 }
+  /* The ring, as four separately filtered strips. Each strip's own border box is what gets
+     filtered (constraint 49), so this is the only geometry in which the filtered area really IS
+     the ring — one glass node with an opaque child still pays the whole window. */
+  .ring { position:absolute; background:transparent }
+  .ring > .strip { position:absolute; backdrop-filter: blur(9px) saturate(1.3);
+                   background: rgba(116,184,252,.08) }
+  .ring > .client { position:absolute; background:#f6f9fc }
+</style>
+
+<div id="desk">
+  <div id="seam"></div>
+</div>
+<pre id="log">building…</pre>
+
+<script type="module">
+  /** The hard step's x, in CSS px within the desk. Half of #desk's width, stated once here and
+   *  published, so the driver never computes it from the stylesheet. */
+  const SEAM_X = 450;
+  const DESK_W = 900;
+  const DESK_H = 1180;
+  /** The window gap-04 sized the blur budget in: "~51 windows of 640x440 at dpr 2". The ring/box
+   *  ratio is a function of window size — a short window is almost all caption — so the comparison
+   *  is made at THIS size and nowhere else, or the ratio is a number about the specimen. */
+  const WIN_W = 640;
+  const WIN_H = 440;
+  /** The caption height a specimen stands for. 7.css's measured Win7 caption
+   *  (https://github.com/khang-nd/7.css/blob/7d3958e707ba97a0718638c273ffeef27ebed73c/gui/_window.scss) */
+  const CAP_H = 29;
+  /** The ring's edge inset. 7.css's 6 px frame inset. */
+  const INSET = 6;
+
+  const desk = document.getElementById('desk');
+  const specimens = [];
+
+  /** One specimen, centred on the seam so the blur has a step to spread. `w` is wide enough that
+   *  ±3σ of a 9 px deviation (27 px) falls inside it with room on both sides. */
+  function spec(name, cls, { y, w = 200, h = CAP_H, wrap = null } = {}) {
+    const el = document.createElement('div');
+    el.className = `spec ${cls}`;
+    el.dataset.spec = name;
+    el.style.left = `${SEAM_X - w / 2}px`;
+    el.style.top = `${y}px`;
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    const tint = document.createElement('div');
+    tint.className = 'tint';
+    el.append(tint);
+    if (wrap) {
+      const holder = document.createElement('div');
+      holder.id = wrap;
+      // The wrapper sits at 0,0 and the specimen keeps its own absolute position inside it, so
+      // the geometry is identical to its unwrapped sibling and only the chain differs.
+      holder.style.left = '0px';
+      holder.style.top = '0px';
+      holder.style.width = `${DESK_W}px`;
+      holder.style.height = `${DESK_H}px`;
+      holder.append(el);
+      desk.append(holder);
+    } else {
+      desk.append(el);
+    }
+    specimens.push({ name, el });
+    return el;
+  }
+
+  /**
+   * The OTHER geometry: one glass node at full window size, with an opaque client child painted
+   * over its middle.
+   *
+   * This is the shape "frame-only glass" reads as in a stylesheet, and it is NOT frame-only in the
+   * unit that costs: `backdrop-filter` filters the element's border box, so the opaque child hides
+   * the blur without saving any of it. The specimen exists so the saving is a measured difference
+   * rather than a claim (`docs/designs/REVIEW-FINDINGS.md` §3).
+   */
+  function boxWindow(name, { y, w = WIN_W, h = WIN_H }) {
+    const el = document.createElement('div');
+    el.className = 'spec glass';
+    el.dataset.spec = name;
+    el.style.left = `${SEAM_X - w / 2}px`;
+    el.style.top = `${y}px`;
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    const tint = document.createElement('div');
+    tint.className = 'tint';
+    el.append(tint);
+    // The opaque client area, inset like a real frame. It covers the blur and charges for it.
+    const client = document.createElement('div');
+    client.className = 'boxclient';
+    client.style.position = 'absolute';
+    client.style.left = `${INSET}px`;
+    client.style.top = `${CAP_H}px`;
+    client.style.width = `${w - 2 * INSET}px`;
+    client.style.height = `${h - CAP_H - INSET}px`;
+    client.style.background = '#f6f9fc';
+    el.append(client);
+    desk.append(el);
+    specimens.push({ name, el });
+    return el;
+  }
+
+  /** The four-strip ring: a window frame whose FILTERED area is the ring and nothing more. */
+  function ring(name, { y, w = 200, h = 140 }) {
+    const el = document.createElement('div');
+    el.className = 'ring';
+    el.dataset.spec = name;
+    el.style.left = `${SEAM_X - w / 2}px`;
+    el.style.top = `${y}px`;
+    el.style.width = `${w}px`;
+    el.style.height = `${h}px`;
+    // caption, left, right, bottom — the ring, as four border boxes.
+    const parts = [
+      ['cap', { left: 0, top: 0, width: w, height: CAP_H }],
+      ['left', { left: 0, top: CAP_H, width: INSET, height: h - CAP_H }],
+      ['right', { left: w - INSET, top: CAP_H, width: INSET, height: h - CAP_H }],
+      ['bottom', { left: INSET, top: h - INSET, width: w - 2 * INSET, height: INSET }],
+    ];
+    for (const [part, box] of parts) {
+      const strip = document.createElement('div');
+      strip.className = 'strip';
+      strip.dataset.strip = part;
+      for (const [k, v] of Object.entries(box)) strip.style[k] = `${v}px`;
+      el.append(strip);
+    }
+    const client = document.createElement('div');
+    client.className = 'client';
+    client.style.left = `${INSET}px`;
+    client.style.top = `${CAP_H}px`;
+    client.style.width = `${w - 2 * INSET}px`;
+    client.style.height = `${h - CAP_H - INSET}px`;
+    el.append(client);
+    desk.append(el);
+    specimens.push({ name, el });
+    return el;
+  }
+
+  // The five specimens, stacked down the seam. Order is the reading order of the report.
+  spec('blur9', 'glass', { y: 20 });
+  spec('blur0', 'glass noblur', { y: 70 });
+  spec('nofilter', 'glass nofilter', { y: 120 });
+  spec('severed', 'glass', { y: 170, wrap: 'severed-wrap' });
+  // The two geometries, at the SAME window size, which is the only way the ratio means anything.
+  boxWindow('box640', { y: 230 });
+  ring('ring640', { y: 700, w: WIN_W, h: WIN_H });
+
+  /** A specimen's rect in DEVICE pixels, which is the unit a screenshot is in. Rounded INWARD on
+   *  both edges so a sample at the reported extent is inside the element rather than on its
+   *  boundary, where antialiasing lives. */
+  function deviceRect(el) {
+    const r = el.getBoundingClientRect();
+    const dpr = window.devicePixelRatio;
+    return {
+      x: Math.ceil(r.left * dpr), y: Math.ceil(r.top * dpr),
+      w: Math.floor(r.width * dpr), h: Math.floor(r.height * dpr),
+      cssX: r.left, cssY: r.top, cssW: r.width, cssH: r.height,
+    };
+  }
+
+  /**
+   * Whether anything between a glass element and the backdrop root severs the chain.
+   *
+   * COMPUTED FROM THE LIVE STYLE, never from the stylesheet text: the hazard is that an ANCESTOR
+   * acquired one of these properties, and the only place that is visible is the computed style of
+   * each ancestor in turn (`docs/research/06-aero-spec.md` §Gotchas).
+   */
+  function severs(el) {
+    const bad = [];
+    for (let node = el.parentElement; node; node = node.parentElement) {
+      const s = getComputedStyle(node);
+      const why = [];
+      if (s.filter !== 'none') why.push(`filter:${s.filter}`);
+      if (parseFloat(s.opacity) < 1) why.push(`opacity:${s.opacity}`);
+      if (s.mask !== 'none' && !s.mask.startsWith('none')) why.push(`mask:${s.mask}`);
+      if (s.clipPath !== 'none') why.push(`clip-path:${s.clipPath}`);
+      if (s.mixBlendMode !== 'normal') why.push(`mix-blend-mode:${s.mixBlendMode}`);
+      if (s.backdropFilter && s.backdropFilter !== 'none') why.push(`backdrop-filter:${s.backdropFilter}`);
+      if (why.length) bad.push({ at: node.id || node.className || node.tagName, why });
+    }
+    return bad;
+  }
+
+  const report = {
+    state: 'building',
+    dpr: window.devicePixelRatio,
+    seamX: SEAM_X,
+    capH: CAP_H,
+    inset: INSET,
+    desk: deviceRect(desk),
+    specimens: {},
+  };
+
+  for (const { name, el } of specimens) {
+    const glassNodes = el.classList.contains('ring')
+      ? [...el.querySelectorAll('.strip')]
+      : [el];
+    report.specimens[name] = {
+      rect: deviceRect(el),
+      // The FILTERED area, summed over each glass element's own border box — which is the unit
+      // constraint 49 requires and the unit a ring is only cheap in.
+      filteredCssPx: glassNodes.reduce((sum, n) => {
+        const r = n.getBoundingClientRect();
+        return sum + r.width * r.height;
+      }, 0),
+      // What each glass node actually asks the compositor for, read back rather than assumed:
+      // a typo in the stylesheet reads as `none` here and the driver says so.
+      backdropFilter: glassNodes.map((n) => getComputedStyle(n).backdropFilter),
+      severed: glassNodes.flatMap((n) => severs(n)),
+      nodes: glassNodes.length,
+    };
+  }
+
+  // Two rAFs, so the first composite of every specimen has happened before the driver shoots.
+  // One is not enough: the rect is laid out on the first and painted on the second.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    report.state = 'done';
+    document.getElementById('log').textContent = JSON.stringify(report, null, 2);
+  }));
+
+  globalThis.GLASS = report;
+</script>

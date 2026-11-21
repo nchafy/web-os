@@ -36,8 +36,8 @@ checks is a wish.
 | M8 | The window surface | 3 | 0.5 | ✅ done — **ACCEPT**, 30 expectations, 1 control, 51 host checks, 5 mutations, 12 review findings fixed, and a prerequisite experiment that reversed the design |
 | M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 41 expectations, 2 controls, 79 host checks, 8 mutations, 9 critic findings fixed |
 | M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 164 host checks, 11 mutations, 3 real-prompt runs, 6 critic findings fixed |
-| **M11** | **Aero glass, frame-only, plus reskin** | 5 | | ⬜ **next (option A)** |
-| M12 | The blur governor | 3 | | ⬜ A |
+| M11 | Aero glass, frame-only, plus reskin | 5 | 0.5 | ✅ done — **ACCEPT**, 35 expectations, 5 controls, 1 real-prompt run, 11 critic findings fixed, and a prerequisite experiment that corrected a decision's headline number |
+| **M12** | **The blur governor** | 3 | | ⬜ **next (option A)** |
 | M13 | The geometry harness | 5 | | ⬜ A |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
@@ -1963,6 +1963,256 @@ format table is closed**, which the review that asked for this asked to be regis
 is a bitmask in one register because a target must decide mid-gesture, and that is recorded as the
 departure it is. **And a file manager cannot MOVE a file yet**: `files` offers COPY only, so nothing
 exercises the effect a `DOBJ_EFFECT_MOVE` source would have to act on.
+
+---
+
+## M11 — Aero glass, frame-only · done · 0.5 days · ~2,600 LoC
+
+`src/wm/aero.mjs` is every number Windows 7's glass is made of, once, plus the stylesheet derived
+from them. `src/wm/window.mjs` builds the frame as **four separately filtered strips** and a client
+area. `scripts/png.py` is a stdlib PNG reader, because the question "did it blur" is only answerable
+from a screenshot. `www/m11.html` is six proofs and then a live Aero desktop.
+
+### The experiment came first, and it corrected a decision's headline number
+
+`bench/m11-glass/probe.py` ran before any of the skin was written, for M8's reason: the thing about
+to be built rested on a figure nobody had measured.
+
+**`backdrop-filter` filters the element's BORDER BOX.** So "frame-only glass" is only frame-only if
+the frame is several filtered boxes that sum to the ring. One glass node with an opaque client child
+painted over its middle hides the blur and **saves none of it**. Measured at 640×440, dpr 2,
+Chrome 157:
+
+| geometry | filtered CSS px² | glass nodes | windows to gap-04's 58 M wall |
+| --- | --- | --- | --- |
+| one box node | 281,600 | 1 | **51** |
+| four strips | 27,260 | 4 | **531** |
+
+The box figure reproduces gap-04's own measured "~51 windows of 640×440" **exactly**, which is what
+makes the ring figure trustworthy: one accounting, applied to two geometries. So `docs/DECISIONS.md`
+D13's "~11× cheaper" is **true of the ring and false of the box** — 10.33× measured — and
+`docs/designs/REVIEW-FINDINGS.md` §3, which raised this against a sibling design, lands on this one
+too. The four-strip geometry is what was built, and `aero.ringArea` is the one definition of its
+area, which **M12's admission controller must call rather than restate** (constraint 49).
+
+**It also answered whether the suite can ask the question at all.** `scripts/check.py` drives
+`--headless=new` with `--disable-gpu` and SwiftShader, and gap-04's whole Aero budget was measured
+in a *headed* window at 120 Hz. The blur reaches the compositor in both: concentration 0.078
+headless against 0.077 headed, with the bare seam at 1.000 in each. So the pixel proof lives in the
+suite. A frame-rate figure still cannot — that is M12's problem and is recorded below.
+
+### "A monotonic gradient" is not an assertion, and that is the first correction
+
+`PLAN.md` §5 specifies M11's proof as "sample a 16 px column across a black/white backdrop seam
+behind the caption and assert a **monotonic gradient**". **Measured, a hard step is monotonic.** The
+bare seam, a `blur(0px)` control, a `backdrop-filter: none` control and a severed blur chain all
+report a monotonic rise. An assertion that every one of its own negative controls satisfies is
+constraint 39's defect wearing a new name.
+
+What separates a blur from a step is **concentration**: the share of the whole transition falling
+between one adjacent pair of samples. A step puts all of it there and reads 1.00; a blur spreads it.
+
+| | concentration |
+| --- | --- |
+| glass, headless | 0.078 |
+| glass, headed | 0.077 |
+| `blur(0px)` | 0.963 |
+| `backdrop-filter: none` | 0.982 |
+| severed chain | 0.982 |
+| bare seam | 1.000 |
+
+The threshold is 0.35, in the empty middle with a factor of four either side.
+
+### And the control `PLAN.md` named is the wrong one — which is the second correction
+
+§5's negative control is "set `backdrop-filter: none`; the gradient assertion must fail".
+`docs/designs/REVIEW-FINDINGS.md` §8 had already measured why that is the weaker cut: removing the
+property also removes the isolated group the `plus-lighter` layers blend into, so it moves the
+sampled pixel by (31,46,71) for a reason that has **nothing to do with blurring**.
+
+`--negative no-blur` is the strict one: the isolation, the brightness, the additive layers and the
+active/inactive brightness pair all stay, and only the standard deviation goes to zero. Both are
+registered, because the comparison is the finding — `none` moves seven labels, `blur(0px)` moves
+one.
+
+### The six proofs, and what each control moved
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the ring is the ring | four strips, summing to `aero.ringArea`, with the frame and the client area filtering nothing |
+| 2 | nothing severs the chain | no ancestor of any strip carries opacity<1, a filter, a mask, a clip-path or a mix-blend-mode; both additive layers sit INSIDE a strip |
+| 3 | the glass blurs | the caption's band across a hard seam reads as a spread ramp, against the bare seam as a step |
+| 4 | the caption is legible | local contrast ≥ 4.5:1 inside the glyph band on BOTH sides of the seam |
+| 5 | minimize and maximize are inert | drawn, `disabled`, labelled, and clicking both leaves the box where it was |
+| 6 | inactive glass is brighter | the blur balance RISES to 0.796 and the tint alpha FALLS, which one opacity value cannot express |
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-blur` | **1** | 33 | only the standard deviation. **The page's own six proofs all stay green** |
+| `no-glass` | 7 | 27 | `backdrop-filter: none` — the blunter cut, and it takes the remap with it |
+| `sever` | 4 | 30 | a wrapper at `opacity:.99`. The strips still ask for blur(9px) |
+| `no-halo` | 5 | 29 | the caption's glow goes; contrast collapses to 2.1:1 and 1.7:1 |
+| `flat-desk` | 2 | 32 | constraint 50 as a world: no seam, so `blur(flat) == flat` |
+
+**`no-blur` moving exactly one label is the milestone.** Nothing reachable from script can see that
+a blur is gone — a `backdrop-filter` is applied by the compositor, `getImageData` reads a canvas,
+and a DOM rasteriser applies no filter at all — so the geometry, the chain, the halo, the inert
+buttons and the focus pair are all still correct in a world with flat glass. One assertion in the
+whole suite can tell, and it is the one that reads a screenshot.
+
+### What the controls found, and the worst of it was my own highlight
+
+**`--negative flat-desk` found a defect in this check.** The SPREAD clause **held** over a flat
+desktop, where with nothing to blur there is no ramp to find. The cause is `.aero-light`, the
+viewport-anchored specular highlight: it is a `background-attachment: fixed` gradient, so it varies
+horizontally across the sample band **on its own**, and that variation reads as a spread transition
+with no backdrop involved. The highlight was satisfying the blur assertion.
+
+The SPAN clause is what fired, so the harness was honest — but only because two clauses were written
+where one looked sufficient. That is the whole case for the control: `--prove-failure` could never
+have found it, because an assertion over a constant still inverts and still fires.
+
+### And a second engine found two more, which is now three milestones in a row
+
+`bench/m7-win/firefox.py --page m11`. CLAUDE.md says to do this before reporting a milestone done
+because the Chrome-only suite has already cost M4a and M6; it cost M11 as well.
+
+**The blur band was placed at a constant offset, and Firefox renders at dpr 1.** A 29 CSS px caption
+holds about 7 text-free device rows either side of its glyphs at dpr 2 and only 3 at dpr 1, so a
+band asking for 6 rows at `capRect.y + 4` overlapped the glyphs and the proof failed on an engine
+where the glass was fine. The band's depth and position are both derived from the measured gap now.
+
+**And chasing that found the asymmetry the placement rule encodes.** `bench/m11-glass/scan.py`
+prints a concentration figure for every row of a caption:
+
+| caption rows | concentration | |
+| --- | --- | --- |
+| 0–8 CSS | 0.077–0.097 | clean glass |
+| 9–10 CSS | 0.137–0.171 | the glyph tops beginning to tell |
+| 11–21 CSS | 0.48–0.95 | the glyphs |
+| 22–27 CSS | 0.52–0.74 | **still contaminated, and worsening downward** |
+
+The last row is the finding. The caption's `text-shadow` halo is a 10 px blur, so it spills ~10 CSS
+px *below* the glyph box — past the caption's own bottom edge — and carries the glyphs' horizontal
+structure with it. **The region below the text is inside the text**, and `textRect` is only the
+glyph box, so a rule that treated it as the text's footprint would place the band there. The band
+goes above the glyphs, and falls back below only when the upper gap cannot hold two rows.
+
+**Proof 6 cannot be taken in headless Firefox, and now says so rather than just failing.**
+`:focus-within` matches nothing in a document that has no focus, so both windows read inactive and
+the pair cannot be compared. The clause still fails — a proof that cannot reach its subject must —
+but it carries `documentHasFocus` so a reader is told which of the two happened. The suite drives
+Chrome with focus emulation on and takes the measurement.
+
+**Three more, each a real bug in work already written.** The Aero sheet never set
+`position: absolute` on `.window` — `window.mjs` writes `left`/`top`/`width`/`height` inline and
+never `position` — so the four strips resolved their own `bottom: 0` against the DESKTOP and the
+ring measured 41,100 CSS px² against a formula of 26,780, with every window stacked at the top left.
+The blur band, sampled at the caption's vertical middle, **crossed the title's glyphs**, whose edges
+are hard steps: 0.74 against 0.078 for the same glass clear of them, which would have put the
+threshold on the wrong side of the answer. And the page's log `<pre>` grew as the proofs ran, moving
+the desktop down **between the moment every device rect was published and the moment the driver
+photographed it** — so the driver sampled bands that were no longer there, and still produced
+numbers.
+
+### The defect a screenshot found, which no check could
+
+**End Process was offered on every healthy window the moment the skin existed.** `.title-box`
+carries `display: grid`, and an *author* `display` declaration beats the UA stylesheet's
+`[hidden] { display: none }` — so M7's not-responding escape hatch was permanently visible, and a
+wedged process was indistinguishable from an idle one.
+
+**M7's own check could not see it.** `src/wm/window.mjs` sets the attribute correctly and M7
+asserts on exactly that; M7's page is unskinned, so it asserts on a frame this rule never touched.
+Found by looking at `bench/m11-glass/shell.py`'s screenshot of the real desktop. The m11 check reads
+the *computed* style now, because the attribute was never the thing that was wrong.
+
+### What the critic changed, and two of its eleven were fatal
+
+**`src/wm/aero.mjs` did not parse, twice.** The stylesheet is a template literal, so a backtick in
+one of its comments ends it — and the comment explaining the `[hidden]` fix above was written with
+backticks around `hidden`. Nothing that imports the file loads, so the m11 check came out BROKEN
+rather than failing, which is the harness behaving correctly. Every reference inside that literal
+uses single quotes now, and the function says why.
+
+**`DEVICE_SCALE` does not exist**, so `dpr = b.get("dpr") or DEVICE_SCALE` raised `NameError`
+instead of falling back — reachable on any run where the page reports `done` with no blur evidence,
+which `?live=1` does by construction. It is `VIEWPORT_SCALE`.
+
+**`concentration` could come back negative, which satisfied the gate unconditionally.**
+`max(jumps)` is signed, so a band whose luminance *falls* left-to-right produced a negative largest
+jump and a negative concentration — and `concentration <= 0.35` passes for every negative number.
+The discriminator stopped discriminating for half of all possible runs. It is `max(abs(j))`.
+
+**The contrast figure was labelled WCAG and was not WCAG.** It fed gamma-encoded luma straight into
+`(L1+0.05)/(L2+0.05)`, which is consistently generous: a glyph/halo pair at luma (128, 0) reads
+11.0:1 that way and 5.3:1 correctly, and (255, 128) reads 2.6:1 against 1.8:1. Both straddle the 4.5
+threshold, so the clause could have reported AA for a caption that does not meet AA. The channels
+are linearized now, with the weight-then-linearize approximation named where it is made.
+
+**And fixing it sharpened a control.** `--negative no-halo` used to move both legibility clauses;
+with the correct arithmetic it moves only the WHITE side. White glyphs over the dark half of the
+seam have real contrast on their own (6.0:1); over the bright half they have none (1.3:1). That
+asymmetry *is* the argument for the glow, and the control now demonstrates the claim its label
+makes rather than a stronger one.
+
+**The inert-button clause could not fail.** `HTMLElement.click()` returns early for a disabled form
+control, so `btn.click()` dispatched nothing and "the box did not move" was true however the buttons
+behaved. It is a REAL mouse drag from each button's centre now — the gesture that can actually move
+a window, and the one that tests whether the press falls through to the caption. Shown capable of
+failing: with `pointer-events: none` on `.title-box` the drag from minimize moved the window from
+`60,60` to `100,84`, exactly the drag vector.
+
+**Four smaller ones, all real:** `proofFocus` dereferenced `second.id` before its own length guard,
+so an empty window table arrived as a stack trace instead of the proof's evidence; a band that fitted
+in neither caption gap fell through and could be placed inside the opaque client area while
+`bandIsTextFree` still reported true, because the client area has no glyphs in it; `--negative
+flat-desk`'s prose claimed the contrast collapses, which the measured tuple says it does not; and
+`drive.py` could not reproduce the one control credited with finding a defect in the check.
+
+### What is not done
+
+**MINIMIZE AND MAXIMIZE DO NOTHING, and they say so.** They are drawn and `disabled`, which is
+Windows 7's own rule for an inapplicable caption command: there is nothing to minimize INTO until
+M14's taskbar, no snap state to maximize TO until M14's Aero Snap, and the window ABI carries no
+state property at all — `WIN_SET_TITLE`, `WIN_SET_BOX`, `WIN_SET_MODAL` and nothing else. A check
+clicks both and asserts the box did not move.
+
+**THE AFTERGLOW IS FLAT.** Aero's second term is `luminance709(blurredRGB) * afterglowRGB`, and no
+CSS layer can read the blurred backdrop's luminance: `backdrop-filter` yields one filtered copy and
+a `plus-lighter` sibling sees a colour, never the pixels beneath it. So the afterglow and
+colorization terms are summed into one additive constant — exact under that approximation, because
+Windows 7 uses the same Sky colour for both. What is lost: glass over a bright backdrop should
+afterglow more than glass over a dark one, and it does not. `src/wm/aero.mjs`'s `ADDITIVE_ALPHA`
+carries the derivation.
+
+**THE HIGHLIGHT IS PARALLAX 0.0, NOT 0.1.** Aero's streak is a monitor-space bitmap that moves 10%
+of the window's own motion; `background-attachment: fixed` is fully monitor-anchored. Closing the
+gap needs a style write per drag frame, which is not worth 10% of a highlight.
+
+**FOUR FILTER PASSES PER WINDOW, UNMEASURED AT SCALE.** The ring's area saving costs four offscreen
+buffers and four filter passes per window instead of one. gap-04 measured *area* as the predictor
+and layer count as free up to 60 layers; four strips at 52 windows is 208, past anything measured.
+**M12 owns this**, and it is the first thing its gate should look at — the governor's own arithmetic
+is a sum over `aero.ringArea`, so a per-layer cost it does not model would be invisible to it.
+
+**NO FRAME-RATE FIGURE IS TAKEN HERE.** The suite is headless on SwiftShader, where a frame time is
+a number about the software rasteriser wearing the name of a number about Aero.
+`bench/m11-glass/probe.py --headed` exists for that reason and M12's gate must use it.
+
+**NO TASKBAR, NO START ORB, NO SNAP, AND NO ICONS.** All M14, and the icon and font redraw is its
+own line. Segoe UI is referenced and never served (constraint 37); Selawik is named for the same
+reason. **Constraint 37 requires every layout to be measured against both, and that cannot be done
+here** — Segoe UI cannot legally be obtained for the comparison — so nothing in the skin depends on
+a glyph advance: the caption truncates, the buttons are fixed boxes, and the terminal cell is still
+measured from a real rendered glyph.
+
+**THE RESKIN IS ONE PAGE DEEP.** `www/m11.html` installs the skin; the eight older `www/*.html`
+pages keep their structural stylesheets, which is deliberate — their checks drive an *unskinned*
+frame, and the strips are out of flow and zero-sized without the Aero sheet, so M7–M10 run
+unchanged. `desktop.mjs`, `dialogs.mjs`, `widgets.mjs` and `contextmenu.mjs`, which `PLAN.md` §5
+lists as part of this reskin, **do not exist in this repository** — they are webxp files, and there
+is nothing here yet for them to be a skin of.
 
 ---
 
