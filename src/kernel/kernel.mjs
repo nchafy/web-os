@@ -37,6 +37,7 @@ import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
   WinMgr, installWindowKernel, setCascade, setDrawReaches, setOwnerChain, setModalBlocks,
+  setGovernor,
   NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
 import {
@@ -104,6 +105,9 @@ let execView = null;
 let usrReport = null;
 /** The same for `/bench`, which exists only under a bench boot. Null reads as "no such mount". */
 let benchReport = null;
+/** Whether this kernel was booted as a bench. Module-level because the boot `cfg` is scoped to the
+ *  boot handler, and M12's runtime budget hook is gated on it from the message switch. */
+let benchBoot = false;
 let hb = 0;
 let kServiceMs = 0;
 let kCalls = 0;
@@ -1652,6 +1656,26 @@ async function handle(m) {
         setCascade(false);
       }
       // M8's control: a batch is accepted and counted and never reaches the page.
+      benchBoot = cfg.bench === 1;
+      if (cfg.noGovernor || cfg.blurTopFirst || cfg.blurStaleCosts) {
+        // M12's three controls. Bench-gated together, because each of them makes the governor
+        // worse in a different direction and none of them is a thing a product boot may ask for.
+        if (cfg.bench !== 1) throw new Error("governor controls require bench=1");
+        setGovernor({
+          off: cfg.noGovernor === 1 || cfg.noGovernor === true,
+          topFirst: cfg.blurTopFirst === 1 || cfg.blurTopFirst === true,
+          staleCosts: cfg.blurStaleCosts === 1 || cfg.blurStaleCosts === true,
+        });
+      }
+      if (cfg.blurBudgetPx) {
+        /* M12's degrade branch, made reachable. Under the shipped ring geometry `BLUR_OFF_AT` is
+         * 413 windows of 640×440 away, so nothing a check can build crosses it — and a refusal
+         * path nothing can reach is a refusal path nobody has seen work. The same hook M3 uses to
+         * build a 64 KiB trace ring instead of a 16 MiB one, with the same bench-boot gate, and
+         * `WinMgr.blurBudget` takes the MINIMUM so this can only ever tighten the budget. */
+        if (cfg.bench !== 1) throw new Error("blurBudgetPx requires bench=1");
+        WINDOWS.blurBudgetPx = cfg.blurBudgetPx | 0;
+      }
       if (cfg.noDraw) {
         if (cfg.bench !== 1) throw new Error("noDraw requires bench=1");
         setDrawReaches(false);
@@ -1821,6 +1845,14 @@ async function handle(m) {
     case "drag-at":
     case "drag-drop":
     case "data-state":
+    /* M12's two, and they belong here for exactly the reason the others do. `WinHost`'s
+     * constructor posts `win-dpr` unconditionally, so a page that built a host before awaiting
+     * `up` would dereference `WINDOWS.dprSq` and panic the kernel instead of being told what it
+     * did wrong. Every page here happens to construct the host after boot, which made it latent
+     * rather than absent — and `win-blur-budget` was protected only incidentally, by its own
+     * bench check. */
+    case "win-dpr":
+    case "win-blur-budget":
       /* THE ONE GUARD FOR ALL FOUR. `WINDOWS` is built in the `boot` case, and `handle()` turns a
        * throw into a `panic` — so a page that posted any of these before awaiting `up` killed the
        * kernel with a TypeError instead of being told what it did wrong. The console these
@@ -1862,6 +1894,12 @@ async function handle(m) {
        * a defect, and the count is what tells the two apart. */
       if (!geomWin) { lateGeoms += 1; return; }
       geomWin.setBox(m);
+      /* M12: A REPORTED BOX IS AN AREA-CHANGING EVENT, and it is the one that carries maximize,
+       * snap, restore and a plain drag-resize — every one of them reaches the kernel as the page
+       * reporting the geometry it settled on. Constraint 49 names those events and forbids a drag
+       * HOOK, which is exactly why the governor hangs off the report rather than off a gesture:
+       * there is one place a box becomes real, and this is it. */
+      WINDOWS.governBlur("geom");
       post({ t: "win-geom", win: geomWin.id, window: geomWin.report() });
       return;
     }
@@ -1902,6 +1940,30 @@ async function handle(m) {
       return;
     case "data-state":
       post({ t: "data-state", data: DATA.report() });
+      return;
+    case "win-blur-budget":
+      /* M12's degrade branch, armed at a figure the PAGE measured. Bench-gated, like the boot
+       * hook it complements, and it can only ever TIGHTEN the budget — `WinMgr.blurBudget` takes
+       * the minimum of this and `BLUR_OFF_AT`.
+       *
+       * WHY AT RUNTIME AND NOT ONLY AT BOOT. The real budget is 413 windows of 640×440 away, so a
+       * check has to lower it — and to lower it to "exactly what N windows cost" it has to know
+       * what a window costs, which it learns by opening one. A boot-time-only figure would have to
+       * hardcode the geometry `src/bin/winopen.mjs` happens to ask for, and that is a number in a
+       * second place waiting to drift. Unlike M3's trace ring, nothing is allocated from this: it
+       * is a comparison, so there is no reason it must be fixed before the first window. */
+      if (!benchBoot) { post({ t: "win-blur-budget", refused: "requires bench=1" }); return; }
+      WINDOWS.blurBudgetPx = Math.max(0, m.px | 0);
+      WINDOWS.governBlur("budget");
+      post({ t: "win-blur-budget", px: WINDOWS.blurBudget() });
+      return;
+    case "win-dpr":
+      /* M12. THE PAGE IS THE SIDE WITH THE DISPLAY, so it reports the device-pixel ratio and the
+       * kernel squares it — a blur cost is an area. Same division as the terminal's cell count in
+       * `win-geom`: the page measures what only the page can see, and the kernel accounts it.
+       * Ignored unless it is a real ratio, because a 0 would make every cost 0 and silently
+       * disarm the governor. */
+      if (m.dpr > 0) WINDOWS.dprSq = m.dpr * m.dpr;
       return;
     case "win-state":
       post({

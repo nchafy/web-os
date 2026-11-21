@@ -545,6 +545,50 @@ const INTS = {
    *  DOM the way an unbounded worker count exhausts the renderer (constraint 17's shape). */
   WIN_CAP: 32,
 
+  /* ---- M12: the frame's chrome, because the KERNEL now has to account it -------------------
+   *
+   * These two are here and not in `src/wm/aero.mjs` for the reason everything else in this file is
+   * here: they became a fact BOTH SIDES must agree on. Constraint 49 requires the blur governor to
+   * account each glass element's BORDER BOX, and the governor is the kernel's — only the kernel
+   * owns the z-order it degrades by (constraint 226) and only the kernel sees every area-changing
+   * call. But the ring's geometry is the skin's. So the area function has to be one definition
+   * imported by both, which is this file's whole job.
+   *
+   * THE CONSEQUENCE IS WORTH STATING: the kernel now knows a caption is 29 px tall. It is not
+   * drawing one — `src/wm/aero.mjs` does, and imports these — but a second skin with different
+   * chrome is a change to the ABI rather than to a stylesheet. That is the price of an admission
+   * controller that accounts what the compositor really filters, and constraint 49 leaves no
+   * cheaper way to pay it.
+   */
+
+  /** The caption strip's height, in CSS px. 7.css's measured Win7 caption. */
+  WIN_CAP_H: 29,
+  /** The left, right and bottom frame inset, in CSS px. 7.css's 6 px. */
+  WIN_INSET: 6,
+
+  /**
+   * The blur governor's two edges, in BLURRED DEVICE PIXELS PER FRAME.
+   *
+   * A threshold on a continuous input must have hysteresis and both edges must be checked, so this
+   * is a pair and not a number: glass goes flat above `BLUR_OFF_AT` and comes back below
+   * `BLUR_ON_AT`. One threshold would oscillate for any desktop sitting on it — open a window,
+   * flatten, which lowers the area, unflatten, which raises it.
+   *
+   * SOURCED, NOT CHOSEN. gap-04 measured the wall at 58–63 M device px per frame (constraint 36):
+   * 120 fps held at 58 M and halved to 62 fps at 63 M. 45 M off / 36 M on are
+   * `docs/designs/fidelity-first.md`'s own figures, quoted in `docs/designs/REVIEW-FINDINGS.md`
+   * §3's correction, and they sit far enough below 58 M that a degrade happens before the cliff
+   * rather than on it.
+   *
+   * MEASURED CONSEQUENCE, stated where the number is: under the four-strip ring M11 shipped, a
+   * 640×440 window filters 109,040 device px, so `BLUR_OFF_AT` is 413 windows away — past
+   * `WIN_CAP` × `PROC_CAP` in any realistic desktop. **This governor does not fire in normal use,
+   * and that is a property of the geometry rather than of the threshold.** `bench/m12-governor/`
+   * carries the sweep; `MILESTONES.md` M12 carries what it means.
+   */
+  BLUR_OFF_AT: 45 * 1000 * 1000,
+  BLUR_ON_AT: 36 * 1000 * 1000,
+
   /**
    * M10's FORMATS. A CLOSED, DENSE TABLE AND NOT A REGISTRY, and the review that asked for this
    * asked for a registerable one — so the departure is stated here rather than discovered. The
@@ -694,6 +738,7 @@ export const {
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_MAX,
   SURFACE_BUDGET_PX, SURFACE_MAX_PX,
+  WIN_CAP_H, WIN_INSET, BLUR_OFF_AT, BLUR_ON_AT,
 } = INTS;
 
 /**
@@ -1341,6 +1386,35 @@ export function encodeBitmap(w, h, pixels) {
   dv.setUint32(BMP_H, h >>> 0, true);
   out.set(pixels, BITMAP_HEADER);
   return out;
+}
+
+/**
+ * The CSS px² a window's frame actually asks the compositor to filter: the sum of the four glass
+ * strips' own border boxes.
+ *
+ * THE ONE DEFINITION, and M12's governor, M11's skin and every check call it. `backdrop-filter`
+ * filters the element's border box, so a frame is only cheap if it is several boxes that sum to the
+ * ring — one glass node with an opaque client child painted over its middle hides the blur and
+ * saves none of it. A second copy of this arithmetic is how a governor comes to account a frame
+ * nobody renders, which is the ~17× under-read constraint 49 exists to forbid.
+ *
+ * Measured against the rendered strips at 640×440: 27,260, byte-identical to this function
+ * (`bench/m11-glass/probe.py`, constraint 255).
+ */
+export function blurRingArea(w, h) {
+  const width = Math.max(0, w | 0);
+  const height = Math.max(0, h | 0);
+  const cap = width * Math.min(WIN_CAP_H, height);
+  const sides = 2 * WIN_INSET * Math.max(0, height - WIN_CAP_H);
+  const bottom = Math.max(0, width - 2 * WIN_INSET)
+    * Math.min(WIN_INSET, Math.max(0, height - WIN_CAP_H));
+  return cap + sides + bottom;
+}
+
+/** The same window as ONE glass node, which is what the ring is cheaper THAN. Kept beside
+ *  `blurRingArea` so the ratio is never quoted without both halves of it. */
+export function blurBoxArea(w, h) {
+  return Math.max(0, w | 0) * Math.max(0, h | 0);
 }
 
 /** `0xRRGGBBAA` unpacked. THE ONE PLACE THOSE BYTES ARE TAKEN APART, so a process's idea of a

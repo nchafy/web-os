@@ -37,8 +37,8 @@ checks is a wish.
 | M9 | Owner, modality, close-request | 3 | 0.5 | ✅ done — **ACCEPT**, 41 expectations, 2 controls, 79 host checks, 8 mutations, 9 critic findings fixed |
 | M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 164 host checks, 11 mutations, 3 real-prompt runs, 6 critic findings fixed |
 | M11 | Aero glass, frame-only, plus reskin | 5 | 0.5 | ✅ done — **ACCEPT**, 35 expectations, 5 controls, 1 real-prompt run, 11 critic findings fixed, and a prerequisite experiment that corrected a decision's headline number |
-| **M12** | **The blur governor** | 3 | | ⬜ **next (option A)** |
-| M13 | The geometry harness | 5 | | ⬜ A |
+| M12 | The blur governor | 3 | 0.5 | ✅ done — **ACCEPT**, 27 expectations, 3 controls, 32 host checks, 1 real-prompt run, 11 critic findings fixed, and a prerequisite sweep that found the specified gate cannot fire |
+| **M13** | **The geometry harness** | 5 | | ⬜ **next (option A)** |
 | M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
 | — | Icons and fonts, redrawn | 4 | | ⬜ A |
 | | **Option A total** | **74.5** | | |
@@ -2213,6 +2213,210 @@ frame, and the strips are out of flow and zero-sized without the Aero sheet, so 
 unchanged. `desktop.mjs`, `dialogs.mjs`, `widgets.mjs` and `contextmenu.mjs`, which `PLAN.md` §5
 lists as part of this reskin, **do not exist in this repository** — they are webxp files, and there
 is nothing here yet for them to be a skin of.
+
+---
+
+## M12 — the blur governor · done · 0.5 days · ~1,900 LoC
+
+An admission controller over total blurred area, in `src/kernel/wins.mjs`: it runs on every event
+that can change the area — a window opening, the page reporting a box after a clamp or a resize, a
+window being destroyed — and when the total crosses the budget it takes glass from the **bottom of
+the stack** upward. `src/abi.mjs` gained the chrome metrics and the area function, because the
+moment the kernel accounts a border box the ring's geometry stops being the skin's private
+business. `www/m12.html` is four proofs and a live desktop; `bench/m12-governor/` is the sweep and
+the host probe.
+
+### The gate the plan specifies cannot fire, and that is the finding
+
+`PLAN.md` §5 and constraint 49 both size M12's kill gate at **"52 glass terminals at 640×440
+(53.7 M device px)"**. That is *box* accounting — one filtered node per window. M11 shipped the
+ring, four filtered strips summing to 27,260 CSS px² per window, so:
+
+| | per window, dpr 2 | 52 windows | windows to the 45 M budget |
+| --- | --- | --- | --- |
+| one glass node (what the gate assumed) | 1,126,400 device px | 58.6 M — **over** | 40 |
+| four strips (what M11 shipped) | 109,040 device px | 5.7 M — **10% of it** | **413** |
+
+Reaching the budget needs 413 windows of 640×440 against `WIN_CAP` 32 per process. **A gate that
+needs 413 windows cannot fail** — which is the exact defect constraint 49 was itself corrected for
+once already (`docs/DECISIONS.md` §Corrections: the 4× dpr error that made the Aero gate
+structurally green). Twice is a pattern, and the pattern is sizing a gate from an arithmetic rather
+than from a run.
+
+So the finding is **asserted rather than written down**: proof 1's last clause is that at the
+shipped budget this desktop is entirely glass, and the degrade branch is driven at a budget the
+page *measured* off the windows on screen.
+
+### What the sweep answered, and it answers M11's owed question
+
+`bench/m12-governor/probe.py` separates two axes gap-04 varied together. At a **fixed** 5.7 M
+device px of filtered area, changing only how many filtered boxes it is spread across:
+
+| filtered boxes | fps |
+| --- | --- |
+| 52 | 29.3 |
+| 104 | 30.0 |
+| 208 | 28.0 |
+| 832 | 13.8 |
+| 1664 | 8.4 |
+
+**Pass count is free to ~208 and costs beyond ~800.** M11 recorded "four strips at 52 windows is
+208 passes, past anything measured" as owed; it is measured now, and four strips per window costs
+nothing at any window count the caps allow. gap-04's "the predictor is area, not layer count" holds
+with its range extended.
+
+The harness validates against gap-04 twice: the box geometry walls where gap-04 said it does, and
+the 20 ms main-thread stall control reads **49.2 fps against gap-04's 49.3**.
+
+### And no frame-rate gate is obtainable in this environment
+
+`PLAN.md` asks M12 to "assert that frame rate holds ≥ 110 fps". It cannot be measured here, and the
+honest thing is to say so rather than print a number:
+
+- **Headless** pins to **60.0 fps** on SwiftShader with `--disable-gpu`. gap-04's whole Aero budget
+  was taken at 120 Hz on a real GPU, and constraint 36 itself notes a 60 Hz panel has twice the
+  per-frame budget. A frame time from here is a number about a software rasteriser wearing the name
+  of a number about Aero.
+- **Headed through CDP** is throttled to **8.9 fps** — Chrome will not paint a window it believes
+  occluded, and `Page.bringToFront` hangs on a window nothing can focus. The flags that keep a
+  background window live get frames but not representative ones.
+
+`bench/m12-governor/probe.py --headed` is where that question lives, and it **refuses to draw a
+conclusion** rather than printing one: every row is labelled with its engine, and the verdict says
+"no row here is a number about Aero" unless it ran headed. The frame-rate half of M12's gate is
+recorded as unmeasurable with its reason, and the measurable half — the accounting, the order, both
+edges, and whether the blur actually went — is what the suite gates on.
+
+### The four proofs, and what each control moved
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the accounting | the kernel's per-window cost equals what the RENDERED strips cover, the page reported its dpr, and the shipped budget is out of reach |
+| 2 | the degrade branch | over the budget glass comes off, from the bottom of the stack in stack order, the top keeps its glass, the total lands under the budget, and the page rendered exactly the set the kernel decided |
+| 3 | it settles, and recovers | the two edges exist and are ordered, re-running over an unchanged desktop changes nothing *and the governor was really re-entered*, and closing windows gives the glass back |
+| 4 | the pixels | a flattened window carries **no** backdrop-filter, and its caption reads as a STEP across a hard seam where a glass one reads as a spread ramp |
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-governor` | 9 | 18 | `PLAN.md`'s own: nothing is ever flattened. Every **measurement** holds |
+| `top-first` | 4 | 23 | degrade from the TOP. Moves the ORDER clauses and nothing else |
+| `stale-costs` | 3 | 24 | admission reads the post-degrade total: the feedback loop, restored |
+
+**`top-first` is the one worth having.** It moves four labels and leaves twenty-three — glass still
+comes off, the total still lands under the budget, both edges still work, a flat caption is still
+there to sample. What changed is *which window pays*, which is the half of constraint 49 that is a
+judgement rather than an arithmetic, and the only half a correct-looking implementation can get
+backwards while every number stays right.
+
+### Proof 4 was unsound twice, and a screenshot is what showed it
+
+**A window's backdrop is the window beneath it.** `winopen` cascades, so each caption sits over the
+*opaque client area* of the window below — and a `backdrop-filter` filters what is behind the
+element. Both sampled bands came back uniform (span 0.86 luma) because they were reading white
+plastic, and the proof failed for a reason that had nothing to do with the governor. The fix is
+staging: two windows only, stacked vertically rather than cascaded, both straddling one seam, with
+bare desktop behind each caption and the budget armed at one window's cost so the bottom is flat and
+the top is glass — by construction rather than by luck. The move is the arrow-key gesture's own
+route, so the kernel learns the geometry exactly as it would from a user.
+
+**And the reference band was sampling the wrong element.** "20 device px above the desk's bottom
+edge" landed below the seam, on the Aero desktop's own gradient, which is uniform — so the
+"the seam is real" clause failed at span 0.0 while the seam was perfectly fine. It is found by
+`elementFromPoint` now: the page asks the browser what is actually there.
+
+### What a second engine found, which is now four milestones running
+
+`bench/m7-win/firefox.py --page m12`. **413 is a dpr-2 constant**, and headless Firefox renders at
+dpr 1 where the same geometry needs 1,651 windows — so an assertion on 413 failed on an engine whose
+governor was fine. The same class of defect M11 shipped and the same lesson: a figure derived from a
+measured ratio survives a second engine, a constant does not. The claim is now a floor — more
+windows than `PROC_CAP` allows one each, so no desktop gets there — and the exact dpr-2 figure is
+asserted in `bench/m12-governor/probe.mjs`, where the ratio is fixed.
+
+### The defect typing it found, which no check could
+
+**The live desktop's governor never fired.** `bootHost` stopped setting the budget when the proofs
+moved to arming one they measure, and nothing re-armed it in `live()` — so the desktop ran at the
+shipped 45 M budget, 413 windows away, while the page's own log told the reader to type
+`winopen -n 4` and watch the bottom windows lose their glass. They did not.
+
+No check could have caught it: the proofs arm their own budget and pass, and the live path has no
+assertions. What caught it was typing the command. `bench/m12-governor/shell.py` is that run, and it
+then found a second one — the budget was armed at "four terminals' worth", a terminal is 560×360
+and `winopen` asks for 420×260, so four of the smaller windows fitted a four-terminal budget and
+five windows still showed no degrade. It is armed relative to what is on screen now.
+
+### What the critic changed, and one of eleven was the governor's own accounting
+
+**The accounting made the input respond to the action.** `governBlur` summed the ring area of the
+windows that still had glass, so flattening one lowered the total, which re-admitted it, which
+raised the total again. That is a genuine feedback loop, and it had two faces:
+
+- **It was not idempotent.** Re-running it over an unchanged desktop could change the flat set.
+- **And it had a stuck state.** Gating re-admission on a restore edge below the budget means a
+  single window whose own cost exceeds that edge can never recover its glass, because `0 + c` is
+  always more than `0.8 × c`. Hit twice — three captions staying flat after four windows closed,
+  then both staged windows flat because neither fitted under the lower edge.
+
+The fix is to sum the **all-glass** cost, which no action changes. The keep-set became a pure
+function of (stack, costs, budget), the governor settles in one pass, and **the hysteresis stopped
+being load-bearing** — with an action-independent input the band between the two edges cannot change
+which windows are flat. Recorded as constraint 269, because the general form is worth having: the
+loop was the defect, not the absence of damping.
+
+**So `--negative no-hysteresis` was replaced.** Against the corrected accounting it broke nothing at
+all, and a control that cannot fail is worse than no control. `--negative stale-costs` restores the
+loop instead and is the defect that is really there: the degrade counter climbs over a desktop
+nobody touched.
+
+**A RAISE NEVER RE-ADMITTED.** The governor ran on create, on the geometry report and on destroy —
+every event that changes the area, which is what constraint 49 asks for — and not on a raise, which
+changes only the order. A window clicked to the front stayed flat while one now beneath it kept its
+glass, which is `--negative top-first`'s own outcome reachable with no control on. Recomputing the
+keep-set from the top of the stack fixes it structurally; the old version walked its own previous
+flags and could not express a swap. Constraint 270.
+
+**And proof 3's "it settles" clause never re-ran the governor.** It nudged a window with
+`Win.moveBy`, which writes the box and calls `apply()` — but the *kernel* learns a box from
+`WinHost.#report`, wired to `pointerup` on the frame and `keyup` on the title bar. No `win-geom`
+was posted, `governBlur` was never called, and the clause asserted that a function nobody ran had
+changed nothing. It dispatches the keyup now, and asserts the page's own geometry counter moved, so
+a run where the keystrokes reach nothing fails instead of passing.
+
+**Seven smaller ones, all real:** `DEVICE_SCALE` again, this time as `noBlurFlat` reading `all()`
+over an empty generator — so a sweep whose blur-off rows both timed out reported the control as
+holding with no frame measured; `stallFired` using `or 999`, so a measured 0.0 fps read as "did not
+fire", which is the one result that row most wants to report; `win-dpr` missing from the pre-boot
+guard, where it would panic the kernel instead of being told what it did wrong; a `bornFlat` toggle
+that could only ever be a no-op, since winids are monotonic and `win-create` precedes the
+`win-blur` that follows it; a flat window losing the active/inactive cue entirely, because
+`is-flat` replaced both the strip brightness and the sheen that carried it; an accounting tolerance
+that scaled with the window count, so one window's cost could be wrong by 48 device px once six
+were open; and a citation of `--negative blur-tiny`, which does not exist.
+
+### What is not done
+
+**THE GOVERNOR DOES NOT FIRE IN NORMAL USE**, and that is a property of M11's geometry rather than
+of this threshold. A realistic ten-window desktop is 1.09 M device px — 2% of the budget. The
+admission controller is correct, armed, and demonstrably working when driven to its branch; it is
+also, on the shipped geometry, a cap for a case nobody reaches. The same is true of
+`SURFACE_BUDGET_PX`, which is why that is the shape it was built in.
+
+**MINIMIZE, SNAP AND PEEK ARE NOT AMONG THE EVENTS IT SEES**, because they do not exist yet.
+Constraint 49 lists "open, maximize, snap, restore, un-minimize, peek"; in this codebase every one
+of those is either a create, a destroy, or the page reporting a box, and the governor hangs off all
+three. M14 adds the gestures, and they arrive as box reports — but **nothing has yet driven a
+minimize through it**, so the claim that the list is covered rests on the shape of the ABI rather
+than on a run.
+
+**THE PASS-COUNT CEILING IS NOT GOVERNED.** The sweep found filtered boxes free to ~208 and costly
+beyond ~800, and nothing accounts them: 200 windows would be 800 passes. It is unreachable for the
+same reason the area budget is, and it is recorded here rather than guarded.
+
+**THE BUDGET IS ONE MACHINE'S.** 45 M off / 36 M on derive from gap-04's 58–63 M wall, measured on
+one 120 Hz panel at dpr 2 with one GPU. An integrated GPU has far less and a 60 Hz panel twice the
+per-frame budget. Nothing adapts the budget to the machine, and doing so would need the frame-rate
+measurement this environment cannot take.
 
 ---
 

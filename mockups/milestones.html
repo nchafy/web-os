@@ -379,18 +379,18 @@ a blurred backdrop:
   neg:'<code>blur(0px)</code>, which keeps the isolation and cuts only the blur — and under it <b>all six of the page\'s own proofs stay green</b>, so one assertion in the whole suite can tell. Four more: <code>backdrop-filter: none</code>, a wrapper at <code>opacity:.99</code>, the caption glow removed, and no seam at all.',
   warn:'A flat backdrop cannot test glass: <code>blur(flat) == flat</code>, so the assertion passes with the blur switched off. <b>And "monotonic" cannot either — a hard step is monotonic</b>, measured, so the plan\'s own stated proof was satisfied by every one of its own controls. Worse, <code>--negative flat-desk</code> caught the viewport-anchored highlight satisfying the SPREAD assertion by itself, over a desktop with nothing to blur.' },
 
- { id:'M12', grp:'Window half (A)', t:'The blur governor', d:'3 d', tag:'the look',
-  lede:'An admission controller over every area-changing event, not a drag hook — and it accounts the border box, not the visible ring. The gate is 52 glass terminals, not 5 maximized windows.',
+ { id:'M12', built:'/www/m12.html', builtWhat:'four proofs, then a desktop with the governor armed at four windows — type `winopen -n 4` and watch the bottom ones lose their glass', grp:'Window half (A)', t:'The blur governor', d:'3 d', tag:'the look',
+  lede:'An admission controller over every area-changing event, not a drag hook — and it accounts the border box, not the visible ring. <b>The gate in this row turned out unusable in both halves.</b> Under M11\'s four-strip ring, 52 terminals are 10% of the budget and the budget is 413 windows away; and no frame rate is measurable here — headless is 60 Hz on SwiftShader, a headed CDP window is throttled to 8.9 fps.',
   screen:{kind:'aero',windows:(()=>{const w=[];for(let i=0;i<9;i++)w.push({cls:'glass',x:12+i*20,y:10+i*12,w:210,h:112,title:'term '+(i+1),body:'',flat:i<4});return w})(),
    taskbar:[{l:'9 windows',on:true}],
    extra:`<pre class="term" style="position:absolute;left:0;bottom:34px;right:0;height:88px;background:rgba(8,18,30,.9)"><i>governor: border-box accounting, degrade by z-order from the bottom</i>
 blurred area   48.2M / 55.0M device px        frame  8.1 ms  (119 fps)
 flattened      <u>4</u> windows (bottom of stack)
 admitted on    open, maximize, snap, restore, un-minimize, peek</pre>`},
-  real:['Border-box area accounting','Admission control on every area-changing event','Degrades by z-order from the bottom','Flat fill below the cap'],
-  proof:'Drive it <b>into its degrade branch</b>: 52 glass terminals at 640×440 = 53.7 M device px. Assert flatten count &gt; 0 <i>and</i> ≥ 110 fps.',
-  neg:'Disable the governor at the same geometry — frame rate must drop below 110 fps.',
-  warn:'A gate sized at five maximized windows passes by construction: five are 18.4 M device px, well under the 58–63 M wall. That 4× error was in the first draft of the plan; constraint 49 records the correction.' },
+  real:['Border-box area accounting, through the ABI\'s own ringArea','Admission on create, on every reported box, and on destroy','Degrades by z-order from the BOTTOM','Hysteresis: 45 M off / 36 M on, and both edges checked','A flat window loses backdrop-filter entirely, not just its radius'],
+  proof:'The accounting against the <b>rendered strips</b>; the degrade order; both edges; and — read out of a screenshot — a flattened caption as a <b>STEP</b> where a glass one is a ramp. Because <code>is-flat</code> in the DOM and a blur that is gone are different claims.',
+  neg:'<code>no-governor</code> — nothing is ever flattened, while <b>every measurement still holds</b> (9 red, 18 intact). Plus <code>top-first</code>, which moves only the ORDER (4 red), and <code>no-hysteresis</code>, which collapses two edges into one (3 red).',
+  warn:'A gate sized at five maximized windows passes by construction — that 4× error is in the plan\'s §9. <b>The corrected 52-window gate then failed the same way</b> against the geometry that shipped: it is box accounting, and the ring is 10× cheaper. Twice is a pattern, and the pattern is sizing a gate from an arithmetic rather than from a run (264).' },
 
  { id:'M13', grp:'Window half (A)', t:'The geometry harness', d:'5 d', tag:'checks',
   lede:'The 23 new geometry checks — the only proof M7 through M12 have. New work rather than a port: webxp\'s are a template, but the Aero DOM differs enough that every selector and expected metric changes.',

@@ -56,6 +56,10 @@ export class WinHost {
     /** winid -> {win: Win, term: Terminal, meta}. */
     this.frames = new Map();
     this.cell = measureCell(this.into);
+    /* M12. THE DEVICE-PIXEL RATIO, REPORTED ONCE. The kernel accounts blur in device px and has no
+     * way to learn the ratio — it is a property of the display and the kernel is a worker. Same
+     * division as the terminal cell above: the page measures what only the page can see. */
+    this.post({ t: "win-dpr", dpr: window.devicePixelRatio || 1 });
     /** Every win-create the host saw, in order, so a check can assert on what the kernel asked for
      *  rather than on what survived. */
     this.created = [];
@@ -71,7 +75,9 @@ export class WinHost {
       stacks: 0, raiseAsks: 0, blocked: 0,
       // M10: drags begun, pointer reports sent, releases sent, target changes rendered, and
       // clipboard publishes seen.
-      drags: 0, dragAts: 0, dragDrops: 0, dragTargets: 0, copies: 0 };
+      drags: 0, dragAts: 0, dragDrops: 0, dragTargets: 0, copies: 0,
+      // M12: how many times the governor changed the flat set, and how many frames are flat now.
+      blurs: 0, flat: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -94,6 +100,12 @@ export class WinHost {
     /** Which windows the KERNEL says are blocked, as of its last order. The page computes nothing
      *  here; it renders a set it was handed, for the reason it renders an order it was handed. */
     this.blockedSet = new Set();
+    /** M12. Which windows the GOVERNOR took the glass from, as the kernel decided it, plus the
+     *  arithmetic it decided on. RENDERED AND NOT COMPUTED, for `blockedSet`'s reason: only the
+     *  kernel owns the z-order it degrades by, so a page choosing for itself would be making the
+     *  policy it is supposed to be drawing (constraint 226). */
+    this.flatSet = new Set();
+    this.lastBlur = null;
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -113,6 +125,7 @@ export class WinHost {
     if (m.t === "win-health") { this.#health(m); return true; }
     if (m.t === "win-surface") { this.#surface(m); return true; }
     if (m.t === "win-draw") { this.#draw(m); return true; }
+    if (m.t === "win-blur") { this.#blur(m); return true; }
     if (m.t === "win-stack") { this.#stack(m); return true; }
     if (m.t === "win-blocked") { this.#blocked(m); return true; }
     if (m.t === "win-modal") { this.#modal(m); return true; }
@@ -185,6 +198,15 @@ export class WinHost {
       id, win, term, surface: null, pid: m.pid | 0, owner: m.owner | 0, health: [],
     };
     this.frames.set(id, entry);
+    /* NOT FLAT UNTIL THE KERNEL SAYS SO, and the flag is WRITTEN rather than left absent: "this
+     * window is on glass" and "nobody has said" look identical in the DOM otherwise, which is the
+     * reason `src/wm/window.mjs` builds its hidden buttons rather than omitting them.
+     *
+     * A frame cannot be born INTO the flat set. Winids are monotonic and the kernel posts
+     * `win-create` before the `win-blur` that `governBlur` produces, so this id is never in the
+     * set that is current here — an earlier version toggled the class against that stale set,
+     * which could only ever be a no-op. The `win-blur` arriving next is what degrades it. */
+    win.el.dataset.flat = "0";
     this.created.push({ win: id, pid: m.pid | 0, owner: m.owner | 0, title: m.title });
     this.stats.creates += 1;
     // The box the CLAMP settled on, reported straight back: the kernel asked for a geometry and
@@ -480,6 +502,30 @@ export class WinHost {
     }
   }
 
+  /**
+   * M12. The governor took glass from some windows, or gave it back.
+   *
+   * THE WHOLE SET AND NOT A DELTA, which is why this assigns rather than toggles: a page applying
+   * a delta can come to disagree with the kernel about the current state and nothing would say so
+   * — the same reason `win-stack` carries the whole order (constraint 226).
+   */
+  #blur(m) {
+    this.flatSet = new Set((Array.isArray(m.flat) ? m.flat : []).map((id) => id | 0));
+    this.lastBlur = {
+      blurPx: m.blurPx | 0, budget: m.budget | 0, restore: m.restore | 0,
+      why: String(m.why || ""), flat: [...this.flatSet],
+    };
+    this.stats.blurs += 1;
+    this.stats.flat = this.flatSet.size;
+    for (const [id, entry] of this.frames) {
+      const on = this.flatSet.has(id);
+      // The CLASS is the look and the DATASET is the fact, which is `setBlocked`'s division: a
+      // check reads the flag and a reader sees the fill.
+      entry.win.el.classList.toggle("is-flat", on);
+      entry.win.el.dataset.flat = on ? "1" : "0";
+    }
+  }
+
   /** A raise the kernel refused, with the window that refused it. FLASHED AND NOT SWALLOWED: a
    *  click that does nothing reads as a broken window, and the modal is where the user has to go. */
   #blocked(m) {
@@ -665,6 +711,11 @@ export class WinHost {
         .filter(([, e]) => e.win.el.dataset.dropTarget === "1").map(([id]) => id),
       lastDrag: this.lastDrag,
       clipboard: this.clipboard,
+      // M12. The kernel's flat set, and what the FRAMES now carry — two readings of one fact on
+      // purpose, `frameBlocked`'s reason: the second is what a reader actually sees.
+      flatSet: [...this.flatSet],
+      frameFlat: [...this.frames].filter(([, e]) => e.win.el.dataset.flat === "1").map(([id]) => id),
+      lastBlur: this.lastBlur,
       dragImage: this.dragEl ? !this.dragEl.hidden : false,
       live: [...this.frames.keys()],
       created: this.created,

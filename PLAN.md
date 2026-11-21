@@ -315,7 +315,7 @@ device-file write cannot transfer an `OffscreenCanvas`.
 | M9 | **Owner, modality, close-request.** `owner:winid`, `modal ∈ {none,window,app,system}`, and a `WIN_CLOSE_REQUEST` the X button posts rather than acts on (constraint 44). | 3 | click the owner's caption behind a modal — it must not raise; close with unsaved state — the app must get to refuse | remove the owner chain; the dialog must fall behind and the check must fail |
 | M10 | **Typed clipboard and drag-and-drop**, kernel-owned. `dataobj_create(formats[])`, `dataobj_set(did,format,bytes)`, `dataobj_get(did,format)`, seeded with text, a file list and an image (constraint 45). **No candidate design had either**, and they are the two gestures that make a set of windows read as one system. **Built as FIVE calls, not three** — `offer` and `open` are what make the object reach another process at all, and the two untyped `clipboard_*` calls were deleted rather than kept beside them (`MILESTONES.md` M10, constraint 240). | 4 | drag a PNG from Explorer into an image view and assert the bytes arrived under the image format; copy an image and paste it | offer only the text format; the image paste must fail cleanly, not silently paste a path |
 | M11 | **Aero glass, frame-only.** Glass on caption and border ring, opaque client area — both more faithful to Win7, whose own rule allows glass only in "small regions touching the window frame without text", and ~11× cheaper. **Two things in this row were wrong and were corrected by measurement; see below.** The ring must be FOUR separately filtered strips, because `backdrop-filter` filters the border box and one glass node with an opaque child saves nothing (255, D35). The reskin list names four webxp files that do not exist in this repository. | 5 | sample a 16 px band across a black/white backdrop seam behind the caption and assert the transition is **SPREAD** — a hard step is monotonic, measured, so monotonicity is satisfied by every one of this row's own controls (256) | `blur(0px)`, **not** `backdrop-filter: none`: removing the property also removes the isolated group the additive layers blend into, so it moves the pixel for a reason unrelated to blurring (257). Both are registered; `none` moves seven expectations where `blur(0px)` moves one |
-| M12 | **The blur governor** as an admission controller over every area-changing event — open, maximize, snap, restore, un-minimize, peek — degrading by z-order from the bottom, accounting the **border box** (constraint 49). | 3 | **drive it into its degrade branch**: open 52 glass terminals at 640×440 (53.7 M device px), assert the flatten count is non-zero and that frame rate holds ≥110 fps | disable the governor at the same geometry; frame rate must drop below 110 fps |
+| M12 | **The blur governor** as an admission controller over every area-changing event — open, maximize, snap, restore, un-minimize, peek — degrading by z-order from the bottom, accounting the **border box** (constraint 49). **Both halves of this row's gate turned out unusable; see below.** | 3 | the flatten count, the degrade ORDER, both hysteresis edges, and that the blur really left the PIXELS. **Not** 52 terminals — under the ring geometry that is 10% of the budget (264) — and **not** a frame rate, which this environment cannot measure (267) | disable the governor at the same geometry: nothing is flattened while every measurement still holds. Plus `top-first`, which moves only the ORDER, and `no-hysteresis` |
 | M13 | **The geometry harness** — the 23 new geometry checks. This is the only proof M7–M12 have, and it is new work, not a port (§3). | 5 | `--prove-failure` inverts every one and the run must report failures | — |
 | M14 | **Aero Snap, Superbar, jump lists, tray.** Snap arms at 1 px of pointer-to-edge, releases at 20 px of drag-out, 50 px side-move to restore a top-maximized window. Both edges of every threshold get checked, because a threshold on a continuous input without hysteresis oscillates. | 6 | drag to 1 px and assert the snap; drag out 19 px and assert it holds; 21 px and assert it releases | remove the hysteresis band; the 19 px case must start failing |
 | — | **Icons and fonts.** Win7 icons and glass bitmaps **must be redrawn** — shipping Microsoft assets is not an option. Segoe UI is not redistributable, Selawik is **not** documented as metric-compatible, so every layout is measured against both (constraint 37). | 4 | contrast and fit re-checked on every surface the glass sits under | — |
@@ -338,6 +338,26 @@ measured the geometry and the control, for M0's reason: the riskiest assumption 
    controls, which is constraint 39's defect. And `backdrop-filter: none` was already measured in
    `docs/designs/REVIEW-FINDINGS.md` §8 to move the sampled pixel by (31,46,71) for reasons
    unrelated to blurring. Constraints 256 and 257, and **D36**.
+
+**What M12 corrected in its own row.** Both halves of the gate as written were unusable, and
+`bench/m12-governor/` measured that before the governor was built.
+
+1. **"52 glass terminals at 640×440 (53.7 M device px)" is box accounting.** Under M11's four-strip
+   ring a 640×440 window filters 109,040 device px, so 52 of them are 5.7 M — 10% of the 45 M
+   budget — and reaching it needs **413 windows** against `WIN_CAP` 32 per process. A gate needing
+   413 windows cannot fail, which is the same defect this gate was corrected for once before (§9
+   item 1: the 4× dpr error). Constraint 264 records it; the finding is now asserted — at the
+   shipped budget the desktop is entirely glass — and the degrade branch is driven at a budget the
+   page measured.
+2. **"frame rate holds ≥ 110 fps" cannot be measured here.** Headless is 60 Hz on SwiftShader;
+   a headed CDP window is throttled to 8.9 fps. Constraint 267 and **D38**:
+   `bench/m12-governor/probe.py --headed` takes the measurement when a human runs it and refuses to
+   conclude otherwise, and the suite gates on what it can actually read.
+
+**And M11 left M12 one thing to measure first, which is now measured.** At a fixed filtered area,
+52 → 208 filtered boxes costs nothing (29.3, 30.0, 28.0 fps) and 832 → 1664 halves it. Four strips
+per window is free at every window count the caps allow, so gap-04's "the predictor is area" stands
+with its range extended (266). The original note follows.
 
 **And M11 leaves M12 one thing to measure first.** Four strips is four offscreen buffers and four
 filter passes per window instead of one. gap-04 found *area* to be the predictor and layer count

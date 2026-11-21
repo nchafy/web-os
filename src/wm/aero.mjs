@@ -28,6 +28,8 @@
 // count as free up to 60 layers; four strips at 52 windows is 208, which is past anything measured.
 // M12 owns that, and `MILESTONES.md` records it as owed rather than assumed here.
 
+import { WIN_CAP_H, WIN_INSET, blurRingArea, blurBoxArea } from "../abi.mjs";
+
 /* ---- The recipe ---------------------------------------------------------------------------
  *
  * Aero is an ADDITIVE composite, not a translucent panel (constraint 34): blurred RGB scaled by
@@ -94,10 +96,14 @@ export const ADDITIVE_ALPHA = AFTERGLOW_BALANCE + COLOR_BALANCE;
  * https://github.com/khang-nd/7.css/blob/7d3958e707ba97a0718638c273ffeef27ebed73c/gui/_window.scss
  */
 
-/** The caption's height, and the first term of the ring area. */
-export const CAP_H = 29;
-/** The frame inset: left, right and bottom. 7.css's 6 px. */
-export const INSET = 6;
+/* THE CAPTION HEIGHT AND THE INSET COME FROM `src/abi.mjs` NOW, and they moved there in M12 for
+ * the reason everything in that file is there: they became a fact both sides must agree on. The
+ * blur governor is the kernel's — only the kernel owns the z-order it degrades by and sees every
+ * area-changing call — and constraint 49 requires it to account each glass element's BORDER BOX.
+ * So the ring's geometry is no longer the skin's private business. Re-exported under the names
+ * this stylesheet has always used, because every rule below reads them. */
+export const CAP_H = WIN_CAP_H;
+export const INSET = WIN_INSET;
 /** 7.css's window radius, on the top corners only — a Win7 frame's bottom corners are square. */
 export const RADIUS = 6;
 /** Caption buttons: minimize and maximize at 29x19, close wider at 48x19. */
@@ -135,20 +141,11 @@ export const UI_FONT =
  * second copy is how a governor comes to believe a geometry the stylesheet does not render, which
  * is the ~17x under-read constraint 49 exists to forbid.
  */
-export function ringArea(w, h) {
-  const width = Math.max(0, w);
-  const height = Math.max(0, h);
-  const cap = width * Math.min(CAP_H, height);
-  const sides = 2 * INSET * Math.max(0, height - CAP_H);
-  const bottom = Math.max(0, width - 2 * INSET) * Math.min(INSET, Math.max(0, height - CAP_H));
-  return cap + sides + bottom;
-}
+export const ringArea = blurRingArea;
 
 /** The same window as ONE glass node, for the comparison D13 rests on. Kept beside `ringArea` so
  *  the two are read together and the ratio is never quoted without both. */
-export function boxArea(w, h) {
-  return Math.max(0, w) * Math.max(0, h);
-}
+export const boxArea = blurBoxArea;
 
 const additive = (alpha) =>
   `rgba(${COLORIZATION.r}, ${COLORIZATION.g}, ${COLORIZATION.b}, ${alpha.toFixed(3)})`;
@@ -397,6 +394,31 @@ export function styleSheet() {
 .aero-desktop .window[data-drop-target="1"] .window-body {
   box-shadow: inset 0 0 0 2px rgba(120,205,255,.95);
 }
+/* ---- M12: a window the governor took the glass from ---------------------------------- */
+/* THE FILTER GOES AND A FLAT FILL TAKES ITS PLACE. The whole point is to stop paying for the blur,
+ * so this must REMOVE 'backdrop-filter' rather than change it: 'blur(0px)' still costs an offscreen
+ * buffer and a filter pass, which is the cost being shed.
+ *
+ * The fill is the colorization colour at the same additive weight the glass carries, so a degraded
+ * window reads as the same window rather than as a different theme — Windows 7's own basic theme
+ * does the same thing with the same colour. */
+.aero-desktop .window.is-flat .aero-strip {
+  backdrop-filter: none;
+  background: ${additive(ADDITIVE_ALPHA)};
+}
+/* And its additive layers go with it: a 'plus-lighter' layer over a flat fill is a second
+ * compositing pass bought for nothing once there is no backdrop showing through. */
+.aero-desktop .window.is-flat .aero-sheen,
+.aero-desktop .window.is-flat .aero-light { display: none }
+/* A FLAT WINDOW STILL SHOWS WHETHER IT HAS THE KEYBOARD. The inactive look was carried by the
+ * strip's brightness and the sheen, and this rule removes both — so a degraded unfocused caption
+ * was pixel-identical to a degraded focused one, and a desktop under the governor lost the one cue
+ * that says which window you are typing into. The fill carries it instead, on the same 0.4 scale
+ * the glass uses. */
+.aero-desktop .window.is-flat:not(:focus-within) .aero-strip {
+  background: ${additive(ADDITIVE_ALPHA * INACTIVE_COLOR_SCALE)};
+}
+
 .aero-desktop .drag-image {
   font: ${FONT_PX}px/1.3 ${UI_FONT};
   padding: 3px 7px; border-radius: 3px;

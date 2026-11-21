@@ -20,6 +20,7 @@ import {
   EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, ST_RETURN,
   WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER, WEV_MAX,
   WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES,
+  BLUR_OFF_AT, BLUR_ON_AT, blurRingArea,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
@@ -43,6 +44,31 @@ let cascade = true;
 
 export function setCascade(on) {
   cascade = !!on;
+}
+
+/**
+ * M12's three negative controls, boot-gated on bench=1 (`src/kernel/kernel.mjs`). Module-level and
+ * not per-manager, which is `cascade`'s shape above and for its reason: the headline path reads a
+ * plain boolean either way and carries no control branch of its own.
+ *
+ *   off          the governor never flattens anything. `PLAN.md` §5's own control for M12 —
+ *                "disable the governor at the same geometry".
+ *   topFirst     degrade from the TOP of the stack instead of the bottom. The plausible
+ *                implementation, and the one that takes the glass from the window being used.
+ *   staleCosts   admission reads the CURRENT blurred total rather than the all-glass one, which is
+ *                the first version of this governor and restores the feedback loop it was built to
+ *                remove: flattening lowers the input, the next run re-admits, the one after
+ *                flattens again. It replaced a `noHysteresis` control that broke nothing once the
+ *                accounting was corrected — see `governBlur`.
+ */
+let governor = { off: false, topFirst: false, staleCosts: false };
+
+export function setGovernor(opts) {
+  governor = {
+    off: opts.off === true,
+    topFirst: opts.topFirst === true,
+    staleCosts: opts.staleCosts === true,
+  };
 }
 
 /** M8's NEGATIVE CONTROL, boot-gated on bench=1: `win_draw` accepts its batch, counts it, and
@@ -110,6 +136,11 @@ export class Window {
      *  ordering correction in the window half). The authority that comes with it is stated at
      *  `WinMgr.destroyTree`. */
     this.owner = spec.owner | 0;
+    /** M12. Whether the GOVERNOR has taken this window's glass away. Written only by
+     *  `WinMgr.governBlur`, and read by nothing else here: the page is told the whole flat set and
+     *  draws a cheap fill for it. Not a property a process can set — a program that could ask for
+     *  glass would be asking to be exempt from a budget. */
+    this.flat = false;
     /** Child winids, in creation order. The destroy cascade walks this. */
     this.children = [];
     /**
@@ -451,6 +482,18 @@ export class WinMgr {
      * press a modal refused never reached a program, so it cannot be the gesture a program claims.
      */
     this.pointer = { win: 0, down: false };
+    /** M12. The page's device-pixel ratio, SQUARED, because a blur cost is an area. Reported by
+     *  the page at boot — it is the side with the display — and 4 until it says otherwise, which
+     *  is dpr 2, the ratio every figure in `docs/CONSTRAINTS.md` was measured at. A kernel that
+     *  assumed 1 would under-read every budget by 4×. */
+    this.dprSq = 4;
+    /** A lowered blur budget, for a bench boot only. 0 means the real one. `blurBudget()` takes
+     *  the MINIMUM of this and `BLUR_OFF_AT`, so this hook can only ever tighten the governor —
+     *  a hook that could loosen it would be a way to disable the thing it exists to exercise. */
+    this.blurBudgetPx = 0;
+    /** Whether the governor is currently holding glass back. It is the hysteresis's state: the
+     *  admission limit is the budget while this is false and the RESTORE edge while it is true. */
+    this.blurDegraded = false;
     this.stats = {
       created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0,
       // M10: pointer presses recorded, and drag-event records the PAGE tried to feed (see `feed`).
@@ -460,6 +503,10 @@ export class WinMgr {
       // M8's surface accounting. `surfacePx` is what is OUTSTANDING; the refusals are counted
       // apart because a budget nobody can see refuse anything is a budget nobody believes.
       surfaces: 0, surfacePx: 0, refusedSurface: 0, batches: 0, ops: 0,
+      // M12's governor. `blurPx` is what is OUTSTANDING after degrading, `blurPxIfAllGlass` is
+      // what the same desktop would cost with every window on glass — two numbers, because the
+      // difference between them is the only evidence the governor did anything.
+      blurPx: 0, blurPxIfAllGlass: 0, flattened: 0, blurDegrades: 0,
     };
   }
 
@@ -621,6 +668,11 @@ export class WinMgr {
     this.stack.push(win.id, ...riders.map((w) => w.id));
     this.stats.raises += 1;
     this.postStack();
+    /* M12: AND RE-ADMIT, because a raise changes the ORDER and the flat set follows the order.
+     * Without this a window the user had just clicked to the top stayed flat while a window now
+     * below it kept its glass — `governBlur` recomputes the keep-set from the top of the stack, so
+     * the correction needs no special case, only this call. */
+    this.governBlur("raise");
     return 0;
   }
 
@@ -708,6 +760,165 @@ export class WinMgr {
     win.surface = { w: w | 0, h: h | 0 };
     K.post({ t: "win-surface", win: win.id, w: w | 0, h: h | 0 });
     return 0;
+  }
+
+  /* ---- M12: the blur governor ---------------------------------------------------------------
+   *
+   * An ADMISSION CONTROLLER over total blurred area, not a drag hook (constraint 49). It runs on
+   * every event that can change the area — a window opening, the page reporting a new box after a
+   * clamp or a resize, and a window being destroyed — and when the total crosses `BLUR_OFF_AT` it
+   * takes glass away from the BOTTOM OF THE STACK upward until the total is under the budget.
+   *
+   * WHY THE KERNEL AND NOT THE PAGE. Only the kernel owns the z-order (constraint 226) and only
+   * the kernel sees every area-changing call; a page that chose for itself would be deciding which
+   * window is cheap enough to keep, which is a policy, and the page renders policy rather than
+   * making it. The page is told WHICH windows are flat and draws a cheap fill for them.
+   *
+   * WHY IT DOES NOT FIRE IN PRACTICE, measured and stated here rather than discovered. A 640×440
+   * window's four strips filter 109,040 device px at dpr 2, so `BLUR_OFF_AT` is 413 windows away —
+   * past anything `WIN_CAP` × `PROC_CAP` makes reachable. That is a consequence of M11's geometry,
+   * not of this threshold: the same window as ONE glass node filters 1.13 M device px and the
+   * budget binds at 40. `bench/m12-governor/probe.py` carries the sweep, and `scripts/check.py`
+   * drives the degrade branch through `cfg.blurBudgetPx` — the same bench-boot-only hook M3 uses
+   * to build a 64 KiB trace ring, and for the same reason: a refusal path nothing can reach is a
+   * refusal path nobody has seen work.
+   */
+
+  /** One window's blurred device pixels, from the box the page reported. `blurRingArea` is the
+   *  ONE definition and it lives in `src/abi.mjs` because this file and the skin are the two
+   *  sides that must agree on it (constraint 255). */
+  blurCost(win) {
+    if (!win || win.destroyed || !win.attached) return 0;
+    /* A SURFACED WINDOW COSTS THE SAME, which is why there is no branch on it. The surface
+     * replaces the client area, and the client area was already opaque and already outside the
+     * ring — so the four strips are unchanged. Charging zero for one would let a desktop full of
+     * `paint` windows cross the wall uncounted. */
+    return blurRingArea(win.box.w, win.box.h) * this.dprSq;
+  }
+
+  /** The budget in force. A bench boot may lower it; nothing may raise it. */
+  blurBudget() {
+    return this.blurBudgetPx > 0 ? Math.min(this.blurBudgetPx, BLUR_OFF_AT) : BLUR_OFF_AT;
+  }
+
+  /** The restore edge, kept in the same proportion to the budget as `BLUR_ON_AT` is to
+   *  `BLUR_OFF_AT` — so a lowered budget keeps its hysteresis instead of collapsing to one edge,
+   *  which is what a control that removed the hysteresis would look like by accident. */
+  blurRestore() {
+    return Math.round(this.blurBudget() * (BLUR_ON_AT / BLUR_OFF_AT));
+  }
+
+  /**
+   * Re-run admission. Returns the number of windows that are flat afterwards.
+   *
+   * THE INPUT IS THE ALL-GLASS COST, AND THAT IS THE WHOLE DESIGN. Every window's ring area is
+   * summed whether it is currently flat or not, so **the number this governor decides on does not
+   * respond to what it does.** Two consequences, and both were defects before:
+   *
+   *   - IT IS IDEMPOTENT. The first version summed only the non-flat windows, so flattening a
+   *     window lowered the total, which re-admitted it, which raised the total again — a genuine
+   *     feedback loop, and the reason hysteresis looked necessary. With an action-independent
+   *     input there is no loop to damp.
+   *   - AND THERE IS NO STUCK STATE. Gating re-admission on a restore edge below the budget means
+   *     a single window whose own cost exceeds that edge can never get its glass back: `0 + c`
+   *     is always greater than `0.8 * c`. Hit at a real prompt — four windows closed and three
+   *     captions stayed flat — and then hit again from the other side, with both staged windows
+   *     flat because neither fitted under the lower edge.
+   *
+   * SO THE HYSTERESIS IS NOT LOAD-BEARING HERE, and saying so is better than keeping a mechanism
+   * that cannot change an outcome. `BLUR_ON_AT` still decides WHETHER the governor is in its
+   * degraded state, which is what `blurDegraded` reports and what a reader sees — but since the
+   * keep-set is computed against the budget either way, the band between the two edges never
+   * changes which windows are flat. **It becomes load-bearing the moment a successor drives this
+   * from a MEASURED frame cost**, because flattening does reduce that, and the loop returns. That
+   * measurement is what this environment cannot take (constraint 267), which is exactly why the
+   * model-based input is what shipped.
+   *
+   * DEGRADES FROM THE BOTTOM, by recomputing the keep-set from the TOP of the stack every time and
+   * stopping at the first window that does not fit. The keep-set is a top suffix and the flat set a
+   * bottom prefix by construction — which is what constraint 49's "degrade by z-order from the
+   * bottom" means, and what makes a RAISE do the right thing with no special case. The first
+   * version walked the existing flags instead and could not swap a raised window with the one
+   * below it, so a window the user had just clicked to the top stayed flat.
+   */
+  governBlur(why = "") {
+    /* THE GOVERNOR OFF. Everything else still runs — the accounting below is skipped with it, so
+     * `blurPx` goes stale, which is why the control's declared set includes the accounting
+     * clauses and not only the degrade ones. */
+    if (governor.off) {
+      this.stats.blurPxIfAllGlass = this.live()
+        .reduce((s, w) => s + this.blurCost(w), 0);
+      this.stats.blurPx = this.stats.blurPxIfAllGlass;
+      return 0;
+    }
+    const budget = this.blurBudget();
+    const restore = this.blurRestore();
+    const live = this.live();
+    const cost = new Map(live.map((w) => [w.id, this.blurCost(w)]));
+    /** The ALL-GLASS cost: every live window, flat or not. See the note above — this is the input,
+     *  and it is independent of what the governor did last time. */
+    const full = live.reduce((s2, w) => s2 + (cost.get(w.id) || 0), 0);
+    const before = live.filter((w) => w.flat).map((w) => w.id);
+
+    /** The windows that fit under `limit`, taken from the TOP of the stack and stopping at the
+     *  first that does not — so the result is a top suffix. `topFirst` takes them from the bottom
+     *  instead, which is the control: it still fits the budget and still flattens, and what moves
+     *  is which window pays.
+     *
+     *  STALE COSTS are the other control: summing only the non-flat windows restores the feedback
+     *  loop this design removes. */
+    const fit = (limit) => {
+      const keep = new Set();
+      const order = governor.topFirst ? this.stack : [...this.stack].reverse();
+      let run = 0;
+      for (const id of order) {
+        const win = this.get(id);
+        if (!win || win.destroyed || !win.attached) continue;
+        const c = cost.get(id) || 0;
+        if (run + c > limit) break;
+        run += c;
+        keep.add(id);
+      }
+      return keep;
+    };
+
+    /* The degraded STATE carries the hysteresis: it takes the budget to enter and the restore edge
+     * to leave. The keep-set is computed against the budget either way (see the note above), so
+     * this is what a reader is told rather than what decides the pixels. */
+    /* THE CONTROL IS APPLIED TO THE INPUT, which is where the defect was. `current` sums only the
+     * windows that still have glass, so flattening lowers it — and the governor then re-admits
+     * everything, which raises it again. `blurDegrades` climbs on every run over an unchanged
+     * desktop, which is what oscillation looks like from outside. */
+    const current = live.reduce((s2, w) => s2 + (w.flat ? 0 : cost.get(w.id) || 0), 0);
+    const input = governor.staleCosts ? current : full;
+    this.blurDegraded = this.blurDegraded ? input > restore : input > budget;
+    const keep = input > budget ? fit(budget) : new Set(live.map((w) => w.id));
+    for (const win of live) {
+      const flat = !keep.has(win.id);
+      if (flat && !win.flat) this.stats.flattened += 1;
+      win.flat = flat;
+    }
+
+    const after = this.live().filter((w) => w.flat).map((w) => w.id);
+    this.stats.blurPx = live.reduce((s2, w) => s2 + (w.flat ? 0 : cost.get(w.id) || 0), 0);
+    this.stats.blurPxIfAllGlass = full;
+    const changed = before.length !== after.length
+      || before.some((id, at) => id !== after[at]);
+    if (changed) {
+      this.stats.blurDegrades += 1;
+      /* THE PAGE IS TOLD WHICH, and the whole set rather than a delta — the same reason the whole
+       * stack is posted rather than a "raise this one" (constraint 226): a page applying a delta
+       * can disagree with the kernel about the current state and nothing would say so. */
+      K.post({
+        t: "win-blur",
+        flat: after,
+        blurPx: this.stats.blurPx,
+        budget,
+        restore,
+        why: String(why),
+      });
+    }
+    return after.length;
   }
 
   /** Release a window's surface area back to the budget. Called from `destroy`, which is where
@@ -800,6 +1011,10 @@ export class WinMgr {
       x: win.box.x, y: win.box.y, w: win.box.w, h: win.box.h,
     });
     this.postStack();
+    // M12: OPENING A WINDOW IS AN AREA-CHANGING EVENT, which constraint 49 lists first. After the
+    // stack, because the governor degrades BY the stack and a window not yet in it cannot be
+    // ordered.
+    this.governBlur("create");
     return win;
   }
 
@@ -851,6 +1066,10 @@ export class WinMgr {
     if (ids.length > 1) this.stats.cascaded += ids.length - 1;
     K.post({ t: "win-destroy", ids });
     this.postStack();
+    // M12: AND CLOSING ONE GIVES THE AREA BACK, so a desktop that came down under the restore
+    // edge gets its glass again. Without this a single busy moment would leave every window flat
+    // for the rest of the session — the failure a governor with no restore path has.
+    this.governBlur("destroy");
     // AND DROP WHAT NOBODY CAN REACH, here rather than on a timer: a destroyed window whose last
     // description has already gone is a row with no reader, and `sample()` walks every row on
     // every heartbeat (constraint 18). `src/kernel/files.mjs`'s `F_WIN.close` sweeps too, which
@@ -957,6 +1176,17 @@ export class WinMgr {
       live: this.live().length,
       rows: this.byId.size,
       nextId: this.nextId,
+      // M12. The governor's whole state, because a budget nobody can read is a budget nobody
+      // believes — the same reason `refusedSurface` is counted apart from the other refusals.
+      blur: {
+        budget: this.blurBudget(),
+        restore: this.blurRestore(),
+        dprSq: this.dprSq,
+        flat: this.live().filter((w) => w.flat).map((w) => w.id),
+        // Per-window cost, so a check can assert the accounting rather than only its total.
+        cost: Object.fromEntries(this.live().map((w) => [w.id, this.blurCost(w)])),
+        lowered: this.blurBudgetPx > 0,
+      },
     };
   }
 }

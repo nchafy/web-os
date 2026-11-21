@@ -1,0 +1,659 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M12 — the blur governor</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's page does it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M11's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every device rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:170px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:470px; margin:8px; overflow:hidden }
+/* The same hard seam M11 samples across. A flat backdrop makes `blur(flat) == flat`, so the
+   "a flat window really stopped blurring" clause could not fail over one (constraint 50). */
+#seam { position:absolute; inset:0;
+        background:linear-gradient(to right, #000 0 50%, #fff 50% 100%) }
+#seam[hidden] { display:none }
+</style>
+</head>
+<body>
+<pre id="log">M12 starting…</pre>
+<div id="desktop"><div id="seam"></div></div>
+<script>
+  globalThis.M12 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M12's page harness: THE BLUR GOVERNOR.
+ *
+ *   PROOF 1  the accounting is the ABI's own formula, per window and in total, and the kernel's
+ *            numbers are what the RENDERED strips cost
+ *   PROOF 2  over the budget, glass comes off — FROM THE BOTTOM OF THE STACK — and the total
+ *            lands back under it
+ *   PROOF 3  both edges of the hysteresis: it does not oscillate when nothing changes, and the
+ *            glass comes BACK when the desktop shrinks
+ *   PROOF 4  a flattened window really stopped blurring, read out of the composited pixels across
+ *            a hard seam — because `is-flat` in the DOM and a blur that is gone are different
+ *            claims, and only one of them is the product
+ *
+ * WHY THE BUDGET IS LOWERED HERE. Under the four-strip ring M11 shipped, a 640×440 window filters
+ * 109,040 device px, so `BLUR_OFF_AT` is 413 windows away and `WIN_CAP` is 32 per process. The real
+ * threshold is unreachable from a page — which is the MILESTONE'S FINDING, not a problem with the
+ * check — so the degrade branch is driven through `cfg.blurBudgetPx`, the same bench-boot-only hook
+ * M3 uses to build a 64 KiB trace ring. `bench/m12-governor/probe.mjs` asserts the real numbers
+ * under node, where 500 windows cost nothing.
+ *
+ * AND THE REAL THRESHOLD IS ASSERTED TOO, as proof 1's last clause: at the shipped budget this
+ * desktop is entirely glass. That clause is the finding stated as an assertion rather than as
+ * prose. It has no negative control of its own and does not need one: the clause is about an
+ * arithmetic over the shipped constants, and `bench/m12-governor/probe.mjs` is where those are
+ * asserted at a fixed device-pixel ratio.
+ */
+import { WinHost } from '/src/wm/winhost.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import { BLUR_OFF_AT, BLUR_ON_AT, blurRingArea } from '/src/abi.mjs'
+import {
+  bootKernel, spawnProgram, ask, until, sleep,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const seam = document.getElementById('seam')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** How many 640×440 windows the lowered budget admits. Four, so there is room for a desktop that
+ *  fits and a desktop that does not without opening thirty windows. */
+const ADMITS = 4
+
+const CFG = {
+  /** The governor off entirely: nothing is ever flattened. `PLAN.md` §5's own control for M12 —
+   *  "disable the governor at the same geometry". */
+  noGovernor: params.get('no_governor') === '1',
+  /** Degrade from the TOP instead of the bottom. The plausible implementation, and the one that
+   *  takes the glass from the window the user is looking at. */
+  topFirst: params.get('top_first') === '1',
+  /** The admission input becomes the CURRENT blurred total rather than the all-glass one: the
+   *  first version of this governor, and the feedback loop it was built to remove. */
+  staleCosts: params.get('stale_costs') === '1',
+  liveOnly: params.get('live') === '1',
+}
+globalThis.M12.config = CFG
+
+const WINOPEN = '/src/bin/winopen.mjs'
+const TERM = '/src/bin/term.mjs'
+
+globalThis.M12.proofs = { account: null, degrade: null, hysteresis: null, pixels: null }
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M12.state = 'aborted'
+  globalThis.M12.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no governor.'
+  out.className = 'bad'
+  say(globalThis.M12.why)
+} else {
+  main().catch((e) => {
+    globalThis.M12.state = 'error'
+    globalThis.M12.why = String((e && e.stack) || e)
+    say(globalThis.M12.why)
+  })
+}
+
+/** A kernel with a window host and the Aero skin. The budget is lowered at BOOT, because the
+ *  governor runs on the first `create` and a budget set afterwards would miss it. */
+async function bootHost (extra = {}) {
+  const k = await bootKernel({
+    label: 'm12', bench: 1,
+    noGovernor: CFG.noGovernor ? 1 : 0,
+    blurTopFirst: CFG.topFirst ? 1 : 0,
+    blurStaleCosts: CFG.staleCosts ? 1 : 0,
+    ...extra,
+  }, globalThis.M12, say)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  return { k, host }
+}
+
+const winState = async (k) => (await ask(k, 'win-state'))
+
+/** Open `n` windows of one size, through `winopen`, and wait for the frames. Returns the pid row. */
+async function openWindows (k, host, n, ceiling = 120000) {
+  const have = host.frames.size
+  const row = await spawnProgram(k, WINOPEN,
+    ['winopen', '-n', String(n), '-c', String(ceiling)])
+  await until(() => host.frames.size >= have + n, 15000)
+  return row
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: the accounting, against the ABI's own formula — and against the RENDERED strips.
+
+   Two comparisons and not one. The kernel's per-window cost must equal `blurRingArea × dpr²`,
+   which is arithmetic; and that figure must equal what the four strips the browser laid out
+   actually cover, which is the only thing that makes the arithmetic about the product. A governor
+   accounting a frame nobody renders is constraint 49's ~17× under-read.
+   -------------------------------------------------------------------------------------------- */
+async function proofAccount (k, host) {
+  const st = await winState(k)
+  const blur = (st.wins || {}).blur || {}
+  const dpr = window.devicePixelRatio
+  const live = [...host.frames.values()]
+
+  // What the PAGE measures, off the rendered strips, per window.
+  const rendered = {}
+  for (const entry of live) {
+    let sum = 0
+    for (const el of entry.win.el.querySelectorAll('.aero-strip')) {
+      const r = el.getBoundingClientRect()
+      sum += r.width * r.height
+    }
+    rendered[entry.id] = Math.round(sum * dpr * dpr)
+  }
+  const kernelCost = blur.cost || {}
+  const mismatched = Object.keys(rendered).filter((id) => {
+    const want = rendered[id]
+    const got = kernelCost[id] | 0
+    /* PER WINDOW, and it used to be `8 * live.length` — which let one window's cost be wrong by
+     * 48 device px once six were open, with the slack growing as the desktop did. The
+     * justification (a fractional rect against an integral formula) is a per-window quantity:
+     * four strips, a device pixel or two each. `www/m11.html` gets the analogous bound right. */
+    return Math.abs(want - got) > 8
+  })
+
+  const evidence = {
+    dpr,
+    dprSqAsKernelSeesIt: blur.dprSq,
+    windows: live.length,
+    renderedDevicePx: rendered,
+    kernelDevicePx: kernelCost,
+    mismatched,
+    blurPx: (st.wins || {}).blurPx,
+    blurPxIfAllGlass: (st.wins || {}).blurPxIfAllGlass,
+    budget: blur.budget,
+    restore: blur.restore,
+    budgetLowered: blur.lowered,
+    realBudget: BLUR_OFF_AT,
+    realRestore: BLUR_ON_AT,
+    /* THE FINDING, AS AN ASSERTION: at the SHIPPED budget this desktop is nowhere near it.
+     *
+     * STATED AS A FLOOR AND NOT AS 413. The exact figure is a dpr-2 figure, and a second engine
+     * found that out: `bench/m7-win/firefox.py --page m12` renders at dpr 1, where the same
+     * geometry needs 1,651 windows — so an assertion on 413 failed on an engine whose governor was
+     * fine. What the milestone actually claims is that the budget is out of REACH, and the honest
+     * bound for that is the process cap: needing more windows than `PROC_CAP` allows one each
+     * means no desktop can get there. The exact dpr-2 figure is asserted in
+     * `bench/m12-governor/probe.mjs`, where the ratio is fixed. */
+    windowsToRealBudget: Math.ceil(BLUR_OFF_AT / (blurRingArea(640, 440) * dpr * dpr)),
+    unreachableFloor: 128,
+    wouldDegradeAtRealBudget:
+      ((st.wins || {}).blurPxIfAllGlass || 0) > BLUR_OFF_AT,
+  }
+  evidence.kernelAgreesWithTheRenderedStrips =
+    live.length > 0 && mismatched.length === 0
+  evidence.dprReported = blur.dprSq === dpr * dpr
+  evidence.ok = evidence.kernelAgreesWithTheRenderedStrips && evidence.dprReported
+    && evidence.windowsToRealBudget >= evidence.unreachableFloor
+    && evidence.wouldDegradeAtRealBudget === false
+  globalThis.M12.proofs.account = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'account: ' + live.length + ' windows, ' +
+    ((st.wins || {}).blurPxIfAllGlass / 1e6).toFixed(3) + ' M dev px all-glass, budget ' +
+    (blur.budget / 1e6).toFixed(3) + ' M' + (blur.lowered ? ' (lowered)' : '') +
+    ', real budget is ' + evidence.windowsToRealBudget + ' windows away at dpr ' + dpr + ')')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: over the budget, glass comes off from the BOTTOM — and the total lands under it.
+   -------------------------------------------------------------------------------------------- */
+async function proofDegrade (k, host) {
+  const before = await winState(k)
+  const beforeFlat = ((before.wins || {}).blur || {}).flat || []
+
+  // One more than the budget admits, so the governor must act.
+  await openWindows(k, host, 2)
+  await sleep(120)
+  const after = await winState(k)
+  const blur = (after.wins || {}).blur || {}
+  const stack = (after.wins || {}).stack || []
+  const flat = blur.flat || []
+
+  const evidence = {
+    stack,
+    flatBefore: beforeFlat,
+    flat,
+    blurPx: (after.wins || {}).blurPx,
+    blurPxIfAllGlass: (after.wins || {}).blurPxIfAllGlass,
+    budget: blur.budget,
+    flattened: (after.wins || {}).flattened,
+    degrades: (after.wins || {}).blurDegrades,
+    // WHAT THE PAGE DID WITH IT, which is the second reading: a kernel that decided and a page
+    // that never rendered it are a desktop still paying for glass it was told to drop.
+    hostFlatSet: host.report().flatSet,
+    hostFrameFlat: host.report().frameFlat,
+    lastBlur: host.report().lastBlur,
+  }
+  evidence.someWentFlat = flat.length > 0
+  evidence.underBudget = ((after.wins || {}).blurPx || 0) <= (blur.budget || 0)
+  // FROM THE BOTTOM: the flat set must be a prefix of the stack, which is bottom-first.
+  evidence.fromTheBottom = flat.length > 0
+    && stack.slice(0, flat.length).slice().sort((a, b) => a - b).join(',')
+      === flat.slice().sort((a, b) => a - b).join(',')
+  evidence.topKeptItsGlass = stack.length > 0 && !flat.includes(stack[stack.length - 1])
+  evidence.pageRenderedIt = flat.slice().sort().join(',')
+    === (evidence.hostFrameFlat || []).slice().sort().join(',')
+  evidence.ok = evidence.someWentFlat && evidence.underBudget && evidence.fromTheBottom
+    && evidence.topKeptItsGlass && evidence.pageRenderedIt
+  globalThis.M12.proofs.degrade = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'degrade: flat ' + JSON.stringify(flat) +
+    ' of stack ' + JSON.stringify(stack) + ', ' +
+    ((after.wins || {}).blurPx / 1e6).toFixed(3) + ' M <= ' + (blur.budget / 1e6).toFixed(3) + ' M')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: it is IDEMPOTENT, and the glass comes back.
+
+   The degrade edge is proof 2; this is the other half of a governor's contract — that re-running it
+   over an unchanged desktop changes nothing, and that closing windows returns the glass.
+
+   WHY IDEMPOTENCE IS THE ASSERTION AND NOT "BOTH EDGES OF THE HYSTERESIS". The governor's input is
+   the ALL-GLASS cost, which does not respond to what the governor does — so there is no feedback
+   loop for hysteresis to damp, and the band between the two edges cannot change which windows are
+   flat. `src/kernel/wins.mjs` carries the argument. The first version summed only the windows that
+   still had glass, which DID create the loop, and `--negative stale-costs` is that world: the
+   degrade counter climbs on every run over a desktop nobody touched.
+   -------------------------------------------------------------------------------------------- */
+async function proofHysteresis (k, host) {
+  const start = await winState(k)
+  const settleFrom = (start.wins || {}).blurDegrades
+  const geomsAtStart = host.report().geoms
+
+  /* IT SETTLES. Nothing changes, so re-evaluating must change nothing — and the governor runs on
+   * every reported box, so a resize that moves no boundary is the realistic way to re-enter it. */
+  /* AND THE MOVE HAS TO BE REPORTED, or this clause asserts that a function nobody called changed
+   * nothing. `Win.moveBy` writes the box and calls `apply()`; the KERNEL learns a box from
+   * `WinHost.#report`, which is wired to `pointerup` on the frame and `keyup` on the title bar —
+   * so six silent moves posted no `win-geom`, `governBlur` never ran, and `blurDegrades` was
+   * trivially unchanged. The keyup is the arrow-key gesture's own route, which is what makes this
+   * a real re-entry into the governor. */
+  const entry = host.newest()
+  for (let i = 0; i < 6; i += 1) {
+    entry.win.moveBy(1, 0)
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+    await sleep(25)
+    entry.win.moveBy(-1, 0)
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+    await sleep(25)
+  }
+  await sleep(150)
+  const settled = await winState(k)
+  const settledFlat = (((settled.wins || {}).blur) || {}).flat || []
+
+  /* THE OTHER EDGE. Close enough windows that the rest fits under the RESTORE edge, and the glass
+   * must come back. A governor with no restore path leaves a desktop degraded for ever after one
+   * busy moment, and nothing else here would notice. */
+  const live = [...host.frames.values()].map((e) => e.id)
+  /* CLOSE UNTIL THE GLASS IS BACK, or until there is nothing left to close — and not a fixed
+   * number of processes. The restore edge is 80% of the budget, so the desktop has to come down
+   * BELOW what it was admitted at, and how many windows that is depends on how many each process
+   * opened. A fixed count left two windows flat and the proof failed for arithmetic reasons
+   * rather than for a defect. */
+  const pids = [...new Set([...host.frames.values()].map((e) => e.pid))]
+  const ended = []
+  for (let i = pids.length - 1; i >= 0; i -= 1) {
+    const st = await winState(k)
+    if (((((st.wins || {}).blur) || {}).flat || []).length === 0) break
+    host.post({ t: 'end-process', pid: pids[i] })
+    ended.push(pids[i])
+    await sleep(350)
+  }
+  await sleep(150)
+  const restored = await winState(k)
+  const restoredBlur = ((restored.wins || {}).blur) || {}
+
+  const evidence = {
+    degradesAtStart: settleFrom,
+    geomsAtStart,
+    degradesAfterSettling: (settled.wins || {}).blurDegrades,
+    flatWhileSettling: settledFlat,
+    liveBefore: live,
+    endedPids: ended,
+    flatAfterClosing: restoredBlur.flat || [],
+    liveAfter: ((restored.wins || {}).stack) || [],
+    blurPxAfter: (restored.wins || {}).blurPx,
+    restoreEdge: restoredBlur.restore,
+    budget: restoredBlur.budget,
+    hostFlatAfter: host.report().frameFlat,
+  }
+  /* IT DID NOT OSCILLATE: the degrade counter did not climb while nothing was changing — AND the
+   * governor was really re-entered, which is asserted rather than assumed. `geoms` counts the
+   * reports the page sent, so a run where the keyups reached nothing fails here instead of
+   * passing on a function that was never called. */
+  evidence.geomsSent = host.report().geoms
+  evidence.reEntered = evidence.geomsSent > (evidence.geomsAtStart || 0)
+  evidence.settled = evidence.degradesAfterSettling === settleFrom && evidence.reEntered
+  // The two edges still EXIST and are still ordered — they decide the degraded STATE a reader is
+  // shown, and they become load-bearing the moment a successor drives admission from a measured
+  // frame cost rather than from the model.
+  evidence.hasHysteresis = (restoredBlur.restore || 0) < (restoredBlur.budget || 0)
+  evidence.glassCameBack = (restoredBlur.flat || []).length === 0
+  evidence.pageAgrees = (host.report().frameFlat || []).length === 0
+  evidence.ok = evidence.settled && evidence.hasHysteresis && evidence.glassCameBack
+    && evidence.pageAgrees
+  globalThis.M12.proofs.hysteresis = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'hysteresis: settled ' + evidence.settled +
+    ', restore ' + ((restoredBlur.restore || 0) / 1e6).toFixed(3) + ' M < budget ' +
+    ((restoredBlur.budget || 0) / 1e6).toFixed(3) + ' M, glass back ' + evidence.glassCameBack)
+}
+
+/**
+ * Put exactly two windows where the seam is behind them — one flat, one glass.
+ *
+ * WHY THIS STAGING IS NECESSARY, and it is the thing that made the first version of proof 4
+ * unsound. `src/bin/winopen.mjs` CASCADES its windows, so each one's caption sits over the
+ * window below it — and a `backdrop-filter` filters WHAT IS BEHIND THE ELEMENT, which in a
+ * cascade is another window's OPAQUE CLIENT AREA, not the desktop. Both sampled bands came back
+ * uniform (span 0.86 luma) because they were reading white plastic, and the proof failed for a
+ * reason that had nothing to do with the governor.
+ *
+ * So: two windows only, stacked vertically rather than cascaded, both straddling one hard seam,
+ * with bare desktop behind each caption. The budget is then armed at ONE window's cost, so the
+ * bottom one is flat and the top one is glass — the pair the proof needs, by construction rather
+ * than by luck.
+ *
+ * THE MOVE IS THE REAL GESTURE. `Win.moveBy` is the arrow-key path and `src/wm/winhost.mjs`
+ * reports the box on `keyup`, so the kernel learns the new geometry exactly as it would from a
+ * user nudging the window — no back door, and the governor re-runs on the report as it should.
+ * Moving changes no area, so the flat set is stable across it.
+ */
+async function stageForPixels (k, host) {
+  // Close everything, so nothing is left to sit in front of the two that matter.
+  for (const pid of new Set([...host.frames.values()].map((e) => e.pid))) {
+    host.post({ t: 'end-process', pid })
+  }
+  await until(() => host.frames.size === 0, 8000)
+  await sleep(150)
+
+  await openWindows(k, host, 2)
+  await sleep(150)
+  const st = await winState(k)
+  const costs = ((((st.wins || {}).blur) || {}).cost) || {}
+  const one = Math.min(...Object.values(costs).map((v) => v | 0))
+  // ONE window's worth, so the bottom of two goes flat and the top keeps its glass. Armed under
+  // every control, for the reason above.
+  k.post({ t: 'win-blur-budget', px: one })
+  await k.expect('win-blur-budget', 5000)
+  await sleep(150)
+
+  /* SIDE BY SIDE VERTICALLY, both crossing the same x. The seam goes at that x, so one gradient
+   * serves both captions — and each caption has bare desktop behind it rather than a sibling. */
+  const entries = [...host.frames.values()].sort((a, b) => a.id - b.id)
+  const deskRect = desktop.getBoundingClientRect()
+  const w = entries[0].win.placed.w
+  const x = Math.max(10, Math.round(deskRect.width / 2 - w / 2))
+  const ys = [8, Math.max(8 + 300, Math.round(deskRect.height - 160))]
+  entries.forEach((entry, i) => {
+    const want = { x, y: ys[i] ?? (8 + i * 300), w, h: entry.win.placed.h }
+    entry.win.box = want
+    entry.win.apply()
+    // The report the host makes on a keyup, which is the arrow-key gesture's own route.
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  })
+  await sleep(250)
+  globalThis.M12.staged = {
+    windows: entries.map((e) => ({ win: e.id, box: { ...e.win.placed },
+      flat: e.win.el.dataset.flat === '1' })),
+    budgetPx: one,
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: a flattened window really stopped blurring.
+
+   `is-flat` in the DOM and a blur that is gone are DIFFERENT CLAIMS, and only the second one is
+   the product: a governor that set a class and changed no pixel would save nothing and every
+   clause above would still pass. So the page publishes a sample band in a flat window's caption
+   and one in a glass window's, across the same hard seam, and `scripts/check.py` reads the
+   composited pixels — a flat caption must read as a STEP and a glass one as a spread ramp.
+
+   The arithmetic is M11's, shared: `scripts/png.py`'s `transition`, and the thresholds the same.
+   -------------------------------------------------------------------------------------------- */
+function proofPixels (host) {
+  const dpr = window.devicePixelRatio
+  const deskRect = desktop.getBoundingClientRect()
+  /* THE SEAM GOES WHERE BOTH KINDS OF CAPTION CROSS IT. The windows are cascaded by
+   * `src/bin/winopen.mjs` and the flat ones are at the bottom of the stack, so a seam down the
+   * middle of the desktop crossed neither — the first version of this published no flat band at
+   * all and the proof failed for a reason that was about window placement. The step is placed in
+   * the horizontal OVERLAP of one flat caption and one glass caption, so one sample position
+   * serves both. */
+  const capsOf = (pred) => [...host.frames.values()]
+    .filter((e) => (e.win.el.dataset.flat === '1') === pred)
+    .map((e) => {
+      const cap = e.win.el.querySelector('.aero-cap')
+      return cap ? { entry: e, r: cap.getBoundingClientRect() } : null
+    })
+    .filter(Boolean)
+  const flatCaps = capsOf(true)
+  const glassCaps = capsOf(false)
+  let overlap = null
+  for (const f of flatCaps) {
+    for (const g of glassCaps) {
+      const left = Math.max(f.r.left, g.r.left)
+      const right = Math.min(f.r.right, g.r.right)
+      // Room for the blur to spread on both sides of the step, or the band samples one colour.
+      if (right - left > 6 * aero.BLUR_SIGMA + 8) {
+        overlap = { left, right, flat: f.entry, glass: g.entry }
+        break
+      }
+    }
+    if (overlap) break
+  }
+  const seamAbs = overlap
+    ? (overlap.left + overlap.right) / 2
+    : deskRect.left + deskRect.width / 2
+  const seamCssX = Math.round(seamAbs - deskRect.left)
+  const seamDev = Math.ceil(deskRect.left * dpr) + Math.round(seamCssX * dpr)
+  seam.style.background =
+    'linear-gradient(to right, #000 0 ' + seamCssX + 'px, #fff ' + seamCssX + 'px 100%)'
+
+  /** A caption's sample band, placed the way M11's is: in the text-free gap above the glyphs,
+   *  as deep as that gap allows. A constant offset failed on a second engine (constraint 256's
+   *  neighbourhood), so the geometry is derived here too. */
+  function bandOf (entry) {
+    const cap = entry.win.el.querySelector('.aero-cap')
+    if (!cap) return null
+    const r = cap.getBoundingClientRect()
+    const capY = Math.ceil(r.top * dpr)
+    const capH = Math.floor(r.height * dpr)
+    const capX = Math.ceil(r.left * dpr)
+    const capW = Math.floor(r.width * dpr)
+    const node = entry.win.headingEl.firstChild
+    let textY = null
+    if (node && node.nodeType === Node.TEXT_NODE) {
+      const range = document.createRange()
+      range.selectNodeContents(node)
+      textY = Math.ceil(range.getBoundingClientRect().top * dpr)
+      range.detach?.()
+    }
+    const top = capY + 2
+    const gap = textY === null ? capH - 4 : (textY - 2) - top
+    const rows = Math.max(2, Math.min(6, gap))
+    const reach = Math.round(3 * aero.BLUR_SIGMA * dpr)
+    return {
+      win: entry.id,
+      flat: entry.win.el.dataset.flat === '1',
+      bandY: gap >= rows ? top + Math.floor((gap - rows) / 2) : top,
+      bandRows: rows,
+      gap,
+      straddles: seamDev - reach > capX && seamDev + reach < capX + capW,
+      filter: getComputedStyle(cap).backdropFilter,
+    }
+  }
+
+  const bands = [...host.frames.values()].map(bandOf).filter(Boolean)
+  const flat = bands.filter((b) => b.flat && b.straddles)
+  const glass = bands.filter((b) => !b.flat && b.straddles)
+  // A GLASS BAND MUST NOT BE COVERED BY A WINDOW ABOVE IT, or the pixels sampled belong to
+  // whatever is on top and the comparison is between two unrelated things.
+  const topmost = (b) => {
+    const entry = host.get(b.win)
+    const r = entry.win.el.querySelector('.aero-cap').getBoundingClientRect()
+    const mid = { x: seamAbs, y: r.top + r.height / 2 }
+    const el = document.elementFromPoint(mid.x, mid.y)
+    return Boolean(el && el.closest('.window') === entry.win.el)
+  }
+
+  const evidence = {
+    dpr, seamCssX, seamDeviceX: seamDev,
+    desk: {
+      x: Math.ceil(deskRect.left * dpr), y: Math.ceil(deskRect.top * dpr),
+      w: Math.floor(deskRect.width * dpr), h: Math.floor(deskRect.height * dpr),
+    },
+    bands,
+    flatBand: flat.find(topmost) || null,
+    glassBand: glass.find(topmost) || null,
+    overlap: overlap
+      ? { flat: overlap.flat.id, glass: overlap.glass.id,
+        left: Math.round(overlap.left), right: Math.round(overlap.right) }
+      : null,
+    /* The bare backdrop, for the reference step M11's check compares against — FOUND BY
+     * HIT-TESTING rather than computed as "near the bottom". The first version sampled 20 device
+     * px above the desk's bottom edge and landed on the Aero desktop's own gradient below the
+     * seam element, which is uniform: span 0.0, so the reference clause failed while the seam was
+     * perfectly fine. `elementFromPoint` asks the browser what is actually there. */
+    bareY: (() => {
+      for (let y = Math.round(deskRect.bottom) - 4; y > deskRect.top + 4; y -= 6) {
+        const el = document.elementFromPoint(seamAbs, y)
+        if (el && el.id === 'seam') return Math.ceil(y * dpr)
+      }
+      return null
+    })(),
+    // A FLAT WINDOW MUST HAVE NO FILTER AT ALL, not blur(0px): a zero-radius filter still costs
+    // an offscreen buffer and a pass, which is the cost being shed.
+    flatFilterIsNone: (flat.find(topmost) || {}).filter === 'none',
+  }
+  evidence.haveBoth = Boolean(evidence.flatBand && evidence.glassBand)
+  evidence.ok = evidence.haveBoth && evidence.flatFilterIsNone
+  globalThis.M12.proofs.pixels = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'pixels: a flat band and a glass band across the seam at ' +
+    'device x ' + seamDev + ', flat filter ' + (evidence.flatBand || {}).filter)
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+async function live () {
+  seam.hidden = true
+  const { k, host } = await bootHost()
+  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => host.frames.size >= 1, 10000)
+  const entry = host.newest()
+  if (entry && entry.term) entry.term.focus()
+
+  /* ARM THE BUDGET, or this desktop's own instructions are a lie. `bootHost` stopped setting it
+   * when the proofs moved to arming it at a figure they MEASURE, and nothing re-armed it here — so
+   * the live desktop ran at the shipped 45 M budget, which is 413 windows away, while the log told
+   * the reader to type `winopen -n 4` and watch the bottom windows lose their glass. They did not.
+   * Found by typing it: `bench/m12-governor/shell.py`. */
+  /* ARMED AT EXACTLY WHAT IS ON SCREEN, not at "N windows' worth". A terminal is 560x360 and
+   * `src/bin/winopen.mjs` asks for 420x260, so a budget of four TERMINALS admitted five windows
+   * and nothing degraded — measured, and the reader was told to watch something that did not
+   * happen. Arming at the current total makes the claim true for any window size: the NEXT window
+   * is over the line, whatever it is. */
+  const st = await winState(k)
+  const total = (st.wins || {}).blurPxIfAllGlass | 0
+  /* JUST ABOVE WHAT IS ON SCREEN, not exactly at it. The restore edge is 80% of the budget, so a
+   * budget equal to the current total puts THIS desktop above its own restore edge — and once
+   * anything pushed it over, the glass could never come back however many windows were closed.
+   * Measured at a real prompt: four windows closed and three captions stayed flat. Arming 2%
+   * above `total / 0.8` puts the restore edge just over the current total, so the desktop starts
+   * all-glass, degrades when a window is added, and recovers when they go. */
+  const armed = Math.round((total / (BLUR_ON_AT / BLUR_OFF_AT)) * 1.02)
+  k.post({ t: 'win-blur-budget', px: armed })
+  await k.expect('win-blur-budget', 5000)
+
+  say('')
+  say('A LIVE AERO DESKTOP, with the governor armed just above what is on screen now (' +
+    (armed / 1e6).toFixed(3) + ' M dev px against ' + (total / 1e6).toFixed(3) + ' M in use).')
+  say('Type `winopen -n 4`: the bottom windows lose their glass to stay under it, and closing')
+  say('them gives it back. The SHIPPED budget is ' +
+    Math.ceil(BLUR_OFF_AT / (blurRingArea(640, 440) * 4)) + ' windows away at dpr 2, which is the')
+  say('point of M11 — four filtered strips per window moved the wall out of reach.')
+  globalThis.M12.phase = 'live'
+  globalThis.M12.livePid = row.pid
+}
+
+async function main () {
+  if (CFG.liveOnly) {
+    globalThis.M12.state = 'done'
+    globalThis.M12.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noGovernor ? 'CONTROL: no_governor (nothing is ever flattened).'
+    : CFG.topFirst ? 'CONTROL: top_first (degrade from the TOP).'
+      : CFG.staleCosts ? 'CONTROL: stale_costs (admission reads the post-degrade total).' : ''
+  say('M12 — the blur governor. ' + which)
+  say('budget ' + (BLUR_OFF_AT / 1e6) + ' M dev px, restore ' + (BLUR_ON_AT / 1e6) +
+    ' M; one 640x440 window is ' + (blurRingArea(640, 440) * 4) + ' dev px, so the real budget ' +
+    'is ' + Math.ceil(BLUR_OFF_AT / (blurRingArea(640, 440) * 4)) + ' windows away.')
+  say('This page lowers it to ' + ADMITS + ' windows, so the degrade branch is reachable at all.')
+
+  const { k, host } = await bootHost()
+  globalThis.M12.kernelIsolated = true
+  const mounts = (await ask(k, 'm3-state')).m3 || {}
+  globalThis.M12.mounts = Object.keys(mounts)
+
+  // A desktop that FITS, and then the budget is armed AT EXACTLY WHAT IT COSTS.
+  await openWindows(k, host, ADMITS)
+  await sleep(150)
+  /* MEASURED, NOT GUESSED. `src/bin/winopen.mjs` asks for its own geometry and this page has no
+   * business knowing it — the first version of this hardcoded 640×440, the program opened 420×260
+   * windows, and the "budget" admitted six of them, so the degrade branch never ran and the proof
+   * failed for a reason that had nothing to do with the governor. The budget is now whatever the
+   * windows on screen actually cost, read out of the kernel's own accounting. */
+  const fitted = await winState(k)
+  const costs = (((fitted.wins || {}).blur) || {}).cost || {}
+  const armed = Object.values(costs).reduce((a, b) => a + (b | 0), 0)
+  /* ARMED IN EVERY WORLD, INCLUDING `?no_governor=1`. A control must differ from the baseline in
+   * ONE thing — here, whether the governor acts — and skipping this under the control left it
+   * comparing against the shipped 45 M budget instead, so "the total lands back under the budget"
+   * held for a reason that had nothing to do with the governor. */
+  k.post({ t: 'win-blur-budget', px: armed })
+  await k.expect('win-blur-budget', 5000)
+  say('budget armed at ' + (armed / 1e6).toFixed(3) + ' M dev px — exactly what these ' +
+    Object.keys(costs).length + ' windows cost')
+  await proofAccount(k, host)
+
+  // Then one that does not.
+  await proofDegrade(k, host)
+  // Both edges, which ENDS WITH THE GLASS BACK — it closes windows to cross the restore edge.
+  await proofHysteresis(k, host)
+
+  /* AND THEN DEGRADE AGAIN, DELIBERATELY, because the driver photographs the page AFTER this
+   * function returns. Proof 4 is read out of that screenshot, so it needs a flat window and a
+   * glass one on screen at the end — and proof 3's whole job was to put the glass back. Sampling
+   * the pixels before it would have published bands for a state the screenshot no longer shows,
+   * which still produces numbers. */
+  await stageForPixels(k, host)
+  proofPixels(host)
+
+  const proofs = globalThis.M12.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M12.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M12.verdict)
+  globalThis.M12.state = 'done'
+  globalThis.M12.phase = 'rendered'
+}
+</script>
+</body>
+</html>

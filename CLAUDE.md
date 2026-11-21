@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 263 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 270 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  263 normative constraints  ← cite these
+  CONSTRAINTS.md  270 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -95,7 +95,9 @@ src/
     providers.mjs the provider table as DATA, and the only place a request URL is built
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
     wins.mjs      M7: a window IS a file description. The event ring, the owner chain, the
-                  destroy cascade, the not-responding detector. It replaced M4a's console
+                  destroy cascade, the not-responding detector. It replaced M4a's console.
+                  M12's blur governor is here too: `governBlur` is an admission controller
+                  over blurred area, degrading by z-order from the bottom
     dataobj.mjs   M10: the typed data object, the ONE clipboard slot and the ONE drag session.
                   Refcounted payloads a process reaches by fd, so teardown releases them
   libos/          in-process syscall stubs + realm lockdown — the trust boundary
@@ -108,8 +110,9 @@ src/
                   It builds the structure and names nothing about how it looks, which is what
                   lets M7-M10's checks drive an unskinned frame
     aero.mjs      M11: every number Windows 7's glass is made of, once, and the stylesheet
-                  derived from them. `ringArea` is the ONE definition of a frame's filtered
-                  area, and M12's governor must call it rather than restate it
+                  derived from them. The METRICS and the area function live in `src/abi.mjs`
+                  (M12, D37) because the kernel's governor accounts them too; this file
+                  imports and re-exports them under the names its CSS uses
     terminal.mjs  the terminal widget. IT DOES NOT ECHO — constraint 161
     winhost.mjs   the page's half of EVERY window: one frame per kernel window, and the one
                   route from a browser event into a window's event queue
@@ -137,6 +140,10 @@ www/
                   sides of it, the inert caption buttons, the active/inactive pair — then a LIVE
                   AERO DESKTOP. The pixels are read by `scripts/check.py` out of a screenshot,
                   because a `backdrop-filter` is unreachable from script
+  m12.html        M12's four proofs — the accounting against the RENDERED strips, the degrade
+                  from the bottom of the stack, both edges of the hysteresis, and a flattened
+                  caption reading as a STEP where a glass one is a ramp — then a live desktop
+                  with the governor armed at four windows, so `winopen -n 4` degrades it
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result. m7, m8 and m11 import it; the
                   older pages still carry their own copies
@@ -193,14 +200,15 @@ row below rather than restate it.
 | What each check asserts, and its negative control | the check's own registration in `scripts/check.py`. Inversion is a per-check `Control.INVERT`, never a tuple maintained beside the checks |
 | The expectation floors | `scripts/check_floors.json`. Lowering one is a reviewable diff |
 | Every number Aero's glass is made of | `src/wm/aero.mjs` — the three balances, the colorization colour, the blur deviation, the caption and inset metrics, and the stylesheet DERIVED from them. Generated rather than written as a `.css` file because `CAP_H` and `INSET` are the terms of `ringArea`, and there is no build step |
-| A frame's FILTERED area | `ringArea` in `src/wm/aero.mjs`, beside `boxArea` so the ratio is never quoted without both. M12's admission controller MUST call it: a second copy is how a governor comes to account a frame nobody renders, which is constraint 49's ~17× under-read |
+| A frame's FILTERED area, and the chrome it is made of | `WIN_CAP_H`, `WIN_INSET` and `blurRingArea`/`blurBoxArea` in `src/abi.mjs`. They MOVED there in M12 (**D37**) for the reason everything in that file is there: constraint 49 makes the kernel account the border box, so the ring's geometry stopped being the skin's private business. `src/wm/aero.mjs` imports them and re-exports `CAP_H`/`INSET`/`ringArea` under the names its stylesheet uses. A second copy is how a governor comes to account a frame nobody renders, which is constraint 49's ~17× under-read |
+| The blur budget, and who is flat | `BLUR_OFF_AT`/`BLUR_ON_AT` in `src/abi.mjs` (two edges, because a threshold on a continuous input needs hysteresis); the accounting and the degrade order are `WinMgr.governBlur` in `src/kernel/wins.mjs` and nowhere else. The page renders the flat set it is sent and decides nothing (constraint 226's rule again) |
 | How a glass seam is sampled, and what separates a ramp from a step | `band_profile`, `transition` and `local_range` in `scripts/png.py`. `scripts/check.py` asserts with them and `bench/m11-glass/probe.py` chose the threshold with them, so the gate and the measurement behind it are ONE arithmetic |
 | A data format, its offer bit and its name | `DOBJ_*` + `fmtBit`/`fmtsOf`/`fmtName` and `DOBJ_FORMATS`/`DOBJ_FMT_ALL` in `src/abi.mjs`. The offer is a BITMASK in one register, so the packing has one definition and three readers: the kernel builds it, an event record carries it, a target tests it |
 | The `DOBJ_BITMAP` payload's header | `BMP_*` + `encodeBitmap`/`decodeBitmap` in `src/abi.mjs`. `8 + w*h*4` written a second time is the drift this exists to stop |
 | Which format a file's bytes are | `FORMAT_BY_EXT` + `formatForPath` in `src/libos/std.mjs`. A USERLAND convention — the kernel knows no names — and three programs need it, so a second copy is how `clip` and `files` come to disagree about a `.rgba` |
 | A data object's lifetime, the clipboard slot and the drag session | `src/kernel/dataobj.mjs`, and nowhere else. `WinMgr.pointer` is the one record of whether a button is down, because `feed` is the one place a pointer event enters the kernel |
 | Where a drop landed, in a window's own unit | `WinHost.#dropPointAt` in `src/wm/winhost.mjs`: surface pixels for a surfaced window, CELLS for a text one — the two units `WEV_POINTER` and `WEV_RESIZE` already use |
-| The 263 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 270 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -348,7 +356,14 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   highlight has a gradient of its own and was found satisfying the spread assertion over a flat
   desktop (259). `scripts/check.py --negative flat-desk` is the run that found it, and
   `--prove-failure` could not have: an assertion over a constant still inverts and still fires.
-- **A threshold on a continuous input gets hysteresis, and both edges get checked.**
+- **A threshold on a continuous input gets hysteresis, and both edges get checked.** **But ask
+  first whether the input is continuous in the governor's OWN output.** M12's first blur governor
+  summed only the windows that still had glass, so flattening one lowered the input and re-admitted
+  it — a feedback loop that made two edges necessary, and that also created a stuck state no edge
+  could fix. Summing the all-glass cost makes the input independent of the action: the governor
+  settles in one pass and the band between the edges cannot change the outcome. The loop was the
+  defect, not the absence of damping — and a `no-hysteresis` control against the corrected version
+  broke nothing, so it was replaced by one that restores the loop (269).
 - **A control must move a NAMED subset of expectations**, declared in its `Expect(failed=..)`. A
   control satisfied by any failure verifies nothing. M3's first control spun a poll loop hard enough
   to lap the trace ring and so also failed a proof it was not about; the poll was paced rather than
@@ -374,10 +389,13 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   started in Firefox at all (206) — both with every expectation green, both found by a human
   opening the page. Before reporting a milestone done, open it in a second engine.
   `firefox --headless --screenshot` is enough, because these pages print their own log.
-  **It has now cost three.** M11's blur band was placed at a constant pixel offset and Firefox
+  **It has now cost four.** M11's blur band was placed at a constant pixel offset and Firefox
   renders at dpr 1, where a caption's text-free gap is 3 device rows rather than 7 — so the band
   overlapped the glyphs and the proof failed on an engine whose glass was fine. **A geometry
   derived from a measured rect survives a second engine; one derived from a constant does not.**
+  M12 repeated it exactly: `413 windows to the budget` is a dpr-2 figure, and Firefox at dpr 1
+  needs 1,651 — so the assertion failed on an engine whose governor was fine. The claim is a floor
+  now, and the exact figure lives in the host probe where the ratio is pinned (264).
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 
@@ -391,6 +409,12 @@ scripts/check.py --prove-failure    # invert every expectation; the run MUST rep
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
 node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec
+node bench/m12-governor/probe.mjs # M12's accounting, both hysteresis edges, the degrade order
+bench/m12-governor/shell.py       # type `winopen -n 4` at a REAL prompt and watch the glass go
+scripts/check.py --negative stale-costs  # ...and the world where the governor cannot settle
+python3 bench/m12-governor/probe.py --headed  # WHAT the blur budget binds on: area vs passes (266)
+python3 bench/m12-governor/probe.py  # ...and headless it REFUSES to conclude, which is the point
+scripts/check.py --negative top-first  # the governor degrading from the wrong end of the stack
 python3 bench/m11-glass/probe.py  # WHY the glass frame is four strips, as a measurement (255)
 python3 bench/m11-glass/probe.py --headed   # ...in the engine gap-04 measured Aero in
 bench/m11-glass/shell.py          # `ls /usr/bin` at a REAL prompt on the Aero desktop

@@ -2553,3 +2553,79 @@ modes — stated because the two engines are different measurements and both wer
     move a window and the one that tests whether the press falls through to the caption underneath.
     Shown capable of failing with `pointer-events: none` on `.title-box`: the drag moved the window
     by exactly its own vector. Constraint 40's rule for windows, applied to a button.
+
+## What M12 measured
+
+264–268 were produced by `bench/m12-governor/probe.py` and `probe.mjs`; the sweep's rows are in
+`bench/m12-governor/results-swiftshader.json`, named by engine so a software-rasteriser frame time
+cannot be quoted as an Aero one. **The frame-rate figures
+are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal area — see 266.
+
+264. **CONSTRAINT 49's OWN KILL GATE CANNOT FIRE AGAINST THE GEOMETRY THAT SHIPPED, AND THIS IS THE
+    SECOND TIME THAT GATE HAS BEEN MIS-SIZED.** 49 and `PLAN.md` §5 both size it at "52 glass
+    terminals at 640×440 (53.7 M device px)", which is BOX accounting — one filtered node per
+    window. Under M11's four-strip ring (constraint 255) a 640×440 window filters 109,040 device px
+    at dpr 2, so 52 of them are **5.7 M, 10% of the 45 M budget**, and reaching it needs **413
+    windows** against `WIN_CAP` 32 per process. The first mis-sizing was the 4× dpr error recorded
+    in `docs/DECISIONS.md` §Corrections, which made the gate predict red while being structurally
+    green; this one has the same shape and the same cause — **a gate sized from an arithmetic
+    rather than from a run.** A kill gate MUST be derived from the geometry that ships, and a
+    milestone whose gate is unreachable MUST assert that fact instead of pretending to test it.
+265. **THE BLUR BUDGET DOES NOT BIND ON ANY REACHABLE DESKTOP UNDER RING GLASS, AND THAT IS A
+    CONSEQUENCE OF THE GEOMETRY RATHER THAN OF THE THRESHOLD.** A ten-window desktop is 1.09 M
+    device px, 2% of `BLUR_OFF_AT`. The governor is still built, armed and exercised — the same
+    shape as `SURFACE_BUDGET_PX`, which also refuses nothing in normal use — but its degrade branch
+    is reachable only through a lowered budget, so the bench-boot hook is load-bearing for the
+    proof rather than a convenience. A refusal path nothing can reach is a refusal path nobody has
+    seen work.
+266. **FILTER PASSES ARE FREE TO ~208 AND COST BEYOND ~800, AT FIXED AREA.** gap-04 concluded "the
+    predictor is area, not layer count: 60 windows at 35 M is free" while varying both together,
+    and M11's four-strip ring pays four filtered boxes per window where gap-04's paid one — 208 at
+    52 windows, which `MILESTONES.md` M11 recorded as owed. Holding the filtered area fixed at
+    5.7 M device px and changing only the number of boxes: 52 → 29.3 fps, 104 → 30.0, 208 → 28.0,
+    832 → 13.8, 1664 → 8.4. So the ring's 4× pass multiplier costs nothing at any window count the
+    caps allow, and gap-04's conclusion stands with its range extended. **Nothing accounts passes**,
+    which is recorded rather than guarded because 200 windows would be needed to reach the knee.
+267. **NO FRAME-RATE FIGURE IS OBTAINABLE IN THIS ENVIRONMENT, SO M12's FPS GATE IS RECORDED AS
+    UNMEASURABLE RATHER THAN ANSWERED.** `scripts/check.py` runs `--headless=new` with
+    `--disable-gpu` and SwiftShader, pinned at **60.0 fps** — against the 120 Hz gap-04 measured,
+    and constraint 36 itself notes a 60 Hz panel has twice the per-frame budget. A headed window
+    driven through CDP is throttled to **8.9 fps**, because Chrome will not paint a window it
+    believes occluded, and `Page.bringToFront` hangs on a window nothing can focus. A harness that
+    cannot reach its subject MUST say so: `bench/m12-governor/probe.py` labels every row with its
+    engine and its verdict refuses to conclude unless it ran headed. The validation that the
+    harness measures the right thing is that its 20 ms main-thread stall control reads 49.2 fps
+    against gap-04's 49.3.
+268. **A WINDOW'S BACKDROP IS THE WINDOW BENEATH IT, SO A GLASS PIXEL CHECK MUST STAGE ITS
+    WINDOWS.** `backdrop-filter` filters what is behind the element, and windows cascade — so a
+    caption over another window's OPAQUE CLIENT AREA filters white plastic, not the desktop.
+    Measured: both of M12's sampled bands came back uniform at span 0.86 luma, and the proof failed
+    for a reason that had nothing to do with its subject. A check comparing a glass caption against
+    a flat one MUST place both over bare desktop — stacked rather than cascaded, straddling one
+    seam — and MUST assert that placement rather than assume it. The reference band has the same
+    hazard in reverse: "near the bottom of the desktop" sampled the Aero background below the seam
+    element and read span 0.0, so the band is located by `elementFromPoint` and not by arithmetic.
+269. **HYSTERESIS IS ONLY NEEDED WHERE THE ACTION CHANGES THE MEASURED INPUT, AND A GOVERNOR
+    SHOULD BE BUILT SO IT DOES NOT.** M12's first governor summed the ring area of the windows that
+    still had glass, so flattening one lowered the input, which re-admitted it, which raised the
+    input again — and two edges were then genuinely required to damp the loop. Summing the
+    **all-glass** cost instead makes the input independent of the action: the keep-set is a pure
+    function of (stack, costs, budget), the governor settles in one pass, and the band between the
+    two edges cannot change which windows are flat. The loop was the defect, not the absence of
+    damping. **Two consequences that are easy to get wrong in the other order:** a restore edge
+    below the budget creates a STUCK STATE, because a single window whose own cost exceeds that
+    edge can never be re-admitted (`0 + c > 0.8c` for every c) — measured twice, once as three
+    captions staying flat after four windows closed and once as both staged windows flat; and a
+    `no-hysteresis` negative control against the corrected accounting **breaks nothing**, so it was
+    replaced by `--negative stale-costs`, which restores the loop and is the defect that is really
+    there. `CLAUDE.md`'s rule that a threshold on a continuous input gets hysteresis stands — this
+    is the prior question of whether the input is continuous in the governor's own output.
+270. **AN ADMISSION CONTROLLER MUST RE-RUN ON A RESTACK, NOT ONLY ON AN AREA CHANGE.** M12's
+    governor ran on create, on the page's geometry report and on destroy — every event that changes
+    the AREA, which is what constraint 49 asks for — and not on a raise, which changes only the
+    ORDER. So a window the user clicked to the front stayed flat while a window now beneath it kept
+    its glass: the exact outcome `--negative top-first` exists to detect, reachable in the shipped
+    path with no control enabled. The fix is structural rather than a fourth hook: the keep-set is
+    recomputed from the top of the stack on every run, so the flat set follows the order by
+    construction and a raise needs only to call the governor. A governor that walks its own
+    previous flags cannot express a swap.

@@ -855,6 +855,54 @@ have found that: an assertion over a constant still inverts and still fires.
 
 *Evidence: measured. Constraints 50, 256, 257, 259; `MILESTONES.md` M11.*
 
+## D37 — the chrome metrics are ABI, because the kernel accounts the border box
+
+**Decided:** `WIN_CAP_H`, `WIN_INSET` and `blurRingArea` live in `src/abi.mjs`, imported by the
+kernel's governor and by `src/wm/aero.mjs`'s stylesheet. **Rejected:** keeping them in the skin and
+having the page report each window's blur cost to the kernel.
+
+Constraint 49 requires the governor to account each glass element's **border box**, and the governor
+has to be the kernel's: only the kernel owns the z-order it degrades by (constraint 226) and only
+the kernel sees every area-changing call. But the ring's geometry is the skin's. So the area
+function became a fact both sides must agree on, which is exactly what `src/abi.mjs` is for.
+
+**What the rejected option would have cost.** The page reporting a cost per window is the same shape
+as the terminal cell count in `win-geom` — the page measures what only the page can see — and it was
+tempting for that reason. It fails on *admission*: the governor must decide before the frame is
+shown, and a cost that arrives with the page's geometry report arrives after. The kernel would be
+admitting on last frame's numbers.
+
+**The consequence, stated rather than discovered:** the kernel now knows a caption is 29 px tall. It
+draws nothing — `aero.mjs` does, and imports these — but **a second skin with different chrome is a
+change to the ABI rather than to a stylesheet.** That is the price of an admission controller that
+accounts what the compositor really filters, and constraint 49 leaves no cheaper way to pay it.
+
+*Evidence: judgement, forced by a measurement. Constraints 49, 255, 264; `MILESTONES.md` M12.*
+
+## D38 — M12's frame-rate gate is recorded as unmeasurable, not answered
+
+**Decided:** the suite gates on the accounting, the degrade order, both hysteresis edges, and
+whether the blur actually left the pixels. **Rejected:** `PLAN.md` §5's "assert that frame rate
+holds ≥ 110 fps".
+
+It cannot be measured in this environment, and the alternative to saying so is printing a number
+that reads like an answer. Headless pins to 60.0 fps on SwiftShader with `--disable-gpu`, against
+the 120 Hz gap-04 measured; a headed window driven through CDP is throttled to 8.9 fps because
+Chrome will not paint a window it believes occluded, and `Page.bringToFront` hangs on a window
+nothing can focus.
+
+So `bench/m12-governor/probe.py` exists, takes the measurement when a human runs it `--headed`, and
+**refuses to draw a conclusion otherwise** — every row carries its engine and the verdict says "no
+row here is a number about Aero" unless it ran headed. That it measures the right thing at all is
+shown by its 20 ms main-thread stall control reading 49.2 fps against gap-04's 49.3.
+
+**What this gives up:** the one assertion that would have caught a governor whose thresholds are
+wrong for the machine it is running on. The budget is one machine's — 45 M off / 36 M on from a
+58–63 M wall on one 120 Hz panel at dpr 2 — and nothing adapts it. Recorded in `MILESTONES.md` M12
+under what is not done, because the honest version of this decision names what it costs.
+
+*Evidence: measured. Constraints 36, 267; `PLAN.md` §5.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

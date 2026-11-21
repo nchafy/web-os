@@ -683,6 +683,20 @@ class Control:
     #: shows those clauses are coupled to the SEAM rather than to a constant — which inversion
     #: cannot show, because an assertion over a constant still inverts and still fires.
     FLAT_DESK = "flat-desk"
+    #: M12's own control, in `PLAN.md` §5's words: "disable the governor at the same geometry".
+    #: Nothing is ever flattened. Every MEASUREMENT still works — the accounting is reported, the
+    #: page renders what it is told, both edges still exist as numbers — so what goes is the
+    #: acting, which is how this is told apart from the two below.
+    NO_GOVERNOR = "no-governor"
+    #: Degrade from the TOP of the stack instead of the bottom. The plausible implementation, and
+    #: the one that takes the glass from the window the user is looking at. It moves the ORDER
+    #: clauses and nothing else: the half of constraint 49 that is a judgement, not an arithmetic.
+    TOP_FIRST = "top-first"
+    #: The admission input becomes the CURRENT blurred total rather than the all-glass one — the
+    #: first version of M12's governor, and the feedback loop it was built to remove. Flattening
+    #: lowers the input, which re-admits, which raises it again: the degrade counter climbs on
+    #: every run over a desktop nobody touched.
+    STALE_COSTS = "stale-costs"
     ONCE = "once"
 
 
@@ -722,6 +736,9 @@ CONTROL_RUNS = {
     Control.SEVER: ("sever",),
     Control.NO_HALO: ("no-halo",),
     Control.FLAT_DESK: ("flat-desk",),
+    Control.NO_GOVERNOR: ("no-governor",),
+    Control.TOP_FIRST: ("top-first",),
+    Control.STALE_COSTS: ("stale-costs",),
 }
 
 
@@ -3625,6 +3642,133 @@ _NO_HALO_FAILS = (
 )
 
 
+# ======================================================================================
+# M12 — the blur governor
+# ======================================================================================
+
+M12_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    # PROOF 1. The accounting, against the ABI's formula AND against the rendered strips.
+    "account ok",
+    "the kernel's per-window cost is what the RENDERED strips cover",
+    "and the page reported its device-pixel ratio, squared",
+    # THE MILESTONE'S FINDING, as an assertion rather than as prose.
+    "the SHIPPED budget is out of reach, so this desktop is all glass",
+    # PROOF 2. The degrade branch.
+    "degrade ok",
+    "over the budget, glass comes off",
+    "from the BOTTOM of the stack, in stack order",
+    "while the window on top keeps its glass",
+    "and the total lands back under the budget",
+    "and the page rendered exactly the set the kernel decided",
+    # PROOF 3. Idempotence, which is what an admission controller owes once its input no longer
+    # responds to its own action — see the note on `_STALE_COSTS_FAILS`.
+    "hysteresis ok",
+    "the two edges exist and are ordered",
+    "re-running the governor over an unchanged desktop changes nothing",
+    "and closing windows gives the glass back",
+    # PROOF 4. The pixels, because `is-flat` and a blur that is gone are different claims.
+    "pixels ok",
+    "a flat caption and a glass caption both cross a hard seam",
+    "a flattened window carries NO backdrop-filter, not a zero-radius one",
+    "the BARE backdrop reads as a hard step, so the seam is real",
+    "the GLASS caption reads as a spread ramp",
+    "while the FLAT caption reads as a step, so the blur really went",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m12.html",
+)
+
+M12_DOCUMENT = "/www/m12.html"
+
+M12_READY = ("(() => { const M = globalThis.M12 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error') ? s : '' })()")
+
+READ_M12 = """(() => {
+  const M = globalThis.M12 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    live: [...document.querySelectorAll('.window')].length,
+    account: one(P.account),
+    degrade: one(P.degrade),
+    hysteresis: one(P.hysteresis),
+    pixels: one(P.pixels),
+  }
+})()"""
+
+M12_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "errors": list, "faults": list, "live": int,
+    "account": (dict, type(None)),
+    "degrade": (dict, type(None)),
+    "hysteresis": (dict, type(None)),
+    "pixels": (dict, type(None)),
+}
+
+#: What A WORLD WITH NO GOVERNOR must break. `PLAN.md` §5's own control for M12 — "disable the
+#: governor at the same geometry".
+#:
+#: Everything that MEASURES still works: the accounting is still reported, the page still renders
+#: what it is told, both edges still exist as numbers. What goes is the acting — nothing is ever
+#: flattened, so the degrade half goes red and the pixel clauses go with it, because there is no
+#: flat caption to sample.
+_NO_GOVERNOR_FAILS = (
+    "degrade ok",
+    "over the budget, glass comes off",
+    "from the BOTTOM of the stack, in stack order",
+    "and the total lands back under the budget",
+    "pixels ok",
+    "a flat caption and a glass caption both cross a hard seam",
+    "a flattened window carries NO backdrop-filter, not a zero-radius one",
+    "while the FLAT caption reads as a step, so the blur really went",
+    "verdict is ok",
+)
+
+#: What DEGRADING FROM THE TOP breaks: the ORDER, and only the order. Glass still comes off, the
+#: total still lands under the budget, the hysteresis still has two edges and a flat caption is
+#: still there to sample — so this control is about which window pays, which is the half of
+#: constraint 49 that is a judgement rather than an arithmetic.
+_TOP_FIRST_FAILS = (
+    "degrade ok",
+    "from the BOTTOM of the stack, in stack order",
+    "while the window on top keeps its glass",
+    "verdict is ok",
+)
+
+#: What READING THE POST-DEGRADE TOTAL breaks, which is the first version of this governor.
+#:
+#: Admission against the CURRENT blurred total makes the input respond to the action: flattening
+#: lowers it, the next run re-admits everything, and the run after that flattens again. So the
+#: degrade counter climbs over a desktop nobody touched, which is what oscillation looks like from
+#: outside — and it is the reason the shipped governor sums the ALL-GLASS cost instead.
+#:
+#: This control replaced a `no-hysteresis` one. That one collapsed the two edges into a single
+#: threshold and, under the corrected accounting, **broke nothing at all**: with an
+#: action-independent input the band between the edges cannot change which windows are flat. A
+#: control that cannot fail is worse than no control, so it was swapped for the defect that is
+#: really there.
+_STALE_COSTS_FAILS = (
+    "hysteresis ok",
+    "re-running the governor over an unchanged desktop changes nothing",
+    "verdict is ok",
+)
+
+
 M4A_LABELS = (
     "cell reported",
     "page isolated",
@@ -3987,6 +4131,13 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "no kernel boots, no process runs and no window is created — and a modality over "
                 "no windows is nothing. UNMEASURABLE rather than FAIL, because a FAIL would claim "
                 "a raise was refused when nothing was ever raised.",
+        ), "m12": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs and no window is framed — so there is no blurred area to account "
+                "and nothing to govern. The GLASS could still be drawn, which is why the page "
+                "refuses before it installs the skin. UNMEASURABLE rather than FAIL, because a "
+                "FAIL would claim a desktop was accounted and degraded wrongly.",
         ), "m11": Expect(
             UNMEASURABLE,
             why="the same mechanism, and the sharpest case of it: without COOP/COEP there is no "
@@ -4632,6 +4783,82 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="the caption must stop being legible over the bright side of the seam",
             failed=_NO_HALO_FAILS,
             held=held_rest(M11_LABELS, _NO_HALO_FAILS),
+        )},
+    ),
+    "no-governor": NegativeControl(
+        name="no-governor",
+        why="no_governor=1: `governBlur` accounts the desktop and then flattens NOTHING (the "
+            "cfg.noGovernor hook, refused without a bench boot). `PLAN.md` §5's control for M12 in "
+            "its own words: 'disable the governor at the same geometry'.\n"
+            "WHAT MUST BREAK: the acting, and the pixels that follow from it. No window goes "
+            "flat, so the degrade half goes red — and the pixel clauses go with it, because there "
+            "is no flat caption to sample across the seam.\n"
+            "WHAT MUST HOLD, and this is what makes it a control rather than a broken world: "
+            "every MEASUREMENT. The per-window cost still matches the rendered strips, the dpr is "
+            "still reported, the shipped budget is still 413 windows away, both edges still exist "
+            "as numbers, and the governor still settles — because with nothing to flatten it "
+            "trivially does.\n"
+            "WHAT IT IS ABOUT: a governor that accounted correctly and never acted would satisfy "
+            "every arithmetic clause in this check. The difference between accounting and "
+            "admitting is the whole of constraint 49.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_governor", "1"),),
+        expects={"m12": Expect(
+            Outcome.FAIL,
+            why="nothing may be flattened while every measurement still holds",
+            failed=_NO_GOVERNOR_FAILS,
+            held=held_rest(M12_LABELS, _NO_GOVERNOR_FAILS),
+        )},
+    ),
+    "top-first": NegativeControl(
+        name="top-first",
+        why="blurTopFirst=1: the degrade walk takes the stack from the TOP instead of the bottom "
+            "(the cfg.blurTopFirst hook, refused without a bench boot).\n"
+            "WHAT MUST BREAK: the ORDER, and only the order. The flat set is no longer a prefix "
+            "of the stack and the window on top is the first to lose its glass.\n"
+            "WHAT MUST HOLD: everything else, which is the point of having this control as well "
+            "as `no-governor`. Glass still comes off, the total still lands under the budget, both "
+            "edges still work, and a flat caption is still there for the pixel clauses — so a "
+            "reader can see that what moved is a JUDGEMENT and not an arithmetic.\n"
+            "WHAT IT IS ABOUT: constraint 49 says 'MUST degrade by z-order from the bottom', and "
+            "that half of it is the only half a correct-looking implementation can get backwards "
+            "while every number stays right.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("top_first", "1"),),
+        expects={"m12": Expect(
+            Outcome.FAIL,
+            why="the glass must come off the wrong end of the stack",
+            failed=_TOP_FIRST_FAILS,
+            held=held_rest(M12_LABELS, _TOP_FIRST_FAILS),
+        )},
+    ),
+    "stale-costs": NegativeControl(
+        name="stale-costs",
+        why="blurStaleCosts=1: admission reads the CURRENT blurred total instead of the all-glass "
+            "one (the cfg.blurStaleCosts hook, refused without a bench boot). This is the first "
+            "version of M12's governor, restored.\n"
+            "WHAT MUST BREAK: idempotence. The input now responds to the action — flattening "
+            "lowers it, the next run re-admits everything, the one after flattens again — so the "
+            "degrade counter climbs over a desktop nobody touched.\n"
+            "WHAT MUST HOLD: the accounting, the degrade ORDER, and the pixels. A governor that "
+            "oscillates still flattens and still saves the area on any single run, which is "
+            "exactly why the defect is worth a control: nothing about one snapshot looks wrong.\n"
+            "WHAT IT IS ABOUT, and why it replaced a `no-hysteresis` control: that one collapsed "
+            "the two edges into one threshold and, against an all-glass input, broke NOTHING — the "
+            "band between the edges cannot change which windows are flat when the input does not "
+            "respond to the action. A control that cannot fail is worse than no control. This is "
+            "the loop that was really there, and hysteresis is what would have been needed had the "
+            "input stayed this way.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("stale_costs", "1"),),
+        expects={"m12": Expect(
+            Outcome.FAIL,
+            why="the governor must stop settling over an unchanged desktop",
+            failed=_STALE_COSTS_FAILS,
+            held=held_rest(M12_LABELS, _STALE_COSTS_FAILS),
         )},
     ),
     "flat-desk": NegativeControl(
@@ -9847,6 +10074,227 @@ def check_m11(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m11.html", env.served_matches_disk(env.document),
                     "the m11.html served does not match www/m11.html on disk")
+
+
+@check(
+    name="m12",
+    milestone="m12",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_GOVERNOR, Control.TOP_FIRST,
+              Control.STALE_COSTS),
+    labels=M12_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M12_DOCUMENT,
+    ready_expr=M12_READY,
+    ready_what="globalThis.M12 reaching done/aborted/error (www/m12.html)",
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M12 && globalThis.M12.state",
+    refusal_want="aborted",
+    note="AN ADMISSION CONTROLLER OVER BLURRED AREA, NOT A DRAG HOOK (constraint 49). It runs on "
+         "every event that can change the area — a window opening, the page reporting a box after "
+         "a clamp or a resize, a window being destroyed — and degrades by z-order FROM THE "
+         "BOTTOM, because the window the user is looking at is on top and glass costs the same "
+         "wherever it sits.\n"
+         "THE GATE `PLAN.md` §5 SPECIFIES CANNOT FIRE, and that is this milestone's finding. Both "
+         "it and constraint 49 size M12's kill gate at '52 glass terminals at 640x440 (53.7 M "
+         "device px)' — which is BOX accounting, one filtered node per window. M11 shipped the "
+         "ring: four filtered strips summing to 27,260 CSS px^2, so 52 of them are 5.7 M device "
+         "px, 10% of the measured wall. Reaching 45 M needs 413 windows against `WIN_CAP` 32 per "
+         "process. A gate needing 413 windows cannot fail — the EXACT defect constraint 49 was "
+         "itself corrected for once (`docs/DECISIONS.md` §Corrections, the 4x dpr error that made "
+         "the Aero gate structurally green). So the finding is asserted instead: at the shipped "
+         "budget this desktop is entirely glass, and `--negative blur-tiny` is not needed because "
+         "the page arms a budget it MEASURED off the windows on screen.\n"
+         "AND NO FRAME-RATE FIGURE COMES FROM HERE. `PLAN.md` asks for '>= 110 fps'; this suite "
+         "runs headless with `--disable-gpu` and SwiftShader, pinned at 60 Hz — measured, a "
+         "trivial geometry reads 60.0 fps and a headed CDP window is throttled to 8.9 because "
+         "Chrome will not paint a window it believes occluded. A frame time from either is a "
+         "number about the rasteriser wearing the name of a number about Aero. "
+         "`bench/m12-governor/probe.py --headed` is where that question lives, and it refuses to "
+         "draw a conclusion rather than printing one.\n"
+         "THE PIXELS ARE READ OUT OF A SCREENSHOT, because `is-flat` in the DOM and a blur that "
+         "is gone are DIFFERENT CLAIMS and only the second is the product: a governor that set a "
+         "class and changed no pixel would save nothing and every other clause here would still "
+         "pass. A flat caption must read as a STEP across a hard seam and a glass one as a spread "
+         "ramp, on the same arithmetic M11 uses (`scripts/png.py`).\n"
+         "negative control: --negative no-governor is `PLAN.md`'s own — nothing is ever "
+         "flattened, so the degrade half and the pixel clauses go red while every measurement "
+         "holds. --negative top-first degrades from the TOP, which moves the ORDER clauses and "
+         "nothing else: the half of constraint 49 that is a judgement rather than an arithmetic. "
+         "--negative stale-costs makes admission read the post-degrade total, which is the "
+         "feedback loop this governor removed: it stops settling. "
+         "--negative no-isolation must come out BROKEN: no SAB, no kernel, no windows.",
+)
+def check_m12(env: Env) -> None:
+    got = env.read(READ_M12, M12_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m12.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m12.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed and there is nothing to "
+            "govern." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m12.html never reached a terminal state (state=%r)" % got["state"])
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF 1: the accounting ------------------------------------------------------------
+    a = ev("account")
+    env.expect_that("account ok", section_ok("account"), a)
+    # THE CLAUSE THAT MAKES THE ARITHMETIC ABOUT THE PRODUCT. A governor accounting a frame nobody
+    # renders is constraint 49's ~17x under-read, and the only way to tell is to measure the
+    # strips the browser actually laid out.
+    env.expect_that("the kernel's per-window cost is what the RENDERED strips cover",
+                    a.get("kernelAgreesWithTheRenderedStrips") is True,
+                    {"rendered": a.get("renderedDevicePx"), "kernel": a.get("kernelDevicePx"),
+                     "mismatched": a.get("mismatched")})
+    env.expect_that("and the page reported its device-pixel ratio, squared",
+                    a.get("dprReported") is True,
+                    {"dpr": a.get("dpr"), "kernelDprSq": a.get("dprSqAsKernelSeesIt")})
+    # THE FINDING. Four strips per window moved the wall out of reach, so the shipped budget does
+    # not bind on any desktop a person could build — stated as an assertion, not as prose.
+    # A FLOOR, NOT THE FIGURE. 413 is a dpr-2 number and a second engine found that out: headless
+    # Firefox renders at dpr 1, where the same geometry needs 1,651 windows, so an assertion on 413
+    # failed on an engine whose governor was fine. The claim is that the budget is out of REACH,
+    # and `PROC_CAP` is the honest bound for that — needing more windows than the process table
+    # allows one each means no desktop gets there. `bench/m12-governor/probe.mjs` asserts the exact
+    # dpr-2 figure, where the ratio is fixed.
+    env.expect_that("the SHIPPED budget is out of reach, so this desktop is all glass",
+                    (a.get("windowsToRealBudget") or 0) >= (a.get("unreachableFloor") or 128)
+                    and a.get("wouldDegradeAtRealBudget") is False,
+                    {"windowsToRealBudget": a.get("windowsToRealBudget"),
+                     "floor": a.get("unreachableFloor"), "dpr": a.get("dpr"),
+                     "allGlassCost": a.get("blurPxIfAllGlass"),
+                     "realBudget": a.get("realBudget")})
+
+    # ---- PROOF 2: the degrade branch --------------------------------------------------------
+    d = ev("degrade")
+    env.expect_that("degrade ok", section_ok("degrade"), d)
+    env.expect_that("over the budget, glass comes off", d.get("someWentFlat") is True,
+                    {"flat": d.get("flat"), "blurPx": d.get("blurPx"),
+                     "budget": d.get("budget")})
+    # BOTTOM-FIRST, which constraint 49 requires and which `--negative top-first` inverts.
+    env.expect_that("from the BOTTOM of the stack, in stack order",
+                    d.get("fromTheBottom") is True,
+                    {"flat": d.get("flat"), "stack": d.get("stack")})
+    env.expect_that("while the window on top keeps its glass",
+                    d.get("topKeptItsGlass") is True,
+                    {"stack": d.get("stack"), "flat": d.get("flat")})
+    env.expect_that("and the total lands back under the budget", d.get("underBudget") is True,
+                    {"blurPx": d.get("blurPx"), "budget": d.get("budget"),
+                     "ifAllGlass": d.get("blurPxIfAllGlass")})
+    # The page's own rendering of it, which is the second reading: a kernel that decided and a page
+    # that never applied it is a desktop still paying for glass it was told to drop.
+    env.expect_that("and the page rendered exactly the set the kernel decided",
+                    d.get("pageRenderedIt") is True,
+                    {"kernel": d.get("flat"), "pageFrames": d.get("hostFrameFlat"),
+                     "pageSet": d.get("hostFlatSet")})
+
+    # ---- PROOF 3: both edges ----------------------------------------------------------------
+    h = ev("hysteresis")
+    env.expect_that("hysteresis ok", section_ok("hysteresis"), h)
+    env.expect_that("the two edges exist and are ordered",
+                    h.get("hasHysteresis") is True,
+                    {"restore": h.get("restoreEdge"), "budget": h.get("budget")})
+    # THE THING HYSTERESIS EXISTS TO PREVENT: with one threshold, flattening a window lowers the
+    # total, which re-admits it, which raises it again — for ever.
+    env.expect_that("re-running the governor over an unchanged desktop changes nothing",
+                    h.get("settled") is True,
+                    {"degradesBefore": h.get("degradesAtStart"),
+                     "degradesAfter": h.get("degradesAfterSettling"),
+                     "flat": h.get("flatWhileSettling")})
+    env.expect_that("and closing windows gives the glass back",
+                    h.get("glassCameBack") is True and h.get("pageAgrees") is True,
+                    {"flatAfter": h.get("flatAfterClosing"), "ended": h.get("endedPids"),
+                     "liveAfter": h.get("liveAfter"), "pageFlat": h.get("hostFlatAfter")})
+
+    # ---- PROOF 4: the pixels ----------------------------------------------------------------
+    px = ev("pixels")
+    env.expect_that("pixels ok", section_ok("pixels"), px)
+    env.expect_that("a flat caption and a glass caption both cross a hard seam",
+                    px.get("haveBoth") is True,
+                    {"overlap": px.get("overlap"), "flatBand": px.get("flatBand"),
+                     "glassBand": px.get("glassBand")})
+    # NO FILTER AT ALL, not `blur(0px)`: a zero-radius filter still costs an offscreen buffer and a
+    # pass, which is exactly the cost the governor exists to shed.
+    env.expect_that("a flattened window carries NO backdrop-filter, not a zero-radius one",
+                    px.get("flatFilterIsNone") is True,
+                    {"flatBand": px.get("flatBand")})
+
+    shot = env.shoot("m12-governor")
+    try:
+        img = Png.decode(shot.read_bytes())
+    except Exception as error:                 # noqa: BLE001 - named, never swallowed
+        env.unmeasurable("the screenshot at %s could not be decoded (%s), so no pixel below was "
+                         "measured" % (_relative(shot), error))
+    dpr = px.get("dpr") or VIEWPORT_SCALE
+    seam = int(px.get("seamDeviceX") or 0)
+
+    def band(spec, rows=None):
+        if not spec:
+            return None
+        try:
+            _, lumas = band_profile(
+                img, seam_x=seam, y=int(spec["bandY"]),
+                rows=int(rows or spec.get("bandRows") or M11_BAND_ROWS),
+                dpr=dpr, reach_css=M11_REACH_CSS)
+        except Exception:                      # noqa: BLE001 - the decoder raises on a bad read
+            return None
+        return transition(lumas)
+
+    bare = None
+    try:
+        _, lumas = band_profile(img, seam_x=seam,
+                                y=int(px.get("bareY") or 0) - M11_BAND_ROWS // 2,
+                                rows=M11_BAND_ROWS, dpr=dpr, reach_css=M11_REACH_CSS)
+        bare = transition(lumas)
+    except Exception:                          # noqa: BLE001
+        bare = None
+    glass = band(px.get("glassBand"))
+    flat = band(px.get("flatBand"))
+
+    # THE REFERENCE FIRST, as M11 does it: without a seam that really is a step, "spread" could be
+    # satisfied by a flat desktop and every clause below would pass with no blur anywhere.
+    env.expect_that("the BARE backdrop reads as a hard step, so the seam is real",
+                    bare is not None and bare.concentration >= M11_STEP_MIN
+                    and bare.span >= 64.0,
+                    {"bare": bare.as_dict() if bare else None, "seamDeviceX": seam,
+                     "shot": _relative(shot)})
+    env.expect_that("the GLASS caption reads as a spread ramp",
+                    glass is not None and glass.concentration <= M11_SPREAD_MAX
+                    and glass.span >= M11_SPAN_MIN,
+                    {"glass": glass.as_dict() if glass else None,
+                     "band": px.get("glassBand"),
+                     "want": {"concentrationAtMost": M11_SPREAD_MAX,
+                              "spanAtLeast": M11_SPAN_MIN}})
+    # THE CLAUSE THE WHOLE MILESTONE RESTS ON. A class is not a saving; the blur has to be gone.
+    env.expect_that("while the FLAT caption reads as a step, so the blur really went",
+                    flat is not None and flat.concentration >= M11_STEP_MIN,
+                    {"flat": flat.as_dict() if flat else None, "band": px.get("flatBand"),
+                     "want": {"concentrationAtLeast": M11_STEP_MIN},
+                     "glassForComparison": glass.as_dict() if glass else None})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m12.html", env.served_matches_disk(env.document),
+                    "the m12.html served does not match www/m12.html on disk")
 
 
 @check(

@@ -1,0 +1,258 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>M12 — what does the blur budget actually bind on?</title>
+<!--
+  The sweep board for `bench/m12-governor/probe.py`. It builds N synthetic window frames over a
+  high-contrast backdrop, animates them with a TRANSFORM so every one re-composites each frame, and
+  reports rAF deltas.
+
+  SYNTHETIC FRAMES AND NOT REAL WINDOWS, deliberately. This measures the COMPOSITOR, and a real
+  window costs a process: `WIN_CAP` is 32 per process and `PROC_CAP` is 128, so the geometries this
+  has to reach (up to 532 frames) would need seventeen processes and would be measuring the kernel
+  at the same time. gap-04's own Aero bench was synthetic for the same reason. The frames are
+  structurally identical to `src/wm/window.mjs`'s — four filtered strips and an opaque client area,
+  with the same metrics imported from `src/wm/aero.mjs`.
+
+  TRANSFORM ONLY. Animating opacity or a filter would make the wrapper a BACKDROP ROOT and sever
+  every descendant's blur chain (constraint 259's neighbourhood), which would silently remove the
+  very cost being measured and report a beautiful frame rate.
+-->
+<style>
+  html, body { margin:0; background:#101014; color:#dde;
+               font:12px/1.4 ui-monospace, Menlo, monospace; overflow:hidden }
+  /* The one backdrop root every strip blurs, and a HIGH-CONTRAST one: a blur over a flat backdrop
+     is free to skip and we would be measuring nothing (constraint 50's cost-side twin). */
+  #desk { position:fixed; inset:0;
+          background:
+            repeating-linear-gradient(90deg, #000 0 24px, #fff 24px 48px),
+            #444 }
+  .frame { position:absolute; box-sizing:border-box; will-change:transform }
+  .strip { position:absolute; box-sizing:border-box;
+           background:rgba(116,184,252,.08) }
+  .client { position:absolute; background:#f4f7fb }
+  #hud { position:fixed; right:0; top:0; z-index:99999; padding:4px 6px;
+         background:rgba(0,0,0,.8); white-space:pre }
+</style>
+
+<div id="desk"></div>
+<div id="hud">building…</div>
+
+<script type="module">
+  // The SAME metrics the skin ships, imported rather than restated: a sweep measuring a geometry
+  // the product does not render would be a number about this file.
+  import { CAP_H, INSET, BLUR_SIGMA, BLUR_BALANCE, ringArea, boxArea } from '/src/wm/aero.mjs'
+
+  const params = new URLSearchParams(location.search)
+  const num = (k, d) => {
+    const v = Number(params.get(k))
+    return Number.isFinite(v) && v > 0 ? v : d
+  }
+
+  const CFG = {
+    //: How many frames.
+    n: num('n', 16),
+    //: Each frame's CSS size.
+    w: num('w', 640),
+    h: num('h', 440),
+    /** The geometry under test.
+     *   ring  four filtered strips per frame — what `src/wm/window.mjs` renders
+     *   box   ONE filtered node per frame, with an opaque client child over it — gap-04's shape,
+     *         and the control that reproduces its measured ~51-window wall
+     *   strips:N  the ring subdivided into N filtered boxes of the SAME total area, which is how
+     *         the pass count is varied with the area held fixed */
+    mode: params.get('mode') || 'ring',
+    //: Blur off, which must be flat at every geometry or the metric is not reading the blur.
+    noBlur: params.get('no_blur') === '1',
+    //: A synchronous main-thread burn per frame. gap-04's own proof that the metric can fail.
+    stallMs: num('stall_ms', 0),
+    //: How long to measure for, after a warmup.
+    windowMs: num('window_ms', 2000),
+    warmupMs: num('warmup_ms', 600),
+  }
+
+  const desk = document.getElementById('desk')
+  const hud = document.getElementById('hud')
+
+  const filter = CFG.noBlur
+    ? 'none'
+    : `blur(${BLUR_SIGMA}px) brightness(${BLUR_BALANCE}) saturate(1.25)`
+
+  /** One filtered box. Returns its CSS area, so the total is summed from what was BUILT rather
+   *  than from a formula that might not match it. */
+  function strip(into, { left, top, width, height }) {
+    const el = document.createElement('div')
+    el.className = 'strip'
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
+    el.style.width = `${width}px`
+    el.style.height = `${height}px`
+    el.style.backdropFilter = filter
+    into.append(el)
+    return width * height
+  }
+
+  /** The four-strip ring: exactly `src/wm/window.mjs`'s structure. */
+  function ringFrame(frame, w, h) {
+    return strip(frame, { left: 0, top: 0, width: w, height: CAP_H })
+      + strip(frame, { left: 0, top: CAP_H, width: INSET, height: h - CAP_H })
+      + strip(frame, { left: w - INSET, top: CAP_H, width: INSET, height: h - CAP_H })
+      + strip(frame, { left: INSET, top: h - INSET, width: w - 2 * INSET, height: INSET })
+  }
+
+  /** ONE filtered node at full window size, with an opaque client child over its middle. The
+   *  child hides the blur and saves none of it, which is the whole of constraint 255. */
+  function boxFrame(frame, w, h) {
+    const area = strip(frame, { left: 0, top: 0, width: w, height: h })
+    const client = document.createElement('div')
+    client.className = 'client'
+    client.style.left = `${INSET}px`
+    client.style.top = `${CAP_H}px`
+    client.style.width = `${w - 2 * INSET}px`
+    client.style.height = `${h - CAP_H - INSET}px`
+    frame.append(client)
+    return area
+  }
+
+  /**
+   * The ring's area, carved into `parts` filtered boxes instead of 4.
+   *
+   * THIS IS THE SECOND AXIS, and the reason this bench exists. gap-04 concluded "the predictor is
+   * area, not layer count: 60 windows at 35 M is free" — but it never varied the two
+   * independently, and the ring geometry M11 shipped pays FOUR filtered boxes per window where
+   * gap-04's paid one. At 52 windows that is 208 passes, past anything measured. Holding the total
+   * area fixed and changing only `parts` is what separates them.
+   */
+  function stripsFrame(frame, w, h, parts) {
+    const total = ringArea(w, h)
+    // A horizontal band of the same total area, cut into `parts` equal boxes side by side. The
+    // SHAPE differs from a ring, and that is acceptable here precisely because the question is
+    // about pass count at fixed area — the ring's own shape is measured by mode=ring.
+    const bandH = Math.max(1, Math.round(total / w))
+    const each = Math.max(1, Math.floor(w / parts))
+    let built = 0
+    for (let i = 0; i < parts; i += 1) {
+      built += strip(frame, { left: i * each, top: 0, width: each, height: bandH })
+    }
+    const client = document.createElement('div')
+    client.className = 'client'
+    client.style.left = `${INSET}px`
+    client.style.top = `${CAP_H}px`
+    client.style.width = `${Math.max(0, w - 2 * INSET)}px`
+    client.style.height = `${Math.max(0, h - CAP_H - INSET)}px`
+    frame.append(client)
+    return built
+  }
+
+  const frames = []
+  let filteredCssPx = 0
+  let passes = 0
+  const stripsMatch = /^strips:(\d+)$/.exec(CFG.mode)
+
+  for (let i = 0; i < CFG.n; i += 1) {
+    const frame = document.createElement('div')
+    frame.className = 'frame'
+    // Cascaded, and WHOLLY ON SCREEN: a frame scrolled out of the viewport is not composited, so
+    // off-screen frames would be free and the sweep would flatten for the wrong reason.
+    const spanX = Math.max(1, window.innerWidth - CFG.w)
+    const spanY = Math.max(1, window.innerHeight - CFG.h)
+    frame.style.left = `${(i * 17) % spanX}px`
+    frame.style.top = `${(i * 11) % spanY}px`
+    frame.style.width = `${CFG.w}px`
+    frame.style.height = `${CFG.h}px`
+    desk.append(frame)
+    let area = 0
+    let p = 0
+    if (stripsMatch) {
+      p = Number(stripsMatch[1])
+      area = stripsFrame(frame, CFG.w, CFG.h, p)
+    } else if (CFG.mode === 'box') {
+      p = 1
+      area = boxFrame(frame, CFG.w, CFG.h)
+    } else {
+      p = 4
+      area = ringFrame(frame, CFG.w, CFG.h)
+    }
+    filteredCssPx += area
+    passes += p
+    frames.push(frame)
+  }
+
+  const dpr = window.devicePixelRatio
+  const report = {
+    state: 'running',
+    cfg: CFG,
+    dpr,
+    frames: CFG.n,
+    //: What the compositor was actually asked to filter, summed over every box BUILT.
+    filteredCssPx,
+    filteredDevicePx: filteredCssPx * dpr * dpr,
+    //: One filter pass per filtered box. The second axis.
+    passes,
+    //: The two accountings side by side, so a reader never sees one without the other.
+    ringAreaPerFrame: ringArea(CFG.w, CFG.h),
+    boxAreaPerFrame: boxArea(CFG.w, CFG.h),
+    filter,
+    viewport: { w: window.innerWidth, h: window.innerHeight },
+  }
+  globalThis.M12 = report
+
+  /* The animation. A 2-D TRANSLATE and nothing else: it moves every frame so the compositor must
+   * re-filter each one, and it touches no property that would establish a backdrop root. */
+  const deltas = []
+  let t0 = 0
+  let last = 0
+  let phase = 'warmup'
+
+  function burn(ms) {
+    const until = performance.now() + ms
+    // A synchronous spin, which is what a long main-thread task is. `while` on the clock rather
+    // than a loop count, so the burn is the same on any machine.
+    while (performance.now() < until) { /* deliberately empty */ }
+  }
+
+  function tick(now) {
+    if (!t0) { t0 = now; last = now; requestAnimationFrame(tick); return }
+    const dt = now - last
+    last = now
+    const elapsed = now - t0
+    if (phase === 'warmup') {
+      if (elapsed >= CFG.warmupMs) { phase = 'measure'; t0 = now; deltas.length = 0 }
+    } else if (phase === 'measure') {
+      deltas.push(dt)
+      if (elapsed >= CFG.windowMs) { finish(); return }
+    }
+    // Move everything. The offset is bounded so nothing leaves the viewport.
+    const k = (elapsed / 16) % 40
+    for (let i = 0; i < frames.length; i += 1) {
+      frames[i].style.transform = `translate(${k}px, ${(i % 2 ? -k : k) / 2}px)`
+    }
+    if (CFG.stallMs) burn(CFG.stallMs)
+    requestAnimationFrame(tick)
+  }
+
+  function pct(sorted, p) {
+    if (!sorted.length) return null
+    const at = Math.min(sorted.length - 1, Math.max(0, Math.round((p / 100) * (sorted.length - 1))))
+    return sorted[at]
+  }
+
+  function finish() {
+    const sorted = [...deltas].sort((a, b) => a - b)
+    const mean = deltas.reduce((s, d) => s + d, 0) / (deltas.length || 1)
+    report.samples = deltas.length
+    report.meanMs = Number(mean.toFixed(3))
+    report.p50Ms = Number((pct(sorted, 50) ?? 0).toFixed(3))
+    report.p95Ms = Number((pct(sorted, 95) ?? 0).toFixed(3))
+    report.maxMs = Number((sorted[sorted.length - 1] ?? 0).toFixed(3))
+    // fps FROM THE MEAN INTERVAL, which is what gap-04 reported, so the two are comparable.
+    report.fps = Number((1000 / mean).toFixed(1))
+    report.p95Fps = Number((1000 / (pct(sorted, 95) || 1)).toFixed(1))
+    report.state = 'done'
+    hud.textContent =
+      `${CFG.mode} n=${CFG.n} ${CFG.w}x${CFG.h}\n` +
+      `${(report.filteredDevicePx / 1e6).toFixed(1)} M dev px, ${passes} passes\n` +
+      `${report.fps} fps (p50 ${report.p50Ms} ms, p95 ${report.p95Ms} ms)`
+  }
+
+  requestAnimationFrame(tick)
+</script>
