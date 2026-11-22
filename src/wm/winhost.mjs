@@ -211,10 +211,29 @@ export class WinHost {
     };
   }
 
-  /** Subscribe to "the window table changed". Returns the watcher, so a caller can keep it. */
+  /** THE SHELL, if a page built one. It is set rather than constructed here because a shell is
+   *  optional: M7 through M13's pages have frames and no taskbar, and a window menu that threw on
+   *  those pages would make a right-click on a caption a page error. */
+  useShell(shell) {
+    this.shell = shell || null;
+    return this.shell;
+  }
+
+  /** Subscribe to "the window table changed". Returns the watcher, so a caller can keep it — and
+   *  `unwatch` it, which a shell taken down has to do. */
   watch(fn) {
     if (typeof fn === "function") this.watchers.push(fn);
     return fn;
+  }
+
+  /** Stop telling a watcher. A SHELL THAT WAS DISPOSED MUST NOT KEEP RENDERING: a page that boots
+   *  a second kernel builds a second shell, and a callback nobody removed keeps rebuilding buttons
+   *  inside a band that is no longer in the document. A critic found `Taskbar.dispose` doing
+   *  exactly that, in the method whose docstring says it exists for this case. */
+  unwatch(fn) {
+    const at = this.watchers.indexOf(fn);
+    if (at >= 0) this.watchers.splice(at, 1);
+    return at >= 0;
   }
 
   /** Tell the watchers, naming what happened. A THROW IN ONE WATCHER MUST NOT STOP THE OTHERS or
@@ -344,6 +363,15 @@ export class WinHost {
        * owns the show state, so a frame that minimized itself would be a second authority on what
        * is on screen. `win-show` comes back and `Win.setState` renders it. */
       onState: (state) => this.askState(id, state),
+      /* AND A RIGHT-CLICK ON THE CAPTION ASKS THE SHELL FOR A MENU. The host is the side that has
+       * both the frame and the shell, so it is the one place the two are joined — `watch` is the
+       * same arrangement in the other direction. A page with no shell gets no menu rather than a
+       * broken one. */
+      onMenu: (at) => {
+        const entry = this.get(id);
+        if (!entry || !this.shell || typeof this.shell.openWindowMenu !== "function") return;
+        this.shell.openWindowMenu(entry, at);
+      },
       /* AND THE WORK AREA IS A CALLBACK, not a value: the shell may take a strip off the desktop
        * at any moment, and a frame laid out against a stale work area is a maximized window
        * covering the taskbar. */

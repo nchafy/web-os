@@ -264,6 +264,10 @@ async function proofSnap (k, host) {
   /* ---- THE DRAG-OUT, AT BOTH EDGES OF THE THRESHOLD. 19 px must hold and 21 px must release,
    * which is the pair `PLAN.md` §5 names and the pair `--negative no-snap-hysteresis` breaks. ---- */
   const hold = capPoint(entry)
+  // WHERE IT CAME FROM, kept so the drag-out can be asserted NOT to go back there: that is the
+  // critic's first finding, page-side — the `win-show` answering an undock used to overwrite the
+  // geometry the drag had just placed under the pointer.
+  evidence.preSnapBox = { x: 60, y: 60 }
   await ask({ kind: 'press', name: 'drag-out-press', at: hold })
   await ask({ kind: 'move', name: 'drag-out-19', at: { x: hold.x + SNAP_RELEASE_PX - 1, y: hold.y } })
   evidence.held19 = {
@@ -275,6 +279,8 @@ async function proofSnap (k, host) {
   evidence.released21 = {
     state: entry.win.state,
     placed: roundBox(entry.win.placed),
+    pointerX: hold.x + SNAP_RELEASE_PX + 1,
+    deskLeft: Math.round(d.left),
   }
   await ask({ kind: 'release', name: 'drag-out-release',
     at: { x: hold.x + SNAP_RELEASE_PX + 1, y: hold.y } })
@@ -322,6 +328,12 @@ async function proofSnap (k, host) {
     && evidence.held19.heldFor >= SNAP_RELEASE_PX - 2
   evidence.releasedAt21 = evidence.released21.state === WST_NORMAL
     && evidence.released21.kernelAgreedMs >= 0
+  /* AND IT STAYED UNDER THE POINTER. An undock re-anchors the frame so the hand keeps its place in
+   * the caption, and the kernel's answer must not move it: the restore box is for a RESTORE, not
+   * for a drag that happens to pass through NORMAL. Asserted as "not back where it started",
+   * because the pointer is near the desktop's left edge here and the pre-snap box was at x = 60. */
+  evidence.stayedUnderThePointer =
+    Math.abs(evidence.released21.placed.x - evidence.preSnapBox.x) > 8
   evidence.maximizedFromTheTop = evidence.armedMax === WST_MAX
     && evidence.maximized.state === WST_MAX
     && JSON.stringify(evidence.maximized.placed) === JSON.stringify(evidence.maximized.want)
@@ -329,8 +341,8 @@ async function proofSnap (k, host) {
     && evidence.held49.heldFor >= MAX_RELEASE_PX - 2
   evidence.releasedAt51 = evidence.released51.state === WST_NORMAL
   evidence.ok = evidence.ghostPromisedWhatItTook && evidence.snappedToTheHalf
-    && evidence.heldAt19 && evidence.releasedAt21 && evidence.maximizedFromTheTop
-    && evidence.heldAt49 && evidence.releasedAt51
+    && evidence.heldAt19 && evidence.releasedAt21 && evidence.stayedUnderThePointer
+    && evidence.maximizedFromTheTop && evidence.heldAt49 && evidence.releasedAt51
   globalThis.M14.proofs.snap = { ok: evidence.ok, evidence }
   say((evidence.ok ? 'ok  ' : 'BAD ') + 'snap: left half ' + evidence.snappedToTheHalf +
     ', held at 19 ' + evidence.heldAt19 + ' released at 21 ' + evidence.releasedAt21 +

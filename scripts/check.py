@@ -4049,6 +4049,13 @@ _NO_CLAMP_FAILS = (
     "dragged above the top, the frame stops at y = 0",
     "arrow-keyed off the left edge, the frame stops at MIN_VISIBLE - w",
     "and in every clamped state a grabbable strip of caption is still over the desktop",
+    # AND THE KERNEL'S-RECORD CLAUSE, which the gate caught declared as held: that clause asserts
+    # the clamp ABSORBED something and the kernel recorded the result, and the first half of it is
+    # false in a world with no clamp. The fixture asks for a box far outside the desktop and
+    # `fixtureIsClamped` is part of the clause — which is exactly what makes the clause capable of
+    # failing at all (see `--negative stale-geom`, which came out green without it).
+    "record ok",
+    "the kernel's box is the box the clamp settled on, for every live window",
     "relayout ok",
     "a desktop that shrinks pulls every frame back inside it",
     "limits ok",
@@ -4114,6 +4121,7 @@ M14_LABELS = (
     "a release at the edge snaps to the half of the work area",
     "a 19 px drag-out HOLDS the snap",
     "and a 21 px drag-out releases it",
+    "and the window stays under the pointer rather than going back where it came from",
     "a drag to the top maximizes to the work area",
     "a 49 px side-move HOLDS the maximize",
     "and a 51 px side-move releases it",
@@ -11630,6 +11638,14 @@ def check_m14(env: Env) -> None:
                     {"held19": s.get("held19"), "releaseAt": s.get("release")})
     env.expect_that("and a 21 px drag-out releases it", s.get("releasedAt21") is True,
                     {"released21": s.get("released21")})
+    # THE CRITIC'S FIRST FINDING, AS A CHECK. An undock re-anchors the frame so the hand keeps its
+    # place in the caption, and the `win-show` that answers it used to overwrite that geometry with
+    # the restore box — so a window dragged out of a snap jumped back to where it had been before
+    # the snap, out from under the pointer holding it.
+    env.expect_that(
+        "and the window stays under the pointer rather than going back where it came from",
+        s.get("stayedUnderThePointer") is True,
+        {"released21": s.get("released21"), "preSnap": s.get("preSnapBox")})
     env.expect_that("a drag to the top maximizes to the work area",
                     s.get("maximizedFromTheTop") is True,
                     {"armedMax": s.get("armedMax"), "maximized": s.get("maximized")})

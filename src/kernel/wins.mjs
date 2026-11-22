@@ -817,6 +817,21 @@ export class WinMgr {
      * floating, not to the half-screen it was snapped to. */
     if (from === WST_NORMAL && state !== WST_MIN) win.restore = { ...win.box };
     if (state === WST_MIN) win.beforeMin = from === WST_MIN ? win.beforeMin : from;
+    /**
+     * AND IT IS CONSUMED BY THE RETURN IT PAYS FOR, which a critic found it was not.
+     *
+     * `restore` used to survive every transition, so the page — which applies whatever box the
+     * post carries — moved a window back to a geometry that was two gestures stale. Reproduced:
+     * maximize a window at (30,40), restore it, DRAG IT to (500,300), minimize it, then click its
+     * taskbar button. The post carried (30,40) and the window teleported there, and because the
+     * page reports the box it settled on, the kernel then recorded the wrong place too.
+     *
+     * A restore point answers one question — "where was this window before it was docked" — and
+     * once the window is floating again the answer is its own box. So the box travels with the
+     * post that uses it and is cleared behind it.
+     */
+    const give = state === WST_NORMAL && win.restore ? { ...win.restore } : null;
+    if (state === WST_NORMAL) win.restore = null;
     win.state = state;
     this.stats.stateChanges += 1;
     /* THE PROCESS IS TOLD. An EVENT and not a query, for `WEV_FOCUS`'s reason — the process that
@@ -830,7 +845,10 @@ export class WinMgr {
       win: win.id,
       state,
       from,
-      restore: win.restore ? { ...win.restore } : null,
+      /* THE BOX TO GO BACK TO on a return to NORMAL, and the box to come back to LATER on the way
+       * into a docked state — the page needs the second one to size an undock. Null once it has
+       * been used, which is what stops a stale one being applied. */
+      restore: give || (win.restore ? { ...win.restore } : null),
     });
     /* M12's OWN GAP, CLOSED. Constraint 49 lists "open, maximize, snap, restore, un-minimize,
      * peek" as the events an admission controller must see, and M12 recorded that nothing had ever
@@ -852,6 +870,20 @@ export class WinMgr {
     if (!(role >= 0 && role <= WROLE_LIMIT)) return -EINVAL;
     if (win.destroyed || !win.attached) return -EHOSTGONE;
     if (role === win.role) return 0;
+    /**
+     * THE DESKTOP ROLE IS ONE-WAY, and this is `win_surface`'s own rule rather than a new one: a
+     * window's content mode changes once (`src/wm/winhost.mjs` `#surface`, `#role`), because two
+     * renderers for one window's inside is two places the same pixel can come from. Taking the
+     * role replaces the text widget with an icon view, and nothing can put a terminal back — so a
+     * window that gave the role up would be a window with a desktop's insides, no keyboard and a
+     * place at the bottom of the stack. A critic found exactly that.
+     *
+     * -EINVAL and not -EPERM: it is not a privilege, it is a transition that does not exist.
+     */
+    if (win.role === WROLE_DESKTOP) {
+      this.stats.refusedRole += 1;
+      return -EINVAL;
+    }
     if (role === WROLE_DESKTOP) {
       /* THE WINDOW'S OWN DISQUALIFICATION FIRST, and the order is the point: an OWNED window can
        * never be the desktop, and -EBUSY would tell it to try again later. A permanent refusal
@@ -867,16 +899,27 @@ export class WinMgr {
         return -EBUSY;
       }
       /* A DESKTOP IS NEVER MINIMIZED OR MAXIMIZED, so a window that was either becomes normal as
-       * it takes the role. Leaving a hidden window as the desktop would be a desktop nobody can
-       * see and nothing can restore, because `setState` refuses the role. */
-      win.state = WST_NORMAL;
+       * it takes the role — AND BOTH SIDES ARE TOLD, which a critic found they were not. The page
+       * writes `Win.state` only from a `win-show`, so a MINIMIZED window that took the role kept
+       * `hidden` set for ever: the kernel believed the desktop was normal and at the bottom of the
+       * stack, the frame was not on screen, and `setState` refuses a desktop — so there was no way
+       * back. That is exactly the state this comment used to claim it was preventing. */
+      if (win.state !== WST_NORMAL) {
+        const was = win.state;
+        win.state = WST_NORMAL;
+        win.push({ type: WEV_STATE, a: WST_NORMAL, b: was });
+        K.post({ t: "win-show", win: win.id, state: WST_NORMAL, from: was, restore: null });
+      }
       win.restore = null;
     }
     win.role = role;
     this.stats.roleChanges += 1;
-    // TO THE BOTTOM, and the whole order goes out: the page renders the order it is sent and
-    // decides nothing (constraint 226).
-    this.lowerToBottom(win);
+    /* TO THE BOTTOM, and the whole order goes out: the page renders the order it is sent and
+     * decides nothing (constraint 226). ONLY FOR THE DESKTOP — a critic found this running for
+     * every role change, which would send an ordinary window to the back of the stack for having
+     * said it was ordinary. The role is one-way now, so the other branch is unreachable; the guard
+     * stays because the reachability is an argument and this is an invariant. */
+    if (role === WROLE_DESKTOP) this.lowerToBottom(win);
     K.post({ t: "win-role", win: win.id, role });
     this.governBlur("role");
     return 0;

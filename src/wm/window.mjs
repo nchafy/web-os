@@ -155,6 +155,8 @@ export class Win {
     /** Where a maximized or snapped window goes back to, as the kernel reported it. */
     this.restore = null;
     this.onState = spec.onState || null;
+    /** Where a right-click on the caption goes: the shell, which owns every menu. */
+    this.onMenu = spec.onMenu || null;
     /** The WORK AREA, as a callback rather than a value: the shell may take a strip off the
      *  desktop at any moment (a taskbar appearing) and a window laid out against a stale work area
      *  is a maximized window covering the taskbar. */
@@ -164,6 +166,9 @@ export class Win {
     this.armed = 0;
     this.snapEl = null;
     this.resize = null;
+    /** Whether a live drag has just undocked this window and placed it itself, so the `win-show`
+     *  that answers must not move it. See `setState`. */
+    this.pendingUndock = false;
     /** 0 responding, 1 greyed caption, 2 End Process offered. Written only by `setHealth`. */
     this.health = 0;
     /** Whether the kernel's last order said something blocks this window, and whether this window
@@ -257,7 +262,22 @@ export class Win {
      * order of the two listeners is not what decides it. */
     this.gripEls = this.#grips();
     el.append(bar, ...this.edgeEls, body, ...this.gripEls);
-    bar.addEventListener("pointerdown", (e) => this.#startDrag(e));
+    bar.addEventListener("pointerdown", (e) => {
+      /* A RIGHT PRESS ON THE CAPTION IS THE WINDOW MENU, which is Windows 7's own gesture and the
+       * one mouse action on a frame this file did not have. It is handed UP rather than handled
+       * here: the menu's rows are state asks, and the shell is what draws a menu
+       * (`docs/DECISIONS.md` D39) — a frame that drew its own would be a second popup nobody can
+       * close with the first one's rules. `pointerdown` with `button === 2`, for the reason the
+       * taskbar uses it: that is the event a driver and a hand both deliver (constraint 279). */
+      if (e.button === 2) {
+        e.preventDefault();
+        if (this.onMenu) this.onMenu({ x: e.clientX, y: e.clientY });
+        return;
+      }
+      this.#startDrag(e);
+    });
+    // And the browser's own menu is refused, or a right-click would show Chrome's over ours.
+    bar.addEventListener("contextmenu", (e) => e.preventDefault());
     bar.addEventListener("keydown", (e) => this.#barKey(e));
     /* A DOUBLE-CLICK ON THE CAPTION MAXIMIZES AND RESTORES, which is the gesture a Windows user
      * tries before they find the button. `dblclick` and not two clicks: the browser already owns
@@ -461,7 +481,19 @@ export class Win {
   setState(state, restore = null) {
     this.state = state | 0;
     if (restore && restore.w > 0 && restore.h > 0) this.restore = { ...restore };
-    if (this.state === WST_NORMAL && this.restore) this.box = { ...this.restore };
+    /* THE BOX COMES FROM THE POST AND NOT FROM MEMORY, which a critic's first finding was about:
+     * `this.restore` is kept for sizing an undock and outlives its use, so applying it on every
+     * return to NORMAL moved a window to a geometry two gestures stale. The kernel sends the box
+     * exactly once, on the transition it pays for, and sends null afterwards.
+     *
+     * AND A DRAG THAT UNDOCKED HAS ALREADY PLACED THE WINDOW — under the pointer, which is the
+     * whole point of `#undock` — so the post that follows it must not move the frame out from
+     * under the hand that is holding it. The flag is consumed here whether or not it was used. */
+    const undocking = this.pendingUndock === true;
+    this.pendingUndock = false;
+    if (this.state === WST_NORMAL && restore && restore.w > 0 && !undocking) {
+      this.box = { ...restore };
+    }
     // The glyph says what the button WILL do, which is Windows 7's own behaviour: a maximized
     // window's button restores, and it draws the overlapping-rectangles glyph to say so.
     this.maxBtn.textContent = this.state === WST_MAX ? "❐" : "□";
@@ -588,6 +620,8 @@ export class Win {
     const grabY = Math.min(Math.max(gesture.y - desk.top - gesture.from.y, 0), WIN_CAP_H);
     gesture.docked = false;
     gesture.state = WST_NORMAL;
+    // The `win-show` that answers `askState` below must leave this geometry alone: see `setState`.
+    this.pendingUndock = true;
     gesture.from = {
       x: Math.round(event.clientX - desk.left - fraction * back.w),
       y: Math.round(event.clientY - desk.top - grabY),
@@ -619,8 +653,12 @@ export class Win {
   #armSnap(event) {
     const desk = this.surfaceEl.getBoundingClientRect();
     let armed = 0;
+    /* ONE CONSTANT FOR ALL THREE EDGES, which a critic found the right one was not: it carried a
+     * `+ 1` and so armed over two pixels where the left and the top arm over one, in a function
+     * whose own comment says the figure "is not a tolerance to be widened". The furthest right a
+     * pointer inside the desktop can be is `right - 1`, so the plain constant already admits it. */
     if (event.clientX - desk.left <= SNAP_ARM_PX) armed = WST_SNAP_L;
-    else if (desk.right - event.clientX <= SNAP_ARM_PX + 1) armed = WST_SNAP_R;
+    else if (desk.right - event.clientX <= SNAP_ARM_PX) armed = WST_SNAP_R;
     else if (event.clientY - desk.top <= SNAP_ARM_PX) armed = WST_MAX;
     if (armed === this.armed) return;
     this.armed = armed;

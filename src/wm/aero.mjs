@@ -670,7 +670,16 @@ export function styleSheet() {
   padding: 4px;
   border-radius: 4px;
   border: 1px solid rgba(255,255,255,.45);
-  background: linear-gradient(rgba(22,52,84,.92), rgba(12,32,56,.94));
+  /* GLASS, LIKE THE BAR IT RISES FROM — Windows 7's own start menu is a blurred panel, and this
+     one has to be for a reason a screenshot made obvious: the fill is translucent, so without a
+     blur the DESKTOP'S ICON LABELS read straight through the rows and both became unreadable.
+     Blurring the backdrop is what makes a translucent panel legible, which is the whole argument
+     of constraint 34 applied to a menu rather than to a frame.
+
+     It is a filtered box the blur governor does not account, exactly like the taskbar — recorded
+     in MILESTONES M14 under what is not done, and bounded: at most one popup exists at a time. */
+  backdrop-filter: blur(${BLUR_SIGMA}px) brightness(.55) saturate(1.2);
+  background: linear-gradient(rgba(22,52,84,.78), rgba(12,32,56,.86));
   box-shadow: 0 0 0 1px rgba(0,0,0,.55), 0 10px 28px rgba(0,0,0,.55);
   color: #eaf4ff;
   font: ${FONT_PX}px/1.3 ${UI_FONT};
@@ -706,7 +715,20 @@ export function styleSheet() {
 
 /* The start menu is the same panel, taller, with a search box at its foot — Windows 7's own
    arrangement, where the search field is where the cursor already is. */
-.aero-desktop .startmenu { min-width: 260px; max-height: 420px; display: grid; gap: 2px }
+.aero-desktop .startmenu { min-width: 420px; max-width: 460px; max-height: 440px;
+  display: grid; gap: 2px }
+/* TWO COLUMNS, which is Windows 7's own menu: the programs on the left and the places on the
+   right, with a rule between them. The right column is narrower and does not scroll — it is a
+   handful of places, and a scrollbar on four rows reads as a mistake. */
+.aero-desktop .startmenu .start-columns {
+  display: grid; grid-template-columns: 1fr 150px; gap: 6px;
+}
+.aero-desktop .startmenu .start-left { min-width: 0; display: grid; gap: 2px; align-content: start }
+.aero-desktop .startmenu .start-places {
+  min-width: 0; display: grid; gap: 1px; align-content: start;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255,255,255,.22);
+}
 .aero-desktop .startmenu .start-list { overflow: auto; max-height: 300px; display: grid; gap: 1px }
 .aero-desktop .startmenu .start-search {
   width: 100%;

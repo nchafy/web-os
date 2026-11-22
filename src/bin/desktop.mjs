@@ -20,6 +20,7 @@
 // row in the start menu — and not when something changes underneath.
 
 import {
+  WITEM_LABEL_MAX, WIN_ITEM_CAP,
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_STATE, WEV_ITEM,
   WROLE_DESKTOP, WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_CONTAINER, WITEM_SEPARATOR,
@@ -64,6 +65,24 @@ const OPENS_FILES = Object.freeze({
   txt: { prog: "editor", argv: (path) => ["editor", path] },
   md: { prog: "editor", argv: (path) => ["editor", path] },
 });
+
+/**
+ * A LABEL THE ABI CAN CARRY: at most `WITEM_LABEL_MAX` bytes, cut on a character boundary.
+ *
+ * THE PUBLISHER TRUNCATES, which `src/abi.mjs` says in as many words — "a refusal would make a
+ * long filename unpublishable" — and this program did not. A critic found what that cost: one file
+ * in `/desktop` with a 65-byte name made `encodeWinItems` return null, `win_items` answer -EINVAL,
+ * and EVERY row disappear — no icons, no start menu, no jump list — because the list is published
+ * whole. An ellipsis is what a reader should see instead.
+ */
+function label(name) {
+  const text = String(name);
+  const bytes = (s2) => new TextEncoder().encode(s2).length;
+  if (bytes(text) <= WITEM_LABEL_MAX) return text;
+  let cut = [...text];
+  while (cut.length > 1 && bytes(`${cut.join("")}…`) > WITEM_LABEL_MAX) cut.pop();
+  return `${cut.join("")}…`;
+}
 
 function extOf(path) {
   const name = String(path).split("/").pop() || "";
@@ -110,9 +129,11 @@ export function run(env) {
   }
   account.role = WROLE_DESKTOP;
 
-  /** The rows, and what each one MEANS — which is this program's own array and is never sent
-   *  anywhere: `WEV_ITEM` reports an INDEX into it, so the shell never learns a path. */
-  let rows = [];
+  /** The rows AS PUBLISHED, and what each one MEANS — this program's own array, never sent
+   *  anywhere: `WEV_ITEM` reports an INDEX into it, so the shell never learns a path. It is
+   *  replaced only when `win_items` has ACCEPTED the list, or the two sides disagree about what
+   *  row 3 is. */
+  let published = [];
 
   /** Make `/desktop` if it is not there. A DIRECTORY AND NOTHING IN IT: a program that wrote
    *  example files would be a program that invented a reader's documents. */
@@ -136,7 +157,13 @@ export function run(env) {
    * desktop, a start menu and a jump list at once (`src/abi.mjs`).
    */
   const publish = () => {
-    rows = [];
+    /* BUILT INTO A SEPARATE LIST AND COMMITTED ONLY ON SUCCESS, which a critic found this did not
+     * do: `rows` was replaced before the publish was attempted, so a refused publish left the
+     * KERNEL holding the previous list while this process held the new one — and a `WEV_ITEM`
+     * index the kernel validated against the old list was then looked up in the new array and
+     * launched the wrong row. */
+    const next = [];
+    const rows = next;
     /* THE SHORTCUTS, which are this program's own idea rather than files — Windows 7's fresh
      * desktop has the same kind: Computer, a user's folder, the Recycle Bin. EVERY ONE OF THEM
      * DOES SOMETHING, which is the rule the caption buttons follow too: a row that opened nothing
@@ -240,13 +267,25 @@ export function run(env) {
       run: () => ["term", "--ceiling", String(ceiling)],
     });
 
-    const sent = env.win.items(made.fd, rows.map((row) => ({
-      icon: row.icon, flags: row.flags, label: row.label,
+    /* AND CAPPED, for the same reason the labels are: the list is published whole, so the 65th
+     * row would take the other 64 with it. The cut is RECORDED rather than silent — a desktop that
+     * is showing less than the filesystem holds has to say so. */
+    const capped = next.slice(0, WIN_ITEM_CAP);
+    if (capped.length < next.length) {
+      account.refusals.push(
+        `${next.length} rows is over WIN_ITEM_CAP ${WIN_ITEM_CAP}; ${next.length - capped.length} `
+        + "not published");
+    }
+    const sent = env.win.items(made.fd, capped.map((row) => ({
+      icon: row.icon, flags: row.flags, label: label(row.label),
     })));
     if (sent < 0) {
       account.refusals.push(`win_items: ${env.std.errnoName(sent)}`);
       return sent;
     }
+    // THE PROCESS'S ARRAY MATCHES THE KERNEL'S LIST FROM HERE, and not before: `WEV_ITEM` carries
+    // an index into exactly this list.
+    published = capped;
     account.publishes += 1;
     account.items = sent;
     return sent;
@@ -310,7 +349,7 @@ export function run(env) {
       }
       if (ev.type === WEV_ITEM) {
         account.activations += 1;
-        const row = rows[ev.a];
+        const row = published[ev.a];
         if (!row) {
           account.refusals.push(`item ${ev.a} is not a row this process published`);
           continue;

@@ -34,8 +34,8 @@
 // learn it — a title is whatever a program says it is.
 
 import {
-  WST_NORMAL, WST_MIN, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR, WITEM_DISABLED,
-  WROLE_DESKTOP, WICON_PROGRAM,
+  WST_NORMAL, WST_MIN, WST_MAX, WITEM_DESKTOP, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR,
+  WITEM_DISABLED, WROLE_DESKTOP, WICON_PROGRAM,
 } from "../abi.mjs";
 // `progName` AND `iconForProgram` ARE THE ICON MODULE'S, because a window's CAPTION needs the
 // same answer this bar does — see `iconForProgram`'s own note.
@@ -74,15 +74,17 @@ const THUMB_LINES = 9;
 
 export class Taskbar {
   /**
-   * `spec.into` is the desktop element, `spec.host` the `WinHost` whose frames this shell renders,
-   * and `spec.onLaunch(name)` is how a start-menu row that names a program gets run — the PAGE is
-   * the supervisor (`docs/DECISIONS.md` D18), so starting a program is the page's to do and not
-   * this file's.
+   * `spec.into` is the desktop element and `spec.host` the `WinHost` whose frames this shell
+   * renders — and nothing else.
+   *
+   * THERE IS NO LAUNCH CALLBACK, and there was one: read from the spec, stored, and never called.
+   * A start-menu row posts `win-item-ask` and the PUBLISHING PROCESS spawns, which is the whole
+   * point of `win_items` — so a second route would have been a way for the page to start programs
+   * on its own. A critic found it before it became one.
    */
   constructor(spec) {
     this.into = spec.into;
     this.host = spec.host;
-    this.onLaunch = spec.onLaunch || null;
     /** The popup that is open, as `{kind, win}` or null. ONE AT A TIME, because every one of them
      *  is a menu and two open menus is a state a user cannot get out of by clicking elsewhere. */
     this.open = null;
@@ -90,7 +92,7 @@ export class Taskbar {
     this.peeking = false;
     this.stats = {
       syncs: 0, buttonClicks: 0, raises: 0, minimizes: 0, restores: 0,
-      jumpOpens: 0, jumpClicks: 0, menuOpens: 0, launches: 0, thumbOpens: 0,
+      jumpOpens: 0, jumpClicks: 0, menuOpens: 0, windowMenus: 0, launches: 0, thumbOpens: 0,
       peeks: 0, showDesktops: 0, closes: 0,
     };
     this.#build();
@@ -98,7 +100,11 @@ export class Taskbar {
      * a maximized window laid out before this call is a window covering the taskbar. `reserve`
      * re-clamps every existing frame, which is M13's `relayout` doing the job it was written for. */
     this.host.reserve(TASKBAR_H);
-    this.host.watch(() => this.sync());
+    /** The watcher, KEPT so `dispose` can take it off again. */
+    this.watcher = this.host.watch(() => this.sync());
+    // THE HOST LEARNS OF THE SHELL HERE, which is what lets a right-click on a caption reach a
+    // menu: the frame asks the host and the host asks whatever shell exists.
+    this.host.useShell(this);
     this.sync();
     this.#startClock();
   }
@@ -244,6 +250,15 @@ export class Taskbar {
     return 0;
   }
 
+  /** The rendered button standing for a group, found by WALKING the band rather than by querying
+   *  with a string a program chose. */
+  #buttonFor(group) {
+    for (const btn of this.band.querySelectorAll("[data-task-btn]")) {
+      if (btn.dataset.taskBtn === group.key) return btn;
+    }
+    return null;
+  }
+
   /** Rebuild the band. Called on every window-table change, which is what `WinHost.watch` is. */
   sync() {
     this.stats.syncs += 1;
@@ -279,9 +294,13 @@ export class Taskbar {
         count.textContent = String(group.wins.length);
         btn.append(count);
       }
+      /* THE BUTTON TRAVELS WITH THE CLICK, rather than being found again by a selector built from
+       * the group's key. The key is `progName(prog)`, which is the basename of ARGV[0] — chosen by
+       * whatever process called `spawn` — so interpolating it into a `querySelector` let a program
+       * with a quote in its argv throw a SyntaxError inside this handler. A critic found it. */
       btn.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.clickGroup(group);
+        this.clickGroup(group, btn);
       });
       /* THE JUMP LIST OPENS ON THE RIGHT BUTTON'S PRESS, which is Windows 7's own timing and is
        * also the only signal that reliably exists: a `contextmenu` event is produced by the
@@ -327,7 +346,7 @@ export class Taskbar {
    * A GROUP OF SEVERAL IN FRONT SHOWS ITS WINDOW LIST instead of minimizing, because "which of
    * these three" is a question a click cannot answer.
    */
-  clickGroup(group) {
+  clickGroup(group, anchor = null) {
     this.stats.buttonClicks += 1;
     this.closePopup();
     const top = this.topmost();
@@ -340,7 +359,7 @@ export class Taskbar {
     }
     const inFront = group.wins.some((w) => w.id === top);
     if (inFront && group.wins.length > 1) {
-      this.openWindowList(group);
+      this.openWindowList(group, anchor);
       return "list";
     }
     if (inFront) {
@@ -505,8 +524,8 @@ export class Taskbar {
     }
     this.popup.append(strip);
     this.open = { kind: "thumbs", win: group.wins[0].id };
-    this.#placeAbove(anchor || this.band.querySelector(`[data-task-btn="${group.key}"]`)
-      || this.el);
+    // NO SELECTOR BUILT FROM A PROGRAM'S OWN STRING: see the click handler in `sync`.
+    this.#placeAbove(anchor || this.#buttonFor(group) || this.el);
     return group.wins.length;
   }
 
@@ -558,6 +577,59 @@ export class Taskbar {
     clearTimeout(this.hoverTimer);
     // The thumbnails close with the pointer; a jump list does not, because it was asked for.
     if (this.open && this.open.kind === "thumbs") this.closePopup();
+  }
+
+  /**
+   * THE WINDOW MENU: what Windows 7 shows for a right-click on a caption, and the one mouse action
+   * on a frame that M14 did not have at first.
+   *
+   * EVERY ROW IS A STATE ASK OR A CLOSE REQUEST, so there is nothing here the caption buttons
+   * cannot already do — which is the point: a menu that could do MORE than the buttons would be a
+   * second authority on a window's state. A row that does not apply is DRAWN AND DISABLED, which
+   * is Windows 7's own rule for an inapplicable command and this project's for a caption button.
+   */
+  openWindowMenu(entry, at) {
+    clearTimeout(this.hoverTimer);
+    this.closePopup();
+    this.stats.windowMenus += 1;
+    this.popup.className = "shell-popup";
+    this.popup.dataset.popup = "window";
+    const title = document.createElement("div");
+    title.className = "shell-title";
+    title.textContent = entry.win.titleText;
+    this.popup.append(title);
+    const docked = entry.state !== WST_NORMAL;
+    this.#row(this.popup, {
+      icon: null, label: "Restore", disabled: !docked, data: { winMenu: "restore" },
+      onClick: () => { this.host.askState(entry.id, WST_NORMAL); this.closePopup(); },
+    });
+    this.#row(this.popup, {
+      icon: null, label: "Minimize", disabled: entry.state === WST_MIN,
+      data: { winMenu: "minimize" },
+      onClick: () => { this.host.askState(entry.id, WST_MIN); this.closePopup(); },
+    });
+    this.#row(this.popup, {
+      icon: null, label: "Maximize", disabled: entry.state === WST_MAX,
+      data: { winMenu: "maximize" },
+      onClick: () => { this.host.askState(entry.id, WST_MAX); this.closePopup(); },
+    });
+    this.#separator(this.popup);
+    this.#row(this.popup, {
+      icon: null, label: "Close", data: { winMenu: "close" },
+      onClick: () => { this.host.requestClose(entry.id); this.closePopup(); },
+    });
+    this.open = { kind: "window", win: entry.id };
+    // AT THE POINTER, which is where a context menu belongs — and inside the desktop, because a
+    // menu that opened off the edge is a menu with rows nobody can reach.
+    this.popup.hidden = false;
+    const desk = this.into.getBoundingClientRect();
+    const box = this.popup.getBoundingClientRect();
+    const x = Math.min(Math.max(at.x - desk.left, 4), Math.max(desk.width - box.width - 4, 4));
+    const y = Math.min(Math.max(at.y - desk.top, 4), Math.max(desk.height - box.height - 4, 4));
+    this.popup.style.left = `${Math.round(x)}px`;
+    this.popup.style.top = `${Math.round(y)}px`;
+    this.popup.style.bottom = "auto";
+    return this.open;
   }
 
   /**
@@ -631,6 +703,30 @@ export class Taskbar {
       list.dataset.rows = String(shown.length);
       return shown.length;
     };
+    /* WINDOWS 7's RIGHT COLUMN, which is the same list under a different flag: the rows the
+     * desktop published for ITSELF are the places a reader goes — Computer, the folders, a
+     * terminal — and Windows 7 puts exactly those on the right of its menu. A fourth rendering of
+     * one mechanism, which is what `WITEM_*` being flags rather than an enum is for. */
+    const places = (desk ? desk.items : [])
+      .map((row, index) => ({ ...row, index }))
+      .filter((row) => (row.flags & WITEM_DESKTOP) !== 0 && (row.flags & WITEM_SEPARATOR) === 0);
+    const right = document.createElement("div");
+    right.className = "start-places";
+    right.dataset.places = String(places.length);
+    for (const row of places) {
+      this.#row(right, {
+        icon: row.icon,
+        label: row.label,
+        disabled: (row.flags & WITEM_DISABLED) !== 0,
+        data: { placeIndex: row.index },
+        onClick: () => {
+          this.stats.launches += 1;
+          this.host.activateItem(desk.id, row.index, WITEM_DESKTOP);
+          this.closePopup();
+        },
+      });
+    }
+
     const title = document.createElement("div");
     title.className = "shell-title";
     title.textContent = "All Programs";
@@ -656,7 +752,16 @@ export class Taskbar {
         this.closePopup();
       },
     });
-    this.popup.append(title, list, search, foot);
+    /* TWO COLUMNS, laid out by the skin: the programs on the left and the places on the right,
+     * which is Windows 7's own arrangement. The search box spans both, because it searches the
+     * left one. */
+    const columns = document.createElement("div");
+    columns.className = "start-columns";
+    const left = document.createElement("div");
+    left.className = "start-left";
+    left.append(title, list);
+    columns.append(left, right);
+    this.popup.append(columns, search, foot);
     render("");
     this.open = { kind: "start", win: desk ? desk.id : 0 };
     this.#placeAbove(this.startBtn);
@@ -704,7 +809,7 @@ export class Taskbar {
       key: g.key,
       prog: g.prog,
       wins: g.wins.map((w) => w.id),
-      state: (this.band.querySelector(`[data-task-btn="${g.key}"]`) || {}).dataset?.state || "",
+      state: (this.#buttonFor(g) || { dataset: {} }).dataset.state || "",
     }));
     return {
       ...this.stats,
@@ -734,6 +839,13 @@ export class Taskbar {
   dispose() {
     clearInterval(this.clockTimer);
     clearTimeout(this.hoverTimer);
+    /* THE WIRING GOES WITH THE ELEMENTS, which a critic found it did not: the host kept calling
+     * `sync()` into a detached band on every window-table change, and the WORK AREA stayed 40 px
+     * shorter than the desktop with no taskbar occupying it — so every maximized window was laid
+     * out against a strip reserved for nothing. */
+    this.host.unwatch(this.watcher);
+    this.host.useShell(null);
+    this.host.reserve(0);
     this.el.remove();
     this.popup.remove();
     this.into.classList.remove("is-peeking");

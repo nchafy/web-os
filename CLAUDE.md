@@ -219,7 +219,7 @@ row below rather than restate it.
 | An icon's drawing | `src/wm/icons.mjs`, one function per `WICON_*`, with `selfTest` asserting the ABI's table is covered. Gradient ids are per-document, because two icons of one kind in one document would otherwise share them |
 | Which icon a FILE gets, and which a PROGRAM's button gets | `iconForPath` in `src/libos/std.mjs` (userland's convention, beside `formatForPath`) and `ICON_BY_PROG` in `src/wm/taskbar.mjs` (the shell's, for a window that publishes no icon of its own) |
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
-| The 278 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 282 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both

@@ -122,6 +122,28 @@ const drain = (win) => {
   checkThat("so the governor's input dropped by exactly that ring",
     m.stats.blurPxIfAllGlass === 0, { ifAllGlass: m.stats.blurPxIfAllGlass, costNormal });
 
+  /* FINDING 1, AS A CHECK, and it is the one a user would hit: maximize, restore, MOVE, minimize,
+   * restore. The restore point used to survive its own use, so the last step moved the window back
+   * to where it was before the maximize — two gestures stale — and because the page reports the box
+   * it settled on, the kernel then recorded the wrong place too. */
+  m.setState(w, WST_NORMAL);
+  w.setBox({ x: 40, y: 50, w: 420, h: 260 });
+  m.setState(w, WST_MAX);
+  check("a maximize remembers where it came from", w.restore, { x: 40, y: 50, w: 420, h: 260 });
+  m.setState(w, WST_NORMAL);
+  check("and the return consumes it", w.restore, null);
+  check("the post that carries it is the one that uses it",
+    lastPost("win-show").restore, { x: 40, y: 50, w: 420, h: 260 });
+  w.setBox({ x: 500, y: 300, w: 420, h: 260 });
+  posts.length = 0;
+  m.setState(w, WST_MIN);
+  check("a minimize from a MOVED box offers no restore point",
+    lastPost("win-show").restore, null);
+  check("and coming back offers none either, so the page leaves the box alone",
+    [m.setState(w, WST_NORMAL), lastPost("win-show").restore], [WST_NORMAL, null]);
+  check("the window is still where it was moved to",
+    { x: w.box.x, y: w.box.y }, { x: 500, y: 300 });
+
   const gone = m.destroyTree(w.id);
   check("a destroyed window refuses a state change", m.setState(w, WST_MAX), -EHOSTGONE);
   check("and it really went", gone, [w.id]);
@@ -155,11 +177,35 @@ const drain = (win) => {
   const owned = m.create(1, { title: "dialog", w: 200, h: 120, owner: a.id });
   check("an owned window is refused the role", m.setRole(owned, WROLE_DESKTOP), -EINVAL);
   check("a window that OWNS something is refused it too", m.setRole(a, WROLE_DESKTOP), -EINVAL);
-  check("giving the role back is allowed", m.setRole(d, WROLE_NORMAL), 0);
-  // A FRESH window: `a` owns a dialog, so it can never be the desktop whoever else holds the role.
+  /* THE ROLE IS ONE-WAY, which is `win_surface`'s rule rather than a new one: taking it replaces
+   * the window's text widget with an icon view and nothing can put a terminal back, so a window
+   * that gave the role up would have a desktop's insides, no keyboard and a place at the bottom of
+   * the stack. A critic found exactly that, and found the lowering running for every role change. */
+  check("giving the role back is REFUSED", m.setRole(d, WROLE_NORMAL), -EINVAL);
+  check("and the desktop is still the desktop", m.desktop().id, d.id);
   const plain = m.create(4, { title: "plain", w: 300, h: 200 });
-  check("and then an unowned window may take it", m.setRole(plain, WROLE_DESKTOP), 0);
+  check("so a second window still cannot take it", m.setRole(plain, WROLE_DESKTOP), -EBUSY);
+  check("and it is still an ordinary window", plain.role, WROLE_NORMAL);
   check("a role outside the table is refused", m.setRole(plain, 99), -EINVAL);
+
+  /* FINDING 2, AS A CHECK: a MINIMIZED window that takes the role must be told it became normal.
+   * The page writes `Win.state` only from a `win-show`, so without the post the frame kept
+   * `hidden` set for ever — and `setState` refuses a desktop, so there was no way back. */
+  const dm = m.create(5, { title: "late", w: 300, h: 200 });
+  m.setState(dm, WST_MIN);
+  m.setRole(d, WROLE_NORMAL);              // refused, so the role is still held: use a free slot
+  const held2 = m.destroyTree(d.id);
+  check("the desktop can be destroyed", held2, [d.id]);
+  posts.length = 0;
+  drain(dm);
+  check("a minimized window may take the role", m.setRole(dm, WROLE_DESKTOP), 0);
+  check("and it is normal afterwards", dm.state, WST_NORMAL);
+  check("the PAGE is told, or the frame stays hidden for ever",
+    { t: lastPost("win-show").t, state: lastPost("win-show").state,
+      from: lastPost("win-show").from },
+    { t: "win-show", state: WST_NORMAL, from: WST_MIN });
+  check("and so is the process", drain(dm).map((e) => ({ type: e.type, a: e.a, b: e.b })),
+    [{ type: WEV_STATE, a: WST_NORMAL, b: WST_MIN }]);
 }
 
 /* ---- the item list ------------------------------------------------------------------------- */

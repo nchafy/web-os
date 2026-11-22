@@ -2721,3 +2721,31 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     DRIVER that sent a left button for a gesture named `rightclick`, and the measurement is what
     separated "the browser does not deliver this" from "we never sent it". A harness that cannot
     tell those apart will blame the product.
+280. **A RESTORE POINT IS CONSUMED BY THE RETURN IT PAYS FOR, AND A SIDE THAT PLACED A WINDOW
+    ITSELF MUST NOT BE OVERRULED BY THE ANSWER.** M14's show state keeps the box a docked window
+    goes back to (constraint 271), and the first version kept it for ever: the page applies whatever
+    box a `win-show` carries, so a window that was maximized, restored, DRAGGED and then minimized
+    came back to where it had been two gestures earlier — and because the page reports the box it
+    settled on, the kernel recorded the wrong place too. The box travels with the post that uses it
+    and is cleared behind it. The same assignment fired mid-drag, because an undock places the frame
+    under the pointer and then asks for NORMAL, so the answering post moved the window out from
+    under the hand: the page marks a geometry it placed itself and the next state change leaves it
+    alone. **The general form: a state machine that hands out a value must say when the value is
+    spent, and a protocol where both sides may place a thing needs a way to say which one did.**
+281. **A WINDOW'S CONTENT MODE CHANGES ONCE, AND THE DESKTOP ROLE IS PART OF THAT RULE RATHER THAN
+    AN EXCEPTION TO IT.** `win_surface` already answers -EINVAL to a `write(2)` after a surface
+    exists, because two renderers for one window's inside is two places the same pixel can come
+    from. Taking `WROLE_DESKTOP` replaces the text widget with an icon view, and nothing can put a
+    terminal back — so giving the role up left a window with a desktop's insides, no keyboard and a
+    place at the bottom of the stack. The role is one-way, -EINVAL in reverse. **And a forced state
+    change must be ANNOUNCED**: the role makes a minimized window normal, and the page writes its
+    own copy of the state only from a `win-show`, so without the post the frame stayed hidden while
+    the kernel believed otherwise — unrecoverable, because a desktop refuses a state change.
+282. **A PUBLISHER TRUNCATES, AND A LIST PUBLISHED WHOLE MUST BE COMMITTED WHOLE.** `WITEM_LABEL_MAX`
+    is 64 bytes and `WIN_ITEM_CAP` is 64 rows, and `win_items` refuses a list that exceeds either —
+    so one 65-byte filename on the desktop made every icon, every start-menu row and every jump-list
+    command disappear at once. The publisher is the side that knows what a row is FOR, so it is the
+    side that shortens the label and caps the list, and the cut must be reported rather than silent.
+    **And the publisher's own array must not be replaced until the kernel has accepted the list**:
+    `WEV_ITEM` carries an index, so a refused publish that left the two sides holding different
+    lists would have a validated index address the wrong row.

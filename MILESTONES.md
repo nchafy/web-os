@@ -2420,7 +2420,7 @@ measurement this environment cannot take.
 
 ---
 
-## M13 — the geometry harness · done · 0.5 days · ~1,400 LoC
+## M13 — the geometry harness · done · 0.5 days · 780 lines of page and protocol
 
 The only proof M7–M12 have that the numbers they trade are about the window a reader can touch.
 `www/m13.html` is seven proofs over the clamp, the gestures, the kernel's record, the glass ring,
@@ -2487,12 +2487,16 @@ clause inverted and fired, because it was an assertion over two copies of one nu
 
 ---
 
-## M14 — Aero Snap, the Superbar, jump lists, the tray and the desktop · done · 1 day · ~4,900 LoC
+## M14 — Aero Snap, the Superbar, jump lists, the tray and the desktop · done · 1 day · 3,870 lines of shell, page and bench
 
 The last row of the window half, and the one a reader sees: `src/wm/taskbar.mjs` is the Superbar,
 its thumbnails, its jump lists, the start menu and the tray; `src/wm/desktop.mjs` is the icon view
 and every mouse action on it; `src/wm/icons.mjs` is eleven redrawn icons; `src/bin/desktop.mjs` is
 the process behind the desktop and the menu. The ABI gained a show state, a role and an item list.
+
+A further 3,400 lines are SHARED between the two milestones and are counted in neither: the ABI's
+new integers and codec, the kernel's state machine, the frame's snap and grips, the host's work
+area and the checks for all of it. The split is where the files are rather than where the work was.
 
 ### Where the shell lives, and why that is a conclusion rather than a shortcut
 
@@ -2640,6 +2644,108 @@ window on top of its own icons**. It opens clear of the icon column now, which i
 desktop owes a reader — and the diagnostic lines stayed in the page, because they are what turned
 an invisible desktop into a located one in a single run.
 
+### What the critic changed, and the worst of it was a restore point that outlived its use
+
+Eight findings, all eight verified against the code before anything was touched, all eight real.
+
+**A RESTORE POINT SURVIVED THE RETURN IT PAID FOR.** `setState` wrote `win.restore` on the way out
+of a floating state and never cleared it, and the page applies whatever box the post carries — so:
+maximize a window at (30,40), restore it, DRAG it to (500,300), minimize it, then click its taskbar
+button. The post carried (30,40), the window teleported there, and because the page reports the box
+it settled on, **the kernel then recorded the wrong place too**. The same line fired mid-drag:
+`#undock` anchors the frame under the pointer and then asks for NORMAL, so the answering `win-show`
+moved the window out from under the hand holding it. The box now travels with the post that uses it
+and is cleared behind it, and a drag that placed the frame itself says so (`pendingUndock`).
+
+**A MINIMIZED WINDOW THAT TOOK THE DESKTOP ROLE BECAME PERMANENTLY INVISIBLE.** `setRole` forced
+the state to NORMAL and posted only `win-role` — but the page writes `Win.state` only from a
+`win-show`, so the frame kept `hidden` set while the kernel believed the desktop was normal and at
+the bottom of the stack. And `setState` refuses a desktop, so there was no way back. It was the
+exact state that code's own comment claimed to be preventing.
+
+**ONE LONG FILENAME BLANKED THE WHOLE DESKTOP.** `src/abi.mjs` says in as many words that the
+publisher truncates — "a refusal would make a long filename unpublishable" — and
+`src/bin/desktop.mjs` did not: a 65-byte name in `/desktop`, or 45 files in it, made
+`encodeWinItems` return null and EVERY row disappear, because the list is published whole. Worse,
+`rows` was replaced before the publish was attempted, so a refused publish left the kernel holding
+the old list while the process held the new one — and a `WEV_ITEM` index the kernel validated
+against the old list was looked up in the new array and would have launched the wrong row. Labels
+are truncated with an ellipsis, the list is capped and the cut is REPORTED, and the process's array
+is committed only once `win_items` has accepted it.
+
+**AND FIVE MORE, every one of them a thing a reader could reach.** `Taskbar.dispose` removed its
+elements and left its watcher registered and its 40 px reserved, so a disposed shell kept rebuilding
+buttons in a detached band while every maximized window was laid out against a strip reserved for
+nothing — in the method whose docstring says it exists for that case. Giving the desktop role BACK
+buried the window and left it with an icon view and no keyboard, so the role is one-way now, which
+is `win_surface`'s own rule rather than a new one. The right snap edge armed over two pixels where
+the left and top arm over one, in a function whose comment says the figure "is not a tolerance to be
+widened". A taskbar group's key is the basename of ARGV[0] — a program's own string — and it was
+interpolated into a `querySelector`, so a quote in an argv threw a SyntaxError inside a click
+handler. And `onLaunch` was dead: read from the spec, stored, never called, and still described in
+the constructor's docstring as how a start-menu row runs a program.
+
+**Three of the eight became checks**, which is where a confirmed finding belongs:
+`bench/m14-shell/probe.mjs` is 60 host checks now, and the new ones drive the restore point through
+maximize-restore-move-minimize-restore, assert the `win-show` a minimized window gets when it takes
+the role, and assert the role is refused in reverse. The other five are page-side (a pointer, a DOM,
+a disposed shell) and are recorded here rather than asserted.
+
+**AND ONE MORE THING THE FIXING FOUND, which is not in the critic's list.** Two of the eight were
+applied by a patch script whose `str.replace` matched nothing — a silent no-op — and the host probe
+caught it: the new clause for the role fix failed with `<no post>` against a kernel that had never
+been changed. A patch that cannot fail is a patch nobody has checked, which is this project's own
+rule about harnesses pointed at itself.
+
+### What the runs themselves did, including the two that were not about M14
+
+Two anomalies came up while verifying this milestone, and both are hazards this repository already
+names — recorded because a suite's own flakes are evidence about the suite.
+
+**The worker-startup stall hit twice, on two different checks.** `m7` FAILED at 78 s where it takes 18, with empty event evidence:
+both windows created, the banner printed, the process parked in `poll` and then sitting in
+`waitpid`, and no result ever delivered. It passes alone, immediately, every time. And on a later
+run `m0` came out BROKEN in 0.65 s with `kernel worker: undefined`, which is constraint 207 in its
+own words — "a Worker that will not start fires an error event with an EMPTY message" — on a page
+that predates the boot retry `www/pagekernel.mjs` added for exactly this. Neither is something M14
+touched: `m7`'s page has no shell, no items and no show state, and `m0` does not load `src/wm` at
+all. Both are about a machine that has been starting and killing Chrome for an hour. Re-run alone,
+`m0` reports its 31 expectations in 1.79 s.
+
+**And one control run came out BROKEN on a dropped CDP socket**: "connection closed mid-frame",
+after five Chrome sessions had been started and killed back to back. `CLAUDE.md` names this one
+too — "kill stray Chrome between control runs… a twelve-control sweep without it reported
+`patched-optional` BROKEN, and the same control passed alone". It scored 15 red and 38 intact on a
+clean run, exactly as declared.
+
+**Neither was treated as a pass.** A flake that is explained is still a run that did not measure
+what it claimed, which is why both were re-run rather than argued away — and why the figures quoted
+above are from runs that measured.
+
+### Three more the pictures asked for, after the critic
+
+**THE WINDOW MENU, which is a mouse action a frame did not have.** A right-click on a caption shows
+Restore / Minimize / Maximize / Close in Windows 7, and the rows here are the same state asks the
+caption buttons make — deliberately nothing more, because a menu that could do MORE than the
+buttons would be a second authority on a window's state. A row that does not apply is drawn and
+DISABLED, which is this project's own rule for an inapplicable command. The frame hands the gesture
+UP rather than drawing it: the shell owns every menu (**D39**), so `Win.onMenu` reaches
+`WinHost.useShell`'s shell or nothing happens — a page with frames and no taskbar gets no menu
+rather than a broken one, which is M7 through M13.
+
+**THE START MENU HAS TWO COLUMNS, which is one list rendered a fourth time.** Windows 7's right
+column is places, and the rows the desktop published for ITSELF — Computer, the folders, a terminal
+— are exactly that. `WITEM_*` being FLAGS rather than an enum is what makes it free: the same row
+is a desktop icon, a start-menu program, a jump-list command and now a place, and adding the
+rendering was adding a filter rather than editing anything.
+
+**AND A SCREENSHOT CAUGHT THE MENU BEING UNREADABLE.** Its fill is translucent, so the desktop's
+own icon LABELS read straight through the rows — two legible texts on top of each other, which is
+neither. Windows 7's menu is blurred glass, and blurring is what makes a translucent panel legible
+at all: constraint 34's argument applied to a menu rather than to a frame. It is a filtered box the
+blur governor does not account, like the taskbar, and bounded the same way — at most one popup
+exists at a time.
+
 ### What is not done
 
 **THE NEW SURFACES' CONTRAST IS STRUCTURAL, NOT SAMPLED.** M11 samples the caption's legibility out
@@ -2648,10 +2754,11 @@ backdrop — a desktop icon's label over wallpaper, a taskbar button's label ove
 over a dark sheet — and each carries the same halo the caption does, but nothing measures the
 contrast ratio at those positions. The `PLAN.md` icons row asks for exactly that re-check.
 
-**THE TASKBAR'S OWN BLURRED AREA IS NOT GOVERNED.** It is one `aero-strip`, so M12's admission
-controller does not account it: the governor sums window rings. At 1,264×40 CSS px that is about
-202,000 device px at dpr 2 — a fifth of one window's ring — and it is constant, which is why this
-is recorded rather than guarded.
+**THE SHELL'S OWN BLURRED AREA IS NOT GOVERNED.** The taskbar is one `aero-strip` and a popup is
+another, and M12's admission controller accounts neither: the governor sums WINDOW rings. At
+1,264×40 CSS px the bar is about 202,000 device px at dpr 2 — a fifth of one window's ring — and a
+menu is at most one more. Both are bounded and constant, which is why this is recorded rather than
+guarded; a shell that grew a panel per window would not be.
 
 **A TEXT WINDOW'S THUMBNAIL IS A READING, NOT A PICTURE.** A surfaced window's preview is its own
 canvas, drawn exactly. A text window is a DOM widget and there is no way to rasterise one from
