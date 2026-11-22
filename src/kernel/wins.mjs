@@ -46,6 +46,11 @@ export function installWindowKernel(surface) {
  *  forgotten, which is the desynchronisation the destroy list exists to prevent. */
 let cascade = true;
 
+/** How far a new window steps when its top-left corner lands exactly on a live one's. Windows 7
+ *  offsets a cascaded window by about a caption's height, which is what makes the one underneath
+ *  recognisable as a separate window rather than a shadow. See `WinMgr.#cascade`. */
+const CASCADE_STEP = 24;
+
 export function setCascade(on) {
   cascade = !!on;
 }
@@ -546,7 +551,8 @@ export class WinMgr {
      *  admission limit is the budget while this is false and the RESTORE edge while it is true. */
     this.blurDegraded = false;
     this.stats = {
-      created: 0, destroyed: 0, cascaded: 0, refusedCap: 0, refusedOwner: 0,
+      created: 0, destroyed: 0, cascaded: 0, cascadedPlacements: 0,
+      refusedCap: 0, refusedOwner: 0,
       // M10: pointer presses recorded, and drag-event records the PAGE tried to feed (see `feed`).
       presses: 0, forgedDrags: 0,
       // M9: raises granted, raises refused by a modal, and how many times the stack was posted.
@@ -1266,6 +1272,43 @@ export class WinMgr {
    * process's window, and it must name a LIVE one — a destroyed owner would give the new window a
    * parent nothing can cascade from, so the child would outlive the chain it was created inside.
    */
+  /**
+   * STEP A NEW WINDOW OFF ONE THAT IS ALREADY THERE.
+   *
+   * Programs name their own geometry, and several name a CONSTANT: `src/bin/files.mjs` asks for
+   * `x: 40, y: 40` every time. So two of them land on exactly the same pixel, and the second is a
+   * window a reader cannot see and cannot tell apart from one that never opened — which is how
+   * this was reported: a double-click on a second folder "did nothing", and what it had done was
+   * open a window perfectly behind the first.
+   *
+   * THE KERNEL IS WHERE THIS CAN LIVE, because it is the only side that knows every window. The
+   * rule is narrow on purpose: an EXACT collision of the top-left corner with a live, floating,
+   * non-desktop window steps down-right by `CASCADE_STEP` and tries again. A window that merely
+   * overlaps is left alone — overlapping is what windows do, and a manager that spread them out
+   * would be deciding a layout nobody asked for.
+   *
+   * The walk is bounded by the number of live windows: each step either finds a free corner or
+   * passes one occupied corner. A window that cannot be
+   * placed keeps what it asked for, because losing the window would be worse than stacking it.
+   */
+  #cascade(win) {
+    if (win.role === WROLE_DESKTOP || win.state !== WST_NORMAL) return;
+    const taken = () => {
+      for (const other of this.byId.values()) {
+        if (other.destroyed || other === win) continue;
+        if (other.role === WROLE_DESKTOP || other.state !== WST_NORMAL) continue;
+        if (other.box.x === win.box.x && other.box.y === win.box.y) return true;
+      }
+      return false;
+    };
+    // BOUNDED BY HOW MANY WINDOWS EXIST, exactly: each step passes at most one occupied corner.
+    const limit = this.byId.size + 1;
+    for (let step = 0; step < limit && taken(); step += 1) {
+      win.box = { ...win.box, x: win.box.x + CASCADE_STEP, y: win.box.y + CASCADE_STEP };
+      this.stats.cascadedPlacements += 1;
+    }
+  }
+
   create(pid, spec) {
     if (this.ofPid(pid).length >= WIN_CAP) {
       this.stats.refusedCap += 1;
@@ -1282,6 +1325,7 @@ export class WinMgr {
     const id = this.nextId;
     this.nextId += 1;
     const win = new Window(id, pid, spec);
+    this.#cascade(win);
     this.byId.set(id, win);
     if (ownerId !== 0) this.get(ownerId).children.push(id);
     // A NEW WINDOW IS ON TOP, which is what a dialog appearing means — and the ORDER must go out

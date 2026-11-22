@@ -2928,6 +2928,74 @@ no grid whatever. The delta is 173x61 against an 86x88 cell now, and the drop ha
 in the first place is asserted separately — because if `want` happened to be a cell corner, "it
 snapped" and "it did not move" are the same picture.
 
+### "Still, I'm unable to open anything" — the second report, and what it really was
+
+The first report had three symptoms that were not defects and one that was five. **This is the
+sentence that came back after all of them were fixed**, and it was right: the desktop still did not
+work, for reasons none of the first round touched. What found it was not another Chrome run.
+
+**THE CHROME SUITE WAS GREEN THROUGHOUT.** 57 expectations over nine proofs, every gesture a real
+pointer. Not one of them asks whether the things on the desktop LAUNCH — they drive snap
+thresholds, grouping, modality and the blur governor on a page that stages its own fixtures. The
+question a reader asks first was not in the registry at all.
+
+**SO FIREFOX WAS DRIVEN, WHICH THIS REPOSITORY SAID WAS IMPOSSIBLE.** `bench/m7-win/firefox.py`
+opens with "Mozilla removed CDP, so there is no driver", and `CLAUDE.md` makes a second engine a
+condition of reporting a milestone done while offering only a screenshot to do it with. That is
+true of CDP and false of the browser: **Firefox 156 speaks WebDriver BiDi**, and
+`input.performActions` delivers events carrying `isTrusted === true`. `scripts/bidi.py` is the
+driver and its self-test is the evidence. The endpoint is `--remote-debugging-port`, the path is
+`/session` rather than `/`, and the handshake must carry no `Origin` header — three facts that each
+cost a confusing failure. **Constraint 292.**
+
+Three defects fell out within minutes of having it:
+
+**A WINDOW OPENED ON THE ICON COLUMN AND THE DESKTOP STOPPED WORKING.** `term` created its window
+with no x or y, which is 0,0; `files`, `editor` and `paint` each asked for x:40. The icons fill the
+first column down the left edge, so they occupy x 8..94 — and `elementFromPoint` on each icon's own
+click point reported **4 of 4 icons answering `window:Terminal`**. Open one thing and every
+subsequent double-click hits the window instead. That is the whole of "I'm unable to open
+anything", and a bounding-box overlap test would have been a guess where the hit test is the
+answer. `WIN_ORIGIN_X` is now the one definition of a corner clear of the column, in
+`src/libos/std.mjs` beside `iconForPath` — userland's, because the kernel knows nothing about
+icons. **Constraint 289.**
+
+**TWENTY OF TWENTY-SIX START-MENU ROWS DID NOTHING, CORRECTLY.** Most of `/usr/bin` writes to
+stdout and owns no window, and the menu lists every program in the directory on purpose. Spawned
+bare, `cat` and `ls` and `grep` started a process that wrote to a stdout nobody was showing and
+exited. The default is inverted now: a program not in `OPENS_OWN_WINDOW` runs inside a terminal,
+which is what Windows 7 does with a console program. `term --run` writes the command to the PTY
+MASTER after the first output — the input side, so the line discipline echoes it and the reader is
+left at a live prompt rather than looking at a dead window. Measured: `ls` shows
+`~$ ls / bench/ desktop/ dev/ proc/ tmp/ usr/ / ~$`. **Constraint 290.**
+
+**AND A SECOND WINDOW LANDED EXACTLY ON THE FIRST.** Programs name constants, so two `files`
+windows shared a pixel and the second was indistinguishable from a launch that never happened —
+which is how it was first read here, as "a double-click on a folder does nothing". `WinMgr.#cascade`
+steps an exact corner collision down-right; a mere overlap is left alone, because overlapping is
+what windows do. Measured after the fix: 160,48 / 184,72 / 208,96 / 232,120. **Constraint 291.**
+
+### What the new gate does, and the proof it can fail
+
+`bench/m14-shell/firefox-drive.py` asks the reader's own question and nothing else: every icon
+opens a window, the icons are still reachable after a launch, a console row opens a terminal that
+RAN the command, and no two windows share a corner. Eight host checks went into
+`bench/m14-shell/probe.mjs` for the cascade rule itself — including that a MAXIMIZED window's stale
+corner pushes nothing and that the desktop never does — and the probe is 80 now.
+
+`--prove-failure` parks a window on the icon column through the frame's own geometry route. In that
+world the gate reports **every double-click opening nothing, four times over**, which is the
+reader's report reproduced on demand. Two of the eight host checks failed when first written, both
+because `setState` and `setRole` take a Window and not an id — so the harness caught its own
+author before it scored anything.
+
+### What this cost, stated plainly
+
+Three rounds of "it works in Chrome" against a reader who could not open a folder. The lesson is
+not that Firefox differs — **it did not**: every one of these three defects is present in Chrome
+too, and the Chrome suite would have found none of them, because no registered check launches
+anything from the desktop. A second engine was the accident that made someone look.
+
 ### One thing found and NOT changed, with the reason
 
 **RESTORING A WINDOW THAT WAS SNAPPED BY A DRAG PUTS IT WHERE THE DRAG ENDED, NOT WHERE IT

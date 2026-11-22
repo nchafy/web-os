@@ -238,6 +238,8 @@ row below rather than restate it.
 | A preview panel's width, and how many thumbnails fit a row | `THUMB_W`, `THUMB_H` and `THUMBS_PER_ROW` in `src/wm/aero.mjs`, with the panel's `max-width` DERIVED from them. A menu's 320 px cap applied to a 208 px thumbnail is how the second one came to render outside the glass (constraint 285) |
 | An icon's drawing | `src/wm/icons.mjs`, one function per `WICON_*`, with `selfTest` asserting the ABI's table is covered. Gradient ids are per-document, because two icons of one kind in one document would otherwise share them |
 | Which icon a FILE gets, and which a PROGRAM's button gets | `iconForPath` in `src/libos/std.mjs` (userland's convention, beside `formatForPath`) and `ICON_BY_PROG` in `src/wm/taskbar.mjs` (the shell's, for a window that publishes no icon of its own) |
+| Where a window opens when its program has no opinion | `WIN_ORIGIN_X`/`WIN_ORIGIN_Y` in `src/libos/std.mjs` — userland's convention, beside `iconForPath`, because the kernel knows nothing about icons. It is NOT the top-left corner: that is the desktop's icon column, and a window there makes the desktop stop working (constraint 289). The kernel spreads what comes after, by stepping an exact corner collision down-right (`WinMgr.#cascade`, constraint 291) |
+| Which programs open a window of their own | `OPENS_OWN_WINDOW` in `src/bin/desktop.mjs`. An ALLOWLIST: everything else in `/usr/bin` writes to stdout, so a menu row runs it inside a terminal rather than spawning a process with nothing to show (constraint 290) |
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
 | The 282 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
@@ -437,6 +439,15 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
+- **FIREFOX CAN BE DRIVEN NOW, and the rule below is why that matters.** `scripts/bidi.py` speaks
+  WebDriver BiDi to Firefox 156: `input.performActions` delivers events carrying
+  `isTrusted === true`, verified by its own self-test. `bench/m7-win/firefox.py`'s "Mozilla removed
+  CDP, so there is no driver" was true of CDP and is no longer true of the browser. So a second
+  engine can be ASSERTED in and not only photographed, which is the whole class constraint 40
+  names. `bench/m14-shell/firefox-drive.py` is the first gate built on it, and it exists because a
+  reader twice reported being unable to open anything on a desktop whose Chrome suite was green
+  (constraints 289-292). The registered suite stays Chrome-driven: one engine, one set of measured
+  constants.
 - **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
   that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
   started in Firefox at all (206) — both with every expectation green, both found by a human
@@ -506,6 +517,9 @@ scripts/fsfuzz.py                   # the fs codecs under Node + 10k torn journa
 scripts/check_links.py              # every path reference in the authored docs resolves
 scripts/check_pages.py              # node --check over every www/*.html inline module (1 s)
 scripts/check_pages.py --prove-failure  # ...and it MUST report the redeclaration it injects
+scripts/bidi.py                     # FIREFOX WITH REAL TRUSTED INPUT, over WebDriver BiDi
+python3 bench/m14-shell/firefox-drive.py  # CAN A READER OPEN ANYTHING? the launchers, in Firefox
+python3 bench/m14-shell/firefox-drive.py --prove-failure  # ...and the world where they cannot
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 

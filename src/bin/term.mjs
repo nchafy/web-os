@@ -69,11 +69,29 @@ export function run(env) {
   let ceiling = CEILING_MS;
   let title = "Terminal";
   let owner = 0;
+  let runCommand = "";
   for (let i = 1; i < argv.length; i += 1) {
     if (argv[i] === "--title") {
       const text = argv[i + 1];
       if (text === undefined) return { exit: 1, program: "term", why: "--title wants a string" };
       title = text;
+      i += 1;
+      continue;
+    }
+    if (argv[i] === "--run") {
+      /* A COMMAND LINE TO HAND THE SHELL ONCE IT IS UP, which is what makes a start-menu row for a
+       * console program open something a reader can see. Most of `/usr/bin` writes to stdout and
+       * owns no window — `cat`, `ls`, `grep`, `wc` — so a menu row that spawned one bare produced
+       * a process that wrote to a stdout nobody was showing and exited. Clicking it did nothing,
+       * visibly, which is how it was reported.
+       *
+       * IT IS WRITTEN TO THE PTY MASTER AND NOT EXEC'D. The master is the input side: bytes
+       * written there run the LINE DISCIPLINE, so the shell reads the command the same way it
+       * reads a keystroke, echo happens, and the reader is left at a live prompt afterwards. An
+       * exec would give them the output and then a dead window. */
+      const text = argv[i + 1];
+      if (text === undefined) return { exit: 1, program: "term", why: "--run wants a command" };
+      runCommand = text;
       i += 1;
       continue;
     }
@@ -113,7 +131,15 @@ export function run(env) {
 
   // The window first, so a refusal is reported before a pty and a shell exist to clean up, and the
   // caller can tell it from a crash.
-  const made = env.win.create({ title, owner, w: 640, h: 400 });
+  /* A POSITION, AND NOT THE DEFAULT 0,0. A window created with no x or y lands on the top-left
+   * corner, which is the desktop's ICON COLUMN — so a terminal opened from a desktop icon covered
+   * every icon including the one that opened it, and the next double-click hit the terminal.
+   * Measured in Firefox with `elementFromPoint`: 4 of 4 icons answered `window:Terminal`
+   * (constraint 289). `WIN_ORIGIN_*` is the one definition of that corner. */
+  const made = env.win.create({
+    title, owner, w: 640, h: 400,
+    x: env.std.WIN_ORIGIN_X, y: env.std.WIN_ORIGIN_Y,
+  });
   if (typeof made === "number") {
     return { exit: 2, ...account, why: `win_create: ${env.std.errnoName(made)}`, errno: -made };
   }
@@ -198,6 +224,15 @@ export function run(env) {
   let lastWake = performance.now();
   /** Whether the shell has already been reaped by its own exit, so the hangup below is not owed. */
   let shellGone = false;
+  /**
+   * `--run`'s command, waiting for the shell to be ready for it.
+   *
+   * NOT WRITTEN BEFORE THE FIRST OUTPUT. The shell has to have read its own startup and printed a
+   * prompt, or the bytes sit in the pty's input buffer ahead of a shell that is still starting and
+   * the first thing a reader sees is their command echoed above the banner. The first `POLLIN` on
+   * the master IS that readiness signal — it is the prompt — so the command goes out after it.
+   */
+  let pending = runCommand ? `${runCommand}\n` : "";
 
   // Every exit from this loop names itself in `why`, or the reason for stopping is not reportable.
   for (;;) {
@@ -283,6 +318,17 @@ export function run(env) {
         const w = unInterrupted(() => env.fs.write(con, buf.subarray(0, n)));
         if (w === -EHOSTGONE) { why = "the window was destroyed"; break; }
         if (w < 0 && w !== -EINTR) { why = `write(win): ${env.std.errnoName(w)}`; break; }
+      }
+      /* `--run`'S COMMAND, ONCE AND AFTER THE PROMPT. The shell has printed something, so it has
+       * read its own startup and is waiting on input — which is the readiness this needs and the
+       * only signal available: there is no "shell is ready" message in the ABI, and a timer would
+       * be a guess. Cleared before the write, so a refused write is not retried for ever. */
+      if (pending) {
+        const bytes = new TextEncoder().encode(pending);
+        pending = "";
+        account.runBytes = bytes.length;
+        const w = unInterrupted(() => env.fs.write(master, bytes));
+        if (w < 0 && w !== -EINTR) { why = `write(master) for --run: ${env.std.errnoName(w)}`; }
       }
     }
 

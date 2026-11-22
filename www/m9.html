@@ -257,12 +257,43 @@ async function pStacking (boot) {
     ev.stack = (buried.wins || {}).stack
     ev.z = s.host.report().zIndex
 
-    // The page publishes where it is, because only the page knows: the frame is positioned by the
-    // clamp and a driver outside it has no way to compute the spot.
+    /* The page publishes where it is, because only the page knows: the frame is positioned by the
+     * clamp and a driver outside it has no way to compute the spot.
+     *
+     * AND IT IS HIT-TESTED, NOT ASSUMED. This proof is about a click on the OWNER being refused,
+     * so a click that landed on anything else measures nothing — and it silently did: the spot was
+     * a fixed third of the caption's width, which held only while `editor` and the stranger
+     * happened to open in different places. Moving a program's default corner (constraint 289)
+     * put another frame under that point and the clause failed on a kernel that was working
+     * perfectly. `elementFromPoint` is what decides where a real click goes, so it is what picks
+     * the spot; `clickHitsOwner` is the clause, and a point that cannot be found fails loudly
+     * instead of measuring the wrong window. */
     const bar = editor.win.barEl.getBoundingClientRect()
-    globalThis.M9.click = {
+    const fallback = {
       x: Math.round(bar.left + bar.width / 3), y: Math.round(bar.top + bar.height / 2),
     }
+    const onOwner = (() => {
+      for (const frac of [1 / 3, 1 / 2, 2 / 3, 1 / 6, 5 / 6, 0.9]) {
+        const at = {
+          x: Math.round(bar.left + bar.width * frac),
+          y: Math.round(bar.top + bar.height / 2),
+        }
+        const el = document.elementFromPoint(at.x, at.y)
+        const frame = el && el.closest ? el.closest('.window') : null
+        if (frame === editor.win.el) return at
+      }
+      return null
+    })()
+    ev.clickAt = onOwner || fallback
+    ev.clickHitsOwner = Boolean(onOwner)
+    ev.clickUnder = (() => {
+      const p = ev.clickAt
+      const el = document.elementFromPoint(p.x, p.y)
+      const frame = el && el.closest ? el.closest('.window') : null
+      const h2 = frame ? frame.querySelector('h2') : null
+      return frame ? ((h2 || {}).textContent || '').trim() : 'nothing'
+    })()
+    globalThis.M9.click = ev.clickAt
     globalThis.M9.phase = 'await-click'
     const declared = await until(
       () => globalThis.M9.driver === 'check' || s.host.report().raiseAsks > 0, DRIVER_WAIT_MS)
@@ -384,6 +415,9 @@ async function pStacking (boot) {
       'and it sits above the window that owns it': top(ev.stackWithDialog) === ev.dialogWin,
       'which the page rendered, so a reader sees it too':
         (ev.z[ev.dialogWin] || 0) > (ev.z[ev.editorWin] || 0),
+      // THE SPOT IS ON THE OWNER'S OWN CAPTION, by hit test. Without this the clause below is a
+      // statement about whatever frame happened to be under a fixed coordinate.
+      'the click point is on the owner and nothing else': ev.clickHitsOwner === true,
       'a real click on the owner was refused by the kernel':
         ev.drivenBy === 'page' ? null : (ev.drivenBy === 'check'),
       'and the blocker it named is the dialog': !!ev.lastBlocked

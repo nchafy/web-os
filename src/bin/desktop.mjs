@@ -39,10 +39,24 @@ const DESK_DIR = "/desktop";
  *  `src/kernel/providerfs.mjs`'s manifest appears in the menu with no change here. */
 const BIN_DIR = "/usr/bin";
 
-/** `sh` ALONE IS NOT RUNNABLE FROM A MENU. It needs a terminal — a pty, a window and a relay — and
- *  `term` is the program that provides all three, so a menu row for the shell starts that instead.
- *  Recorded here rather than silently substituted somewhere a reader cannot see it. */
-const NEEDS_TERMINAL = new Set(["sh"]);
+/**
+ * THE PROGRAMS THAT OPEN A WINDOW OF THEIR OWN. Everything else in `/usr/bin` writes to stdout and
+ * owns nothing, so a menu row that spawned one bare started a process that wrote to a stdout
+ * nobody was showing and exited: clicking `cat`, `ls`, `grep` or `wc` in the start menu did
+ * NOTHING VISIBLE, which is most of the menu, and is how it was reported.
+ *
+ * So the default is inverted. A row for a program not listed here runs it INSIDE a terminal —
+ * `term --run <name>` — which is what Windows 7 does with a console program and what makes every
+ * row in the menu open something a reader can see. `sh` was the only member of the old set, and it
+ * was the same argument applied to one program instead of to the rule.
+ *
+ * IT IS AN ALLOWLIST AND NOT A DENYLIST on purpose: a new program in `/usr/bin` gets a terminal
+ * until someone says it draws its own window, and the failure of that default is a spare terminal
+ * rather than a row that silently does nothing.
+ */
+const OPENS_OWN_WINDOW = new Set([
+  "term", "winopen", "files", "imgview", "paint", "editor", NAME,
+]);
 
 /** Programs the menu does not list. ONE ENTRY AND A REASON: a second `desktop` is refused by the
  *  kernel with -EBUSY (there is one desktop, and `WinMgr.setRole` enforces it), so a row for it
@@ -234,14 +248,18 @@ export function run(env) {
         .sort();
       for (const name of names) {
         if (HIDDEN_FROM_MENU.has(name)) continue;
-        const launch = NEEDS_TERMINAL.has(name) ? "term" : name;
+        const ownWindow = OPENS_OWN_WINDOW.has(name);
         rows.push({
           icon: env.std.iconForPath(`${BIN_DIR}/${name}`, { isProgram: true }),
           flags: WITEM_MENU,
-          label: NEEDS_TERMINAL.has(name) ? `${name} (in a terminal)` : name,
-          run: () => (launch === "term"
-            ? ["term", "--ceiling", String(ceiling)]
-            : [launch]),
+          label: ownWindow ? name : `${name} (in a terminal)`,
+          /* `sh` IS THE ONE PROGRAM A TERMINAL RUNS BY DEFAULT, so a row for it needs no --run:
+           * asking the shell to run `sh` would nest a second one inside the first for nothing. */
+          run: () => (ownWindow
+            ? [name]
+            : name === "sh"
+              ? ["term", "--ceiling", String(ceiling)]
+              : ["term", "--ceiling", String(ceiling), "--run", name]),
         });
       }
     }

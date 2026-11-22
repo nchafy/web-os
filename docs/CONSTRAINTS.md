@@ -2808,3 +2808,49 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     over a worker, applied to the half of the code that lives in HTML and that no file-based tool
     reads. It parses and does not execute, which is exactly the class of failure that is most
     expensive to find any other way.
+289. **A WINDOW THAT OPENS ON THE DESKTOP'S ICON COLUMN MAKES THE DESKTOP STOP WORKING, AND IT
+    LOOKS LIKE NOTHING ELSE.** `src/wm/desktop.mjs` fills cells down the FIRST COLUMN before
+    starting the second, which is Windows 7's own order — so the icons occupy roughly x 8..94 from
+    the top down. `term` created its window with no x or y at all, which is 0,0, and `files`,
+    `editor` and `paint` each asked for x:40. Measured in Firefox with `elementFromPoint`: after
+    opening one thing, **4 of 4 icons answered `window:Terminal` instead of their own icon**, so
+    the next double-click hit the new window and did nothing. Twice reported as "I'm unable to open
+    anything", and the second report came after a fix that was about something else entirely.
+    **`elementFromPoint` AND NOT A RECTANGLE OVERLAP is what has to be asserted**: what decides
+    where a double-click lands is the hit test. `WIN_ORIGIN_X`/`WIN_ORIGIN_Y` in `src/libos/std.mjs`
+    is the one definition of a corner clear of the column — userland's, beside `iconForPath`,
+    because the kernel knows nothing about icons (D39) and a program picks its own geometry.
+290. **A MENU ROW THAT LAUNCHES A PROGRAM WITH NO WINDOW DOES NOTHING, VISIBLY.** Most of
+    `/usr/bin` writes to stdout and owns nothing — `cat`, `ls`, `grep`, `wc` — and the start menu
+    lists every program in the directory on purpose, because a menu that hid what a reader can run
+    would disagree with the filesystem. Spawned bare, those rows started a process that wrote to a
+    stdout nobody was showing and exited: 20 of 26 rows appeared broken. So the DEFAULT IS
+    INVERTED — a row for a program not in `OPENS_OWN_WINDOW` runs it inside a terminal
+    (`term --run <name>`), which is what Windows 7 does with a console program. **It is an
+    allowlist and not a denylist**: a new program gets a terminal until someone says it draws its
+    own window, and the cost of that default being wrong is a spare terminal rather than a row that
+    silently does nothing. `--run` writes to the PTY MASTER after the first output, never an exec:
+    the master is the input side, so the line discipline echoes the command and the reader is left
+    at a live prompt instead of looking at a dead window.
+291. **TWO WINDOWS ON THE SAME CORNER ARE ONE WINDOW A READER CANNOT SEE.** Programs name their own
+    geometry and several name a CONSTANT, so a second `files` landed exactly on the first and was
+    indistinguishable from a launch that never happened — reported as "a double-click on a folder
+    does nothing". `WinMgr.#cascade` steps a new window down-right by `CASCADE_STEP` while its
+    top-left corner matches a live, floating, non-desktop window's. The kernel is where this can
+    live because it is the only side that knows every window. **The rule is deliberately narrow**:
+    an EXACT corner collision steps, a mere overlap does not — overlapping is what windows do, and
+    a manager that spread them out would be deciding a layout nobody asked for. A minimized or
+    docked window is not stepped off, because it is not where its box says it is, and neither is
+    the desktop, which is at 0,0 and would push every window off it.
+292. **FIREFOX CAN BE DRIVEN WITH REAL INPUT, AND THE CLAIM THAT IT CANNOT WAS COSTING MILESTONES.**
+    `bench/m7-win/firefox.py` opens "Mozilla removed CDP, so there is no driver", and that was
+    true of CDP and is no longer true of Firefox: **156 speaks WebDriver BiDi**, over a WebSocket,
+    with `input.performActions` delivering events that carry `isTrusted === true` — verified by
+    `scripts/bidi.py`'s own self-test. The endpoint is `--remote-debugging-port`, the path is
+    `/session` and not `/`, and the handshake must carry NO `Origin` header or Firefox refuses it.
+    The gap it closes is the whole class constraint 40 names: a screenshot cannot tell an inert
+    frame from a working one, so five milestones shipped defects that a person found by hand
+    (175, 206, the dpr-1 blur band, 264, and 289). `bench/m14-shell/firefox-drive.py` is the gate,
+    and `--prove-failure` parks a window on the icon column to show it can fail — in that world
+    every double-click reports opening nothing, which is the reader's own report reproduced on
+    demand.

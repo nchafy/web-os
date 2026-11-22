@@ -95,10 +95,17 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   `http://127.0.0.1:8000/www/m14.html`. The icons and the start menu are rows
   `/usr/bin/desktop` published after reading the filesystem, a jump list is rows the program that
   owns the window published, and a snap is a real drag the kernel records as a show state — so the
-  shell is a renderer and not an authority. `scripts/check.py --only m14` is 52 expectations over
+  shell is a renderer and not an authority. `scripts/check.py --only m14` is 57 expectations over
   nine proofs, every gesture a real pointer or a real key, and `--negative no-items` has the kernel
   discard every published row: the only run that tells this apart from a page drawing a hard-coded
   menu. `bench/m14-shell/shell.py` uses the desktop and keeps the picture.
+- **And `bench/m14-shell/firefox-drive.py` asks the question a reader asks first**, in a real
+  Firefox with real trusted input: does every icon open a window, are the icons still reachable
+  afterwards, does a start-menu row for a console program open a terminal that RAN it. It exists
+  because none of those 57 expectations did — a reader twice reported being unable to open anything
+  on a desktop whose Chrome suite was green (constraints 289-292). `scripts/bidi.py` is what makes
+  it possible: Firefox 156 speaks WebDriver BiDi, so a second engine can be asserted in and not
+  only photographed.
 - **There is a working terminal, and you can watch M6 from inside it.** `scripts/serve.py`, then
   `http://127.0.0.1:8000/www/m4a.html?live=1` — a real window with `/usr/bin/sh` in its own
   process over a real pty. `ls /usr/bin`, `ps`, `echo hi` and Ctrl-C all work. Typing

@@ -146,7 +146,9 @@ export function run(env) {
 
   const h = PAD * 2 + rows.length * (ROW_H + ROW_GAP) - ROW_GAP;
   const made = env.win.create({
-    title: `${NAME} — ${dir}`, w: 300, h: h + 40, x: 40, y: 40,
+    title: `${NAME} — ${dir}`, w: 300, h: h + 40,
+    // CLEAR OF THE DESKTOP'S ICON COLUMN: see `WIN_ORIGIN_X` in src/libos/std.mjs.
+    x: env.std.WIN_ORIGIN_X, y: env.std.WIN_ORIGIN_Y,
   });
   if (typeof made === "number") {
     return { exit: 2, ...account, why: `win_create: ${env.std.errnoName(made)}`, errno: -made };

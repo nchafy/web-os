@@ -3300,6 +3300,7 @@ M9_LABELS = (
     "the dialog is BLOCKING at window scope",
     "and it sits above the window that owns it",
     "which the page rendered, so a reader sees it too",
+    "the click point is on the owner and nothing else",
     "a REAL click on the owner was refused by the kernel",
     "and the blocker it named is the dialog",
     "so the order did not change at all",
@@ -3542,6 +3543,7 @@ _NO_OWNER_CHAIN_FAILS = (
 #: program set.
 _NO_MODAL_FAILS = (
     "stacking ok",
+    "the click point is on the owner and nothing else",
     "a REAL click on the owner was refused by the kernel",
     "and the blocker it named is the dialog",
     "so the order did not change at all",
@@ -10172,9 +10174,17 @@ def check_m9(env: Env) -> None:
     env.expect_that("which the page rendered, so a reader sees it too",
                     (z.get(str(a.get("dialogWin"))) or 0) > (z.get(str(a.get("editorWin"))) or 0),
                     {"zIndex": z, "dialog": a.get("dialogWin"), "editor": a.get("editorWin")})
+    # THE SPOT IS ON THE OWNER, BY HIT TEST. Without it the clause below is a statement about
+    # whatever frame happened to be under a fixed fraction of the caption's width — which is how it
+    # failed: moving a program's default corner (constraint 289) put another frame there and the
+    # refusal clause went red against a kernel that was working.
+    env.expect_that("the click point is on the owner and nothing else",
+                    a.get("clickHitsOwner") is True,
+                    {"at": a.get("clickAt"), "under": a.get("clickUnder")})
     env.expect_that("a REAL click on the owner was refused by the kernel",
                     a.get("drivenBy") == "check" and a.get("refusedMs", -1) >= 0,
-                    {"drivenBy": a.get("drivenBy"), "refusedMs": a.get("refusedMs")})
+                    {"drivenBy": a.get("drivenBy"), "refusedMs": a.get("refusedMs"),
+                     "under": a.get("clickUnder")})
     env.expect_that("and the blocker it named is the dialog",
                     blocked.get("by") == a.get("dialogWin")
                     and blocked.get("win") == a.get("editorWin"),

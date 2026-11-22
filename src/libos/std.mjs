@@ -15,6 +15,28 @@ import {
 const ENC = new TextEncoder();
 const DEC = new TextDecoder();
 
+/**
+ * WHERE A WINDOW OPENS IF ITS PROGRAM HAS NO OPINION, and why it is not the top-left corner.
+ *
+ * THE DESKTOP'S ICON COLUMN IS THE LEFT EDGE. `src/wm/desktop.mjs` fills cells down the first
+ * column before starting the second (Windows 7's own order), so the icons occupy roughly x 8..94
+ * from the top down — and `files`, `editor` and `paint` all asked for x:40, which lands squarely
+ * on them. Measured in Firefox with `elementFromPoint`: after ONE launch, 3 of 4 icons answered
+ * `window:files — /usr/bin` instead of their own icon, so a double-click on the next icon hit the
+ * new window and did nothing. That is what "I'm unable to open anything" turned out to be.
+ *
+ * IT IS A USERLAND CONVENTION, which is why it lives here beside `FORMAT_BY_EXT` and
+ * `iconForPath` rather than in the kernel or the shell: the kernel knows nothing about icons
+ * (D39), and a program picks its own geometry. Three programs needed the same number, so it has
+ * one definition. A program with a real opinion about where it belongs still states it —
+ * `imgview` opens beside the file list on purpose.
+ *
+ * The KERNEL spreads what comes after: an exact corner collision steps down-right
+ * (`WinMgr.#cascade`), so two windows from here do not land on the same pixel.
+ */
+export const WIN_ORIGIN_X = 160;
+export const WIN_ORIGIN_Y = 48;
+
 export function bytes(text) {
   return ENC.encode(text);
 }

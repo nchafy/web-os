@@ -324,6 +324,55 @@ const drain = (win) => {
   check("a tiny view is still one cell", gridFor(10, 10), { cols: 1, rows: 1 });
 }
 
+/* ---------------------------------------------------------------------------------------------
+   THE CASCADE: a new window whose top-left corner lands exactly on a live one's steps off it.
+
+   WHY IT IS HERE. Programs name their own geometry and several name a CONSTANT —
+   `src/bin/files.mjs` asks for x:40,y:40 every time — so two of them land on the same pixel and
+   the second is a window a reader cannot see. It was reported as "a double-click on a folder does
+   nothing", and what it had done was open a window perfectly behind the first.
+
+   The rule is narrow and this asserts the narrowness as much as the behaviour: an EXACT corner
+   collision steps, a mere overlap does not, and a minimized or docked window is not something to
+   step off because it is not where its box says.
+   --------------------------------------------------------------------------------------------- */
+{
+  const m = new WinMgr();
+  const a = m.create(1, { title: "a", x: 40, y: 40, w: 300, h: 200 });
+  check("the first window keeps the corner it asked for", [a.box.x, a.box.y], [40, 40]);
+
+  const b = m.create(1, { title: "b", x: 40, y: 40, w: 300, h: 200 });
+  check("a second window on the same corner steps off it", [b.box.x, b.box.y], [64, 64]);
+  const c = m.create(1, { title: "c", x: 40, y: 40, w: 300, h: 200 });
+  check("and a third steps twice", [c.box.x, c.box.y], [88, 88]);
+  check("each step is counted", m.stats.cascadedPlacements, 3);
+
+  // A MERE OVERLAP IS LEFT ALONE: overlapping is what windows do, and spreading them out would be
+  // deciding a layout nobody asked for.
+  const over = m.create(1, { title: "over", x: 41, y: 40, w: 300, h: 200 });
+  check("a window that merely overlaps is not moved", [over.box.x, over.box.y], [41, 40]);
+
+  // THE CORNER FREES UP when the window on it goes, and the next window takes it back.
+  m.destroyTree(a.id);
+  const again = m.create(1, { title: "again", x: 40, y: 40, w: 300, h: 200 });
+  check("a freed corner is taken back", [again.box.x, again.box.y], [40, 40]);
+
+  // A DOCKED OR MINIMIZED WINDOW IS NOT AT ITS BOX, so it is not something to step off.
+  const snapped = m.create(2, { title: "snapped", x: 500, y: 500, w: 300, h: 200 });
+  m.setState(snapped, WST_MAX);
+  const onTop = m.create(2, { title: "onTop", x: 500, y: 500, w: 300, h: 200 });
+  check("a maximized window's old corner does not push a new window off",
+        [onTop.box.x, onTop.box.y], [500, 500]);
+
+  // AND THE DESKTOP IS NOT IN IT EITHER: it is at 0,0 and every window would step off it.
+  const m2 = new WinMgr();
+  const desk = m2.create(3, { title: "desk", x: 0, y: 0, w: 1320, h: 700 });
+  m2.setRole(desk, WROLE_DESKTOP);
+  const first = m2.create(3, { title: "first", x: 0, y: 0, w: 300, h: 200 });
+  check("a window at the desktop's own corner is not pushed off it",
+        [first.box.x, first.box.y], [0, 0]);
+}
+
 const failed = results.filter((r) => !r.ok);
 const report = {
   ok: failed.length === 0,
