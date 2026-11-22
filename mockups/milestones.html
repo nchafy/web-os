@@ -392,8 +392,8 @@ admitted on    open, maximize, snap, restore, un-minimize, peek</pre>`},
   neg:'<code>no-governor</code> — nothing is ever flattened, while <b>every measurement still holds</b> (9 red, 18 intact). Plus <code>top-first</code>, which moves only the ORDER (4 red), and <code>no-hysteresis</code>, which collapses two edges into one (3 red).',
   warn:'A gate sized at five maximized windows passes by construction — that 4× error is in the plan\'s §9. <b>The corrected 52-window gate then failed the same way</b> against the geometry that shipped: it is box accounting, and the ring is 10× cheaper. Twice is a pattern, and the pattern is sizing a gate from an arithmetic rather than from a run (264).' },
 
- { id:'M13', grp:'Window half (A)', t:'The geometry harness', d:'5 d', tag:'checks',
-  lede:'The 23 new geometry checks — the only proof M7 through M12 have. New work rather than a port: webxp\'s are a template, but the Aero DOM differs enough that every selector and expected metric changes.',
+ { id:'M13', built:'/www/m13.html', builtWhat:'seven proofs, every gesture a real pointer or a real key', grp:'Window half (A)', t:'The geometry harness', d:'5 d', tag:'checks',
+  lede:'The only proof M7 through M12 have. BUILT as 38 expectations over seven proofs — 22 of them geometry clauses — and it found a defect in the product rather than in itself: a desktop that changed size re-clamped nothing, so a shrunken desktop left frames outside it with their captions out of reach.',
   screen:{kind:'noui',body:T(`
 $ scripts/check.py --prove-failure
 
@@ -410,12 +410,12 @@ $ scripts/check.py --prove-failure
 
 $ scripts/check.py
   105 checks ..................................... all pass`)},
-  real:['23 geometry checks driving real input via CDP','--prove-failure inverts every INVERTIBLE','Negative control: a drag in the window body moves nothing'],
-  proof:'<code>--prove-failure</code> inverts all 23 and the run must report failures.',
-  neg:'That <i>is</i> the negative control — the mode exists so the suite can be seen to fail.' },
+  real:['38 expectations driving real input via CDP, and a page that ASKS for each gesture','--prove-failure inverts every one and all 38 fire','Three controls: no-clamp, stale-geom, no-relayout'],
+  proof:'<code>--prove-failure</code> inverts all 38 and the run must report failures.',
+  neg:'Three, where this row asked for none — and <code>--negative stale-geom</code> came out GREEN the first time, because with every window inside the desktop the kernel\'s box and the page\'s are the same number. The fixture is clamped now and the clause asserts it.' },
 
- { id:'M14', grp:'Window half (A)', t:'Snap, Superbar, jump lists', d:'6 d', tag:'the feel',
-  lede:'The behaviours that make it specifically Windows 7. Snap arms at 1 px of pointer-to-edge, releases at 20 px of drag-out, and a top-maximized window needs a 50 px sideways move to restore.',
+ { id:'M14', built:'/www/m14.html', builtWhat:'nine proofs, then a LIVE Windows 7 desktop — `?live=1` skips straight to it: double-click an icon, use the Start orb, snap a window to an edge, right-click a taskbar button', grp:'Window half (A)', t:'Snap, Superbar, jump lists', d:'6 d', tag:'the feel',
+  lede:'The behaviours that make it specifically Windows 7. Snap arms at 1 px of pointer-to-edge, releases at 20 px of drag-out, and a top-maximized window needs a 50 px SIDEWAYS move to restore — a different measurement on purpose, because its caption is at the top of the work area and a hand reaching for it drags downward constantly.',
   screen:{kind:'aero',snap:true,windows:[
     {cls:'glass',x:210,y:30,w:330,h:196,title:'notes.txt — editor',body:T(`
 Dragging left. The snap preview is
@@ -423,9 +423,9 @@ armed at 1px of pointer-to-edge, and
 releases at 20px of drag-out.`)}],
    taskbar:[{l:'Terminal'},{l:'editor',on:true},{l:'build 62%',prog:true}],
    jump:true},
-  real:['Aero Snap with hysteresis: 1 px arm / 20 px release / 50 px restore','Superbar: pinned + running merged, icon-only','Jump lists','Taskbar progress, tray with hidden icons'],
-  proof:'Drag to 1 px and assert the snap. Drag out 19 px and assert it holds. 21 px and assert it releases.',
-  neg:'Remove the hysteresis band — the 19 px case must start failing.',
+  real:['Aero Snap with hysteresis: 1 px arm / 20 px release / 50 px restore, all driven by a real pointer','Superbar: grouped by PROGRAM, hover thumbnails, a window list','Jump lists, the start menu and the desktop icons are all one mechanism — rows a PROCESS published','The tray: a live clock, Aero Peek, and Show desktop as a toggle','Eleven icons redrawn as vectors, because Microsoft\'s cannot be shipped'],
+  proof:'Drag to 1 px and assert the snap. Drag out 19 px and assert it holds. 21 px and assert it releases — and 49/51 px for the maximize, which is the second pair.',
+  neg:'Four. Remove the hysteresis band and the 19 px case fails; maximize to the desktop and a window covers the taskbar; key the buttons by window and the Superbar stops grouping; discard every published row and the shell has nothing to show — which is the only run that tells this apart from a page drawing a hard-coded menu.',
   warn:'A threshold on a continuous input without hysteresis oscillates: the window snaps, unsnaps and snaps again as the hand trembles. Both edges get checked.' },
 ,
 

@@ -7,16 +7,22 @@ Research and plan first, kernel second — deliberately, and in that order. The 
 ([webxp](https://github.com/nchafy/webxp)) was built first and designed afterwards, and became a very
 good window manager that was not an operating system.
 
-M0 to M10 are done: the syscall channel, the process table, the journalled filesystem, the mount
-table with `/proc`, `/dev`, `/tmp`, `/usr` and `/usr/share`, pipes, a pty with a line discipline, a
-shell with fourteen programs, the process realm stripped of its ambient capabilities — and the
-window half: a window that IS a file description, a kernel-owned surface a process draws on by
-sending a display list, modality and an advisory close, and a typed clipboard and drag-and-drop you
-can drive with a real mouse.
+**M0 to M14 are done, which is the whole spine and the whole window half**: the syscall channel,
+the process table, the journalled filesystem, the mount table with `/proc`, `/dev`, `/tmp`, `/usr`
+and `/usr/share`, pipes, a pty with a line discipline, a shell with fifteen programs, the process
+realm stripped of its ambient capabilities — and then a window that IS a file description, a
+kernel-owned surface a process draws on by sending a display list, modality and an advisory close,
+a typed clipboard and drag-and-drop, Aero glass as four separately filtered strips, an admission
+controller over blurred area, a geometry harness that drives a real pointer, and Aero Snap, the
+Superbar, jump lists, a tray and a desktop whose icons are rows a PROCESS published.
 
 ```sh
 scripts/serve.py          # then open http://127.0.0.1:8000/www/
 ```
+
+**Or go straight to the desktop:** `http://127.0.0.1:8000/www/m14.html?live=1` — double-click an
+icon, use the Start orb, drag a caption to an edge to snap it, right-click a taskbar button for its
+jump list. Every row in that menu is `/usr/bin` as a process read it.
 
 That serves a preflight which checks the seven capabilities the kernel needs and refuses to
 proceed if any are missing. `scripts/serve.py --no-isolation` makes it fail on purpose, which is
@@ -75,9 +81,17 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   as nested workers, and the SAB ABI, measured closed-loop at N ∈ {1, 4, 16, 64, 128}. ACCEPT.
   `bench/syscall-contention/`, and `scripts/check.py --negative kernel-stall` keeps the negative
   control re-runnable.
-- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and twenty-eight negative controls over fourteen checks and 542 expectations.
+- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and thirty-five negative controls over eighteen checks and 695 expectations.
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
+- **There is a Windows 7 desktop, and everything on it is a process.** M13 and M14:
+  `http://127.0.0.1:8000/www/m14.html?live=1`. The icons and the start menu are rows
+  `/usr/bin/desktop` published after reading the filesystem, a jump list is rows the program that
+  owns the window published, and a snap is a real drag the kernel records as a show state — so the
+  shell is a renderer and not an authority. `scripts/check.py --only m14` is 52 expectations over
+  nine proofs, every gesture a real pointer or a real key, and `--negative no-items` has the kernel
+  discard every published row: the only run that tells this apart from a page drawing a hard-coded
+  menu. `bench/m14-shell/shell.py` uses the desktop and keeps the picture.
 - **There is a working terminal, and you can watch M6 from inside it.** `scripts/serve.py`, then
   `http://127.0.0.1:8000/www/m4a.html?live=1` — a real window with `/usr/bin/sh` in its own
   process over a real pty. `ls /usr/bin`, `ps`, `echo hi` and Ctrl-C all work. Typing

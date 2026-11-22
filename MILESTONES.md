@@ -18,7 +18,7 @@ checks is a wish.
 | | Milestone | Est | Actual | Status |
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
-| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, 4 negative controls, `check_boot`; spine checks land per milestone |
+| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **35 negative controls over 18 checks and 695 expectations**; the spine checks landed per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
