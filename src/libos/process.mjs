@@ -17,7 +17,7 @@ import {
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
   winCreate, winDestroy, winSetTitle, winSetBox, winRead, winSurface, winDraw,
-  winSetModal, winRaise,
+  winSetModal, winRaise, winSetState, winSetRole, winItems,
   dataobjCreate, dataobjSet, dataobjGet, dataobjToClipboard, dataobjDrag, dataobjOpen,
 } from "./syscall.mjs";
 /** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
@@ -63,6 +63,10 @@ const WIN = Object.freeze({
   surface: winSurface, draw: winDraw,
   // M9. The kernel owns the stack, so raising is a call and modality is enforced rather than drawn.
   setModal: winSetModal, raise: winRaise,
+  /* M14. What the SHELL does with this window: its show state, its role, and the rows it
+   * publishes for a desktop, a start menu or a jump list. `setState` answers the state it
+   * REACHED — restoring a minimized window gives back what it was. */
+  setState: winSetState, setRole: winSetRole, items: winItems,
 });
 
 /**

@@ -164,7 +164,17 @@ const INTS = {
   SYS_dataobj_get: 56,
   SYS_dataobj_offer: 57,
   SYS_dataobj_open: 58,
-  NSYS: 59,
+  // M14. A WINDOW'S ITEM LIST: the rows a shell renders ON THIS WINDOW'S BEHALF — desktop icons,
+  // a start-menu entry, a jump-list command. ONE call and one list, because the three differ only
+  // in WHERE the shell puts them, which is a flag on each row (`WITEM_*`).
+  //
+  // WHY IT IS AN ABI CALL AND NOT A CONVENTION. The shell that draws them is page-side chrome
+  // (`docs/DECISIONS.md` D39) and a process cannot reach the page except through the kernel, so a
+  // program that wants a jump list has exactly one route — and the kernel bounds it: a count, a
+  // label length, and a label the page sets as TEXT. Activation comes back as `WEV_ITEM` on the
+  // window's own fd, which is the readiness the process is already parked on.
+  SYS_win_items: 59,
+  NSYS: 60,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -433,7 +443,22 @@ const INTS = {
   //: nothing), `b` the target winid or 0. Without it a MOVE source cannot know whether to delete
   //: what it moved.
   WEV_DRAG_DONE: 10,
-  WEV_MAX: 10,
+  //: M14. THE SHOW STATE CHANGED: `a` is the new state, `b` the one it came from. An EVENT and not
+  //: a query, for `WEV_FOCUS`'s reason — the process that wants to know is asleep in `poll`. A
+  //: minimized window is told, because a program that keeps drawing into a surface nobody is
+  //: showing is a program paying for pixels no reader sees.
+  WEV_STATE: 11,
+  //: M14. ONE OF THIS WINDOW'S PUBLISHED ITEMS WAS ACTIVATED: `a` is its INDEX in the list the
+  //: window last published, `b` its flags, and `c` the `WITEM_*` bit saying WHERE it was activated
+  //: from — a desktop icon, a start-menu row or a jump-list command are the same row in three
+  //: places, and a program that cares can tell them apart.
+  //:
+  //: THE INDEX AND NOT A STRING, which is what keeps the page out of the program's business: the
+  //: shell renders labels and returns a position, and what that position MEANS is the publisher's
+  //: own array. The kernel validates the index against the list it is holding, so a page cannot
+  //: name a row that does not exist.
+  WEV_ITEM: 12,
+  WEV_MAX: 12,
 
   //: `mods` on a WEV_POINTER. A move with no button held is a hover, which is the zero case.
   WPTR_DOWN: 0x10,
@@ -460,6 +485,57 @@ const INTS = {
   //: describes WHICH windows are affected, and SerenityOS's enforced `WindowMode` describes WHAT
   //: happens to them. An owned window needs both (constraint 226).
   WIN_SET_MODAL: 3,
+  //: M14. a2 = the SHOW STATE. Until M14 the window ABI had no state property at all, which is why
+  //: `src/wm/window.mjs` drew minimize and maximize DISABLED: there was nothing to minimize into
+  //: and no snap state to maximize to, and a live-looking button that silently did nothing is the
+  //: defect. One selector, because this is "change a field of this window" like the three above it.
+  WIN_SET_STATE: 4,
+  //: M14. a2 = the ROLE. What a window IS to the shell, which is a different question from what it
+  //: looks like: the desktop is a window at the bottom of the stack with no frame and no taskbar
+  //: button, and nothing about that is expressible as geometry.
+  WIN_SET_ROLE: 5,
+
+  /**
+   * THE SHOW STATE. Win32 calls it that (`ShowWindow`'s `SW_*`) and the name is worth keeping,
+   * because "state" alone collides with the modality axes above and with the process state.
+   *
+   * THE KERNEL OWNS IT AND THE PAGE COMPUTES THE GEOMETRY FOR IT, which is the same division
+   * `WIN_SET_BOX` already makes: only the kernel sees every area-changing call and owns the
+   * z-order (constraints 49, 226), and only the page knows what the WORK AREA is — the desktop
+   * minus whatever the shell has taken off it. So a state change is kernel-recorded, the page lays
+   * the frame out for it, and the box comes back through `win-geom` like every other box.
+   *
+   * THE RESTORE BOX IS THE KERNEL'S, for the reason the state is: a maximized window that lost
+   * where it came from is a window a user cannot put back, and the page is a renderer that may be
+   * re-laid-out at any moment (`WinHost.relayout`).
+   */
+  WST_NORMAL: 0,
+  //: Minimized: no frame on screen, no blurred area, and STILL A WINDOW — its fd is live, its
+  //: events still queue, and its process is none the wiser except for the `WEV_STATE` it is told.
+  WST_MIN: 1,
+  //: Maximized to the WORK AREA. Not to the screen: a maximized window that covered the taskbar
+  //: would be a window a user cannot get out from under.
+  WST_MAX: 2,
+  //: Aero Snap's two halves. A third and fourth value rather than a flag on MAX, because a snapped
+  //: window restores to its own box and a maximized one does not stop being maximized when you
+  //: drag it to an edge.
+  WST_SNAP_L: 3,
+  WST_SNAP_R: 4,
+  WST_LIMIT: 4,
+
+  /**
+   * THE ROLE. What the shell does with this window, as a closed enum the kernel enforces.
+   *
+   * WHY THE KERNEL AND NOT A PAGE CONVENTION: a desktop window must be at the BOTTOM of the stack
+   * and must stay there — that is the z-order, which is the kernel's (constraint 226) — and there
+   * may be only one, which is a uniqueness the page cannot enforce against two processes that
+   * cannot see each other.
+   */
+  WROLE_NORMAL: 0,
+  //: The desktop surface: pinned to the bottom of the stack, no frame, no taskbar button, sized to
+  //: the work area by the shell. Its `win_items` are the desktop's icons.
+  WROLE_DESKTOP: 1,
+  WROLE_LIMIT: 1,
 
   /**
    * THE SCOPE: which windows a modal window affects. Computed by walking the owner chain, so a
@@ -544,6 +620,72 @@ const INTS = {
   /** Windows per process. A process that could create them without limit would exhaust the page's
    *  DOM the way an unbounded worker count exhausts the renderer (constraint 17's shape). */
   WIN_CAP: 32,
+
+  /* ---- M14: a window's published items ------------------------------------------------------
+   *
+   * ONE LIST PER WINDOW, and the three places a shell shows it are a FLAG PER ROW rather than
+   * three calls: a desktop icon, a start-menu row and a jump-list command are the same record in
+   * three renderings, and "adding the next case is adding data, not editing logic" (`CLAUDE.md`).
+   *
+   * The record is `dirent`'s shape and for its reason: a fixed header, a variable name, and the
+   * whole thing padded to 4 so the next header is aligned.
+   */
+
+  //: `[u16 icon][u16 flags][u16 label bytes][u16 reserved]`, then the label, then padding to 4.
+  WITEM_HEADER: 8,
+  WIT_ICON: 0, WIT_FLAGS: 2, WIT_LEN: 4, WIT_RESERVED: 6,
+
+  /** Rows one window may publish. A list a shell has to draw is a list a reader has to read, and
+   *  64 is already more than a Windows 7 jump list shows. A program with more has a window to put
+   *  them in. */
+  WIN_ITEM_CAP: 64,
+
+  /** One label's bytes. Shorter than `NAME_MAX` on purpose: this is a caption on a 75-px icon,
+   *  not a filename, and a 255-byte label is a label nothing can lay out. The publisher truncates
+   *  — a refusal would make a long filename unpublishable. */
+  WITEM_LABEL_MAX: 64,
+
+  //: WHERE a row appears, as bits. A row may appear in more than one place, which is why these are
+  //: bits and not an enum: `files` belongs on the desktop and in the start menu both.
+  WITEM_DESKTOP: 0x1,
+  WITEM_MENU: 0x2,
+  WITEM_JUMP: 0x4,
+  //: A rule, not a row: the label is ignored and the shell draws a separator. Windows 7's jump
+  //: lists are grouped by them and a list without them reads as one undifferentiated column.
+  WITEM_SEPARATOR: 0x8,
+  //: This row is a CONTAINER — a directory. The shell may draw it differently; what it means is
+  //: the publisher's business, because only the publisher knows what activating it does.
+  WITEM_CONTAINER: 0x10,
+  //: Drawn greyed and not activatable. Windows 7's own rule for an inapplicable command, which
+  //: this project already follows for the caption buttons: a live-looking row that does nothing is
+  //: the defect.
+  WITEM_DISABLED: 0x20,
+  WITEM_FLAGS_ALL: 0x3f,
+
+  /**
+   * THE ICON SET, as a closed dense table the PAGE draws and a PROGRAM chooses from.
+   *
+   * WHY AN ID AND NOT A PATH OR BYTES. Windows 7's icons cannot be shipped (constraint 37), so
+   * every icon here is redrawn as vector art in `src/wm/icons.mjs` — and a process that named a
+   * file would be asking the shell to load an image from the filesystem on its behalf, which is a
+   * capability nothing needs. An id is a word in a register, the page owns the drawing, and a
+   * program that wants pixels of its own has a surface.
+   *
+   * 0 IS A VALID ICON here, unlike an event type: a row that names nothing gets the generic one,
+   * which is what a reader should see for a file nothing recognises.
+   */
+  WICON_GENERIC: 0,
+  WICON_FOLDER: 1,
+  WICON_TEXT: 2,
+  WICON_IMAGE: 3,
+  WICON_PROGRAM: 4,
+  WICON_TERMINAL: 5,
+  WICON_PAINT: 6,
+  WICON_EDITOR: 7,
+  WICON_FILES: 8,
+  WICON_COMPUTER: 9,
+  WICON_TRASH: 10,
+  WICON_LIMIT: 10,
 
   /* ---- M12: the frame's chrome, because the KERNEL now has to account it -------------------
    *
@@ -689,6 +831,7 @@ export const {
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
   SYS_win_raise,
   SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
+  SYS_win_items,
   NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
@@ -725,13 +868,23 @@ export const {
   WEV_BYTES, WEV_TYPE, WEV_MODS, WEV_A, WEV_B, WEV_C,
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE,
+  WEV_STATE, WEV_ITEM,
+  WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
+  WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
+  WITEM_HEADER, WIT_ICON, WIT_FLAGS, WIT_LEN, WIT_RESERVED,
+  WIN_ITEM_CAP, WITEM_LABEL_MAX,
+  WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER, WITEM_DISABLED,
+  WITEM_FLAGS_ALL,
+  WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM, WICON_TERMINAL,
+  WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH, WICON_LIMIT,
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_FMT_MAX,
   BMP_W, BMP_H, BITMAP_HEADER,
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_WHERE_MAX,
   DOBJ_F_APPEND, DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE,
   DOBJ_MAX_BYTES, DOBJ_BUDGET_BYTES, DOBJ_CAP, DRAG_IDLE_MS,
   WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
-  WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_F_NONE, WIN_CAP,
+  WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+  WIN_F_NONE, WIN_CAP,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
@@ -801,6 +954,7 @@ export const SYS_NAME = Object.freeze([
   "chdir",
   "win_create", "win_destroy", "win_set", "win_surface", "win_draw", "win_raise",
   "dataobj_create", "dataobj_set", "dataobj_get", "dataobj_offer", "dataobj_open",
+  "win_items",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -1267,6 +1421,93 @@ export function decodeWinEvents(bytes, length = bytes.length) {
   return out;
 }
 
+/* ---- M14: the item list, both directions ------------------------------------------------------
+ *
+ * A PUBLISHER WRITES AND A SHELL READS, which are the two sides — a process encodes its rows into
+ * the byte region and the page decodes them to draw. The kernel carries them and validates the
+ * bounds, exactly as it carries a title: it knows a row has a label and an icon id, and nothing
+ * about what the row MEANS.
+ */
+
+/** One row's encoded length: the header plus its label, padded to 4 so the next header is aligned.
+ *  `direntSize`'s arithmetic, declared again here because the two records are not the same record
+ *  and sharing the function would tie this list's growth to the filesystem's. */
+export function winItemSize(labelBytes) {
+  const n = Math.max(0, labelBytes | 0);
+  return WITEM_HEADER + n + ((4 - (n % 4)) % 4);
+}
+
+/**
+ * Encode a list of `{icon, flags, label}` rows. Returns the bytes, or null for a list this ABI
+ * cannot carry — too many rows, a label too long, or a flag outside the table.
+ *
+ * NULL AND NEVER A THROW, which is the shape every codec in this file takes: the caller is a
+ * program and a throw inside a libos stub is a fault the program cannot handle.
+ */
+export function encodeWinItems(items) {
+  if (!Array.isArray(items) || items.length > WIN_ITEM_CAP) return null;
+  const enc = new TextEncoder();
+  const rows = [];
+  let total = 0;
+  for (const item of items) {
+    const label = enc.encode(String((item && item.label) || ""));
+    if (label.length > WITEM_LABEL_MAX) return null;
+    const icon = (item && item.icon) | 0;
+    const flags = (item && item.flags) | 0;
+    if (icon < 0 || icon > WICON_LIMIT) return null;
+    if (flags < 0 || (flags & ~WITEM_FLAGS_ALL) !== 0) return null;
+    rows.push({ icon, flags, label });
+    total += winItemSize(label.length);
+  }
+  if (total > MAX_INLINE) return null;
+  const bytes = new Uint8Array(total);
+  const dv = new DataView(bytes.buffer);
+  let at = 0;
+  for (const row of rows) {
+    dv.setUint16(at + WIT_ICON, row.icon, true);
+    dv.setUint16(at + WIT_FLAGS, row.flags, true);
+    dv.setUint16(at + WIT_LEN, row.label.length, true);
+    dv.setUint16(at + WIT_RESERVED, 0, true);
+    bytes.set(row.label, at + WITEM_HEADER);
+    at += winItemSize(row.label.length);
+  }
+  return bytes;
+}
+
+/**
+ * Decode a whole list. Returns the rows, or null for bytes that are not a list: a truncated row, a
+ * label running past the end, a count over the cap, or an icon outside the table.
+ *
+ * REFUSING THE WHOLE LIST AND NOT THE ROW, for `decodeSpawnRequest`'s reason: a shell that drew
+ * the rows it could parse would show a desktop missing an icon and say nothing, and a partial list
+ * is indistinguishable from a complete one once it is on screen.
+ */
+export function decodeWinItems(bytes, length = bytes.length) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, length);
+  const dec = new TextDecoder("utf-8", { fatal: false });
+  const out = [];
+  let at = 0;
+  while (at < length) {
+    if (length - at < WITEM_HEADER) return null;
+    const icon = dv.getUint16(at + WIT_ICON, true);
+    const flags = dv.getUint16(at + WIT_FLAGS, true);
+    const len = dv.getUint16(at + WIT_LEN, true);
+    if (icon > WICON_LIMIT) return null;
+    if ((flags & ~WITEM_FLAGS_ALL) !== 0) return null;
+    if (len > WITEM_LABEL_MAX) return null;
+    const size = winItemSize(len);
+    if (at + size > length) return null;
+    const label = dec.decode(bytes.subarray(at + WITEM_HEADER, at + WITEM_HEADER + len));
+    // A NUL IN A LABEL IS REFUSED, for the reason a title's is: the page renders the rest as text
+    // and a reader sees a row whose name stops in the middle.
+    if (label.includes("\0")) return null;
+    out.push({ icon, flags, label });
+    if (out.length > WIN_ITEM_CAP) return null;
+    at += size;
+  }
+  return out;
+}
+
 /** How many display-list ops one `win_draw` may carry. DERIVED, so the number is never written
  *  twice: a batch is bytes in the caller's own frame and the frame is MAX_INLINE. */
 export const DL_MAX_OPS = Math.floor(MAX_INLINE / DLOP_BYTES);
@@ -1710,7 +1951,7 @@ export function selfTest() {
     fail("a resize event yielded key bytes");
   }
   const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER,
-    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE];
+    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WEV_STATE, WEV_ITEM];
   if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
   if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
   if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
@@ -1777,8 +2018,90 @@ export function selfTest() {
   if (WMODAL_NONE !== 0 || WMODE_MODELESS !== 0) {
     fail("the quiet value of each axis must be 0, so an unset window is ordinary");
   }
-  if (WIN_SET_MODAL === WIN_SET_TITLE || WIN_SET_MODAL === WIN_SET_BOX) {
-    fail("two win_set selectors collide");
+  const selectors = [WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE];
+  if (new Set(selectors).size !== selectors.length) fail("two win_set selectors collide");
+  // 0 IS NOT A SELECTOR, so a `win_set` with an unset a1 is refused rather than meaning the first
+  // case. `calls.mjs` answers -EINVAL for an unknown one, which is what makes that true.
+  if (selectors.includes(0)) fail("0 is a win_set selector: an unset argument would select it");
+
+  /* M14's SHOW STATE and ROLE. Dense from 0 and distinct, for the reason M9's two axes are: they
+   * are read out of the same call's arguments, so a gap would make an unset argument mean
+   * something, and the quiet value must be 0 — a window nobody has minimized is normal. */
+  const states = [WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R];
+  const roles = [WROLE_NORMAL, WROLE_DESKTOP];
+  for (const [name, set, max] of [["show state", states, WST_LIMIT],
+    ["window role", roles, WROLE_LIMIT]]) {
+    if (new Set(set).size !== set.length) fail(`two ${name} values collide`);
+    if (Math.min(...set) !== 0) fail(`${name} does not start at 0`);
+    if (Math.max(...set) !== max) fail(`${name}'s LIMIT is not its largest value`);
+    if (set.length !== max + 1) fail(`${name} is not dense over 0..${max}`);
+  }
+  if (WST_NORMAL !== 0 || WROLE_NORMAL !== 0) {
+    fail("the quiet value of each M14 axis must be 0, so an unset window is an ordinary one");
+  }
+
+  /* M14's ITEM RECORD. The header is contiguous and filling, every `WITEM_*` flag is a single bit
+   * inside `WITEM_FLAGS_ALL`, the icon table is dense from 0, and the codec round-trips — including
+   * the padding, which is where a list of rows comes apart one row in. */
+  if (WIT_ICON + 2 !== WIT_FLAGS || WIT_FLAGS + 2 !== WIT_LEN || WIT_LEN + 2 !== WIT_RESERVED) {
+    fail("the item header's fields are not contiguous");
+  }
+  if (WIT_RESERVED + 2 !== WITEM_HEADER) fail(`an item header is not ${WITEM_HEADER} bytes`);
+  if (WITEM_HEADER % 4 !== 0) fail("an item header that is not 4-byte aligned unaligns the next");
+  const itemFlags = [WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER,
+    WITEM_DISABLED];
+  if (new Set(itemFlags).size !== itemFlags.length) fail("two item flags collide");
+  for (const bit of itemFlags) {
+    if (bit === 0 || (bit & (bit - 1)) !== 0) fail(`item flag ${bit} is not a single bit`);
+    if ((bit & WITEM_FLAGS_ALL) !== bit) fail(`item flag ${bit} is outside WITEM_FLAGS_ALL`);
+  }
+  if (itemFlags.reduce((m, b) => m | b, 0) !== WITEM_FLAGS_ALL) {
+    fail("WITEM_FLAGS_ALL is not the OR of the flags: an unknown bit would be accepted");
+  }
+  const icons = [WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
+    WICON_TERMINAL, WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH];
+  if (new Set(icons).size !== icons.length) fail("two icon ids collide");
+  if (Math.min(...icons) !== 0 || Math.max(...icons) !== WICON_LIMIT
+    || icons.length !== WICON_LIMIT + 1) {
+    fail("the icon table is not dense over 0..WICON_LIMIT");
+  }
+  // A LABEL WHOSE LENGTH IS NOT A MULTIPLE OF 4 is the case the padding exists for, so the fixture
+  // uses one: "é" is two bytes, so row 1 is 10 bytes of content in a 12-byte record.
+  const itemsIn = [
+    { icon: WICON_FOLDER, flags: WITEM_DESKTOP | WITEM_CONTAINER, label: "Sharé" },
+    { icon: WICON_GENERIC, flags: WITEM_SEPARATOR, label: "" },
+    { icon: WICON_TERMINAL, flags: WITEM_MENU | WITEM_JUMP, label: "term" },
+  ];
+  const itemBytes = encodeWinItems(itemsIn);
+  if (itemBytes === null) fail("a legal item list was refused by the encoder");
+  const itemsOut = decodeWinItems(itemBytes, itemBytes.length);
+  if (itemsOut === null || itemsOut.length !== itemsIn.length) {
+    fail(`an item list round-trips as ${JSON.stringify(itemsOut)}`);
+  }
+  for (let i = 0; i < itemsIn.length; i += 1) {
+    if (itemsOut[i].icon !== itemsIn[i].icon || itemsOut[i].flags !== itemsIn[i].flags
+      || itemsOut[i].label !== itemsIn[i].label) {
+      fail(`item ${i} round-trips as ${JSON.stringify(itemsOut[i])}`);
+    }
+  }
+  // AND THE REFUSALS, each for a reason a shell could not recover from: a row too long to lay out,
+  // an icon nothing can draw, a flag nothing knows, and a list longer than the cap.
+  if (encodeWinItems([{ icon: 0, flags: 0, label: "x".repeat(WITEM_LABEL_MAX + 1) }]) !== null) {
+    fail("an over-long label was accepted");
+  }
+  if (encodeWinItems([{ icon: WICON_LIMIT + 1, flags: 0, label: "x" }]) !== null) {
+    fail("an icon id outside the table was accepted");
+  }
+  if (encodeWinItems([{ icon: 0, flags: WITEM_FLAGS_ALL + 1, label: "x" }]) !== null) {
+    fail("an unknown item flag was accepted");
+  }
+  if (encodeWinItems(new Array(WIN_ITEM_CAP + 1).fill({ icon: 0, flags: 0, label: "x" })) !== null) {
+    fail("a list over WIN_ITEM_CAP was accepted");
+  }
+  // A TRUNCATED LIST IS REFUSED WHOLE. A shell that drew the rows it could parse would show a
+  // desktop missing an icon and say nothing.
+  if (decodeWinItems(itemBytes, itemBytes.length - 1) !== null) {
+    fail("a truncated item list was decoded");
   }
 
   /* M10's FORMAT TABLE. The offer is a bitmask in ONE word, so the table must be dense from 1 and

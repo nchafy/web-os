@@ -182,6 +182,10 @@ class Session:
         # rather than synthesised events.
         "ArrowUp": (38, ""),
         "ArrowDown": (40, ""),
+        # M13 drives a window's keyboard move with these, and asserts both ends of the step: a
+        # plain arrow is KEY_STEP px and Shift one px (src/wm/window.mjs).
+        "ArrowLeft": (37, ""),
+        "ArrowRight": (39, ""),
     }
 
     @staticmethod

@@ -102,7 +102,7 @@ const TERM = '/src/bin/term.mjs'
 const WINOPEN = '/src/bin/winopen.mjs'
 
 globalThis.M11.proofs = { ring: null, chain: null, blur: null, legible: null,
-  inert: null, focus: null }
+  caption: null, focus: null }
 
 if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
   globalThis.M11.state = 'aborted'
@@ -550,29 +550,26 @@ function proofLegible (entry, blurEv) {
 }
 
 /* --------------------------------------------------------------------------------------------
-   PROOF 5: minimize and maximize are drawn and INERT.
+   PROOF 5: the caption's commands are LIVE, and a minimize round trip returns the window.
 
-   Windows 7's own rule for an inapplicable caption command is disabled rather than hidden. There is
-   nothing to minimize INTO until M14's taskbar and no snap state to maximize TO until M14's Aero
-   Snap, and the window ABI carries no state property at all — `WIN_SET_TITLE`, `WIN_SET_BOX`,
-   `WIN_SET_MODAL` and nothing else. So they are drawn, disabled, and CLICKED here: the box must not
-   move, and `disabled` must be what stops it, because a button that merely has no handler looks
-   live to a reader.
+   THIS PROOF SAID THE OPPOSITE UNTIL M14, and the change is the milestone rather than a correction.
+   Until then minimize and maximize were drawn and DISABLED — Windows 7's own rule for an
+   inapplicable command, and the honest state of the world: there was nothing to minimize into, no
+   snap state to maximize to, and the window ABI carried no state property at all. M14 added
+   `WIN_SET_STATE`, a taskbar to minimize into and a work area to maximize to, so all three reasons
+   are gone.
+
+   WHAT IS ASSERTED NOW IS THE WIRING AND THE ROUND TRIP. `disabled === false` on its own is the
+   defect the old clause existed to forbid — a live-looking button that does nothing — so the
+   button is CLICKED, the frame must go, and asking for the window back must return it to the SAME
+   BOX. A minimize that lost the geometry would be a close with extra steps.
    -------------------------------------------------------------------------------------------- */
-function proofInert (entry) {
+async function proofCaption (k, host, entry) {
   const win = entry.win
   const before = { ...win.placed }
   const rows = []
-  const dpr = window.devicePixelRatio
   for (const [name, btn] of [['min', win.minBtn], ['max', win.maxBtn]]) {
     const style = getComputedStyle(btn)
-    /* `btn.click()` IS NOT THE GESTURE, and on its own it proved nothing: `HTMLElement.click()`
-     * returns early for a disabled form control, so no event was dispatched at all and "the box did
-     * not move" could not have failed however the buttons behaved. It is kept because a click that
-     * DID fire a handler would still be a defect, and `scripts/check.py` drives a REAL mouse drag
-     * from each button's centre — which is the gesture that can actually move a window, and which
-     * also tests that the press does not fall through to the caption underneath. */
-    btn.click()
     const r = btn.getBoundingClientRect()
     rows.push({
       // Viewport CSS coordinates, which is the unit `Input.dispatchMouseEvent` takes.
@@ -583,9 +580,21 @@ function proofInert (entry) {
       // Visible, not hidden: a reader must be able to see the command exists.
       displayed: style.display !== 'none' && style.visibility !== 'hidden' && !btn.hidden,
       cursor: style.cursor,
-      width: Math.round(btn.getBoundingClientRect().width),
+      width: Math.round(r.width),
     })
   }
+
+  /* THE ROUND TRIP. `btn.click()` is enough here because the BUTTON is the subject and its own
+   * handler is what is being tested; `scripts/check.py` drives a REAL mouse drag from each
+   * button's centre for the other half — that a press on a button does not fall through to the
+   * caption and start a drag. */
+  win.minBtn.click()
+  const wentMs = await until(() => win.el.hidden === true, 4000)
+  const minimized = await ask(k, 'win-state')
+  const asKernelSawIt = ((minimized.wins || {}).states || {})[entry.id]
+  // AND BACK, through the same route a taskbar button takes: the shell ASKS and the kernel decides.
+  host.askState(entry.id, 0)
+  const backMs = await until(() => win.el.hidden === false, 4000)
   const after = { ...win.placed }
   /* AND THE END PROCESS BOX MUST STILL BE HIDDEN ON A HEALTHY WINDOW. `src/wm/window.mjs` sets the
    * `hidden` attribute correctly and M7 asserts on that — but an AUTHOR `display` declaration beats
@@ -600,18 +609,27 @@ function proofInert (entry) {
     endDisplay: endStyle.display,
     endNotOffered: win.endBtn.hidden === true && endStyle.display === 'none',
     health: win.health,
+    wentMs: Math.round(wentMs),
+    backMs: Math.round(backMs),
+    stateWhileMinimized: asKernelSawIt,
     boxUnchanged: before.x === after.x && before.y === after.y
       && before.w === after.w && before.h === after.h,
-    // And the close box IS live, or "inert" would be a statement about a frame with no live
-    // buttons at all.
+    // And the close box is live too, so "the commands are live" is about all three.
     closeEnabled: win.closeBtn.disabled !== true,
     closeWidth: Math.round(win.closeBtn.getBoundingClientRect().width),
   }
-  evidence.ok = rows.length === 2 && rows.every((r) => r.disabled && r.displayed)
-    && evidence.boxUnchanged && evidence.closeEnabled && evidence.endNotOffered
-  globalThis.M11.proofs.inert = { ok: evidence.ok, evidence }
-  say((evidence.ok ? 'ok  ' : 'BAD ') + 'inert: min/max disabled and visible, box unchanged ' +
-    evidence.boxUnchanged + ', End Process not offered ' + evidence.endNotOffered)
+  evidence.live = rows.length === 2
+    && rows.every((r) => !r.disabled && r.displayed && r.ariaLabel && r.cursor === 'pointer')
+  // THE KERNEL'S OWN READING OF IT, not the page's: `WST_MIN` is 1, and a frame that hid itself
+  // while the kernel believed otherwise would be the two sides disagreeing about what is on screen.
+  evidence.roundTripped = wentMs >= 0 && backMs >= 0 && asKernelSawIt === 1
+    && evidence.boxUnchanged
+  evidence.ok = evidence.live && evidence.roundTripped && evidence.closeEnabled
+    && evidence.endNotOffered
+  globalThis.M11.proofs.caption = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'caption: min/max live and labelled, minimize round trip ' +
+    evidence.roundTripped + ' (box unchanged ' + evidence.boxUnchanged +
+    '), End Process not offered ' + evidence.endNotOffered)
 }
 
 /* --------------------------------------------------------------------------------------------
@@ -777,7 +795,7 @@ async function main () {
   proofChain(host)
   proofBlur(first, seamCssX)
   proofLegible(first, globalThis.M11.proofs.blur.evidence)
-  proofInert(first)
+  await proofCaption(k, host, first)
   await proofFocus(host, first)
 
   // Proof 6 moved the focus, so the window the driver photographs is the INACTIVE one. Put it back,

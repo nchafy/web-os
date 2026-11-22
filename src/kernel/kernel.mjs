@@ -1626,6 +1626,17 @@ async function handle(m) {
         now,
         pollWake: () => pollWakeAll(),
         windowGone: (id) => DATA.windowGone(id),
+        /* M14. WHICH PROGRAM A PID IS RUNNING, for the shell. A Superbar groups its buttons by
+         * program — two terminals are one button with two windows — and the page has no way to
+         * learn that: it sees a pid and a title, and a title is whatever the program says it is.
+         * The kernel already records argv for `/proc/<pid>/cmdline`, so this is a read of a fact
+         * it holds rather than a new one, and it is the ARGV HEAD because that is the name a user
+         * typed. Injected like `windowGone`, because `wins.mjs` must not import the table. */
+        progOf: (pid) => {
+          const slot = table.get(pid);
+          if (!slot) return "";
+          return String(slot.cmdline || "").split("\0")[0] || "";
+        },
       });
 
       if (cfg.depth === false) dispatch = onSyscallNoDepth;
@@ -1853,6 +1864,12 @@ async function handle(m) {
      * bench check. */
     case "win-dpr":
     case "win-blur-budget":
+    /* M14's two page reports, and they belong here for the reason every one above does: a
+     * process's messages arrive on its own MessagePort, so a process cannot minimize another
+     * process's window or claim one of its rows was clicked. What the page sends is WHAT THE USER
+     * DID — a taskbar button, an icon, a jump-list row — and the kernel decides what it means. */
+    case "win-show-ask":
+    case "win-item-ask":
       /* THE ONE GUARD FOR ALL FOUR. `WINDOWS` is built in the `boot` case, and `handle()` turns a
        * throw into a `panic` — so a page that posted any of these before awaiting `up` killed the
        * kernel with a TypeError instead of being told what it did wrong. The console these
@@ -1924,6 +1941,27 @@ async function handle(m) {
       // is a different race: one counter for two facts cannot answer either (constraint 235).
       if (!toRaise || toRaise.destroyed) { lateRaises += 1; return; }
       WINDOWS.raise(toRaise);
+      return;
+    }
+    case "win-show-ask": {
+      /* THE SHELL ASKS AND THE KERNEL DECIDES, which is `win-raise`'s division applied to the
+       * other thing a taskbar button does. The page is the side that knows a button was clicked;
+       * the kernel is the side that owns the state, the restore point and the blurred area the
+       * change alters (constraints 49, 226, 271).
+       *
+       * A WINDOW THAT HAS GONE IS A RACE AND NOT AN ERROR, for `win-geom`'s measured reason: a
+       * click and a destroy cross in the page's own queue. Counted with the raises, because it is
+       * the same race on the same route. */
+      const showWin = WINDOWS.get(m.win | 0);
+      if (!showWin || showWin.destroyed) { lateRaises += 1; return; }
+      WINDOWS.setState(showWin, m.state | 0);
+      return;
+    }
+    case "win-item-ask": {
+      /* A ROW WAS ACTIVATED. The INDEX is validated against the list the kernel holds, so a page
+       * cannot name a row nothing published — and a separator or a disabled row is refused there
+       * too, because the flags are the publisher's statement about its own list. */
+      WINDOWS.activateItem(m.win | 0, m.index | 0, m.where | 0);
       return;
     }
     case "drag-at":

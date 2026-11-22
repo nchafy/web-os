@@ -115,6 +115,36 @@ export const CLOSE_W = 48;
  *  font size or larger". */
 export const FONT_PX = 12;
 
+/* ---- M14: the shell's own metrics ---------------------------------------------------------
+ *
+ * THEY LIVE HERE FOR `CAP_H`'s REASON. The taskbar's height is not a look: it is the strip the
+ * shell reserves, so `WinHost.reserve` subtracts it from the desktop and every maximized window is
+ * laid out against what is left. A second copy is how a window comes to cover the taskbar.
+ *
+ * Windows 7's own figures where they are knowable: a 40 px taskbar with large icons, and a 48 px
+ * desktop icon grid at 75 px of label pitch. The rest are 7.css's or are stated as choices.
+ */
+
+/** The taskbar's height, in CSS px. Windows 7's large-icon default. */
+export const TASKBAR_H = 40;
+
+/** A Superbar button: Windows 7 sizes these to fit the bar's height less a 2 px gutter. */
+export const TASK_BTN_H = TASKBAR_H - 6;
+export const TASK_BTN_W = 160;
+
+/** The start orb: round, and wider than it is tall because it carries the bar's full height. */
+export const ORB = TASKBAR_H - 4;
+
+/** A desktop icon's drawing, and the cell it sits in. Windows 7's own 48 px icon on a 75 px
+ *  pitch, which is what makes two rows of labels fit without touching. */
+export const ICON_PX = 48;
+export const ICON_CELL_W = 86;
+export const ICON_CELL_H = 88;
+
+/** A hover thumbnail, as Windows 7 sizes an Aero Peek preview: wide enough to read a caption. */
+export const THUMB_W = 196;
+export const THUMB_H = 120;
+
 /**
  * Segoe UI MUST NOT be shipped — it is not redistributable, and Microsoft routes distribution
  * licensing through Monotype (constraint 37). So the family is REFERENCED and never served: a
@@ -425,6 +455,336 @@ export function styleSheet() {
   background: rgba(16,38,62,.82); color: #eaf4ff;
   box-shadow: 0 0 0 1px rgba(255,255,255,.45), 0 4px 12px rgba(0,0,0,.5);
 }
+
+/* ---- M14: Aero Snap's ghost ----------------------------------------------------------- */
+/* WHERE THE WINDOW WOULD LAND, drawn while the pointer holds an edge. Windows 7 shows a
+   translucent pane with a bright border, and the border is the load-bearing half: over a dark
+   desktop a translucent fill alone is nearly invisible.
+
+   NO TRANSITION AND NO OPACITY ANIMATION. An animated opacity on a child of the backdrop root
+   would establish one and sever the blur chain for a frame at a time, which is the failure with no
+   symptom (docs/designs/REVIEW-FINDINGS.md section 8). */
+.aero-desktop .snap-preview {
+  z-index: 2147483000;
+  border-radius: 3px;
+  background: rgba(146,200,245,.22);
+  box-shadow: inset 0 0 0 2px rgba(220,240,255,.85), 0 0 18px rgba(120,190,245,.45);
+}
+.aero-desktop .snap-preview[hidden] { display: none }
+
+/* ---- M14: a window the shell has docked ----------------------------------------------- */
+/* A MAXIMIZED FRAME LOSES ITS ROUNDED TOP CORNERS, which is Windows 7's own behaviour and is not
+   decoration: a rounded corner against the top of the work area shows a wedge of desktop through
+   a window that is supposed to be filling it. */
+.aero-desktop .window.is-maximized { border-radius: 0 }
+.aero-desktop .window.is-maximized .aero-cap { border-radius: 0 }
+/* The grips go with the geometry: a docked window's size is the state's, so a resize would be
+   undone by the next layout. 'src/wm/window.mjs' refuses the gesture; this stops the cursor
+   promising it. */
+.aero-desktop .window.is-maximized .window-grip,
+.aero-desktop .window.is-snapped .window-grip,
+.aero-desktop .window.is-desktop .window-grip { display: none }
+
+/* ---- M14: the desktop window ---------------------------------------------------------- */
+/* NO FRAME AT ALL. The desktop is a window — it has an fd, a process and a place in the stack —
+   and it is the one window that must look like none: no caption, no glass ring, no shadow, and a
+   transparent client area so the wallpaper underneath is what a reader sees. */
+.aero-desktop .window.is-desktop {
+  box-shadow: none;
+  border-radius: 0;
+}
+.aero-desktop .window.is-desktop .window-title,
+.aero-desktop .window.is-desktop .aero-strip { display: none }
+.aero-desktop .window.is-desktop .window-body {
+  position: absolute; inset: 0;
+  background: transparent;
+  border-top: 0;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+/* ---- M14: the Superbar ----------------------------------------------------------------- */
+/* THE TASKBAR IS A GLASS STRIP, and it carries the same '.aero-strip' class the frame's four
+   strips do — one definition of what glass is, so the bar cannot drift from the windows above it.
+   What is added here is only its geometry and the things that sit in it. */
+.aero-desktop .taskbar {
+  left: 0; right: 0; bottom: 0; height: ${TASKBAR_H}px;
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 4px;
+  /* ABOVE EVERY WINDOW. The window stack's z-indexes start at 1 and grow with the window count,
+     so this is a number no stack can reach rather than a number one window above the current top.
+     A taskbar a maximized window could cover is a taskbar a user cannot get back to. */
+  z-index: 2147482000;
+  border-top: 1px solid rgba(255,255,255,.35);
+  box-shadow: 0 -1px 0 rgba(0,0,0,.45), 0 -8px 20px rgba(0,0,0,.28);
+  font: ${FONT_PX}px/1.2 ${UI_FONT};
+  color: #eaf4ff;
+}
+
+/* The start orb. ROUND, GLOSSY, AND NOT A WINDOWS FLAG: the four-pane flag is Microsoft's mark,
+   so the glyph here is the same little window this project draws for a program icon
+   (src/wm/icons.mjs). The orb's own look — a radial sheen with a bright rim — is the Aero grammar
+   and is what makes it read as a button. */
+.aero-desktop .taskbar-start {
+  flex: 0 0 auto;
+  width: ${ORB}px; height: ${ORB}px;
+  border-radius: 50%;
+  border: 1px solid rgba(255,255,255,.55);
+  background:
+    radial-gradient(120% 120% at 35% 22%, rgba(255,255,255,.85) 0%, rgba(255,255,255,.12) 42%,
+      rgba(255,255,255,0) 60%),
+    radial-gradient(90% 90% at 50% 120%, rgba(120,225,255,.85) 0%, rgba(26,98,160,.95) 70%),
+    linear-gradient(#2b85c8, #10436f);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.5), inset 0 1px 1px rgba(255,255,255,.6),
+    0 2px 6px rgba(0,0,0,.45);
+  display: grid; place-items: center;
+  cursor: pointer; padding: 0;
+}
+.aero-desktop .taskbar-start:hover {
+  background:
+    radial-gradient(120% 120% at 35% 22%, rgba(255,255,255,.95) 0%, rgba(255,255,255,.22) 42%,
+      rgba(255,255,255,0) 60%),
+    radial-gradient(90% 90% at 50% 120%, rgba(170,240,255,.95) 0%, rgba(40,130,200,.95) 70%),
+    linear-gradient(#3c9ade, #15568c);
+}
+.aero-desktop .taskbar-start .wicon { filter: drop-shadow(0 1px 1px rgba(0,0,0,.5)) }
+
+/* The band of program buttons. It SCROLLS RATHER THAN SHRINKS past its width: Windows 7 narrows
+   its buttons and then groups them, and narrowing to nothing is how a label becomes unreadable. */
+.aero-desktop .taskbar-band {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 3px;
+  overflow: hidden;
+}
+
+/* A Superbar button: a glass pane with a lit left edge, the icon, the label, and a stack edge when
+   it stands for more than one window. */
+.aero-desktop .task-btn {
+  flex: 0 1 ${TASK_BTN_W}px;
+  height: ${TASK_BTN_H}px;
+  min-width: 42px;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,.18);
+  background: linear-gradient(rgba(255,255,255,.14), rgba(255,255,255,.04) 48%,
+    rgba(255,255,255,.10));
+  color: #eaf4ff;
+  font: ${FONT_PX}px/1.2 ${UI_FONT};
+  text-shadow: 0 1px 1px rgba(0,16,38,.85);
+  cursor: pointer; overflow: hidden;
+}
+.aero-desktop .task-btn .task-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: left;
+}
+.aero-desktop .task-btn:hover {
+  background:
+    radial-gradient(120% 180% at 50% 120%, rgba(120,225,255,.45) 0%, rgba(255,255,255,.10) 70%),
+    linear-gradient(rgba(255,255,255,.22), rgba(255,255,255,.08));
+  border-color: rgba(190,235,255,.6);
+  transition: background 50ms linear;
+}
+/* THE ACTIVE WINDOW'S BUTTON IS LIT, and the cue is a border plus a brighter fill rather than a
+   colour: the bar is glass over an unknown backdrop, so a hue alone has no contrast to rely on. */
+.aero-desktop .task-btn.is-active {
+  background: linear-gradient(rgba(255,255,255,.34), rgba(255,255,255,.14) 48%,
+    rgba(255,255,255,.26));
+  border-color: rgba(220,245,255,.85);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35), 0 0 8px rgba(130,205,255,.45);
+}
+/* A MINIMIZED WINDOW STILL HAS A BUTTON, and it has to read as "here but not on screen" — so it
+   is dimmer and flatter rather than absent. A button that disappeared on minimize would leave no
+   way back. */
+.aero-desktop .task-btn.is-minimized {
+  background: linear-gradient(rgba(255,255,255,.07), rgba(255,255,255,.02));
+  border-color: rgba(255,255,255,.12);
+  color: #c9d8e6;
+}
+/* The group edge: Windows 7 draws a stacked-pane hint on a button standing for several windows. */
+.aero-desktop .task-btn.is-group {
+  box-shadow: inset -3px 0 0 rgba(255,255,255,.18), inset -6px 0 0 rgba(255,255,255,.10);
+}
+.aero-desktop .task-count {
+  flex: 0 0 auto;
+  font: 600 10px/1 ${UI_FONT};
+  padding: 1px 4px; border-radius: 6px;
+  background: rgba(10,30,52,.55); border: 1px solid rgba(255,255,255,.35);
+}
+
+/* ---- M14: the tray --------------------------------------------------------------------- */
+.aero-desktop .tray {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 2px 0 8px;
+  border-left: 1px solid rgba(255,255,255,.18);
+}
+.aero-desktop .clock {
+  font: ${FONT_PX}px/1.15 ${UI_FONT};
+  text-align: center; color: #f2f8ff;
+  text-shadow: 0 1px 1px rgba(0,16,38,.9);
+  padding: 0 4px;
+  display: grid; gap: 1px;
+  cursor: default;
+}
+.aero-desktop .clock .clock-date { font-size: 10px; opacity: .85 }
+/* Show desktop: Windows 7's thin pane at the very end of the bar. */
+.aero-desktop .show-desktop {
+  width: 14px; height: ${TASKBAR_H - 8}px;
+  border-radius: 2px;
+  border: 1px solid rgba(255,255,255,.35);
+  background: linear-gradient(rgba(255,255,255,.22), rgba(255,255,255,.06));
+  cursor: pointer; padding: 0;
+}
+.aero-desktop .show-desktop:hover {
+  background: linear-gradient(rgba(190,235,255,.55), rgba(255,255,255,.12));
+}
+
+/* AERO PEEK: every window becomes an outline while the pointer rests on Show desktop.
+   THE STRIPS AND THE CLIENT AREA GO, NOT THE FRAME — so the window keeps its place and its
+   shadow-free outline shows where it is. An opacity on the frame itself would establish a backdrop
+   root and sever the blur chain of everything inside it, which is the failure with no symptom. */
+.aero-desktop.is-peeking .window:not(.is-desktop) .aero-strip,
+.aero-desktop.is-peeking .window:not(.is-desktop) .window-body { opacity: 0 }
+.aero-desktop.is-peeking .window:not(.is-desktop) {
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.8);
+}
+
+/* ---- M14: the popups — jump lists, the window list, the start menu --------------------- */
+/* ONE PANEL LOOK FOR ALL THREE, because they are one thing in Windows 7 too: a dark glass sheet
+   with a bright rim, rows that light on hover, and a separator that is a line and not a gap. */
+.aero-desktop .shell-popup {
+  position: absolute;
+  z-index: 2147482500;
+  min-width: 180px; max-width: 320px;
+  padding: 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(255,255,255,.45);
+  background: linear-gradient(rgba(22,52,84,.92), rgba(12,32,56,.94));
+  box-shadow: 0 0 0 1px rgba(0,0,0,.55), 0 10px 28px rgba(0,0,0,.55);
+  color: #eaf4ff;
+  font: ${FONT_PX}px/1.3 ${UI_FONT};
+}
+.aero-desktop .shell-popup[hidden] { display: none }
+.aero-desktop .shell-row {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0; border-radius: 3px;
+  background: transparent; color: inherit;
+  font: inherit; text-align: left;
+  cursor: pointer;
+}
+.aero-desktop .shell-row:hover:not([disabled]) {
+  background: linear-gradient(rgba(140,215,255,.35), rgba(80,165,230,.30));
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
+}
+.aero-desktop .shell-row[disabled] { color: rgba(234,244,255,.45); cursor: default }
+.aero-desktop .shell-row .shell-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.aero-desktop .shell-sep {
+  height: 1px; margin: 3px 6px;
+  background: rgba(255,255,255,.22);
+}
+.aero-desktop .shell-title {
+  padding: 2px 8px 6px;
+  font: 600 ${FONT_PX}px/1.2 ${UI_FONT};
+  color: #cfe6fb;
+}
+
+/* The start menu is the same panel, taller, with a search box at its foot — Windows 7's own
+   arrangement, where the search field is where the cursor already is. */
+.aero-desktop .startmenu { min-width: 260px; max-height: 420px; display: grid; gap: 2px }
+.aero-desktop .startmenu .start-list { overflow: auto; max-height: 300px; display: grid; gap: 1px }
+.aero-desktop .startmenu .start-search {
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px 7px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,.45);
+  background: rgba(255,255,255,.92);
+  color: #10212f;
+  font: ${FONT_PX}px/1.2 ${UI_FONT};
+}
+.aero-desktop .startmenu .start-foot {
+  display: flex; justify-content: flex-end; padding-top: 4px;
+}
+
+/* A hover thumbnail: the panel, a canvas, and the window's title above it — which is the order
+   Windows 7 uses, because the title is what tells two identical terminals apart. */
+.aero-desktop .task-thumbs { display: flex; gap: 6px }
+.aero-desktop .task-thumb {
+  display: grid; gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255,255,255,.28);
+  border-radius: 3px;
+  background: rgba(255,255,255,.06);
+  cursor: pointer;
+}
+.aero-desktop .task-thumb:hover {
+  background: rgba(140,215,255,.28);
+  border-color: rgba(220,245,255,.8);
+}
+.aero-desktop .task-thumb canvas {
+  display: block;
+  width: ${THUMB_W}px; height: ${THUMB_H}px;
+  background: #0d1c2c;
+  border: 1px solid rgba(0,0,0,.45);
+}
+.aero-desktop .task-thumb .thumb-title {
+  font: ${FONT_PX}px/1.2 ${UI_FONT};
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  max-width: ${THUMB_W}px;
+}
+
+/* ---- M14: the desktop's icons ---------------------------------------------------------- */
+/* ABSOLUTELY POSITIONED IN A GRID, not laid out by flow: an icon is a thing a user can DRAG to a
+   place and have it stay there, and a flow layout would put it back. */
+.aero-desktop .icon-view { position: absolute; inset: 0; overflow: hidden }
+.aero-desktop .desk-icon {
+  position: absolute;
+  width: ${ICON_CELL_W}px;
+  display: grid; justify-items: center; gap: 2px;
+  padding: 4px 2px 6px;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent;
+  color: #fff;
+  font: ${FONT_PX}px/1.25 ${UI_FONT};
+  cursor: default;
+  /* THE LABEL NEEDS THE SAME HALO THE CAPTION NEEDS, and for the same reason: it sits over a
+     wallpaper whose luminance is unknown, so no single text colour has a contrast ratio
+     (constraint 39's neighbourhood). Two rows and then an ellipsis, which is Windows 7's own. */
+  text-shadow: 0 0 3px rgba(0,16,38,.95), 0 1px 2px rgba(0,16,38,.9);
+}
+.aero-desktop .desk-icon .desk-label {
+  max-width: ${ICON_CELL_W - 8}px;
+  text-align: center;
+  overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.aero-desktop .desk-icon:hover {
+  border-color: rgba(180,225,255,.55);
+  background: linear-gradient(rgba(140,215,255,.22), rgba(80,165,230,.18));
+}
+/* SELECTED IS A FILL AND A RIM, which is what Windows 7 draws, and it must be legible over any
+   wallpaper — so the rim carries the contrast and the fill only tints. */
+.aero-desktop .desk-icon.is-selected {
+  border-color: rgba(220,245,255,.9);
+  background: linear-gradient(rgba(150,220,255,.38), rgba(70,160,230,.34));
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.35);
+}
+.aero-desktop .desk-icon[data-disabled="1"] { color: rgba(255,255,255,.55) }
+/* The rubber band: a marquee, drawn while a drag crosses the bare desktop. */
+.aero-desktop .rubber {
+  position: absolute;
+  border: 1px solid rgba(220,245,255,.9);
+  background: rgba(140,205,250,.22);
+  pointer-events: none;
+}
+.aero-desktop .rubber[hidden] { display: none }
 `;
 }
 

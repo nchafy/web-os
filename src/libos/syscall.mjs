@@ -21,9 +21,11 @@ import {
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, SYS_win_raise,
+  SYS_win_items,
   SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_F_APPEND, fmtBit,
-  WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, decodeWinEvents,
+  WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+  decodeWinEvents, encodeWinItems,
   DLOP_BYTES, DL_MAX_OPS, encodeDrawOp,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   TIOCGPGRP, TIOCSPGRP, encodeTermios, decodeTermios, decodeWinsize,
@@ -656,6 +658,44 @@ export function winSetModal(fd, scope, mode) {
  *  it: the kernel decides, and the refusal is a rule rather than a transient to retry. */
 export function winRaise(fd) {
   return syscall(SYS_win_raise, fd);
+}
+
+/**
+ * M14. Ask for a SHOW STATE — normal, minimized, maximized, snapped left or right. Returns the
+ * state that was REACHED, which is not always the one asked for: restoring a minimized window
+ * gives back what it was, so a window minimized while maximized comes back maximized (Win32's
+ * `SW_RESTORE`). A caller that assumed its own argument would be wrong on the case a user hits
+ * every day.
+ *
+ * The GEOMETRY is not this call's business: the shell lays the frame out for the state and reports
+ * the box it settled on, exactly as it does for a drag (constraint 271).
+ */
+export function winSetState(fd, state) {
+  return syscall(SYS_win_set, fd, WIN_SET_STATE, state | 0);
+}
+
+/** M14. Ask to BE something to the shell: an ordinary window, or the desktop. -EBUSY if another
+ *  window already holds the desktop role, -EINVAL for an owned window — the owner chain exists so
+ *  a dialog rides above its owner, and the desktop is the one window nothing may ride above. */
+export function winSetRole(fd, role) {
+  return syscall(SYS_win_set, fd, WIN_SET_ROLE, role | 0);
+}
+
+/**
+ * M14. Publish this window's rows for the shell to draw: desktop icons, start-menu entries, or a
+ * jump list, by the `WITEM_*` flag on each row. Returns how many rows the kernel now holds.
+ *
+ * THE LIST IS REPLACED WHOLE and `[]` withdraws it, which is what a program shutting down owes: a
+ * jump list that outlived the window it describes is a menu of commands nothing can carry out.
+ *
+ * Encoded HERE through `src/abi.mjs`'s one codec, so no program writes a field offset — and a list
+ * this ABI cannot carry (too many rows, a label too long, an icon nothing can draw) is -EINVAL
+ * from this side rather than a round trip that fails.
+ */
+export function winItems(fd, items = []) {
+  const bytes = encodeWinItems(items);
+  if (bytes === null) return -EINVAL;
+  return syscall(SYS_win_items, fd, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
 }
 
 /** Ask the kernel for a surface of `w` x `h` DEVICE PIXELS on this window, or get an errno. The

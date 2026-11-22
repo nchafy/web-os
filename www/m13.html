@@ -1,0 +1,736 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M13 — the geometry harness</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's and M12's pages do it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M11's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect the page publishes — which is exactly what this
+   milestone is asserting about. */
+#log { margin:8px; white-space:pre-wrap; height:150px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+/* THE DESKTOP'S SIZE IS A MEASUREMENT HERE, not decoration: the clamp is a function of it and the
+   relayout proof changes it. Both dimensions are written as inline styles by the proof, so the
+   stylesheet gives only the starting point. */
+#desktop { position:relative; height:520px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M13 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M13 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M13's page harness: THE GEOMETRY HARNESS.
+ *
+ * It is the only proof M7–M12 have that the numbers they trade are about the window a reader can
+ * actually touch. Everything here is measured off RENDERED RECTS and driven by REAL INPUT, for
+ * constraint 40's reason: an inert frame and a working one are the same picture, so a screenshot
+ * cannot tell a window manager from a drawing of one.
+ *
+ *   PROOF 1  THE CLAMP. A window cannot be put out of reach: dragged past the bottom-right corner
+ *            or above the top, and arrow-keyed off the left edge, the frame stops with MIN_VISIBLE
+ *            px of caption still over the desktop — asserted on the rendered caption, not on the
+ *            dataset the page wrote
+ *   PROOF 2  THE GESTURE IS FAITHFUL. An unclamped drag moves the frame by exactly the pointer's
+ *            delta; a drag after a clamped one starts from where the frame IS; and both ends of the
+ *            keyboard step move, which is the pair constraint 39 asks for
+ *   PROOF 3  THE KERNEL'S RECORD. For every live window the kernel's box is the box the clamp
+ *            settled on, and its cell grid is what the rendered client area divides into — the
+ *            whole of "the kernel RECORDS geometry; it never decides it"
+ *   PROOF 4  THE RING AND THE CHROME. The four glass strips do not overlap and their areas sum to
+ *            `blurRingArea`, which is what makes M12's accounting a fact about the product; and the
+ *            client area is inset by exactly the chrome the ABI declares
+ *   PROOF 5  THE STACK A READER CAN TOUCH. A real click on a buried window's sliver raises it, and
+ *            the window under that same point afterwards is the one that came up
+ *   PROOF 6  THE DESKTOP CHANGING SIZE. A desktop that shrinks pulls every frame back inside it and
+ *            tells the kernel; one that grows back returns each window to the box it asked for
+ *   PROOF 7  THE FLOOR. A box under the minimum is floored, and the kernel records the floor rather
+ *            than the request
+ *
+ * WHY THE PAGE WRITES `entry.win.box` DIRECTLY in `place()`. Several proofs need a window to START
+ * from a known box, and that is not a gesture — it is this page setting up its own fixture. It is
+ * `www/m12.html`'s own route (`stageForPixels`) and it goes through `apply()` and the host's own
+ * `keyup` report, so nothing downstream learns the geometry any differently from a user nudging the
+ * window with an arrow key.
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import {
+  MIN_VISIBLE, MIN_W, MIN_H, KEY_STEP, SNAP_ARM_PX, setGeometryControls,
+} from '/src/wm/window.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import { WIN_CAP_H, WIN_INSET, WST_NORMAL, blurRingArea } from '/src/abi.mjs'
+import {
+  bootKernel, spawnProgram, ask as askKernel, until, sleep, gestureAsker,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  /** `apply()` writes the requested box straight onto the element: nothing holds a window inside
+   *  the desktop. `src/wm/window.mjs` owns the switch. */
+  noClamp: params.get('no_clamp') === '1',
+  /** The host reports the box the process ASKED FOR rather than the one the clamp settled on, so
+   *  the kernel's record is a geometry no frame ever had. */
+  staleGeom: params.get('stale_geom') === '1',
+  /** The desktop changing size re-clamps nothing, which is the world before M13. */
+  noRelayout: params.get('no_relayout') === '1',
+  liveOnly: params.get('live') === '1',
+}
+globalThis.M13.config = CFG
+
+/* THE CONTROLS ARE INSTALLED BEFORE THE HOST EXISTS, and read back out of the modules that own
+ * them into `host.report().controls` — a control a check believed was on and was not is a green run
+ * over an unmodified world. */
+setGeometryControls({ noClamp: CFG.noClamp })
+setHostControls({ staleGeom: CFG.staleGeom, noRelayout: CFG.noRelayout })
+
+const WINOPEN = '/src/bin/winopen.mjs'
+const TERM = '/src/bin/term.mjs'
+
+globalThis.M13.proofs = {
+  clamp: null, gesture: null, record: null, ring: null, stack: null, relayout: null, limits: null,
+}
+
+const ask = gestureAsker(globalThis.M13)
+
+/** The host, once there is one. A module-level handle because `float()` below has to be able to
+ *  ask the kernel for a state and is called from every section. */
+let HOST = null
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M13.state = 'aborted'
+  globalThis.M13.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no geometry.'
+  out.className = 'bad'
+  say(globalThis.M13.why)
+} else {
+  main().catch((e) => {
+    globalThis.M13.state = 'error'
+    globalThis.M13.why = String((e && e.stack) || e)
+    say(globalThis.M13.why)
+  })
+}
+
+async function bootHost () {
+  const k = await bootKernel({ label: 'm13', bench: 1 }, globalThis.M13, say)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  HOST = host
+  return { k, host }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** The desktop's rect as the clamp sees it: rounded, because `Win.surface()` rounds. */
+function deskBox () {
+  const r = desktop.getBoundingClientRect()
+  return { x: r.left, y: r.top, w: Math.round(r.width), h: Math.round(r.height), rect: r }
+}
+
+/**
+ * MAKE SURE A WINDOW IS FLOATING before a section measures it.
+ *
+ * M14 made the caption's commands and the screen edges live, so a window can arrive at a section
+ * MAXIMIZED — and a docked window's geometry comes from `boxForState`, which means `place()` below
+ * writes a box nothing reads and every number after it is about the wrong rectangle. Measured: the
+ * clamp proof dragged to the top edge, which is now a maximize gesture, and the next section
+ * reported a 1,264×520 "window".
+ *
+ * It asks through the shell's own route rather than writing `state` here: the kernel owns it.
+ */
+async function float (entry) {
+  if (entry.win.state === WST_NORMAL) return 0
+  HOST.askState(entry.id, WST_NORMAL)
+  return until(() => entry.win.state === WST_NORMAL, 4000)
+}
+
+/** Put a window at a known box, through `apply()` and the host's own report. Returns `placed`. */
+function place (entry, box) {
+  entry.win.box = { x: box.x | 0, y: box.y | 0, w: box.w | 0, h: box.h | 0 }
+  entry.win.apply()
+  entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  return { ...entry.win.placed }
+}
+
+/**
+ * A client point on the caption, `offset` px in from its LEFT edge.
+ *
+ * NEAR THE LEFT EDGE AND NOT IN THE MIDDLE, which is arithmetic rather than taste: a drag moves
+ * the window by the pointer's delta, so the furthest right a pointer inside the viewport can push
+ * the window's left edge is `pointer.x - offset`. A grab in the middle of a 420 px caption cannot
+ * reach the right-hand clamp at all, and the proof would pass on a window that was never clamped.
+ *
+ * Clamped into the desktop, because a clamped window's caption RECT extends past the desktop's own
+ * edge — `overflow: hidden` clips the pixels and not the rectangle — and a press outside the
+ * desktop lands on the page instead of on the frame.
+ */
+function capPoint (entry, offset = 6) {
+  const r = entry.win.barEl.getBoundingClientRect()
+  const d = desktop.getBoundingClientRect()
+  const left = Math.max(r.left, d.left)
+  const right = Math.min(r.right, d.right)
+  return {
+    x: Math.round(Math.min(left + offset, right - 2)),
+    y: Math.round(Math.min(Math.max(r.top + r.height / 2, d.top + 2), d.bottom - 2)),
+  }
+}
+
+/** How much of a caption is over the desktop, in CSS px. The invariant the clamp exists for, read
+ *  off what the browser laid out. */
+function captionOverlap (entry) {
+  const c = entry.win.barEl.getBoundingClientRect()
+  const d = desktop.getBoundingClientRect()
+  return {
+    w: Math.max(0, Math.min(c.right, d.right) - Math.max(c.left, d.left)),
+    h: Math.max(0, Math.min(c.bottom, d.bottom) - Math.max(c.top, d.top)),
+    caption: { x: Math.round(c.left), y: Math.round(c.top), w: Math.round(c.width),
+      h: Math.round(c.height) },
+  }
+}
+
+const roundBox = (b) => ({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w),
+  h: Math.round(b.h) })
+
+/** Open `n` windows through `winopen` and wait for the frames. */
+async function openWindows (k, host, n, ceiling = 600000) {
+  const have = host.frames.size
+  const row = await spawnProgram(k, WINOPEN, ['winopen', '-n', String(n), '-c', String(ceiling)])
+  await until(() => host.frames.size >= have + n, 15000)
+  return row
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: THE CLAMP. A window cannot be put out of reach.
+
+   THE THREE EDGES ARE DRIVEN BY THREE DIFFERENT REAL GESTURES, and the reason is arithmetic. The
+   right and bottom bounds sit INSIDE the desktop, so a pointer can overshoot them without leaving
+   the viewport. The top bound is reachable the same way. The LEFT bound is not: it is
+   `MIN_VISIBLE - w`, which for a 420 px window is 348 px of window off the left edge, so the
+   pointer would have to travel to a negative client coordinate. The keyboard route — `#barKey`,
+   `moveBy`, `apply`, the host's `keyup` report — reaches it with real trusted keys, which is why
+   `src/wm/window.mjs` gives every gesture a keyboard spelling.
+   -------------------------------------------------------------------------------------------- */
+async function proofClamp (k, host) {
+  await float([...host.frames.values()].sort((a, b) => a.id - b.id)[0])
+
+  const entry = [...host.frames.values()].sort((a, b) => a.id - b.id)[0]
+  const desk = deskBox()
+  const evidence = { desk: { w: desk.w, h: desk.h }, minVisible: MIN_VISIBLE, states: {} }
+
+  // ---- bottom-right, by a real drag that overshoots both bounds at once ----
+  place(entry, { x: 60, y: 60, w: 420, h: 260 })
+  await ask({ kind: 'drag', name: 'drag-past-bottom-right', from: capPoint(entry),
+    to: { x: Math.round(desk.rect.right - 12), y: Math.round(desk.rect.bottom - 12) } })
+  evidence.states.bottomRight = {
+    placed: roundBox(entry.win.placed),
+    asked: roundBox(entry.win.box),
+    want: { x: desk.w - MIN_VISIBLE, y: desk.h - MIN_VISIBLE },
+    state: entry.win.state,
+    overlap: captionOverlap(entry),
+  }
+
+  // ---- the top, by a real drag to the top of the viewport ----
+  place(entry, { x: 80, y: 220, w: 420, h: 260 })
+  /* EIGHT PIXELS SHORT OF THE TOP, and the number is derived rather than chosen: the grab point is
+   * the caption's middle, about 14 px below the frame's top edge, so a pointer 8 px into the
+   * desktop asks for y = -6 and the clamp has something to absorb — while staying outside M14's
+   * SNAP_ARM_PX band, where a drag to the top edge MAXIMIZES the window. Measured: it did, and the
+   * next two sections then described a 1,264x520 frame. */
+  await ask({ kind: 'drag', name: 'drag-past-top', from: capPoint(entry),
+    to: { x: Math.round(desk.rect.left + 200),
+      y: Math.round(desk.rect.top + SNAP_ARM_PX + 7) } })
+  evidence.states.top = {
+    placed: roundBox(entry.win.placed),
+    asked: roundBox(entry.win.box),
+    want: { y: 0 },
+    state: entry.win.state,
+    overlap: captionOverlap(entry),
+  }
+
+  // ---- the left, by REAL ARROW KEYS, enough of them to overshoot the bound and five to spare ----
+  const spot = place(entry, { x: 100, y: 120, w: 420, h: 260 })
+  entry.win.barEl.focus()
+  const presses = Math.max(1,
+    Math.ceil((spot.x - (MIN_VISIBLE - spot.w)) / KEY_STEP) + 5)
+  await ask({ kind: 'key', name: 'arrow-past-left', key: 'ArrowLeft', times: presses })
+  evidence.states.left = {
+    placed: roundBox(entry.win.placed),
+    asked: roundBox(entry.win.box),
+    want: { x: MIN_VISIBLE - entry.win.placed.w },
+    presses,
+    state: entry.win.state,
+    overlap: captionOverlap(entry),
+  }
+
+  const states = Object.values(evidence.states)
+  /* EVERY CLAUSE REQUIRES THE WINDOW TO HAVE STAYED FLOATING. A clamp is a statement about a
+   * window whose geometry is its box, and M14's edges are live — so a drag that snapped instead of
+   * clamping must FAIL this proof rather than have its docked rectangle measured as if the clamp
+   * had produced it. */
+  const floating = (s) => s.state === WST_NORMAL
+  evidence.bottomRightHeld =
+    evidence.states.bottomRight.placed.x === evidence.states.bottomRight.want.x
+    && evidence.states.bottomRight.placed.y === evidence.states.bottomRight.want.y
+    && floating(evidence.states.bottomRight)
+  evidence.topHeld = evidence.states.top.placed.y === 0 && floating(evidence.states.top)
+  evidence.leftHeld = evidence.states.left.placed.x === evidence.states.left.want.x
+    && floating(evidence.states.left)
+  /* THE CLAUSE THAT IS ABOUT THE PRODUCT, and the only one a reader would notice: in every clamped
+   * state there is still a grabbable strip of caption over the desktop. Measured off the caption's
+   * own rendered rect, because the dataset the page wrote is the page's own claim. */
+  evidence.stillGrabbable = states.every(
+    (s) => s.overlap.w >= MIN_VISIBLE - 1 && s.overlap.h >= 1)
+  evidence.ok = evidence.bottomRightHeld && evidence.topHeld && evidence.leftHeld
+    && evidence.stillGrabbable
+  globalThis.M13.proofs.clamp = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'clamp: bottom-right ' +
+    JSON.stringify(evidence.states.bottomRight.placed) + ', top y ' +
+    evidence.states.top.placed.y + ', left x ' + evidence.states.left.placed.x +
+    ' (want ' + evidence.states.left.want.x + ')')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE GESTURE IS FAITHFUL.
+   -------------------------------------------------------------------------------------------- */
+async function proofGesture (k, host) {
+  await float([...host.frames.values()].sort((a, b) => a.id - b.id)[0])
+
+  const entry = [...host.frames.values()].sort((a, b) => a.id - b.id)[0]
+  const desk = deskBox()
+  const evidence = { keyStep: KEY_STEP }
+
+  // ---- an unclamped drag moves the frame by exactly the pointer's delta ----
+  const start = place(entry, { x: 60, y: 90, w: 420, h: 260 })
+  const from = capPoint(entry)
+  const delta = { dx: 137, dy: 83 }
+  await ask({ kind: 'drag', name: 'drag-exact',
+    from, to: { x: from.x + delta.dx, y: from.y + delta.dy } })
+  evidence.exact = {
+    start, delta, placed: roundBox(entry.win.placed),
+    want: { x: start.x + delta.dx, y: start.y + delta.dy },
+  }
+  evidence.exactHeld = evidence.exact.placed.x === evidence.exact.want.x
+    && evidence.exact.placed.y === evidence.exact.want.y
+
+  /* ---- A DRAG AFTER A CLAMPED ONE STARTS FROM WHERE THE FRAME IS ----
+   *
+   * The two-box design in `src/wm/window.mjs`: `box` stays what was asked for and `placed` is what
+   * the clamp allowed, and a gesture writes `box` from `placed` plus its own delta. Without that a
+   * clamped window JUMPS out from under the pointer on the next press, by exactly the amount the
+   * clamp had absorbed. */
+  place(entry, { x: 60, y: 90, w: 420, h: 260 })
+  const push = capPoint(entry)
+  await ask({ kind: 'drag', name: 'drag-into-the-clamp', from: push,
+    to: { x: Math.round(desk.rect.right - 12), y: Math.round(desk.rect.top + 120) } })
+  const clamped = roundBox(entry.win.placed)
+  const back = capPoint(entry)
+  await ask({ kind: 'drag', name: 'drag-back-out', from: back,
+    to: { x: back.x - 90, y: back.y + 40 } })
+  evidence.noJump = {
+    clamped,
+    asked: roundBox(entry.win.box),
+    after: roundBox(entry.win.placed),
+    want: { x: clamped.x - 90, y: clamped.y + 40 },
+  }
+  evidence.noJumpHeld = evidence.noJump.after.x === evidence.noJump.want.x
+    && evidence.noJump.after.y === evidence.noJump.want.y
+
+  // ---- both ends of the keyboard step ----
+  const base = place(entry, { x: 200, y: 140, w: 420, h: 260 })
+  entry.win.barEl.focus()
+  await ask({ kind: 'key', name: 'one-arrow', key: 'ArrowRight', times: 1 })
+  const coarse = roundBox(entry.win.placed)
+  await ask({ kind: 'key', name: 'one-shift-arrow', key: 'ArrowRight', times: 1, shift: true })
+  const fine = roundBox(entry.win.placed)
+  evidence.step = {
+    base, coarse, fine,
+    wantCoarse: base.x + KEY_STEP, wantFine: base.x + KEY_STEP + 1,
+  }
+  evidence.stepHeld = coarse.x === evidence.step.wantCoarse && fine.x === evidence.step.wantFine
+
+  evidence.ok = evidence.exactHeld && evidence.noJumpHeld && evidence.stepHeld
+  globalThis.M13.proofs.gesture = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'gesture: exact ' + evidence.exactHeld + ', no jump ' +
+    evidence.noJumpHeld + ', step ' + coarse.x + ' then ' + fine.x +
+    ' from ' + base.x)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: THE KERNEL'S RECORD is the geometry the page settled on, and nothing else.
+   -------------------------------------------------------------------------------------------- */
+async function proofRecord (k, host) {
+  for (const entry of host.frames.values()) await float(entry)
+  /* THE FIXTURE HAS TO BE CLAMPED, and the first version of this proof was not — which a negative
+   * control found. With every window inside the desktop, `box` and `placed` are the same object's
+   * worth of numbers, so a host that reported the REQUESTED box instead of the PLACED one reported
+   * an identical number and `--negative stale-geom` came out green against a check that claims to
+   * be about exactly that. One window is asked for a position far outside the desktop, so the
+   * clamp has something to absorb and the two boxes differ by a measured amount.
+   *
+   * It is asserted rather than arranged: `fixtureIsClamped` is part of the clause, so a future
+   * desktop big enough to hold this request fails the proof instead of passing it vacuously. */
+  const first = [...host.frames.values()].sort((a, b) => a.id - b.id)[0]
+  place(first, { x: 100000, y: 60, w: 420, h: 260 })
+  await sleep(80)
+  const st = await winState(k)
+  const rows = new Map((st.windows || []).map((w) => [w.id, w]))
+  const cell = host.report().cell
+  const windows = []
+  for (const entry of [...host.frames.values()].sort((a, b) => a.id - b.id)) {
+    const row = rows.get(entry.id) || {}
+    const body = entry.win.bodyEl.getBoundingClientRect()
+    windows.push({
+      win: entry.id,
+      asked: roundBox(entry.win.box),
+      placed: roundBox(entry.win.placed),
+      kernel: { x: row.x, y: row.y, w: row.w, h: row.h },
+      kernelCells: { cols: row.cols, rows: row.rows },
+      renderedCells: {
+        cols: Math.max(1, Math.floor(body.width / cell.w)),
+        rows: Math.max(1, Math.floor(body.height / cell.h)),
+      },
+    })
+  }
+  const boxMismatch = windows.filter((row) => row.kernel.x !== row.placed.x
+    || row.kernel.y !== row.placed.y || row.kernel.w !== row.placed.w
+    || row.kernel.h !== row.placed.h)
+  const cellMismatch = windows.filter((row) => row.kernelCells.cols !== row.renderedCells.cols
+    || row.kernelCells.rows !== row.renderedCells.rows)
+  const evidence = {
+    windows, cell, boxMismatch, cellMismatch,
+    controls: host.report().controls,
+  }
+  // THE FIXTURE'S OWN CLAUSE: at least one window must have been asked for a box the clamp had to
+  // change, or "the kernel's box is the one the clamp settled on" is a comparison of a number
+  // against itself.
+  evidence.fixtureIsClamped = windows.some((row) => row.asked.x !== row.placed.x
+    || row.asked.y !== row.placed.y || row.asked.w !== row.placed.w
+    || row.asked.h !== row.placed.h)
+  evidence.boxesAgree = windows.length > 0 && evidence.fixtureIsClamped
+    && boxMismatch.length === 0
+  evidence.cellsAgree = windows.length > 0 && cellMismatch.length === 0
+  /* THE CELL WAS MEASURED OFF A RENDERED GLYPH. `src/wm/winhost.mjs` falls back to 8x16 and SAYS
+   * SO rather than looking measured; a fallback would make every `stty size` wrong on a display
+   * that is not this one, and the two are indistinguishable without this flag. */
+  evidence.cellMeasured = cell.measured === true
+  evidence.ok = evidence.boxesAgree && evidence.cellsAgree && evidence.cellMeasured
+  globalThis.M13.proofs.record = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'record: ' + windows.length + ' windows, ' +
+    boxMismatch.length + ' box and ' + cellMismatch.length + ' cell mismatches, cell ' +
+    cell.w.toFixed(2) + 'x' + cell.h.toFixed(2) + (cell.measured ? ' measured' : ' ASSUMED'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: THE RING AND THE CHROME, which is what makes M12's accounting a fact about the product.
+   -------------------------------------------------------------------------------------------- */
+function proofRing (host) {
+  const entry = [...host.frames.values()].sort((a, b) => a.id - b.id)[0]
+  const frame = entry.win.el.getBoundingClientRect()
+  const strips = [...entry.win.el.querySelectorAll('.aero-strip')].map((el) => {
+    const r = el.getBoundingClientRect()
+    return {
+      strip: el.dataset.strip || 'cap',
+      x: r.left - frame.left, y: r.top - frame.top, w: r.width, h: r.height,
+      area: r.width * r.height,
+    }
+  })
+  const overlaps = []
+  for (let i = 0; i < strips.length; i += 1) {
+    for (let j = i + 1; j < strips.length; j += 1) {
+      const a = strips[i]
+      const b = strips[j]
+      const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)
+      const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)
+      if (w > 0.5 && h > 0.5) overlaps.push({ a: a.strip, b: b.strip, w, h })
+    }
+  }
+  const body = entry.win.bodyEl.getBoundingClientRect()
+  const inset = {
+    left: body.left - frame.left,
+    top: body.top - frame.top,
+    right: frame.right - body.right,
+    bottom: frame.bottom - body.bottom,
+  }
+  const cap = entry.win.barEl.getBoundingClientRect()
+  const heading = entry.win.headingEl.getBoundingClientRect()
+  const buttons = [...entry.win.el.querySelectorAll('.title-box')]
+    .filter((b) => !b.hidden)
+    .map((b) => {
+      const r = b.getBoundingClientRect()
+      return {
+        cls: b.className.replace('title-box ', ''),
+        inside: r.left >= cap.left - 0.5 && r.right <= cap.right + 0.5
+          && r.top >= cap.top - 0.5 && r.bottom <= cap.bottom + 0.5,
+        clearOfTitle: r.left >= heading.right - 0.5 || r.right <= heading.left + 0.5,
+        disabled: b.disabled === true,
+      }
+    })
+
+  const measured = strips.reduce((s, x) => s + x.area, 0)
+  const formula = blurRingArea(entry.win.placed.w, entry.win.placed.h)
+  const evidence = {
+    win: entry.id,
+    placed: roundBox(entry.win.placed),
+    strips, overlaps,
+    measuredRingCssPx: Math.round(measured),
+    formulaRingCssPx: formula,
+    chrome: { capH: WIN_CAP_H, inset: WIN_INSET },
+    inset: {
+      left: Math.round(inset.left * 100) / 100, top: Math.round(inset.top * 100) / 100,
+      right: Math.round(inset.right * 100) / 100, bottom: Math.round(inset.bottom * 100) / 100,
+    },
+    buttons,
+  }
+  evidence.disjoint = strips.length === 4 && overlaps.length === 0
+  // FOUR STRIPS, FOUR FRACTIONAL RECTS: a device pixel or two each is the whole slack, which is
+  // the bound `www/m12.html` arrived at per window after an earlier version scaled it with the
+  // window COUNT and let one window's cost be wrong by 48 device px.
+  evidence.sumsToFormula = Math.abs(measured - formula) <= 8
+  evidence.insetExact = Math.abs(inset.left - WIN_INSET) <= 1 && Math.abs(inset.top - WIN_CAP_H) <= 1
+    && Math.abs(inset.right - WIN_INSET) <= 1 && Math.abs(inset.bottom - WIN_INSET) <= 1
+  evidence.buttonsPlaced = buttons.length >= 3 && buttons.every((b) => b.inside && b.clearOfTitle)
+  evidence.ok = evidence.disjoint && evidence.sumsToFormula && evidence.insetExact
+    && evidence.buttonsPlaced
+  globalThis.M13.proofs.ring = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'ring: ' + strips.length + ' strips, ' + overlaps.length +
+    ' overlaps, ' + Math.round(measured) + ' css px² against the formula\'s ' + formula +
+    ', inset ' + JSON.stringify(evidence.inset))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: THE STACK A READER CAN TOUCH.
+
+   The kernel owns the order (constraint 226) and M7 already asserts the page applied it. What is
+   NOT asserted anywhere is that the order is reachable: that a click on the sliver of a buried
+   window raises THAT window, and that the thing under the pointer afterwards is the one that came
+   up. `elementFromPoint` is the browser answering, which is what makes this geometry rather than
+   bookkeeping.
+   -------------------------------------------------------------------------------------------- */
+async function proofStack (k, host) {
+  const entries = [...host.frames.values()].sort((a, b) => a.id - b.id)
+  for (const entry of entries) await float(entry)
+  const low = entries[0]
+  const high = entries[entries.length - 1]
+  // Side by side with a deliberate overlap: `low`'s left third stays uncovered, which is the
+  // sliver a user clicks.
+  place(low, { x: 40, y: 60, w: 420, h: 260 })
+  place(high, { x: 260, y: 60, w: 420, h: 260 })
+  // `high` to the top first, so the raise under test has something to come out from under.
+  host.post({ t: 'win-raise', win: high.id })
+  await until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === high.id
+  }, 5000)
+
+  const at = capPoint(low)
+  const under = document.elementFromPoint(at.x, at.y)
+  const evidence = {
+    low: low.id, high: high.id, at,
+    underBefore: under && under.closest('.window') ? under.closest('.window').id : null,
+    stackBefore: ((await winState(k)).wins || {}).stack || [],
+  }
+  await ask({ kind: 'click', name: 'click-the-buried-sliver', at })
+  await sleep(120)
+  const st = await winState(k)
+  const stack = (st.wins || {}).stack || []
+  const z = host.report().zIndex || {}
+  const afterEl = document.elementFromPoint(at.x, at.y)
+  evidence.stackAfter = stack
+  evidence.zIndex = z
+  evidence.underAfter = afterEl && afterEl.closest('.window')
+    ? afterEl.closest('.window').id : null
+  evidence.raiseAsks = host.report().raiseAsks
+  const zs = Object.values(z)
+  evidence.cameUp = stack.length > 0 && stack[stack.length - 1] === low.id
+  evidence.readerSeesIt = evidence.underAfter === `win-${low.id}`
+    && (z[String(low.id)] || 0) > (z[String(high.id)] || 0)
+  evidence.zUnique = zs.length === new Set(zs).size && zs.every((v) => v > 0)
+  evidence.ok = evidence.underBefore === `win-${low.id}` && evidence.cameUp
+    && evidence.readerSeesIt && evidence.zUnique
+  globalThis.M13.proofs.stack = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'stack: clicked win ' + low.id + '\'s sliver, stack ' +
+    JSON.stringify(stack) + ', z ' + JSON.stringify(z))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 6: THE DESKTOP CHANGING SIZE.
+
+   `Win.apply` clamps against the desktop's CURRENT rect, so until M13 the clamp was correct at
+   every gesture and stale at every resize. A desktop that shrank left frames outside it with their
+   captions out of reach, and the kernel was never told the boxes had stopped being true.
+   -------------------------------------------------------------------------------------------- */
+async function proofRelayout (k, host) {
+  const entries = [...host.frames.values()].sort((a, b) => a.id - b.id)
+  for (const entry of entries) await float(entry)
+  // Out where a smaller desktop cannot hold them, and inside the one that is there now.
+  const asked = entries.map((entry, i) => place(entry,
+    { x: 430 + i * 30, y: 230 + i * 30, w: 420, h: 260 }))
+  await sleep(80)
+  const before = host.report()
+  const small = { w: 520, h: 260 }
+  desktop.style.width = `${small.w}px`
+  desktop.style.height = `${small.h}px`
+  const shrankMs = await until(() => host.report().relayouts > before.relayouts, 4000)
+  await sleep(120)
+  const shrunkDesk = deskBox()
+  const st = await winState(k)
+  const rows = new Map((st.windows || []).map((w) => [w.id, w]))
+  const shrunk = entries.map((entry) => ({
+    win: entry.id,
+    placed: roundBox(entry.win.placed),
+    kernel: (() => { const r = rows.get(entry.id) || {}; return { x: r.x, y: r.y, w: r.w, h: r.h } })(),
+    overlap: captionOverlap(entry),
+  }))
+
+  // And back. The windows must return to the boxes they ASKED for, which is the two-box design's
+  // whole point and is why `apply()` never writes `box`. Both dimensions go back to the
+  // stylesheet's, so there is one definition of how big this desktop is.
+  desktop.style.width = ''
+  desktop.style.height = ''
+  const grewMs = await until(() => host.report().relayouts > before.relayouts + 1, 4000)
+  await sleep(120)
+  const restored = entries.map((entry, i) => ({
+    win: entry.id,
+    placed: roundBox(entry.win.placed),
+    asked: asked[i],
+  }))
+
+  const evidence = {
+    asked, small, shrunkDesk: { w: shrunkDesk.w, h: shrunkDesk.h },
+    shrankMs: Math.round(shrankMs), grewMs: Math.round(grewMs),
+    relayoutsBefore: before.relayouts, relayoutsAfter: host.report().relayouts,
+    skipped: host.report().skippedRelayouts,
+    geomsBefore: before.geoms, geomsAfter: host.report().geoms,
+    shrunk, restored,
+    lastRelayout: host.report().lastRelayout,
+  }
+  evidence.pulledInside = shrankMs >= 0 && shrunk.length > 0 && shrunk.every(
+    (row) => row.placed.x + row.placed.w > 0 && row.placed.y >= 0
+      && row.placed.x <= shrunkDesk.w - MIN_VISIBLE
+      && row.placed.y <= shrunkDesk.h - MIN_VISIBLE
+      && row.overlap.w >= MIN_VISIBLE - 1 && row.overlap.h >= 1)
+  // AND THE KERNEL WAS TOLD. A re-clamp nobody reported leaves `/proc` and the blur governor
+  // accounting boxes no frame has.
+  evidence.kernelToldOfIt = shrunk.length > 0 && shrunk.every(
+    (row) => row.kernel.x === row.placed.x && row.kernel.y === row.placed.y
+      && row.kernel.w === row.placed.w && row.kernel.h === row.placed.h)
+    && evidence.geomsAfter > evidence.geomsBefore
+  evidence.cameBack = grewMs >= 0 && restored.length > 0 && restored.every(
+    (row) => row.placed.x === row.asked.x && row.placed.y === row.asked.y)
+  evidence.ok = evidence.pulledInside && evidence.kernelToldOfIt && evidence.cameBack
+  globalThis.M13.proofs.relayout = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'relayout: ' + evidence.relayoutsBefore + ' -> ' +
+    evidence.relayoutsAfter + ' re-clamps (' + evidence.skipped + ' skipped), inside ' +
+    evidence.pulledInside + ', kernel told ' + evidence.kernelToldOfIt + ', back ' +
+    evidence.cameBack)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 7: THE FLOOR. A window cannot be made too small to use.
+   -------------------------------------------------------------------------------------------- */
+async function proofLimits (k, host) {
+  const entry = [...host.frames.values()].sort((a, b) => a.id - b.id)[0]
+  await float(entry)
+  const placed = place(entry, { x: 120, y: 120, w: 10, h: 10 })
+  await sleep(80)
+  const st = await winState(k)
+  const row = (st.windows || []).find((w) => w.id === entry.id) || {}
+  const rendered = entry.win.el.getBoundingClientRect()
+  const evidence = {
+    asked: { w: 10, h: 10 },
+    floor: { w: MIN_W, h: MIN_H },
+    placed,
+    rendered: { w: Math.round(rendered.width), h: Math.round(rendered.height) },
+    kernel: { w: row.w, h: row.h },
+  }
+  evidence.flooredOnScreen = placed.w === MIN_W && placed.h === MIN_H
+    && evidence.rendered.w === MIN_W && evidence.rendered.h === MIN_H
+  evidence.kernelRecordsTheFloor = row.w === MIN_W && row.h === MIN_H
+  evidence.ok = evidence.flooredOnScreen && evidence.kernelRecordsTheFloor
+  globalThis.M13.proofs.limits = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'limits: asked 10x10, rendered ' +
+    evidence.rendered.w + 'x' + evidence.rendered.h + ', kernel ' + row.w + 'x' + row.h +
+    ' (floor ' + MIN_W + 'x' + MIN_H + ')')
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+async function live () {
+  const { k, host } = await bootHost()
+  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => host.frames.size >= 1, 10000)
+  const entry = host.newest()
+  if (entry && entry.term) entry.term.focus()
+  say('')
+  say('A LIVE DESKTOP. Drag a window off any edge and it stops with ' + MIN_VISIBLE +
+    ' px of caption still')
+  say('reachable; hold the title bar and press an arrow for a ' + KEY_STEP +
+    ' px step, Shift for one px.')
+  say('Resize the browser window: every frame is re-clamped and the kernel is told the new box.')
+  globalThis.M13.phase = 'live'
+  globalThis.M13.livePid = row.pid
+}
+
+async function main () {
+  if (CFG.liveOnly) {
+    globalThis.M13.state = 'done'
+    globalThis.M13.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noClamp ? 'CONTROL: no_clamp (nothing holds a window inside the desktop).'
+    : CFG.staleGeom ? 'CONTROL: stale_geom (the kernel is told the box that was ASKED for).'
+      : CFG.noRelayout ? 'CONTROL: no_relayout (a desktop that changes size re-clamps nothing).'
+        : ''
+  say('M13 — the geometry harness. ' + which)
+  say('Every number below is read off a RENDERED rect and every gesture is REAL input: an inert')
+  say('frame and a working one are the same picture (constraint 40).')
+
+  const { k, host } = await bootHost()
+  globalThis.M13.kernelIsolated = true
+  /* THE WORLD, READ BACK OUT OF THE MODULES THAT OWN IT rather than from this page's own query
+   * parsing: a control a check believed was on and was not is a green run over an unmodified
+   * world, and that is exactly the failure a negative control exists to rule out. */
+  globalThis.M13.controlsInForce = host.report().controls
+  await openWindows(k, host, 2)
+  await sleep(150)
+
+  await proofClamp(k, host)
+  await proofGesture(k, host)
+  await proofRecord(k, host)
+  proofRing(host)
+  await proofStack(k, host)
+  await proofRelayout(k, host)
+  await proofLimits(k, host)
+  /* AND PUT IT BACK, so the artifact screenshot is a desktop rather than the 220x120 corner
+   * proof 7 leaves behind. The evidence is already recorded; this changes no assertion. */
+  for (const entry of host.frames.values()) place(entry, { x: 60, y: 60, w: 420, h: 260 })
+
+  const proofs = globalThis.M13.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M13.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M13.verdict)
+  globalThis.M13.state = 'done'
+  globalThis.M13.phase = 'rendered'
+}
+</script>
+</body>
+</html>

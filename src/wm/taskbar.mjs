@@ -1,0 +1,719 @@
+// M14: the Superbar — the taskbar, its grouped buttons, their hover thumbnails and jump lists, the
+// start menu, and the tray with its clock and Show desktop.
+//
+// THERE IS NO SYSCALL IN THIS FILE. It is handed a `WinHost` and talks to the kernel only through
+// it: `askState` to minimize or restore, `win-raise` to bring a window up, `activateItem` to report
+// that one of a window's published rows was clicked. Every one of those is an ASK — the kernel owns
+// the stack, the show state and the meaning of a row (constraints 226, 271) — so nothing here
+// decides anything a program could disagree with.
+//
+// ## Why the shell is page-side, and what that costs
+//
+// `docs/research/09-hobbyist-os-actions.md` §4 records that a taskbar needs cross-process window
+// enumeration no ordinary client may have, and that SerenityOS answers it with a SECOND, separately
+// gated management endpoint. This project needs no such endpoint, for a reason that is specific to
+// its architecture rather than a shortcut: the page ALREADY holds every window's frame. `win-create`
+// built it, `win-stack` ordered it, `win-title` named it — so a taskbar rendered by the page reads
+// facts the page was already told, and adds no capability to anything. A taskbar as a PROCESS would
+// need the endpoint, and that is the trade recorded as `docs/DECISIONS.md` D39.
+//
+// What it costs is stated rather than hidden: the display list has no text and no image op
+// (`src/abi.mjs` DL_*), and a `WEV_POINTER` is only delivered while a button is down
+// (`src/wm/winhost.mjs`) — so a process-drawn Superbar could have neither labels nor hover, which
+// are two of the three things a Superbar IS.
+//
+// ## What the kernel still owns
+//
+//   a click on a button      -> `win-raise` or `win-show-ask`, and the kernel answers
+//   a jump-list row          -> `win-item-ask`, and the kernel validates the INDEX
+//   Show desktop             -> one `win-show-ask` per window, each of which the kernel may refuse
+//   the window list          -> `host.frames`, which is the kernel's own `win-create` log
+//
+// The one thing this file decides for itself is WHICH BUTTON IS WHICH: windows are grouped by the
+// program behind them, which the kernel reports in `win-create` (`prog`) because the page cannot
+// learn it — a title is whatever a program says it is.
+
+import {
+  WST_NORMAL, WST_MIN, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR, WITEM_DISABLED,
+  WROLE_DESKTOP, WEV_CLOSE,
+  WICON_PROGRAM, WICON_TERMINAL, WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_IMAGE,
+  WICON_COMPUTER,
+} from "../abi.mjs";
+import { iconMarkup } from "./icons.mjs";
+import { TASKBAR_H, THUMB_W, THUMB_H } from "./aero.mjs";
+
+/**
+ * WHICH ICON A PROGRAM'S BUTTON GETS. A SHELL CONVENTION, page-side, and the honest place for it:
+ * a window does not publish an icon for itself — `win_create` has no spare register and an icon is
+ * not a property of a window but of the program behind it — so the shell recognises the programs it
+ * ships with and falls back for everything else.
+ *
+ * It is the same shape as `FORMAT_BY_EXT` in `src/libos/std.mjs`: a convention over names, in one
+ * place, with a stated default. A program that wants a particular icon can publish a row with one.
+ */
+const ICON_BY_PROG = Object.freeze({
+  term: WICON_TERMINAL,
+  sh: WICON_TERMINAL,
+  winopen: WICON_PROGRAM,
+  paint: WICON_PAINT,
+  editor: WICON_EDITOR,
+  files: WICON_FILES,
+  imgview: WICON_IMAGE,
+  desktop: WICON_COMPUTER,
+});
+
+/** How long the pointer must rest on a button before its thumbnails appear. Windows 7 waits about
+ *  this long; shorter and the previews flash past as the pointer crosses the bar. */
+const HOVER_MS = 120;
+
+/** The last few lines of a text window, drawn into its thumbnail. More than this is unreadable at
+ *  thumbnail size and costs a `fillText` each. */
+const THUMB_LINES = 9;
+
+/** The basename of a program path, which is what a button is labelled and keyed by. */
+function progName(prog) {
+  const path = String(prog || "");
+  const at = path.lastIndexOf("/");
+  return (at >= 0 ? path.slice(at + 1) : path) || "program";
+}
+
+export class Taskbar {
+  /**
+   * `spec.into` is the desktop element, `spec.host` the `WinHost` whose frames this shell renders,
+   * and `spec.onLaunch(name)` is how a start-menu row that names a program gets run — the PAGE is
+   * the supervisor (`docs/DECISIONS.md` D18), so starting a program is the page's to do and not
+   * this file's.
+   */
+  constructor(spec) {
+    this.into = spec.into;
+    this.host = spec.host;
+    this.onLaunch = spec.onLaunch || null;
+    /** The popup that is open, as `{kind, win}` or null. ONE AT A TIME, because every one of them
+     *  is a menu and two open menus is a state a user cannot get out of by clicking elsewhere. */
+    this.open = null;
+    this.hoverTimer = 0;
+    this.peeking = false;
+    this.stats = {
+      syncs: 0, buttonClicks: 0, raises: 0, minimizes: 0, restores: 0,
+      jumpOpens: 0, jumpClicks: 0, menuOpens: 0, launches: 0, thumbOpens: 0,
+      peeks: 0, showDesktops: 0, closes: 0,
+    };
+    this.#build();
+    /* THE STRIP IS RESERVED BEFORE THE FIRST SYNC, so the work area is right from the first frame:
+     * a maximized window laid out before this call is a window covering the taskbar. `reserve`
+     * re-clamps every existing frame, which is M13's `relayout` doing the job it was written for. */
+    this.host.reserve(TASKBAR_H);
+    this.host.watch(() => this.sync());
+    this.sync();
+    this.#startClock();
+  }
+
+  #build() {
+    const bar = document.createElement("div");
+    // `aero-strip` IS THE GLASS, shared with the window frame's four strips: one definition of what
+    // glass is, so the bar cannot drift from the windows above it.
+    bar.className = "taskbar aero-strip";
+    bar.dataset.taskbar = "1";
+    bar.setAttribute("role", "toolbar");
+    bar.setAttribute("aria-label", "Taskbar");
+    for (const cls of ["aero-sheen", "aero-light"]) {
+      const layer = document.createElement("div");
+      layer.className = cls;
+      layer.style.position = "absolute";
+      layer.setAttribute("aria-hidden", "true");
+      bar.append(layer);
+    }
+
+    this.startBtn = document.createElement("button");
+    this.startBtn.type = "button";
+    this.startBtn.className = "taskbar-start";
+    this.startBtn.dataset.start = "1";
+    this.startBtn.setAttribute("aria-label", "Start");
+    this.startBtn.innerHTML = iconMarkup(WICON_PROGRAM, 22);
+    this.startBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleStart();
+    });
+
+    this.band = document.createElement("div");
+    this.band.className = "taskbar-band";
+    this.band.dataset.band = "1";
+
+    const tray = document.createElement("div");
+    tray.className = "tray";
+    tray.dataset.tray = "1";
+    this.clockEl = document.createElement("div");
+    this.clockEl.className = "clock";
+    this.clockEl.dataset.clock = "1";
+    this.clockEl.setAttribute("role", "status");
+    this.showBtn = document.createElement("button");
+    this.showBtn.type = "button";
+    this.showBtn.className = "show-desktop";
+    this.showBtn.dataset.showDesktop = "1";
+    this.showBtn.setAttribute("aria-label", "Show desktop");
+    /* HOVER PEEKS AND CLICK MINIMIZES, which is Windows 7's own pair and is why both are wired to
+     * this one button: peek is a look and the click is the action. */
+    this.showBtn.addEventListener("pointerenter", () => this.peek(true));
+    this.showBtn.addEventListener("pointerleave", () => this.peek(false));
+    this.showBtn.addEventListener("focus", () => this.peek(true));
+    this.showBtn.addEventListener("blur", () => this.peek(false));
+    this.showBtn.addEventListener("click", () => this.showDesktop());
+    tray.append(this.clockEl, this.showBtn);
+
+    bar.append(this.startBtn, this.band, tray);
+    this.el = bar;
+    this.into.append(bar);
+
+    /** The one popup element, reused by the jump list, the window list and the start menu: they
+     *  are one panel in Windows 7 too, and one element means one thing to close. */
+    this.popup = document.createElement("div");
+    this.popup.className = "shell-popup";
+    this.popup.dataset.popup = "0";
+    this.popup.hidden = true;
+    this.into.append(this.popup);
+
+    /* A CLICK ANYWHERE ELSE CLOSES THE MENU, and Escape does too. On the DESKTOP and not the
+     * document: this shell may be one of several on a page, and a listener on the document would
+     * close another desktop's menu. */
+    this.into.addEventListener("pointerdown", (e) => {
+      if (this.popup.hidden) return;
+      if (this.popup.contains(e.target)) return;
+      if (this.el.contains(e.target)) return;
+      this.closePopup();
+    }, true);
+    this.into.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && !this.popup.hidden) {
+        e.preventDefault();
+        this.closePopup();
+      }
+    });
+  }
+
+  /* ---- the clock ----------------------------------------------------------------------------- */
+
+  /** The tray clock, on a one-second interval. A REAL CLOCK and not a frozen picture of one: the
+   *  tray is the one part of this shell a reader checks against their own wrist. */
+  #startClock() {
+    const tick = () => {
+      const now = new Date();
+      this.clockEl.textContent = "";
+      const time = document.createElement("div");
+      time.className = "clock-time";
+      time.textContent = now.toLocaleTimeString(undefined,
+        { hour: "2-digit", minute: "2-digit" });
+      const date = document.createElement("div");
+      date.className = "clock-date";
+      date.textContent = now.toLocaleDateString(undefined,
+        { day: "2-digit", month: "2-digit", year: "numeric" });
+      this.clockEl.append(time, date);
+      this.clockEl.dataset.epoch = String(now.getTime());
+    };
+    tick();
+    this.clockTimer = setInterval(tick, 1000);
+  }
+
+  /* ---- the buttons --------------------------------------------------------------------------- */
+
+  /**
+   * The window groups this bar is showing: one row per program, each holding its windows in winid
+   * order.
+   *
+   * THE DESKTOP IS NOT IN IT. A desktop window has no button — it is the surface the buttons sit
+   * over — and `WROLE_DESKTOP` is how this file knows that without a convention about titles.
+   */
+  groups() {
+    const by = new Map();
+    for (const [id, entry] of this.host.frames) {
+      if (entry.role === WROLE_DESKTOP) continue;
+      const key = progName(entry.prog) || `pid ${entry.pid}`;
+      if (!by.has(key)) by.set(key, { key, prog: entry.prog, wins: [] });
+      by.get(key).wins.push({ id, entry });
+    }
+    for (const group of by.values()) group.wins.sort((a, b) => a.id - b.id);
+    return [...by.values()];
+  }
+
+  /** The window the kernel has on top, or 0. The order is the KERNEL's — `host.order` is what it
+   *  last sent — because a button's "active" cue must agree with what is actually in front. */
+  topmost() {
+    for (let i = this.host.order.length - 1; i >= 0; i -= 1) {
+      const entry = this.host.get(this.host.order[i]);
+      if (!entry || entry.role === WROLE_DESKTOP) continue;
+      if (entry.state === WST_MIN) continue;
+      return entry.id;
+    }
+    return 0;
+  }
+
+  /** Rebuild the band. Called on every window-table change, which is what `WinHost.watch` is. */
+  sync() {
+    this.stats.syncs += 1;
+    const top = this.topmost();
+    this.band.textContent = "";
+    for (const group of this.groups()) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "task-btn";
+      btn.dataset.taskBtn = group.key;
+      btn.dataset.wins = group.wins.map((w) => w.id).join(",");
+      const icon = ICON_BY_PROG[group.key] ?? WICON_PROGRAM;
+      const live = group.wins.filter((w) => w.entry.state !== WST_MIN);
+      const active = group.wins.some((w) => w.id === top);
+      const allMin = live.length === 0;
+      btn.classList.toggle("is-active", active);
+      btn.classList.toggle("is-minimized", allMin);
+      btn.classList.toggle("is-group", group.wins.length > 1);
+      btn.dataset.state = allMin ? "min" : (active ? "active" : "idle");
+      // THE ICON IS MARKUP AND THE LABEL IS TEXT. The label comes from a program's own title, so it
+      // is set as `textContent` and never as HTML — one assignment is the whole of what keeps a
+      // window title from being a script.
+      btn.innerHTML = iconMarkup(icon, 20);
+      const label = document.createElement("span");
+      label.className = "task-label";
+      label.textContent = group.wins.length === 1
+        ? (group.wins[0].entry.win.titleText || group.key)
+        : group.key;
+      btn.append(label);
+      if (group.wins.length > 1) {
+        const count = document.createElement("span");
+        count.className = "task-count";
+        count.textContent = String(group.wins.length);
+        btn.append(count);
+      }
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.clickGroup(group);
+      });
+      // RIGHT-CLICK IS THE JUMP LIST, which is where a window's published rows are shown.
+      btn.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openJumpList(group, btn);
+      });
+      btn.addEventListener("pointerenter", () => this.#hoverIn(group, btn));
+      btn.addEventListener("pointerleave", () => this.#hoverOut());
+      this.band.append(btn);
+    }
+    // A POPUP OUTLIVES A REBUILD ONLY IF ITS WINDOW DOES. A jump list for a window that has just
+    // closed is a menu of commands nothing can carry out.
+    if (this.open && this.open.win && !this.host.get(this.open.win)) this.closePopup();
+    return this.band.children.length;
+  }
+
+  /**
+   * A click on a group's button. Windows 7's own three-way behaviour, which is the part people
+   * notice when it is missing:
+   *
+   *   every window minimized  -> restore them and raise the last one
+   *   the group is in front   -> minimize it
+   *   otherwise               -> raise it
+   *
+   * A GROUP OF SEVERAL IN FRONT SHOWS ITS WINDOW LIST instead of minimizing, because "which of
+   * these three" is a question a click cannot answer.
+   */
+  clickGroup(group) {
+    this.stats.buttonClicks += 1;
+    this.closePopup();
+    const top = this.topmost();
+    const live = group.wins.filter((w) => w.entry.state !== WST_MIN);
+    if (live.length === 0) {
+      for (const w of group.wins) this.host.askState(w.id, WST_NORMAL);
+      this.host.post({ t: "win-raise", win: group.wins[group.wins.length - 1].id });
+      this.stats.restores += 1;
+      return "restore";
+    }
+    const inFront = group.wins.some((w) => w.id === top);
+    if (inFront && group.wins.length > 1) {
+      this.openWindowList(group);
+      return "list";
+    }
+    if (inFront) {
+      this.host.askState(top, WST_MIN);
+      this.stats.minimizes += 1;
+      return "minimize";
+    }
+    const want = live[live.length - 1];
+    this.host.post({ t: "win-raise", win: want.id });
+    this.stats.raises += 1;
+    return "raise";
+  }
+
+  /* ---- the popups ---------------------------------------------------------------------------- */
+
+  closePopup() {
+    this.popup.hidden = true;
+    this.popup.textContent = "";
+    this.popup.dataset.popup = "0";
+    this.open = null;
+  }
+
+  /** Put the popup above a button, kept inside the desktop. A menu that opened off the edge of the
+   *  screen would be a menu with rows nobody can reach. */
+  #placeAbove(anchor) {
+    const desk = this.into.getBoundingClientRect();
+    const at = anchor.getBoundingClientRect();
+    this.popup.hidden = false;
+    const box = this.popup.getBoundingClientRect();
+    const x = Math.min(Math.max(at.left - desk.left, 4), Math.max(desk.width - box.width - 4, 4));
+    this.popup.style.left = `${Math.round(x)}px`;
+    this.popup.style.bottom = `${TASKBAR_H + 6}px`;
+    this.popup.style.top = "auto";
+  }
+
+  /** One row of a popup: an icon, a label, and what to do. Returns the button so a caller can mark
+   *  it. */
+  #row(parent, { icon, label, disabled = false, onClick = null, data = {} }) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "shell-row";
+    if (icon !== undefined && icon !== null) row.innerHTML = iconMarkup(icon, 16);
+    const text = document.createElement("span");
+    text.className = "shell-label";
+    // TEXT, NOT HTML: every label here came from a program.
+    text.textContent = label;
+    row.append(text);
+    for (const [key, value] of Object.entries(data)) row.dataset[key] = String(value);
+    if (disabled) row.disabled = true;
+    if (onClick && !disabled) {
+      row.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onClick();
+      });
+    }
+    parent.append(row);
+    return row;
+  }
+
+  #separator(parent) {
+    const line = document.createElement("div");
+    line.className = "shell-sep";
+    line.setAttribute("aria-hidden", "true");
+    parent.append(line);
+    return line;
+  }
+
+  /**
+   * The jump list: the rows this group's windows published with `WITEM_JUMP`, then Close.
+   *
+   * THE ROWS ARE THE PROGRAM'S AND THE CLOSE IS THE SHELL'S, and the division is not cosmetic: a
+   * row posts `win-item-ask` and the program decides what it means, where Close posts a `WEV_CLOSE`
+   * the program may REFUSE (constraint 44). A jump list that could kill a window would be a way
+   * around the close contract.
+   */
+  openJumpList(group, anchor) {
+    this.closePopup();
+    this.stats.jumpOpens += 1;
+    this.popup.dataset.popup = "jump";
+    this.popup.className = "shell-popup";
+    const title = document.createElement("div");
+    title.className = "shell-title";
+    title.textContent = group.key;
+    this.popup.append(title);
+    // The newest window of the group owns the list, which is the one a user just used.
+    const target = group.wins[group.wins.length - 1];
+    const rows = (target.entry.items || [])
+      .map((row, index) => ({ ...row, index }))
+      .filter((row) => (row.flags & WITEM_JUMP) !== 0);
+    for (const row of rows) {
+      if (row.flags & WITEM_SEPARATOR) {
+        this.#separator(this.popup);
+        continue;
+      }
+      this.#row(this.popup, {
+        icon: row.icon,
+        label: row.label,
+        disabled: (row.flags & WITEM_DISABLED) !== 0,
+        data: { jumpIndex: row.index },
+        onClick: () => {
+          this.stats.jumpClicks += 1;
+          this.host.activateItem(target.id, row.index, WITEM_JUMP);
+          this.closePopup();
+        },
+      });
+    }
+    if (!rows.length) {
+      this.#row(this.popup, {
+        icon: null, label: "This program published no tasks", disabled: true,
+        data: { jumpEmpty: 1 },
+      });
+    }
+    this.#separator(this.popup);
+    this.#row(this.popup, {
+      icon: null,
+      label: group.wins.length > 1 ? "Close all windows" : "Close window",
+      data: { jumpClose: 1 },
+      onClick: () => {
+        this.stats.closes += 1;
+        for (const w of group.wins) this.host.requestClose(w.id);
+        this.closePopup();
+      },
+    });
+    this.open = { kind: "jump", win: target.id };
+    this.#placeAbove(anchor || this.el);
+    return rows.length;
+  }
+
+  /** The window list: one thumbnail per window of a group. What a click on a group of several
+   *  opens, and what hovering one shows. */
+  openWindowList(group, anchor) {
+    this.closePopup();
+    this.stats.thumbOpens += 1;
+    this.popup.dataset.popup = "thumbs";
+    const strip = document.createElement("div");
+    strip.className = "task-thumbs";
+    for (const w of group.wins) {
+      const cell = document.createElement("div");
+      cell.className = "task-thumb";
+      cell.dataset.thumbWin = String(w.id);
+      const title = document.createElement("div");
+      title.className = "thumb-title";
+      title.textContent = w.entry.win.titleText || group.key;
+      const canvas = document.createElement("canvas");
+      canvas.width = THUMB_W;
+      canvas.height = THUMB_H;
+      cell.append(title, canvas);
+      this.#drawThumb(w.entry, canvas);
+      cell.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (w.entry.state === WST_MIN) this.host.askState(w.id, WST_NORMAL);
+        this.host.post({ t: "win-raise", win: w.id });
+        this.stats.raises += 1;
+        this.closePopup();
+      });
+      strip.append(cell);
+    }
+    this.popup.append(strip);
+    this.open = { kind: "thumbs", win: group.wins[0].id };
+    this.#placeAbove(anchor || this.band.querySelector(`[data-task-btn="${group.key}"]`)
+      || this.el);
+    return group.wins.length;
+  }
+
+  /**
+   * A window's thumbnail, drawn into a canvas.
+   *
+   * WHAT A THUMBNAIL CAN AND CANNOT BE HERE, stated rather than discovered. A SURFACED window is
+   * its own canvas, so `drawImage` is exact. A TEXT window is a DOM widget, and there is no way to
+   * rasterise one from script — so its preview is its last few lines drawn small, which is a
+   * READING of the window rather than a picture of it. Windows 7 gets a real DWM thumbnail; this is
+   * the honest approximation, and it is labelled as one in `MILESTONES.md`.
+   */
+  #drawThumb(entry, canvas) {
+    const g = canvas.getContext("2d");
+    g.fillStyle = "#f4f7fb";
+    g.fillRect(0, 0, canvas.width, canvas.height);
+    if (entry.surface && entry.surface.el) {
+      try {
+        g.drawImage(entry.surface.el, 0, 0, canvas.width, canvas.height);
+        canvas.dataset.thumb = "surface";
+        return "surface";
+      } catch (error) {
+        // A canvas that cannot be read is not a reason to show nothing; fall through to the text
+        // path, which at least names the window.
+        canvas.dataset.thumbError = String(error && error.name);
+      }
+    }
+    const lines = entry.term ? entry.term.screen().split("\n").slice(-THUMB_LINES) : [];
+    g.fillStyle = "#17242f";
+    g.font = "9px ui-monospace, Menlo, Consolas, monospace";
+    lines.forEach((line, i) => {
+      g.fillText(line.slice(0, 44), 5, 12 + i * 11);
+    });
+    canvas.dataset.thumb = entry.term ? "text" : "blank";
+    return canvas.dataset.thumb;
+  }
+
+  #hoverIn(group, btn) {
+    clearTimeout(this.hoverTimer);
+    this.hoverTimer = setTimeout(() => {
+      // A HOVER MUST NOT STEAL AN OPEN MENU. A jump list the user opened on purpose outranks a
+      // preview they got by moving the pointer.
+      if (this.open && this.open.kind === "jump") return;
+      this.openWindowList(group, btn);
+    }, HOVER_MS);
+  }
+
+  #hoverOut() {
+    clearTimeout(this.hoverTimer);
+    // The thumbnails close with the pointer; a jump list does not, because it was asked for.
+    if (this.open && this.open.kind === "thumbs") this.closePopup();
+  }
+
+  /**
+   * The start menu: the rows the DESKTOP window published with `WITEM_MENU`, a search box that
+   * filters them, and Log off.
+   *
+   * THE ROWS COME FROM A PROCESS. `src/bin/desktop.mjs` reads `/usr/bin` through the filesystem and
+   * publishes what it found — so this menu lists what is actually installed rather than what the
+   * page was written to expect, and a program added to `/usr/bin` appears in it with no change
+   * here. That is the whole reason `win_items` exists.
+   */
+  toggleStart() {
+    if (this.open && this.open.kind === "start") {
+      this.closePopup();
+      return false;
+    }
+    this.openStart();
+    return true;
+  }
+
+  /** The desktop window's entry, or null. The shell's one named window. */
+  desktopEntry() {
+    for (const entry of this.host.frames.values()) {
+      if (entry.role === WROLE_DESKTOP) return entry;
+    }
+    return null;
+  }
+
+  openStart() {
+    this.closePopup();
+    this.stats.menuOpens += 1;
+    this.popup.dataset.popup = "start";
+    this.popup.className = "shell-popup startmenu";
+    const desk = this.desktopEntry();
+    const rows = (desk ? desk.items : [])
+      .map((row, index) => ({ ...row, index }))
+      .filter((row) => (row.flags & WITEM_MENU) !== 0);
+    const list = document.createElement("div");
+    list.className = "start-list";
+    const render = (filter) => {
+      list.textContent = "";
+      const needle = filter.trim().toLowerCase();
+      const shown = rows.filter((row) => !needle || row.label.toLowerCase().includes(needle));
+      for (const row of shown) {
+        if (row.flags & WITEM_SEPARATOR) {
+          this.#separator(list);
+          continue;
+        }
+        this.#row(list, {
+          icon: row.icon,
+          label: row.label,
+          disabled: (row.flags & WITEM_DISABLED) !== 0,
+          data: { menuIndex: row.index },
+          onClick: () => {
+            this.stats.launches += 1;
+            // THROUGH THE DESKTOP PROCESS, which published the row and knows what it means. The
+            // shell does not run programs: the kernel validates the index and the process acts.
+            this.host.activateItem(desk.id, row.index, WITEM_MENU);
+            this.closePopup();
+          },
+        });
+      }
+      if (!shown.length) {
+        this.#row(list, {
+          icon: null,
+          label: desk ? "No programs match" : "No desktop process is publishing a menu",
+          disabled: true,
+          data: { menuEmpty: 1 },
+        });
+      }
+      list.dataset.rows = String(shown.length);
+      return shown.length;
+    };
+    const title = document.createElement("div");
+    title.className = "shell-title";
+    title.textContent = "All Programs";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "start-search";
+    search.dataset.startSearch = "1";
+    search.placeholder = "Search programs";
+    search.setAttribute("aria-label", "Search programs");
+    search.addEventListener("input", () => render(search.value));
+    const foot = document.createElement("div");
+    foot.className = "start-foot";
+    this.#row(foot, {
+      icon: null,
+      label: "Log off",
+      data: { logOff: 1 },
+      onClick: () => {
+        // EVERY PROCESS, THROUGH THE PAGE'S OWN SUPERVISOR ROUTE. There is no `shutdown` syscall
+        // and there should not be: ending every process is a thing the page does, and the kernel's
+        // own teardown closes their fds and takes their windows with them (constraint 14).
+        const pids = new Set([...this.host.frames.values()].map((e) => e.pid));
+        for (const pid of pids) this.host.post({ t: "end-process", pid });
+        this.closePopup();
+      },
+    });
+    this.popup.append(title, list, search, foot);
+    render("");
+    this.open = { kind: "start", win: desk ? desk.id : 0 };
+    this.#placeAbove(this.startBtn);
+    // THE SEARCH BOX TAKES THE KEYBOARD, which is where a Windows 7 user starts typing the moment
+    // the menu opens.
+    search.focus();
+    return rows.length;
+  }
+
+  /* ---- the tray's two actions ---------------------------------------------------------------- */
+
+  /** Aero Peek: every window becomes an outline while the pointer rests on Show desktop. A LOOK
+   *  AND NOT AN ACTION — nothing is minimized and no state changes, so there is nothing to undo. */
+  peek(on) {
+    const want = on === true;
+    if (want === this.peeking) return this.peeking;
+    this.peeking = want;
+    if (want) this.stats.peeks += 1;
+    this.into.classList.toggle("is-peeking", want);
+    this.into.dataset.peeking = want ? "1" : "0";
+    return this.peeking;
+  }
+
+  /**
+   * Show desktop: minimize everything, or put it all back if everything is already minimized.
+   *
+   * A TOGGLE, which is Windows 7's own behaviour and is what makes the button usable: a one-way
+   * "minimize all" leaves a user clicking every taskbar button to recover.
+   */
+  showDesktop() {
+    this.stats.showDesktops += 1;
+    const windows = [...this.host.frames.values()].filter((e) => e.role !== WROLE_DESKTOP);
+    const anyUp = windows.some((e) => e.state !== WST_MIN);
+    for (const entry of windows) {
+      this.host.askState(entry.id, anyUp ? WST_MIN : WST_NORMAL);
+    }
+    this.peek(false);
+    return anyUp ? "minimized" : "restored";
+  }
+
+  /* ---- for a check, and for a reader of a failure ------------------------------------------- */
+
+  report() {
+    const groups = this.groups().map((g) => ({
+      key: g.key,
+      prog: g.prog,
+      wins: g.wins.map((w) => w.id),
+      state: (this.band.querySelector(`[data-task-btn="${g.key}"]`) || {}).dataset?.state || "",
+    }));
+    return {
+      ...this.stats,
+      height: TASKBAR_H,
+      reserved: this.host.reserved,
+      workArea: this.host.workArea(),
+      buttons: this.band.children.length,
+      groups,
+      topmost: this.topmost(),
+      open: this.open ? { ...this.open } : null,
+      popupKind: this.popup.dataset.popup || "0",
+      popupRows: [...this.popup.querySelectorAll(".shell-row")].map(
+        (row) => row.querySelector(".shell-label")?.textContent || ""),
+      thumbs: [...this.popup.querySelectorAll("[data-thumb-win]")].map((cell) => ({
+        win: Number(cell.dataset.thumbWin),
+        kind: cell.querySelector("canvas")?.dataset.thumb || "",
+      })),
+      peeking: this.peeking,
+      clock: this.clockEl.textContent,
+      clockEpoch: Number(this.clockEl.dataset.epoch || 0),
+    };
+  }
+
+  /** Stop the clock and take the bar down. A page that boots a second kernel builds a second shell
+   *  and an interval nobody cleared keeps ticking against an element that has gone. */
+  dispose() {
+    clearInterval(this.clockTimer);
+    clearTimeout(this.hoverTimer);
+    this.el.remove();
+    this.popup.remove();
+    this.into.classList.remove("is-peeking");
+  }
+}

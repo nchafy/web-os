@@ -16,8 +16,9 @@ import {
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_F_APPEND,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
-  WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
-  WMODAL_MAX, WMODE_MAX,
+  WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
+  WMODAL_MAX, WMODE_MAX, decodeWinItems,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
@@ -988,6 +989,16 @@ HANDLERS.win_set = (p, k) => {
     k.post({ t: "win-modal", win: d.win.id, scope, mode });
     return 0;
   }
+  /* M14's two. THE RULES LIVE IN `WinMgr`, for the reason the modality rules do: this file reads
+   * registers and that one owns the window table. Both answer the state or role they SETTLED ON
+   * rather than 0, because neither is always the one asked for — restoring a minimized window
+   * gives back what it was, which is `SW_RESTORE` and what a taskbar button needs. */
+  if (what === WIN_SET_STATE) {
+    return k.wins.setState(d.win, p.ctl[A2] | 0);
+  }
+  if (what === WIN_SET_ROLE) {
+    return k.wins.setRole(d.win, p.ctl[A2] | 0);
+  }
   // A selector nobody implements is -EINVAL, never 0: a caller checking the return would read a
   // no-op as a successful change.
   return -EINVAL;
@@ -1053,6 +1064,30 @@ HANDLERS.win_draw = (p, k) => {
   // read applies in the other direction.
   if (length !== nops * DLOP_BYTES) return -EINVAL;
   return k.wins.draw(d.win, p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+};
+
+/**
+ * win_items(fd) -> how many rows this window now publishes, with the rows in the byte region.
+ *
+ * THE LIST IS REPLACED WHOLE, and an EMPTY region withdraws it — which is the one thing a program
+ * that is shutting down needs and the reason a zero length is not -EINVAL here as it is for a
+ * draw. A jump list that outlived the window it describes would be a menu of commands nothing can
+ * carry out.
+ *
+ * THE DECODE IS THE VALIDATION. `decodeWinItems` refuses a list whole rather than per row — a
+ * shell that drew the rows it could parse would show a desktop missing an icon and say nothing —
+ * so a malformed region is -EINVAL and the window keeps the list it had.
+ */
+HANDLERS.win_items = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  if (d.win.destroyed) return -EHOSTGONE;
+  const length = Atomics.load(p.ctl, LEN_I32);
+  if (length < 0 || length > MAX_INLINE) return -EINVAL;
+  if (length === 0) return k.wins.items(d.win, []);
+  const rows = decodeWinItems(p.bytes.subarray(DATA_OFF, DATA_OFF + length), length);
+  if (rows === null) return -EINVAL;
+  return k.wins.items(d.win, rows);
 };
 
 /* ----------------------------------------------------------------------------------------------

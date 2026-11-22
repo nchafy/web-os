@@ -17,13 +17,17 @@
 // page kinds only from it.
 
 import {
-  EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, ST_RETURN,
+  EHOSTGONE, EINVAL, EBADF, ENOENT, EMFILE, EPERM, ENOMEM, EBUSY, ST_RETURN,
   WEV_BYTES, WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER, WEV_MAX,
   WIN_EVENT_CAP, WIN_CAP, SURFACE_BUDGET_PX, SURFACE_MAX_PX, DLOP_BYTES,
   BLUR_OFF_AT, BLUR_ON_AT, blurRingArea,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
+  WEV_STATE, WEV_ITEM,
+  WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
+  WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
+  WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED,
   encodeWinEvent,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
@@ -153,6 +157,32 @@ export class Window {
      */
     this.scope = WMODAL_NONE;
     this.mode = WMODE_MODELESS;
+    /**
+     * M14's THIRD AND FOURTH AXES, and they are axes rather than more of the same: `scope` and
+     * `mode` say what this window does to OTHER windows, and these two say what the SHELL does
+     * with this one.
+     *
+     * `state` is Win32's show state — normal, minimized, maximized, snapped left or right. `role`
+     * is what the window IS: an ordinary window, or the desktop.
+     *
+     * THE KERNEL OWNS BOTH AND COMPUTES NEITHER'S GEOMETRY. A maximized window fills the WORK
+     * AREA, which is the desktop minus whatever the shell has taken off it — a fact only the page
+     * has. So the page lays the frame out and reports the box through `win-geom` like any other
+     * box, and this side records the state, the order and the restore point (constraint 271).
+     */
+    this.state = WST_NORMAL;
+    this.role = WROLE_NORMAL;
+    /** Where a maximized or snapped window goes back to, as the page last reported it, or null.
+     *  THE KERNEL'S because the state is: a window that lost where it came from is a window a user
+     *  cannot put back, and the page is a renderer that may be re-laid-out at any moment. */
+    this.restore = null;
+    /** The state a MINIMIZED window came from, so restoring a minimized maximized window gives
+     *  back a maximized one — Win32's `SW_RESTORE`, and what a taskbar button has to do. */
+    this.beforeMin = WST_NORMAL;
+    /** The rows this window has published for the shell to draw: `{icon, flags, label}`, capped at
+     *  `WIN_ITEM_CAP`. The kernel carries them and bounds them; what a row MEANS is the
+     *  publisher's, which is why `WEV_ITEM` reports an INDEX. */
+    this.items = [];
     /** Where the page put it, as the page reports it — never as this side computed it. */
     this.box = {
       x: spec.x | 0, y: spec.y | 0,
@@ -436,6 +466,14 @@ export class Window {
       rows: this.rows,
       scope: this.scope,
       mode: this.mode,
+      // M14. The two shell axes, the restore point, and how many rows this window published.
+      // The ROWS THEMSELVES ARE NOT HERE: `/proc/<pid>/win/<winid>` is a status file and a list of
+      // 64 labels in it would make every read of it a page of text.
+      state: this.state,
+      role: this.role,
+      restore: this.restore ? { ...this.restore } : null,
+      beforeMin: this.beforeMin,
+      items: this.items.length,
       attached: this.attached,
       destroyed: this.destroyed,
       opens: this.opens,
@@ -507,6 +545,13 @@ export class WinMgr {
       // what the same desktop would cost with every window on glass — two numbers, because the
       // difference between them is the only evidence the governor did anything.
       blurPx: 0, blurPxIfAllGlass: 0, flattened: 0, blurDegrades: 0,
+      // M14's shell axes. Every refusal counted apart from the others, for `refusedSurface`'s
+      // reason: a budget — or a rule — nobody can see refuse anything is one nobody believes.
+      stateChanges: 0, roleChanges: 0, refusedState: 0, refusedRole: 0,
+      desktopRaises: 0,
+      itemPublishes: 0, itemActivations: 0, refusedItems: 0, badItems: 0,
+      // Window events the PAGE tried to post that only the kernel may produce. See `feed`.
+      forgedKernelEvents: 0,
     };
   }
 
@@ -648,6 +693,15 @@ export class WinMgr {
    */
   raise(win) {
     if (win.destroyed) return null;
+    /* M14. THE DESKTOP IS NEVER RAISED. A click on the backdrop is a click on a window — the
+     * desktop IS one — and the page posts `win-raise` for it like any other frame, so without this
+     * clicking the wallpaper would bury every window on screen behind it. It stays where
+     * `setRole` put it, and 0 is the honest answer: nothing refused the raise, there was simply
+     * nothing to move. */
+    if (win.role === WROLE_DESKTOP) {
+      this.stats.desktopRaises += 1;
+      return 0;
+    }
     if (win.mode === WMODE_PASSIVE) {
       const up = this.ancestors(win).find((a) => a.mode !== WMODE_PASSIVE);
       if (up) return this.raise(up);
@@ -698,6 +752,171 @@ export class WinMgr {
     win.mode = mode;
     this.raise(win);
     return 0;
+  }
+
+  /* ---- M14: the show state, the role, and the published items -------------------------------
+   *
+   * THE DIVISION IS THE ONE `WIN_SET_BOX` ALREADY MAKES. A maximized window fills the WORK AREA —
+   * the desktop minus whatever the shell has taken off it — and that is a fact only the page has.
+   * So this side records WHAT state a window is in, which window is the desktop, and where a
+   * maximized window came from; the page lays the frame out for it and reports the box through
+   * `win-geom` like every other box (constraint 271).
+   *
+   * WHY THE KERNEL AT ALL, since the page could track a flag: because minimizing changes the
+   * BLURRED AREA and the blur governor is an admission controller over it (constraint 49), because
+   * a desktop window's place at the bottom of the stack is the z-order and the z-order is the
+   * kernel's (constraint 226), and because "there is one desktop" is a uniqueness two processes
+   * that cannot see each other have no way to agree on.
+   */
+
+  /** Whether any live window already holds the desktop role. */
+  desktop() {
+    return this.live().find((w) => w.role === WROLE_DESKTOP) || null;
+  }
+
+  /**
+   * Set a window's SHOW STATE, or a negative errno. Returns the state it SETTLED ON, which is not
+   * always the one asked for.
+   *
+   * RESTORING A MINIMIZED WINDOW GIVES BACK WHAT IT WAS, which is Win32's `SW_RESTORE` and what a
+   * taskbar button has to do: minimize a maximized window, click it again, and a maximized window
+   * must come back. So a request for `WST_NORMAL` while minimized settles on `beforeMin`, and the
+   * state that was really reached is what is returned and posted — a caller that assumed its own
+   * argument would be wrong exactly once, on the case a user hits every day.
+   *
+   * THE DESKTOP HAS NO SHOW STATE. Minimizing the thing every other window sits on is not a
+   * gesture with a meaning, and maximizing it is what it already is.
+   */
+  setState(win, want) {
+    if (!(want >= 0 && want <= WST_LIMIT)) return -EINVAL;
+    if (win.destroyed || !win.attached) return -EHOSTGONE;
+    if (win.role === WROLE_DESKTOP) {
+      this.stats.refusedState += 1;
+      return -EINVAL;
+    }
+    const from = win.state;
+    let state = want | 0;
+    if (from === WST_MIN && state === WST_NORMAL) state = win.beforeMin;
+    if (state === from) return state;
+    /* THE RESTORE POINT IS TAKEN ON THE WAY OUT OF A FLOATING STATE, and only then: a window
+     * dragged from a snap to a maximize must still go back to the box it had when it was last
+     * floating, not to the half-screen it was snapped to. */
+    if (from === WST_NORMAL && state !== WST_MIN) win.restore = { ...win.box };
+    if (state === WST_MIN) win.beforeMin = from === WST_MIN ? win.beforeMin : from;
+    win.state = state;
+    this.stats.stateChanges += 1;
+    /* THE PROCESS IS TOLD. An EVENT and not a query, for `WEV_FOCUS`'s reason — the process that
+     * wants to know is parked in `poll` — and it matters: a program drawing into a surface nobody
+     * is showing is paying for pixels no reader sees. */
+    win.push({ type: WEV_STATE, a: state, b: from });
+    /* AND THE PAGE IS TOLD, with the restore box, because the page is what has to lay the frame
+     * out: going back to NORMAL means going back to a geometry the page no longer holds. */
+    K.post({
+      t: "win-show",
+      win: win.id,
+      state,
+      from,
+      restore: win.restore ? { ...win.restore } : null,
+    });
+    /* M12's OWN GAP, CLOSED. Constraint 49 lists "open, maximize, snap, restore, un-minimize,
+     * peek" as the events an admission controller must see, and M12 recorded that nothing had ever
+     * driven a minimize through it because none of those gestures existed. They do now, and this
+     * is the call that makes the claim a run rather than a shape: `blurCost` charges a minimized
+     * window nothing. */
+    this.governBlur("state");
+    return state;
+  }
+
+  /**
+   * Set a window's ROLE, or a negative errno.
+   *
+   * THE DESKTOP IS UNIQUE AND IT LIVES AT THE BOTTOM. A second one is -EBUSY rather than a second
+   * surface nobody can reach, and an OWNED window cannot be the desktop — the owner chain exists
+   * so a dialog rides above its owner, and the desktop is the one window nothing may ride above.
+   */
+  setRole(win, role) {
+    if (!(role >= 0 && role <= WROLE_LIMIT)) return -EINVAL;
+    if (win.destroyed || !win.attached) return -EHOSTGONE;
+    if (role === win.role) return 0;
+    if (role === WROLE_DESKTOP) {
+      const held = this.desktop();
+      if (held && held.id !== win.id) {
+        this.stats.refusedRole += 1;
+        return -EBUSY;
+      }
+      if (win.owner !== 0 || win.children.length > 0) {
+        this.stats.refusedRole += 1;
+        return -EINVAL;
+      }
+      /* A DESKTOP IS NEVER MINIMIZED OR MAXIMIZED, so a window that was either becomes normal as
+       * it takes the role. Leaving a hidden window as the desktop would be a desktop nobody can
+       * see and nothing can restore, because `setState` refuses the role. */
+      win.state = WST_NORMAL;
+      win.restore = null;
+    }
+    win.role = role;
+    this.stats.roleChanges += 1;
+    // TO THE BOTTOM, and the whole order goes out: the page renders the order it is sent and
+    // decides nothing (constraint 226).
+    this.lowerToBottom(win);
+    K.post({ t: "win-role", win: win.id, role });
+    this.governBlur("role");
+    return 0;
+  }
+
+  /** Put a window at the bottom of the stack and post the order. The desktop's own move. */
+  lowerToBottom(win) {
+    this.stack = [win.id, ...this.stack.filter((id) => id !== win.id)];
+    this.postStack();
+    return 0;
+  }
+
+  /**
+   * Replace a window's published rows. Returns how many it holds, or a negative errno.
+   *
+   * THE LIST IS REPLACED WHOLE, never appended to, for the reason the blur governor posts its whole
+   * flat set and the stack posts its whole order (constraint 226): a shell applying a delta can
+   * come to disagree with the publisher about what the list is, and nothing would say so.
+   */
+  items(win, rows) {
+    if (win.destroyed || !win.attached) return -EHOSTGONE;
+    if (!Array.isArray(rows)) return -EINVAL;
+    if (rows.length > WIN_ITEM_CAP) {
+      this.stats.refusedItems += 1;
+      return -EINVAL;
+    }
+    win.items = rows.map((r) => ({ icon: r.icon | 0, flags: r.flags | 0, label: String(r.label) }));
+    this.stats.itemPublishes += 1;
+    K.post({ t: "win-items", win: win.id, items: win.items.map((r) => ({ ...r })) });
+    return win.items.length;
+  }
+
+  /**
+   * The shell says one of a window's rows was activated. Returns true if the event queued.
+   *
+   * THE INDEX IS VALIDATED AGAINST THE LIST THE KERNEL IS HOLDING, which is the same division as
+   * every other page report: the page says WHERE the pointer went and the kernel decides what that
+   * means. Without it a page could name a row that does not exist and a program would act on an
+   * index into its own array that nothing published.
+   *
+   * A SEPARATOR AND A DISABLED ROW ARE NOT ACTIVATABLE, and they are refused here rather than
+   * trusted not to be drawn as buttons: the flags are the publisher's statement about its own rows,
+   * and the one place they can be enforced is the side that holds them.
+   */
+  activateItem(id, index, where) {
+    const win = this.get(id);
+    if (!win || win.destroyed) return false;
+    const row = win.items[index | 0];
+    if (!row) {
+      this.stats.badItems += 1;
+      return false;
+    }
+    if ((row.flags & WITEM_SEPARATOR) || (row.flags & WITEM_DISABLED)) {
+      this.stats.badItems += 1;
+      return false;
+    }
+    this.stats.itemActivations += 1;
+    return win.push({ type: WEV_ITEM, a: index | 0, b: row.flags, c: where | 0 });
   }
 
   /**
@@ -789,6 +1008,12 @@ export class WinMgr {
    *  sides that must agree on it (constraint 255). */
   blurCost(win) {
     if (!win || win.destroyed || !win.attached) return 0;
+    /* M14. A WINDOW WITH NO FRAME ON SCREEN FILTERS NOTHING, and there are two of them. A
+     * MINIMIZED window is not rendered at all, and the DESKTOP has no frame by definition — the
+     * shell draws its icons straight onto the backdrop. Charging either would be accounting a ring
+     * nobody renders, which is constraint 49's under-read arrived at from the other side, and it
+     * would make a desktop full of minimized windows degrade the glass of the one in use. */
+    if (win.state === WST_MIN || win.role === WROLE_DESKTOP) return 0;
     /* A SURFACED WINDOW COSTS THE SAME, which is why there is no branch on it. The surface
      * replaces the client area, and the client area was already opaque and already outside the
      * ring — so the four strips are unchanged. Charging zero for one would let a desktop full of
@@ -1008,6 +1233,10 @@ export class WinMgr {
       pid,
       title: win.title,
       owner: win.owner,
+      // M14. THE PROGRAM, so a Superbar can group its buttons by it: two terminals are one button
+      // with two windows, and a page that only has a pid and a title cannot know that. The title
+      // is whatever the program says it is; this is what the user typed.
+      prog: K.progOf ? K.progOf(pid) : "",
       x: win.box.x, y: win.box.y, w: win.box.w, h: win.box.h,
     });
     this.postStack();
@@ -1110,6 +1339,14 @@ export class WinMgr {
       this.stats.forgedDrags += 1;
       return false;
     }
+    /* M14. AND NEITHER OF THE TWO M14 ADDED, for the same reason and with its own counter. A
+     * `WEV_STATE` the page posted would tell a program it had been minimized when the kernel
+     * believes otherwise; a `WEV_ITEM` would name a row index nothing published. Both have a
+     * kernel route — `setState` and `activateItem` — which is where the validation lives. */
+    if (ev.type === WEV_STATE || ev.type === WEV_ITEM) {
+      this.stats.forgedKernelEvents += 1;
+      return false;
+    }
     if (ev.type === WEV_KEY || ev.type === WEV_POINTER) {
       const blocker = this.blockingFor(w);
       if (blocker) {
@@ -1170,12 +1407,18 @@ export class WinMgr {
   }
 
   report() {
+    const desk = this.desktop();
     return {
       ...this.stats,
       stack: [...this.stack],
       live: this.live().length,
       rows: this.byId.size,
       nextId: this.nextId,
+      // M14. Which window is the desktop, and the show state of every live window — the two facts
+      // a shell renders and a check reads, in the kernel's own words rather than the page's.
+      desktop: desk ? desk.id : 0,
+      states: Object.fromEntries(this.live().map((w) => [w.id, w.state])),
+      minimized: this.live().filter((w) => w.state === WST_MIN).map((w) => w.id),
       // M12. The governor's whole state, because a budget nobody can read is a budget nobody
       // believes — the same reason `refusedSurface` is counted apart from the other refusals.
       blur: {

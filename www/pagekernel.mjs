@@ -235,6 +235,48 @@ export async function ask(k, kind, ms = 5000) {
   return await k.expect(kind, ms);
 }
 
+/**
+ * THE GESTURE PROTOCOL: how a page asks for REAL input and waits for it.
+ *
+ * A window manager cannot be checked by screenshot — an inert frame and a working one are the same
+ * picture (constraint 40) — so M13's and M14's proofs have to drive a real pointer and read the
+ * geometry back. A page cannot drive one: a synthesised `PointerEvent` carries `isTrusted === false`
+ * and `setPointerCapture` refuses a pointerId no live pointer owns (constraint 175), which is the
+ * gesture half of M4a's whole lesson.
+ *
+ * So the page PUBLISHES the gesture it needs, at coordinates it measures off its own rects, and
+ * blocks until something performed it. `scripts/check.py`'s `drive_gestures` is the other half and
+ * uses `Input.dispatchMouseEvent`; a human opening the page performs them with a hand, which is
+ * what the bench shells do. ONE definition of the handshake, because the two sides agreeing about
+ * it by hand is how a page comes to wait for a gesture nobody is sending.
+ *
+ * `report.want` is the ask, `report.driven` is the receipt, and the id makes a second ask for the
+ * same gesture distinguishable from a stale receipt — the `CALLID` argument, one layer up.
+ */
+export function gestureAsker(report) {
+  let serial = 0;
+  report.want = null;
+  report.driven = "";
+  report.gestureLog = [];
+  return async function ask(spec, ms = 60000) {
+    serial += 1;
+    const id = `${spec.name || spec.kind}#${serial}`;
+    report.want = { id, ...spec };
+    report.phase = "await-input";
+    const waited = await until(() => report.driven === id, ms);
+    report.want = null;
+    report.phase = `drove ${id}`;
+    report.gestureLog.push({ id, kind: spec.kind, waited: Math.round(waited) });
+    // A THROW AND NOT A FLAG. A page that carried on after a gesture nobody performed would
+    // measure the state before it and report numbers for a world that never happened.
+    if (waited < 0) {
+      throw new Error(`nothing performed the ${spec.kind} gesture ${id} within ${ms} ms. `
+        + "A human reading this page performs it by hand; a check drives it over CDP.");
+    }
+    return waited;
+  };
+}
+
 /** Synthesised keys into a widget's own element. They reach that handler and nothing in front of
  *  it, which is why `src/wm/terminal.mjs` counts trusted and synthetic keys separately. */
 export function typeSynthetic(el, text) {

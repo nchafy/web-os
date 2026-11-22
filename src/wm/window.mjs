@@ -1,4 +1,4 @@
-// A window: a frame, a title bar you can drag, and a client area.
+// A window: a frame, a title bar you can drag, eight resize grips, and a client area.
 //
 // THE FRAME IS FOUR GLASS STRIPS AND A CLIENT AREA (M11). `backdrop-filter` filters an element's
 // border box, so a ring is only a ring if it is four separately filtered boxes — measured at
@@ -11,17 +11,91 @@
 // module draws and listens while `www/m4a.html` holds the one route to the kernel. Every gesture
 // below has a keyboard spelling, so a check can drive it as real input.
 
+import {
+  WIN_CAP_H, WIN_INSET, WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R,
+  WROLE_NORMAL, WROLE_DESKTOP,
+} from "../abi.mjs";
+
+/* ---- M14: Aero Snap's thresholds, in CSS px -------------------------------------------------
+ *
+ * THREE NUMBERS AND NOT ONE, and `PLAN.md` §5 names all three: snap ARMS at a pointer within 1 px
+ * of an edge, a snapped window RELEASES after 20 px of drag-out, and a maximized one releases
+ * after a 50 px SIDE-move.
+ *
+ * THE ARM AND THE RELEASE ARE A HYSTERESIS PAIR, which is constraint 39's rule applied to a
+ * continuous input: with one threshold a window snapped at the edge would un-snap on the next
+ * motion sample, re-snap on the one after, and flicker for as long as the button was held. Both
+ * edges get checked, which is what `--negative no-snap-hysteresis` is for.
+ *
+ * MAXIMIZED RELEASES ON HORIZONTAL MOVEMENT ALONE, and that is not a stricter version of the same
+ * rule. A maximized window's caption is at the top of the work area, so a user reaching for it
+ * drags slightly downward constantly; measuring total distance would un-maximize the window every
+ * time somebody nudged it. Windows 7 takes the same view.
+ */
+export const SNAP_ARM_PX = 1;
+export const SNAP_RELEASE_PX = 20;
+export const MAX_RELEASE_PX = 50;
+
 /** Smallest a window may be dragged or resized to. webxp's numbers, kept. */
 export const MIN_W = 220;
 export const MIN_H = 120;
 const DEFAULT_W = 560;
 const DEFAULT_H = 360;
 
-/** How much of the title bar must stay on screen, so a window cannot be dragged out of reach. */
-const MIN_VISIBLE = 72;
+/** How much of the title bar must stay on screen, so a window cannot be dragged out of reach.
+ *
+ *  EXPORTED SINCE M13, because the geometry harness asserts the clamp lands exactly here. A check
+ *  carrying its own 72 would be the same number in a second place, and the clamp is the subject. */
+export const MIN_VISIBLE = 72;
 
-/** One arrow press, in CSS pixels. The keyboard equivalent of a drag. */
-const KEY_STEP = 10;
+/** One arrow press, in CSS pixels. The keyboard equivalent of a drag. Exported for `MIN_VISIBLE`'s
+ *  reason: M13 asserts both ends of the step, and Shift is the fine one. */
+export const KEY_STEP = 10;
+
+/**
+ * M13's FIRST NEGATIVE CONTROL. `apply()` writes the requested box straight onto the element, so
+ * nothing holds a window inside the desktop: a drag can put a title bar past the edge and leave it
+ * unreachable, which is what `clampBox` exists to prevent.
+ *
+ * MODULE-LEVEL AND NOT PER-WINDOW, which is `src/kernel/wins.mjs`'s shape for its controls and for
+ * its reason: the headline path reads a plain boolean and carries no control branch of its own.
+ *
+ * IT IS NOT GATED ON A BENCH BOOT, and the difference is worth stating: the kernel's hooks are
+ * gated because a PROCESS could otherwise ask for them, and nothing here is reachable from a
+ * process. The page is the supervisor (`docs/DECISIONS.md` D18), so a page-side control is the
+ * supervisor disabling its own clamp — `www/m13.html` is the only caller and reads `?no_clamp=1`.
+ */
+/**
+ * And M14's: the snap RELEASE collapses onto the ARM, so there is one threshold instead of two.
+ * `PLAN.md` §5's own control for M14 — "remove the hysteresis band; the 19 px case must start
+ * failing" — and what a reader sees is a window that will not stay snapped.
+ */
+let geometryControls = { noClamp: false, noSnapHysteresis: false, noWorkArea: false };
+
+export function setGeometryControls(opts = {}) {
+  geometryControls = {
+    noClamp: opts.noClamp === true,
+    noSnapHysteresis: opts.noSnapHysteresis === true,
+    /** And the third: a maximized window fills the DESKTOP rather than the work area, so it covers
+     *  the taskbar — which is a window a user cannot get out from under. */
+    noWorkArea: opts.noWorkArea === true,
+  };
+  return { ...geometryControls };
+}
+
+/** How far a drag must travel before a docked window lets go. One definition, because the control
+ *  above has to be able to collapse it onto the arm threshold. */
+function releaseDistance(state) {
+  if (geometryControls.noSnapHysteresis) return SNAP_ARM_PX;
+  return state === WST_MAX ? MAX_RELEASE_PX : SNAP_RELEASE_PX;
+}
+
+/** What is in force, so a check reads the world it is measuring out of the module that owns it
+ *  rather than out of the page's own query parsing. A control a check believed was on and was not
+ *  is a green run over an unmodified world. */
+export function geometryControlsInForce() {
+  return { ...geometryControls };
+}
 
 let serial = 0;
 
@@ -67,6 +141,29 @@ export class Win {
     this.placed = { ...this.box };
     this.drag = null;
     this.closed = false;
+    /**
+     * M14. THE SHOW STATE, AS THE KERNEL DECIDED IT. Written only by `setState`, which the host
+     * calls when the kernel posts `win-show` — never by a gesture here. The caption buttons and
+     * the snap gesture ASK (`spec.onState`), the kernel answers, and this file renders the answer.
+     * That is `win-stack`'s rule for the z-order applied to the other thing a shell decides
+     * (constraints 226, 271): the page draws policy and never makes it.
+     */
+    this.state = WST_NORMAL;
+    /** M14. What this window IS to the shell, as the kernel decided it. A desktop window has no
+     *  frame, fills the work area and is not dragged — see `boxForState` and `setRole`. */
+    this.role = WROLE_NORMAL;
+    /** Where a maximized or snapped window goes back to, as the kernel reported it. */
+    this.restore = null;
+    this.onState = spec.onState || null;
+    /** The WORK AREA, as a callback rather than a value: the shell may take a strip off the
+     *  desktop at any moment (a taskbar appearing) and a window laid out against a stale work area
+     *  is a maximized window covering the taskbar. */
+    this.workAreaOf = spec.workArea || null;
+    /** The snap the pointer is currently over, as a `WST_*` value, and the preview element that
+     *  shows where the window would land. 0 for "no edge". */
+    this.armed = 0;
+    this.snapEl = null;
+    this.resize = null;
     /** 0 responding, 1 greyed caption, 2 End Process offered. Written only by `setHealth`. */
     this.health = 0;
     /** Whether the kernel's last order said something blocks this window, and whether this window
@@ -108,14 +205,16 @@ export class Win {
       if (this.onEndProcess) this.onEndProcess();
     });
     this.endBtn.hidden = true;
-    /* MINIMIZE AND MAXIMIZE ARE DRAWN AND INERT, which is Windows 7's own rule for an inapplicable
-     * caption command — disabled rather than hidden. There is nothing to minimize INTO until M14's
-     * taskbar and no snap state to maximize TO until M14's Aero Snap, and the window ABI carries no
-     * state property at all (`WIN_SET_TITLE`, `WIN_SET_BOX`, `WIN_SET_MODAL` and nothing else).
-     * A live-looking button that silently did nothing is the defect; `disabled` is the fact, and
-     * `scripts/check.py`'s m11 check asserts the box does not move when they are clicked. */
-    this.minBtn = this.#titleButton("—", "window-min", null, { disabled: true, label: "Minimize" });
-    this.maxBtn = this.#titleButton("□", "window-max", null, { disabled: true, label: "Maximize" });
+    /* MINIMIZE AND MAXIMIZE ARE LIVE SINCE M14, and until M14 they were drawn and DISABLED — which
+     * was Windows 7's own rule for an inapplicable command and was the honest state of the world:
+     * there was nothing to minimize into, no snap state to maximize to, and the window ABI carried
+     * no state property at all. M14 added `WIN_SET_STATE`, a taskbar to minimize into and a work
+     * area to maximize to, so the three reasons are gone and the buttons ASK for a state. They
+     * still do not ACT: the kernel decides and posts, and `setState` renders what it said. */
+    this.minBtn = this.#titleButton("—", "window-min", () => this.askState(WST_MIN),
+      { label: "Minimize" });
+    this.maxBtn = this.#titleButton("□", "window-max", () => this.toggleMaximize(),
+      { label: "Maximize" });
     this.closeBtn = this.#titleButton("✕", "window-close", () => this.close(), { label: "Close" });
     boxes.append(this.endBtn, this.minBtn, this.maxBtn, this.closeBtn);
 
@@ -137,12 +236,58 @@ export class Win {
       this.#glassLayers(edge);
       return edge;
     });
-    el.append(bar, ...this.edgeEls, body);
+    /* M14's EIGHT RESIZE GRIPS. Transparent, positioned HERE and not by the skin, for the reason
+     * the glass strips are positioned here: where a frame can be grabbed is behaviour, and a page
+     * that does not install the skin still has to be resizable. The thickness is the frame's own
+     * inset, imported rather than restated — a grip wider than the border would swallow clicks
+     * meant for the client area.
+     *
+     * THE TOP GRIP OVERLAPS THE CAPTION'S FIRST FEW PIXELS, which is Windows 7's own geometry: the
+     * top edge resizes and the rest of the caption drags. It sits above the caption in z, so the
+     * order of the two listeners is not what decides it. */
+    this.gripEls = this.#grips();
+    el.append(bar, ...this.edgeEls, body, ...this.gripEls);
     bar.addEventListener("pointerdown", (e) => this.#startDrag(e));
     bar.addEventListener("keydown", (e) => this.#barKey(e));
+    /* A DOUBLE-CLICK ON THE CAPTION MAXIMIZES AND RESTORES, which is the gesture a Windows user
+     * tries before they find the button. `dblclick` and not two clicks: the browser already owns
+     * the timing, and a hand-rolled one would be a second definition of how fast is fast. */
+    bar.addEventListener("dblclick", (e) => {
+      if (e.target.closest("button")) return;
+      this.toggleMaximize();
+    });
     this.el = el;
     this.barEl = bar;
     this.surfaceEl.append(el);
+  }
+
+  /** The eight grips, in the order a reader would name them. Each carries its own axes as data, so
+   *  the resize gesture reads a vector rather than branching on a name. */
+  #grips() {
+    const sides = [
+      ["n", 0, -1, { left: WIN_INSET, right: WIN_INSET, top: 0, height: 4 }, "ns-resize"],
+      ["s", 0, 1, { left: WIN_INSET, right: WIN_INSET, bottom: 0, height: WIN_INSET }, "ns-resize"],
+      ["w", -1, 0, { left: 0, top: 4, bottom: WIN_INSET, width: WIN_INSET }, "ew-resize"],
+      ["e", 1, 0, { right: 0, top: 4, bottom: WIN_INSET, width: WIN_INSET }, "ew-resize"],
+      ["nw", -1, -1, { left: 0, top: 0, width: 10, height: 10 }, "nwse-resize"],
+      ["ne", 1, -1, { right: 0, top: 0, width: 10, height: 10 }, "nesw-resize"],
+      ["sw", -1, 1, { left: 0, bottom: 0, width: 10, height: 10 }, "nesw-resize"],
+      ["se", 1, 1, { right: 0, bottom: 0, width: 10, height: 10 }, "nwse-resize"],
+    ];
+    return sides.map(([name, ax, ay, at, cursor]) => {
+      const grip = document.createElement("div");
+      grip.className = `window-grip grip-${name}`;
+      grip.dataset.grip = name;
+      grip.setAttribute("aria-hidden", "true");
+      grip.style.position = "absolute";
+      for (const [key, value] of Object.entries(at)) grip.style[key] = `${value}px`;
+      grip.style.cursor = cursor;
+      // ABOVE THE CAPTION AND THE STRIPS, so the edge of a frame resizes rather than drags. A
+      // corner is above an edge for the same reason: the corner's own 10 px must win.
+      grip.style.zIndex = name.length === 2 ? "4" : "3";
+      grip.addEventListener("pointerdown", (e) => this.#startResize(e, ax, ay));
+      return grip;
+    });
   }
 
   /** The two additive layers every strip carries: the summed afterglow-plus-colorization term, and
@@ -181,9 +326,63 @@ export class Win {
     return { w: Math.round(r.width), h: Math.round(r.height) };
   }
 
+  /**
+   * THE WORK AREA: the part of the desktop a maximized window may have, in desktop coordinates.
+   *
+   * Defaults to the whole desktop, which is what every page without a shell gets. The taskbar is
+   * what narrows it, and it does so through the callback rather than by writing a value here —
+   * a window laid out against a work area measured once is a maximized window covering a taskbar
+   * that appeared afterwards.
+   */
+  workArea() {
+    const s = this.surface();
+    const whole = { x: 0, y: 0, w: s.w, h: s.h };
+    // THE CONTROL: a maximized window fills the DESKTOP and covers whatever the shell put on it.
+    if (geometryControls.noWorkArea || !this.workAreaOf) return whole;
+    const wa = this.workAreaOf();
+    if (!wa || !(wa.w > 0) || !(wa.h > 0)) return whole;
+    return { x: wa.x | 0, y: wa.y | 0, w: wa.w | 0, h: wa.h | 0 };
+  }
+
+  /** The box a docked state puts this window in, or null for a state that uses `box`. The ONE
+   *  definition of what maximized and snapped MEAN as geometry; the snap preview and the layout
+   *  both read it, so the ghost cannot promise a rectangle the window does not take. */
+  boxForState(state = this.state) {
+    const wa = this.workArea();
+    /* THE DESKTOP IS THE WORK AREA, always, and not a geometry a process asked for: it is the
+     * surface every other window sits on, and one that did not fill the space would leave a strip
+     * of bare page that no icon could be dropped on. It is the work area and NOT the whole desktop
+     * because the shell's own strip is drawn over the backdrop — the wallpaper still shows through
+     * the glass there, and an icon under the taskbar would be an icon nobody can click. */
+    if (this.role === WROLE_DESKTOP) return { ...wa };
+    if (state === WST_MAX) return { ...wa };
+    if (state === WST_SNAP_L || state === WST_SNAP_R) {
+      // HALF, ROUNDED, AND THE OTHER HALF IS THE REMAINDER: two `floor(w/2)` halves leave a one
+      // pixel gap down the middle of an odd-width desktop, which is a seam a reader can see.
+      const half = Math.round(wa.w / 2);
+      return state === WST_SNAP_L
+        ? { x: wa.x, y: wa.y, w: half, h: wa.h }
+        : { x: wa.x + half, y: wa.y, w: wa.w - half, h: wa.h };
+    }
+    return null;
+  }
+
   /** Write `box`, clamped, onto the element. The ONLY writer of `placed` and of the style. */
   apply() {
-    this.placed = clampBox(this.box, this.surface());
+    /* A DOCKED WINDOW'S GEOMETRY IS THE STATE'S, NOT THE BOX'S, and `box` is left alone — which is
+     * the two-box design doing the same job it does for the clamp: a maximized window still
+     * remembers what it asked for, so a restore needs no stored geometry of its own. */
+    const docked = this.boxForState();
+    // THE CONTROL IS HERE AND NOT INSIDE `clampBox`, so the pure function stays pure and a host
+    // probe can keep asserting on it under node while this world is running in a browser.
+    this.placed = docked || (geometryControls.noClamp
+      ? { ...this.box }
+      : clampBox(this.box, this.surface()));
+    /* A MINIMIZED WINDOW IS NOT ON SCREEN, and `hidden` is the whole of it: the frame keeps its
+     * geometry, the window keeps its fd, its events keep queueing, and its process is told by
+     * `WEV_STATE` rather than by noticing. Nothing is torn down — a minimize that destroyed
+     * anything would be a close. */
+    this.el.hidden = this.state === WST_MIN;
     const s = this.el.style;
     s.left = `${this.placed.x}px`;
     s.top = `${this.placed.y}px`;
@@ -194,6 +393,64 @@ export class Win {
     this.el.dataset.y = String(this.placed.y);
     this.el.dataset.w = String(this.placed.w);
     this.el.dataset.h = String(this.placed.h);
+    // THE STATE IS PUBLISHED AS DATA, for the reason every other kernel decision is: the class is
+    // the look and the dataset is the fact, and a check reads the fact.
+    this.el.dataset.state = String(this.state);
+    this.el.classList.toggle("is-maximized", this.state === WST_MAX);
+    this.el.classList.toggle("is-snapped",
+      this.state === WST_SNAP_L || this.state === WST_SNAP_R);
+  }
+
+  /* ---- M14: the show state ------------------------------------------------------------------
+   *
+   * EVERY ONE OF THESE ASKS. The kernel owns the state, the restore point and the blurred area a
+   * state change alters, so a button here posts an intent and the frame changes when the kernel
+   * says it did (constraint 271). A page that applied the change itself would be a second
+   * authority on what is maximized, and the two would disagree the first time one was refused.
+   */
+
+  askState(state) {
+    if (this.blocked) return false;
+    if (!this.onState) return false;
+    this.onState(state | 0);
+    return true;
+  }
+
+  /** The maximize button and the caption double-click, which are one gesture with two spellings:
+   *  maximize what is floating or snapped, restore what is maximized. */
+  toggleMaximize() {
+    return this.askState(this.state === WST_MAX ? WST_NORMAL : WST_MAX);
+  }
+
+  /**
+   * What the kernel said this window's state now is. The ONLY writer of `state`.
+   *
+   * A RESTORE PUTS THE BOX BACK, and the box comes from the KERNEL's record rather than from
+   * anything held here: the page is a renderer that may be re-laid-out at any moment, and a window
+   * whose restore point lived only in the page would come back to the wrong place after one.
+   */
+  /** What the kernel said this window IS. The ONLY writer of `role`. A desktop window loses its
+   *  caption and its grips to the skin and its gestures to the guards in `#startDrag` and
+   *  `#startResize` — the backdrop is not a thing a user drags. */
+  setRole(role) {
+    this.role = role | 0;
+    this.el.dataset.role = String(this.role);
+    this.el.classList.toggle("is-desktop", this.role === WROLE_DESKTOP);
+    this.apply();
+    return this.role;
+  }
+
+  setState(state, restore = null) {
+    this.state = state | 0;
+    if (restore && restore.w > 0 && restore.h > 0) this.restore = { ...restore };
+    if (this.state === WST_NORMAL && this.restore) this.box = { ...this.restore };
+    // The glyph says what the button WILL do, which is Windows 7's own behaviour: a maximized
+    // window's button restores, and it draws the overlapping-rectangles glyph to say so.
+    this.maxBtn.textContent = this.state === WST_MAX ? "❐" : "□";
+    this.maxBtn.setAttribute("aria-label", this.state === WST_MAX ? "Restore" : "Maximize");
+    this.#clearSnap();
+    this.apply();
+    return this.state;
   }
 
   moveBy(dx, dy) {
@@ -205,6 +462,9 @@ export class Win {
   #startDrag(event) {
     if (event.button !== 0) return;
     if (event.target.closest("button")) return;
+    // THE DESKTOP IS NOT DRAGGED. Its geometry is the work area's, so a drag would be undone by
+    // the next `apply()` — and a backdrop that slid around under the pointer is not a desktop.
+    if (this.role === WROLE_DESKTOP) return;
     // A BLOCKED WINDOW DOES NOT MOVE. The drag is page-side from end to end, so without this the
     // kernel's suppression covered the client area and not the frame: a window behind a modal could
     // not be typed into or raised, and could still be dragged around under it (constraint 233).
@@ -218,6 +478,13 @@ export class Win {
       x: event.clientX,
       y: event.clientY,
       from: this.placed,
+      /** The state the window was in when the press landed, and whether the drag has already
+       *  pulled it out of that state. A FLOATING window is free from the first sample. */
+      docked: this.state !== WST_NORMAL,
+      state: this.state,
+      /** How far the pointer got while the window was still docked, for a reader and a check:
+       *  "it held" and "nothing moved the mouse" are different facts. */
+      heldFor: 0,
       end: () => {
         if (this.drag === gesture) this.drag = null;
         const target = this.el.ownerDocument;
@@ -230,15 +497,35 @@ export class Win {
     };
     const move = (e) => {
       if (this.drag !== gesture || e.pointerId !== gesture.id) return;
-      this.box = {
-        ...gesture.from,
-        x: gesture.from.x + (e.clientX - gesture.x),
-        y: gesture.from.y + (e.clientY - gesture.y),
-      };
+      const dx = e.clientX - gesture.x;
+      const dy = e.clientY - gesture.y;
+      /* A DOCKED WINDOW HOLDS UNTIL THE DRAG IS MEANT. 20 px out of a snap, 50 px SIDEWAYS out of
+       * a maximize — see the thresholds at the top of this file. Below that the window does not
+       * move at all, which is what "it holds" means: a maximized window that crept downward by
+       * three pixels every time somebody brushed its caption would be unusable. */
+      if (gesture.docked) {
+        const travelled = gesture.state === WST_MAX
+          ? Math.abs(dx)
+          : Math.sqrt(dx * dx + dy * dy);
+        gesture.heldFor = Math.max(gesture.heldFor, Math.round(travelled));
+        if (travelled < releaseDistance(gesture.state)) return;
+        this.#undock(gesture, e);
+        return;
+      }
+      this.box = { ...gesture.from, x: gesture.from.x + dx, y: gesture.from.y + dy };
       this.apply();
+      // AND THE EDGES ARM AS THE POINTER REACHES THEM, which is the other half of the gesture.
+      this.#armSnap(e);
     };
     const up = (e) => {
       if (e.pointerId !== gesture.id) return;
+      /* THE RELEASE IS WHERE A SNAP HAPPENS, and it ASKS: the kernel decides the state and posts
+       * it back, so a snap a modal refuses does not half-happen on screen. */
+      if (this.armed) {
+        const want = this.armed;
+        this.#clearSnap();
+        this.askState(want);
+      }
       gesture.end();
     };
     this.drag = gesture;
@@ -261,14 +548,201 @@ export class Win {
     }
   }
 
+  /**
+   * The drag has earned the right to undock. Put the window back to its restore size UNDER THE
+   * POINTER and carry on dragging from there.
+   *
+   * THE POINTER KEEPS ITS PLACE IN THE CAPTION, which is what makes the gesture feel like one
+   * gesture: a maximized window is 1,264 px wide and its restore box may be 420, so re-anchoring
+   * at the window's left edge would make the frame jump out from under the hand that is holding
+   * it. The fraction along the caption is preserved instead, which is Windows 7's own behaviour.
+   */
+  #undock(gesture, event) {
+    const back = this.restore && this.restore.w > 0 ? this.restore : { ...gesture.from };
+    const desk = this.surfaceEl.getBoundingClientRect();
+    const grabX = gesture.x - desk.left - gesture.from.x;
+    const fraction = gesture.from.w > 0
+      ? Math.min(1, Math.max(0, grabX / gesture.from.w))
+      : 0;
+    // The vertical offset is capped at the caption's own height: a press 300 px down a maximized
+    // window's caption does not exist, but a press on its bottom edge does, and the restored
+    // window must still be held by its caption.
+    const grabY = Math.min(Math.max(gesture.y - desk.top - gesture.from.y, 0), WIN_CAP_H);
+    gesture.docked = false;
+    gesture.state = WST_NORMAL;
+    gesture.from = {
+      x: Math.round(event.clientX - desk.left - fraction * back.w),
+      y: Math.round(event.clientY - desk.top - grabY),
+      w: back.w,
+      h: back.h,
+    };
+    // RE-ANCHOR THE GESTURE, or the next sample would apply the whole travelled delta twice.
+    gesture.x = event.clientX;
+    gesture.y = event.clientY;
+    this.box = { ...gesture.from };
+    /* THE STATE CHANGE IS ASKED FOR AND THE GEOMETRY IS APPLIED NOW, which is the one place this
+     * file moves before the kernel has answered — and it has to: the drag is live, and a window
+     * that waited a round trip would lag the pointer by one message. The kernel's `win-show` then
+     * arrives and `setState` renders the same thing, so the two agree a moment later rather than
+     * never. A refusal would put the window back, which is the correct outcome. */
+    this.state = WST_NORMAL;
+    this.apply();
+    this.askState(WST_NORMAL);
+  }
+
+  /**
+   * Arm or disarm the snap edge the pointer is over, and show the ghost of where the window would
+   * land. Called on every motion sample of a title-bar drag.
+   *
+   * ONE PIXEL, which is `PLAN.md` §5's own figure and is not a tolerance to be widened: the edge
+   * of the screen is where a pointer STOPS, so a user who means to snap drags until the pointer
+   * cannot go further and lands exactly on it.
+   */
+  #armSnap(event) {
+    const desk = this.surfaceEl.getBoundingClientRect();
+    let armed = 0;
+    if (event.clientX - desk.left <= SNAP_ARM_PX) armed = WST_SNAP_L;
+    else if (desk.right - event.clientX <= SNAP_ARM_PX + 1) armed = WST_SNAP_R;
+    else if (event.clientY - desk.top <= SNAP_ARM_PX) armed = WST_MAX;
+    if (armed === this.armed) return;
+    this.armed = armed;
+    this.#renderSnap();
+  }
+
+  /** The ghost. One element per window, built on the first arm and removed with the frame: a
+   *  preview is a picture, so it is the page's — and it reads `boxForState`, so it cannot promise
+   *  a rectangle the window will not take. */
+  #renderSnap() {
+    if (!this.armed) {
+      if (this.snapEl) this.snapEl.hidden = true;
+      this.el.dataset.armed = "0";
+      return;
+    }
+    if (!this.snapEl) {
+      const ghost = document.createElement("div");
+      ghost.className = "snap-preview";
+      ghost.dataset.snapPreview = "1";
+      ghost.setAttribute("aria-hidden", "true");
+      ghost.style.position = "absolute";
+      ghost.style.pointerEvents = "none";
+      this.surfaceEl.append(ghost);
+      this.snapEl = ghost;
+    }
+    const box = this.boxForState(this.armed);
+    this.snapEl.hidden = false;
+    this.snapEl.style.left = `${box.x}px`;
+    this.snapEl.style.top = `${box.y}px`;
+    this.snapEl.style.width = `${box.w}px`;
+    this.snapEl.style.height = `${box.h}px`;
+    this.snapEl.dataset.state = String(this.armed);
+    this.el.dataset.armed = String(this.armed);
+  }
+
+  #clearSnap() {
+    this.armed = 0;
+    this.#renderSnap();
+  }
+
+  /**
+   * Resize from one of the eight grips. `ax`/`ay` are the axes that grip moves: -1 the near edge,
+   * +1 the far edge, 0 not at all.
+   *
+   * A DOCKED WINDOW DOES NOT RESIZE. Windows 7 disables the grips on a maximized window, and the
+   * reason is this file's own: the geometry of a docked state comes from `boxForState`, so a
+   * resize would be overwritten by the next `apply()` and the user would watch their drag undo
+   * itself.
+   */
+  #startResize(event, ax, ay) {
+    if (event.button !== 0) return;
+    if (this.blocked) return;
+    if (this.state !== WST_NORMAL) return;
+    if (this.role === WROLE_DESKTOP) return;
+    if (this.resize) this.resize.end();
+    const from = { ...this.placed };
+    const gesture = {
+      id: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      end: () => {
+        if (this.resize === gesture) this.resize = null;
+        const doc = this.el.ownerDocument;
+        doc.removeEventListener("pointermove", move);
+        doc.removeEventListener("pointerup", up);
+        doc.removeEventListener("pointercancel", up);
+      },
+      captureError: "",
+    };
+    const move = (e) => {
+      if (this.resize !== gesture || e.pointerId !== gesture.id) return;
+      const dx = e.clientX - gesture.x;
+      const dy = e.clientY - gesture.y;
+      /* THE FLOOR IS APPLIED TO THE EDGE BEING MOVED, which is why this is not simply
+       * `clampBox`'s job. Dragging the LEFT edge right past the minimum must stop the edge, not
+       * slide the whole window: without the `Math.min` the x would keep moving while the width sat
+       * at MIN_W, and the window would crawl across the desktop. */
+      const next = { ...from };
+      if (ax < 0) {
+        const want = Math.min(dx, from.w - MIN_W);
+        next.x = from.x + want;
+        next.w = from.w - want;
+      } else if (ax > 0) {
+        next.w = Math.max(MIN_W, from.w + dx);
+      }
+      if (ay < 0) {
+        const want = Math.min(dy, from.h - MIN_H);
+        next.y = from.y + want;
+        next.h = from.h - want;
+      } else if (ay > 0) {
+        next.h = Math.max(MIN_H, from.h + dy);
+      }
+      this.box = next;
+      this.apply();
+    };
+    const up = (e) => {
+      if (e.pointerId !== gesture.id) return;
+      gesture.end();
+    };
+    this.resize = gesture;
+    const doc = this.el.ownerDocument;
+    doc.addEventListener("pointermove", move);
+    doc.addEventListener("pointerup", up);
+    doc.addEventListener("pointercancel", up);
+    try {
+      // The grip itself takes the capture, so a resize that leaves the frame keeps arriving —
+      // and it MAY THROW for a pointerId no live pointer owns (constraint 175).
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch (error) {
+      gesture.captureError = `${error.name}: ${error.message}`;
+    }
+  }
+
   #barKey(event) {
     // The keyboard route to the same gesture, so it takes the same refusal.
     if (this.blocked) return;
+    /* M14's STATES HAVE A KEYBOARD SPELLING, because every gesture in this file does (WCAG SC
+     * 2.1.1) and because a check can then drive them as real trusted keys. Windows 7 spells these
+     * Win+Arrow; the Win key is not deliverable to a page, so they are CTRL+Arrow here — and the
+     * departure is recorded where a reader meets it rather than left to be discovered. */
+    if (event.ctrlKey && !event.altKey) {
+      const want = {
+        ArrowUp: WST_MAX,
+        ArrowDown: this.state === WST_NORMAL ? WST_MIN : WST_NORMAL,
+        ArrowLeft: WST_SNAP_L,
+        ArrowRight: WST_SNAP_R,
+      }[event.key];
+      if (want === undefined) return;
+      event.preventDefault();
+      this.askState(want);
+      return;
+    }
     const step = event.shiftKey ? 1 : KEY_STEP;
     const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step],
       ArrowDown: [0, step] }[event.key];
     if (!d) return;
     event.preventDefault();
+    // A DOCKED WINDOW DOES NOT CREEP. Its geometry is `boxForState`'s, so a move would be undone
+    // by the next `apply()` — the same reason a resize is refused in that state.
+    if (this.state !== WST_NORMAL) return;
     this.moveBy(d[0], d[1]);
   }
 
@@ -324,6 +798,12 @@ export class Win {
   destroy() {
     if (this.closed) return;
     this.closed = true;
+    // THE GHOST GOES WITH THE FRAME. It is a sibling of the window under the desktop, so a window
+    // destroyed mid-drag would leave a snap preview on screen for the rest of the session.
+    if (this.snapEl) {
+      this.snapEl.remove();
+      this.snapEl = null;
+    }
     this.el.remove();
   }
 }

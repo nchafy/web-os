@@ -697,6 +697,20 @@ class Control:
     #: lowers the input, which re-admits, which raises it again: the degrade counter climbs on
     #: every run over a desktop nobody touched.
     STALE_COSTS = "stale-costs"
+    #: M13's first, and the one a reader would notice: `Win.apply` writes the requested box
+    #: straight onto the element, so nothing holds a window inside the desktop. A drag puts a
+    #: caption past the edge and leaves it unreachable — and the MIN_W/MIN_H floor goes with it,
+    #: because `clampBox` is where that floor lives. A PAGE-SIDE control, not gated on a bench
+    #: boot: nothing in `src/wm/` is reachable from a process, and the page is the supervisor.
+    NO_CLAMP = "no-clamp"
+    #: M13's second: the host tells the kernel the box the process ASKED FOR instead of the one the
+    #: clamp settled on. One post changes, the frames are laid out exactly as before, and the
+    #: kernel's whole record becomes a geometry no frame ever had.
+    STALE_GEOM = "stale-geom"
+    #: M13's third: a desktop that changes size re-clamps nothing, which is the world this project
+    #: was in until M13 — frames left hanging outside a shrunken desktop with their captions out of
+    #: reach, and a kernel still accounting the boxes they used to have.
+    NO_RELAYOUT = "no-relayout"
     ONCE = "once"
 
 
@@ -739,6 +753,9 @@ CONTROL_RUNS = {
     Control.NO_GOVERNOR: ("no-governor",),
     Control.TOP_FIRST: ("top-first",),
     Control.STALE_COSTS: ("stale-costs",),
+    Control.NO_CLAMP: ("no-clamp",),
+    Control.STALE_GEOM: ("stale-geom",),
+    Control.NO_RELAYOUT: ("no-relayout",),
 }
 
 
@@ -1911,6 +1928,113 @@ def mouse_drag(page, start, end, steps: int = 8) -> None:
                   button="left", buttons=1)
     page.call("Input.dispatchMouseEvent", type="mouseReleased", x=end["x"], y=end["y"],
               button="left", buttons=0, clickCount=1)
+
+
+#: One `Input.dispatchMouseEvent` button name and bitmask per button a gesture may ask for.
+_BUTTONS = {"left": 1, "right": 2, "middle": 4}
+
+
+def _perform_gesture(page, want: Dict[str, Any], *, held: bool) -> bool:
+    """Perform ONE gesture a page asked for, with real input. Returns whether a button is now down.
+
+    The page publishes what it needs and where (www/pagekernel.mjs `gestureAsker`); this is the
+    other half. `press`/`move`/`release` are separate kinds so a page can MEASURE MID-GESTURE,
+    which is what a snap threshold needs: arm at the edge, read the state, drag out 19 px, read it
+    again. A single `drag` cannot answer a question about the middle of itself.
+    """
+    kind = str(want.get("kind") or "")
+    at = want.get("at") or want.get("from") or {}
+    button = str(want.get("button") or "left")
+    mask = _BUTTONS.get(button, 1)
+
+    def mouse(event_type, point, *, buttons, clicks=0):
+        # `button` is WHICH button this event is about and `buttons` is what is held. A move with
+        # nothing held must say `none`, or Chrome reports a drag of a button that is not down.
+        params = {"type": event_type, "x": int(point["x"]), "y": int(point["y"]),
+                  "button": button if (buttons or event_type != "mouseMoved") else "none",
+                  "buttons": buttons}
+        if clicks:
+            params["clickCount"] = clicks
+        page.call("Input.dispatchMouseEvent", **params)
+
+    if kind == "drag":
+        mouse_drag(page, want["from"], want["to"], int(want.get("steps") or 8))
+        return False
+    if kind == "press":
+        mouse("mousePressed", at, buttons=mask, clicks=1)
+        return True
+    if kind == "move":
+        # The button mask carries whether this is a drag or a hover, which is the one thing a
+        # `mouseMoved` cannot be derived from: `src/wm/winhost.mjs` ignores a move with no button.
+        mouse("mouseMoved", at, buttons=mask if held else 0)
+        return held
+    if kind == "release":
+        mouse("mouseReleased", at, buttons=0, clicks=1)
+        return False
+    if kind in ("click", "rightclick"):
+        mouse("mousePressed", at, buttons=mask, clicks=1)
+        mouse("mouseReleased", at, buttons=0, clicks=1)
+        return False
+    if kind == "dblclick":
+        # The SECOND press carries clickCount 2, which is what makes Blink synthesise `dblclick`;
+        # two independent clicks do not.
+        mouse("mousePressed", at, buttons=mask, clicks=1)
+        mouse("mouseReleased", at, buttons=0, clicks=1)
+        mouse("mousePressed", at, buttons=mask, clicks=2)
+        mouse("mouseReleased", at, buttons=0, clicks=2)
+        return False
+    if kind == "hover":
+        mouse("mouseMoved", at, buttons=0)
+        return held
+    if kind == "key":
+        for _ in range(max(1, int(want.get("times") or 1))):
+            page.press(str(want["key"]), shift=bool(want.get("shift")))
+        return held
+    if kind == "type":
+        page.type_keys(str(want.get("text") or ""))
+        return held
+    raise Unmeasurable("the page asked for a %r gesture, which no driver here performs" % kind)
+
+
+def drive_gestures(env: Env, flag: str, *, timeout: float = 300.0) -> int:
+    """Perform every gesture `globalThis.<flag>` asks for until the page reaches a terminal state.
+
+    THE PAGE CANNOT DRIVE ITS OWN. A synthesised `PointerEvent` is `isTrusted === false` and
+    `setPointerCapture` refuses a pointerId no live pointer owns (constraint 175) - so a window
+    manager driven by the page under test is a window manager nobody has moved. A human reading
+    the page performs the same asks by hand, which is what the bench shells are for.
+
+    Returns how many gestures were performed, so a check can assert the page was really driven
+    rather than having finished without asking for anything.
+    """
+    deadline = time.monotonic() + timeout
+    read = ("(() => { const M = globalThis.%s || {}; return JSON.stringify({"
+            "state: String(M.state || ''), phase: String(M.phase || ''),"
+            "want: M.want || null, why: String(M.why || '') }) })()" % flag)
+    performed = 0
+    held = False
+    last = ""
+    while True:
+        row = json.loads(env.page.evaluate(read) or "{}")
+        want = row.get("want")
+        # THE ID GUARD, and it is not optional: the page clears `want` only once its own poll sees
+        # the receipt, so without this the same gesture is performed two or three times - which for
+        # a `dblclick` or a `press` is a different gesture entirely.
+        if want and want.get("id") != last:
+            held = _perform_gesture(env.page, want, held=held)
+            env.page.evaluate("globalThis.%s.driven = %s" % (flag, json.dumps(want["id"])))
+            last = want["id"]
+            performed += 1
+            continue
+        if row.get("state") in ("done", "aborted", "error"):
+            return performed
+        if time.monotonic() >= deadline:
+            raise Unmeasurable(
+                "globalThis.%s never reached a terminal state within %.0fs: state=%r phase=%r "
+                "want=%r why=%r. %d gesture(s) were performed."
+                % (flag, timeout, row.get("state"), row.get("phase"), want, row.get("why"),
+                   performed))
+        time.sleep(0.02)
 
 
 def held_rest(labels: Tuple[str, ...], failed: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -3446,9 +3570,14 @@ M11_LABELS = (
     "the caption carries a halo, and its glyphs cross the seam",
     "the caption is legible over the BLACK side of the seam",
     "and over the WHITE side, which no single text colour manages",
-    # PROOF 5.
-    "inert ok",
-    "minimize and maximize are drawn, disabled and say so",
+    # PROOF 5. IT SAID THE OPPOSITE UNTIL M14, and the change is the milestone rather than a
+    # correction: minimize and maximize were drawn and DISABLED while there was nothing to minimize
+    # into, no snap state to maximize to and no state property in the window ABI. M14 added all
+    # three, so what is asserted now is the WIRING and the round trip — `disabled === false` alone
+    # is the live-looking-button-that-does-nothing defect the old clause existed to forbid.
+    "caption ok",
+    "minimize and maximize are live, drawn and labelled",
+    "and a minimize round trip returns the window to the same box",
     "and a REAL mouse drag from either of them does not move the window",
     "while the close box is still live",
     "and End Process is not offered on a window that is responding",
@@ -3490,7 +3619,7 @@ READ_M11 = """(() => {
     chain: one(P.chain),
     blur: one(P.blur),
     legible: one(P.legible),
-    inert: one(P.inert),
+    caption: one(P.caption),
     focus: one(P.focus),
   }
 })()"""
@@ -3508,7 +3637,7 @@ M11_SHAPE = {
     "chain": (dict, type(None)),
     "blur": (dict, type(None)),
     "legible": (dict, type(None)),
-    "inert": (dict, type(None)),
+    "caption": (dict, type(None)),
     "focus": (dict, type(None)),
 }
 
@@ -3765,6 +3894,174 @@ _TOP_FIRST_FAILS = (
 _STALE_COSTS_FAILS = (
     "hysteresis ok",
     "re-running the governor over an unchanged desktop changes nothing",
+    "verdict is ok",
+)
+
+
+# ======================================================================================
+# M13 — the geometry harness
+#
+# THE ONLY PROOF M7-M12 HAVE that the numbers they trade are about the window a reader can touch.
+# Every clause is read off a RENDERED rect and every gesture is REAL input, for constraint 40's
+# reason: an inert frame and a working one are the same picture, so no screenshot can tell a window
+# manager from a drawing of one.
+# ======================================================================================
+
+M13_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+    # PROOF 1. The clamp: a window cannot be put out of reach, by any of three real gestures.
+    "clamp ok",
+    "dragged past the bottom-right corner, the frame stops at the clamp",
+    "dragged above the top, the frame stops at y = 0",
+    "arrow-keyed off the left edge, the frame stops at MIN_VISIBLE - w",
+    "and in every clamped state a grabbable strip of caption is still over the desktop",
+    # PROOF 2. The gesture is faithful, and both ends of the keyboard step move.
+    "gesture ok",
+    "an unclamped drag moves the frame by exactly the pointer delta",
+    "a drag after a clamped one starts from where the frame IS",
+    "one arrow press is KEY_STEP px and a Shift arrow is one px",
+    # PROOF 3. The kernel RECORDS geometry and never decides it.
+    "record ok",
+    "the kernel's box is the box the clamp settled on, for every live window",
+    "the cell grid the kernel holds is what the rendered client area divides into",
+    "and the cell was measured off a rendered glyph, not assumed",
+    # PROOF 4. The ring and the chrome, which is what makes M12's accounting about the product.
+    "ring ok",
+    "the four glass strips do not overlap",
+    "and their rendered areas sum to the ABI's ring formula",
+    "the client area is inset by exactly the chrome the ABI declares",
+    "the caption buttons sit inside the caption and clear of the title",
+    # PROOF 5. The stack a reader can touch.
+    "stack ok",
+    "a real click on a buried window's sliver raises it to the top of the kernel's stack",
+    "and the window under that same point afterwards is the one that came up",
+    "no two live frames share a z-index",
+    # PROOF 6. The desktop changing size.
+    "relayout ok",
+    "a desktop that shrinks pulls every frame back inside it",
+    "and the kernel is told the box each frame settled on",
+    "a desktop that grows back returns each window to the box it asked for",
+    # PROOF 7. The floor.
+    "limits ok",
+    "a box under the minimum is floored on screen",
+    "and the kernel records the floor rather than the request",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m13.html",
+)
+
+M13_DOCUMENT = "/www/m13.html"
+
+M13_READY = ("(() => { const M = globalThis.M13 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+#: THE READY EXPRESSION IS SATISFIED BY A PENDING GESTURE as well as by a terminal state, because
+#: this page BLOCKS on its first ask: it publishes a drag and waits, so a readiness predicate that
+#: only accepted `done` would wait out its own timeout before anything had driven the page. The
+#: check then drives every ask and settles on the terminal state itself.
+READ_M13 = """(() => {
+  const M = globalThis.M13 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    live: [...document.querySelectorAll('.window')].length,
+    clamp: one(P.clamp),
+    gesture: one(P.gesture),
+    record: one(P.record),
+    ring: one(P.ring),
+    stack: one(P.stack),
+    relayout: one(P.relayout),
+    limits: one(P.limits),
+  }
+})()"""
+
+M13_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "live": int,
+    "clamp": (dict, type(None)),
+    "gesture": (dict, type(None)),
+    "record": (dict, type(None)),
+    "ring": (dict, type(None)),
+    "stack": (dict, type(None)),
+    "relayout": (dict, type(None)),
+    "limits": (dict, type(None)),
+}
+
+#: What A WORLD WITH NO CLAMP must break. `Win.apply` writes the requested box straight onto the
+#: element, so nothing holds a window inside the desktop.
+#:
+#: The three clamped states stop being clamped, the caption-still-grabbable clause goes with them,
+#: the shrink no longer pulls anything back inside, and the minimum size goes too — `clampBox` is
+#: where the MIN_W/MIN_H floor lives, which is a thing this control makes visible rather than a
+#: coincidence.
+#:
+#: WHAT MUST HOLD, and it is most of the check: every drag still moves the frame by the pointer's
+#: delta, the kernel is still told what the page did, the ring is still the ring, the stack is still
+#: reachable, and a desktop that grows back still holds each window where it was asked to be.
+_NO_CLAMP_FAILS = (
+    "clamp ok",
+    "dragged past the bottom-right corner, the frame stops at the clamp",
+    "dragged above the top, the frame stops at y = 0",
+    "arrow-keyed off the left edge, the frame stops at MIN_VISIBLE - w",
+    "and in every clamped state a grabbable strip of caption is still over the desktop",
+    "relayout ok",
+    "a desktop that shrinks pulls every frame back inside it",
+    "limits ok",
+    "a box under the minimum is floored on screen",
+    "and the kernel records the floor rather than the request",
+    "verdict is ok",
+)
+
+#: What TELLING THE KERNEL THE BOX THAT WAS ASKED FOR breaks. The frames are laid out exactly as
+#: before — this control changes one post — and what goes is the kernel's record: `/proc`, the blur
+#: governor's area and a terminal's cell count are all arithmetic over a number the page supplied,
+#: so a page that supplies the wrong one is simply believed.
+#:
+#: The cell clauses HOLD, which is the detail worth reading: cols and rows are computed from the
+#: rendered client rect, not from the box, so they stay true while the box beside them is a fiction.
+_STALE_GEOM_FAILS = (
+    "record ok",
+    "the kernel's box is the box the clamp settled on, for every live window",
+    "relayout ok",
+    "and the kernel is told the box each frame settled on",
+    "limits ok",
+    "and the kernel records the floor rather than the request",
+    "verdict is ok",
+)
+
+#: What A DESKTOP THAT RE-CLAMPS NOTHING breaks, which is the world this file was in until M13.
+#: Every gesture still clamps, so the first five proofs hold entirely; what fails is the resize,
+#: and the window that was left hanging outside the desktop with its caption out of reach.
+#:
+#: AND THE GROW-BACK CLAUSE GOES TOO, which is worth stating because the POSITIONS would pass it:
+#: a window that was never pulled in was never moved, so it is still where it was asked to be. The
+#: clause asserts the re-clamp RAN as well as that the box came back, so it fails on the mechanism
+#: rather than on a coincidence — the same reason M12's idempotence clause asserts the governor was
+#: really re-entered.
+_NO_RELAYOUT_FAILS = (
+    "relayout ok",
+    "a desktop that shrinks pulls every frame back inside it",
+    "and the kernel is told the box each frame settled on",
+    "a desktop that grows back returns each window to the box it asked for",
     "verdict is ok",
 )
 
@@ -4138,6 +4435,14 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "and nothing to govern. The GLASS could still be drawn, which is why the page "
                 "refuses before it installs the skin. UNMEASURABLE rather than FAIL, because a "
                 "FAIL would claim a desktop was accounted and degraded wrongly.",
+        ), "m13": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs and no window is framed — and a geometry harness with no frames in "
+                "it measures nothing. The page refuses before it builds a host, so it never asks "
+                "for a gesture either, which is what keeps the driver from waiting out its own "
+                "timeout. UNMEASURABLE rather than FAIL, because a FAIL would claim a window was "
+                "dragged and landed in the wrong place.",
         ), "m11": Expect(
             UNMEASURABLE,
             why="the same mechanism, and the sharpest case of it: without COOP/COEP there is no "
@@ -4859,6 +5164,82 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="the governor must stop settling over an unchanged desktop",
             failed=_STALE_COSTS_FAILS,
             held=held_rest(M12_LABELS, _STALE_COSTS_FAILS),
+        )},
+    ),
+    "no-clamp": NegativeControl(
+        name="no-clamp",
+        why="no_clamp=1: `Win.apply` writes the requested box straight onto the element, so nothing "
+            "holds a window inside the desktop (the `setGeometryControls` hook in "
+            "src/wm/window.mjs).\n"
+            "WHAT MUST BREAK: all three clamped states, the caption-still-grabbable clause that "
+            "follows from them, the shrink that pulls frames back inside — and the MINIMUM SIZE, "
+            "which is worth noticing rather than explaining away: `clampBox` is where the "
+            "MIN_W/MIN_H floor lives, so a world with no clamp also has no floor.\n"
+            "WHAT MUST HOLD, and it is most of the check: every drag still moves the frame by the "
+            "pointer's delta, the kernel is still told what the page did, the ring is still the "
+            "ring, the stack is still reachable by a click, and a desktop that grows back still "
+            "holds each window where it was asked to be.\n"
+            "WHAT IT IS ABOUT: a window a user cannot reach is a window a user has lost. The "
+            "clamp is the only thing standing between a drag and that, and it is page-side from "
+            "end to end — so no kernel assertion anywhere can see it.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_clamp", "1"),),
+        expects={"m13": Expect(
+            Outcome.FAIL,
+            why="a frame must be draggable out of reach, and the floor must go with it",
+            failed=_NO_CLAMP_FAILS,
+            held=held_rest(M13_LABELS, _NO_CLAMP_FAILS),
+        )},
+    ),
+    "stale-geom": NegativeControl(
+        name="stale-geom",
+        why="stale_geom=1: `WinHost.#report` posts the box the process ASKED FOR rather than the "
+            "one the clamp settled on (the `setHostControls` hook in src/wm/winhost.mjs).\n"
+            "WHAT MUST BREAK: the kernel's record, in all three places this check reads it — the "
+            "per-window box, the box after a re-clamp, and the floored size.\n"
+            "WHAT MUST HOLD: everything the page can see for itself. The frames are laid out "
+            "exactly as before, so the clamp clauses, the drags, the ring and the stack are "
+            "untouched — AND THE CELL GRID, which is the detail worth reading: cols and rows are "
+            "computed from the rendered client rect rather than from the box, so they stay true "
+            "while the box beside them is a fiction.\n"
+            "WHAT IT IS ABOUT: `src/kernel/wins.mjs` says 'the kernel RECORDS geometry; it never "
+            "decides it', and this one post is the only thing that makes it true. Everything "
+            "downstream — `/proc`, the blur governor's area, a terminal's `stty size` — is "
+            "arithmetic over a number the page supplied, so a page that supplies the wrong one is "
+            "believed.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("stale_geom", "1"),),
+        expects={"m13": Expect(
+            Outcome.FAIL,
+            why="the kernel must come to hold a geometry no frame ever had",
+            failed=_STALE_GEOM_FAILS,
+            held=held_rest(M13_LABELS, _STALE_GEOM_FAILS),
+        )},
+    ),
+    "no-relayout": NegativeControl(
+        name="no-relayout",
+        why="no_relayout=1: the desktop changing size re-clamps nothing (the `setHostControls` "
+            "hook). This is the world web-os was in until M13.\n"
+            "WHAT MUST BREAK: the resize proof entirely — frames stay outside the desktop that "
+            "shrank, the kernel is told nothing, and the grow-back clause goes with them because "
+            "it asserts the re-clamp RAN and not merely that the boxes match. They would match: a "
+            "window that was never pulled in was never moved.\n"
+            "WHAT MUST HOLD: the first five proofs, unchanged. Every gesture still clamps against "
+            "the desktop as it is at that moment, which is exactly why the gap was invisible.\n"
+            "WHAT IT IS ABOUT: `Win.apply` clamps against the desktop's CURRENT rect, so the "
+            "clamp was correct at every gesture and stale at every resize — and M14 needs the same "
+            "callback for something that is not a resize at all, because the taskbar takes a strip "
+            "off the bottom and the WORK AREA changes when the shell appears.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_relayout", "1"),),
+        expects={"m13": Expect(
+            Outcome.FAIL,
+            why="a desktop that shrinks must leave its frames outside it",
+            failed=_NO_RELAYOUT_FAILS,
+            held=held_rest(M13_LABELS, _NO_RELAYOUT_FAILS),
         )},
     ),
     "flat-desk": NegativeControl(
@@ -10000,15 +10381,28 @@ def check_m11(env: Env) -> None:
                     {"light": sides["light"], "want": {"ratioAtLeast": M11_CONTRAST_MIN},
                      "box": g.get("light")})
 
-    # ---- PROOF 5: minimize and maximize are drawn and inert --------------------------------
-    i = ev("inert")
-    env.expect_that("inert ok", section_ok("inert"), i)
+    # ---- PROOF 5: the caption's commands are live, and a minimize round trip returns the box ----
+    #
+    # UNTIL M14 THIS ASSERTED THE OPPOSITE, and the change is a milestone rather than a correction:
+    # the buttons were disabled because there was nothing to minimize into, no snap state to
+    # maximize to, and no state property in the window ABI. M14 added `WIN_SET_STATE`, a taskbar
+    # and a work area, so the three reasons are gone — and the clause had to move with the product,
+    # because a check that still demanded `disabled` would be demanding the feature back.
+    i = ev("caption")
+    env.expect_that("caption ok", section_ok("caption"), i)
     buttons = i.get("buttons") or []
-    env.expect_that("minimize and maximize are drawn, disabled and say so",
-                    len(buttons) == 2
-                    and all(x.get("disabled") and x.get("displayed") and x.get("ariaLabel")
-                            for x in buttons),
+    env.expect_that("minimize and maximize are live, drawn and labelled",
+                    i.get("live") is True,
                     {"buttons": buttons})
+    # THE WIRING AND THE GEOMETRY TOGETHER. `disabled === false` on its own is the live-looking
+    # button that does nothing; and a minimize that came back somewhere else would be a close with
+    # extra steps. The state is read out of the KERNEL's own report, not the page's.
+    env.expect_that("and a minimize round trip returns the window to the same box",
+                    i.get("roundTripped") is True,
+                    {"wentMs": i.get("wentMs"), "backMs": i.get("backMs"),
+                     "stateWhileMinimized": i.get("stateWhileMinimized"),
+                     "before": i.get("before"), "after": i.get("after"),
+                     "boxUnchanged": i.get("boxUnchanged")})
     # A REAL MOUSE DRAG FROM EACH OF THEM, and `btn.click()` on its own proved nothing:
     # `HTMLElement.click()` returns early for a disabled form control, so no event was dispatched
     # and "the box did not move" could not have failed however the buttons behaved. A press, some
@@ -10570,6 +10964,221 @@ def check_m6(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m6.html", env.served_matches_disk(env.document),
                     "the m6.html served does not match www/m6.html on disk")
+
+
+@check(
+    name="m13",
+    milestone="m13",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_CLAMP, Control.STALE_GEOM,
+              Control.NO_RELAYOUT),
+    labels=M13_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M13_DOCUMENT,
+    ready_expr=M13_READY,
+    ready_what="globalThis.M13 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m13.html)",
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M13 && globalThis.M13.state",
+    refusal_want="aborted",
+    note="THE GEOMETRY HARNESS, which is the only proof M7-M12 have that the numbers they trade "
+         "are about the window a reader can touch. `PLAN.md` §5 costs it at five days and says it "
+         "is new work rather than a port, and the reason is constraint 40: an inert frame and a "
+         "working one are the same picture, so every clause here is read off a RENDERED rect and "
+         "every gesture is REAL input through `Input.dispatchMouseEvent` and "
+         "`Input.dispatchKeyEvent`.\n"
+         "THE PAGE ASKS AND THIS CHECK PERFORMS. A page cannot drive its own pointer — a "
+         "synthesised `PointerEvent` is `isTrusted === false` and `setPointerCapture` refuses a "
+         "pointerId no live pointer owns (constraint 175) — so `www/m13.html` publishes the "
+         "gesture it needs at coordinates it measures off its own rects and blocks until something "
+         "performs it (`gestureAsker` in www/pagekernel.mjs, `drive_gestures` here). A human "
+         "opening the page performs the same asks by hand.\n"
+         "THE THREE EDGES OF THE CLAMP ARE THREE DIFFERENT GESTURES, and that is arithmetic rather "
+         "than variety: the right and bottom bounds sit inside the desktop so a pointer can "
+         "overshoot them, and the LEFT bound is `MIN_VISIBLE - w` — 348 px of window off the edge "
+         "for a 420 px frame, which needs a negative client coordinate. The keyboard route reaches "
+         "it with real trusted keys, which is why every gesture in src/wm/window.mjs has a "
+         "keyboard spelling.\n"
+         "WHAT THIS MILESTONE CHANGED IN THE PRODUCT: the desktop changing size re-clamped "
+         "nothing. `Win.apply` clamps against the desktop's CURRENT rect, so the clamp was correct "
+         "at every gesture and stale at every resize — frames left outside a shrunken desktop with "
+         "their captions out of reach, and a kernel still accounting the boxes they used to have. "
+         "`WinHost.relayout` and a ResizeObserver are M13's own addition, and "
+         "`--negative no-relayout` is the world without them.\n"
+         "negative controls: --negative no-clamp removes the clamp, so a frame can be dragged out "
+         "of reach and the MIN_W/MIN_H floor goes with it, since `clampBox` is where that floor "
+         "lives. --negative stale-geom reports the box that was ASKED for, so the kernel's record "
+         "becomes a geometry no frame ever had while the cell grid beside it stays true. "
+         "--negative no-relayout leaves the resize unhandled. --negative no-isolation must come "
+         "out BROKEN: no SAB, no kernel, no windows, no geometry.",
+)
+def check_m13(env: Env) -> None:
+    # EVERY GESTURE THE PAGE ASKS FOR, PERFORMED, before anything is read: the page blocks on its
+    # first ask, so a check that read the state first would read a page that had not started.
+    performed = drive_gestures(env, "M13", timeout=280.0)
+
+    got = env.read(READ_M13, M13_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m13.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m13.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed and there is no geometry to "
+            "measure." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m13.html never reached a terminal state (state=%r)" % got["state"])
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+    # THE DRIVING ITSELF IS ASSERTED. A page that finished without asking for a gesture would have
+    # measured a desktop nobody touched, and every clause below would still produce numbers - which
+    # is M12's "a function nobody ran had changed nothing" in a second place.
+    env.expect_that("the page was really driven",
+                    performed >= 8 and got["gestures"] == performed,
+                    {"performed": performed, "pageLogged": got["gestures"]})
+    # AND THE WORLD IS ASSERTED TO BE THE ONE ASKED FOR, read back out of the modules that own the
+    # switches: a control a run believed was on and was not is a green run over an unmodified world.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    env.expect_that("the controls the page reports are the ones asked for",
+                    bool(live) and live.get("noClamp") is bool(cfg.get("noClamp"))
+                    and live.get("staleGeom") is bool(cfg.get("staleGeom"))
+                    and live.get("noRelayout") is bool(cfg.get("noRelayout")),
+                    {"asked": cfg, "inForce": live})
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # ---- PROOF 1: the clamp ------------------------------------------------------------------
+    c = ev("clamp")
+    states = c.get("states") or {}
+    env.expect_that("clamp ok", section_ok("clamp"), c)
+    env.expect_that("dragged past the bottom-right corner, the frame stops at the clamp",
+                    c.get("bottomRightHeld") is True,
+                    {"state": states.get("bottomRight"), "desk": c.get("desk"),
+                     "minVisible": c.get("minVisible")})
+    env.expect_that("dragged above the top, the frame stops at y = 0",
+                    c.get("topHeld") is True, {"state": states.get("top")})
+    env.expect_that("arrow-keyed off the left edge, the frame stops at MIN_VISIBLE - w",
+                    c.get("leftHeld") is True, {"state": states.get("left")})
+    # THE CLAUSE A READER WOULD NOTICE, and the only one that is about the product rather than
+    # about an arithmetic: in every clamped state there is still a strip of caption to grab.
+    env.expect_that(
+        "and in every clamped state a grabbable strip of caption is still over the desktop",
+        c.get("stillGrabbable") is True,
+        {"overlaps": {k: (v or {}).get("overlap") for k, v in states.items()},
+         "minVisible": c.get("minVisible")})
+
+    # ---- PROOF 2: the gesture ----------------------------------------------------------------
+    g = ev("gesture")
+    env.expect_that("gesture ok", section_ok("gesture"), g)
+    env.expect_that("an unclamped drag moves the frame by exactly the pointer delta",
+                    g.get("exactHeld") is True, g.get("exact"))
+    # THE TWO-BOX DESIGN. Without it a clamped window jumps out from under the pointer on the next
+    # press, by exactly the amount the clamp had absorbed.
+    env.expect_that("a drag after a clamped one starts from where the frame IS",
+                    g.get("noJumpHeld") is True, g.get("noJump"))
+    # BOTH ENDS OF THE STEP, which is constraint 39's rule applied to a discrete input: a check
+    # that only pressed the coarse arrow would pass against a Shift that did nothing.
+    env.expect_that("one arrow press is KEY_STEP px and a Shift arrow is one px",
+                    g.get("stepHeld") is True, g.get("step"))
+
+    # ---- PROOF 3: the kernel's record --------------------------------------------------------
+    r = ev("record")
+    env.expect_that("record ok", section_ok("record"), r)
+    # THE FIXTURE IS PART OF THE CLAUSE. With every window inside the desktop, `box` and `placed`
+    # hold the same numbers — so a host reporting the REQUESTED box reports an identical number and
+    # `--negative stale-geom` came out GREEN against the one check that is about this. Measured, by
+    # running it. The page now asks one window for a box far outside the desktop and asserts the
+    # clamp really absorbed something.
+    env.expect_that("the kernel's box is the box the clamp settled on, for every live window",
+                    r.get("boxesAgree") is True,
+                    {"mismatched": r.get("boxMismatch"), "windows": r.get("windows"),
+                     "fixtureIsClamped": r.get("fixtureIsClamped")})
+    env.expect_that("the cell grid the kernel holds is what the rendered client area divides into",
+                    r.get("cellsAgree") is True,
+                    {"mismatched": r.get("cellMismatch"), "cell": r.get("cell")})
+    env.expect_that("and the cell was measured off a rendered glyph, not assumed",
+                    r.get("cellMeasured") is True, {"cell": r.get("cell")})
+
+    # ---- PROOF 4: the ring and the chrome ----------------------------------------------------
+    ring = ev("ring")
+    env.expect_that("ring ok", section_ok("ring"), ring)
+    env.expect_that("the four glass strips do not overlap", ring.get("disjoint") is True,
+                    {"overlaps": ring.get("overlaps"), "strips": ring.get("strips")})
+    # THE CLAUSE M12 RESTS ON, FROM THE OTHER SIDE: its accounting calls `blurRingArea`, and this is
+    # where that formula is compared against what the browser actually laid out.
+    env.expect_that("and their rendered areas sum to the ABI's ring formula",
+                    ring.get("sumsToFormula") is True,
+                    {"measured": ring.get("measuredRingCssPx"),
+                     "formula": ring.get("formulaRingCssPx"), "placed": ring.get("placed")})
+    env.expect_that("the client area is inset by exactly the chrome the ABI declares",
+                    ring.get("insetExact") is True,
+                    {"inset": ring.get("inset"), "chrome": ring.get("chrome")})
+    env.expect_that("the caption buttons sit inside the caption and clear of the title",
+                    ring.get("buttonsPlaced") is True, {"buttons": ring.get("buttons")})
+
+    # ---- PROOF 5: the stack a reader can touch -----------------------------------------------
+    s = ev("stack")
+    env.expect_that("stack ok", section_ok("stack"), s)
+    env.expect_that(
+        "a real click on a buried window's sliver raises it to the top of the kernel's stack",
+        s.get("cameUp") is True,
+        {"clickedAt": s.get("at"), "before": s.get("stackBefore"), "after": s.get("stackAfter"),
+         "low": s.get("low"), "high": s.get("high")})
+    env.expect_that("and the window under that same point afterwards is the one that came up",
+                    s.get("readerSeesIt") is True,
+                    {"underBefore": s.get("underBefore"), "underAfter": s.get("underAfter"),
+                     "zIndex": s.get("zIndex")})
+    env.expect_that("no two live frames share a z-index", s.get("zUnique") is True,
+                    {"zIndex": s.get("zIndex")})
+
+    # ---- PROOF 6: the desktop changing size --------------------------------------------------
+    rl = ev("relayout")
+    env.expect_that("relayout ok", section_ok("relayout"), rl)
+    env.expect_that("a desktop that shrinks pulls every frame back inside it",
+                    rl.get("pulledInside") is True,
+                    {"desk": rl.get("shrunkDesk"), "frames": rl.get("shrunk"),
+                     "relayouts": [rl.get("relayoutsBefore"), rl.get("relayoutsAfter")],
+                     "skipped": rl.get("skipped"), "waitedMs": rl.get("shrankMs")})
+    env.expect_that("and the kernel is told the box each frame settled on",
+                    rl.get("kernelToldOfIt") is True,
+                    {"frames": rl.get("shrunk"), "geoms": [rl.get("geomsBefore"),
+                                                           rl.get("geomsAfter")]})
+    env.expect_that("a desktop that grows back returns each window to the box it asked for",
+                    rl.get("cameBack") is True,
+                    {"restored": rl.get("restored"), "waitedMs": rl.get("grewMs")})
+
+    # ---- PROOF 7: the floor ------------------------------------------------------------------
+    lim = ev("limits")
+    env.expect_that("limits ok", section_ok("limits"), lim)
+    env.expect_that("a box under the minimum is floored on screen",
+                    lim.get("flooredOnScreen") is True,
+                    {"asked": lim.get("asked"), "floor": lim.get("floor"),
+                     "placed": lim.get("placed"), "rendered": lim.get("rendered")})
+    env.expect_that("and the kernel records the floor rather than the request",
+                    lim.get("kernelRecordsTheFloor") is True,
+                    {"kernel": lim.get("kernel"), "floor": lim.get("floor")})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+    # AN ARTIFACT AND NOT AN ASSERTION: nothing here is read out of the PNG, because an inert frame
+    # and a working one are the same picture. It is for a human reading a failure.
+    env.shoot("m13-geometry")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m13.html", env.served_matches_disk(env.document),
+                    "the m13.html served does not match www/m13.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

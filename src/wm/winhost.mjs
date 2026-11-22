@@ -16,7 +16,7 @@
 //   browser keydown       -> win-in with a WEV_KEY record
 //   browser drag/resize   -> win-geom with the box the clamp settled on
 
-import { Win } from "./window.mjs";
+import { Win, geometryControlsInForce } from "./window.mjs";
 // `bytesForKey` is the TERMINAL's key translation, reused for a surface rather than written
 // again: a Ctrl-C is 0x03 whatever is inside the window (constraint 161's file is where it lives).
 import { Terminal, bytesForKey } from "./terminal.mjs";
@@ -25,6 +25,7 @@ import {
   WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
   WMODAL_SYSTEM, WMODE_BLOCKING,
+  WST_NORMAL, WST_MIN, WROLE_NORMAL, WROLE_DESKTOP,
 } from "../abi.mjs";
 
 /** Cell metrics, measured once per host from a real rendered glyph rather than assumed: the cell
@@ -46,6 +47,31 @@ function measureCell(into) {
   // A zero would make every cell count Infinity. Falling back SAYS SO rather than looking measured.
   if (!(w > 0) || !(h > 0)) return { w: 8, h: 16, measured: false };
   return { w, h, measured: true };
+}
+
+/**
+ * M13's SECOND NEGATIVE CONTROL. `#report` tells the kernel the box the process ASKED FOR instead
+ * of the box the clamp settled on, so the kernel's record is a geometry no frame ever had.
+ *
+ * WHAT IT IS ABOUT: `src/kernel/wins.mjs` says "the kernel RECORDS geometry; it never decides it",
+ * and the only thing making that true is this one post. Everything downstream of it — `/proc`, the
+ * blur governor's area, a terminal's cell count — is arithmetic over a number the page supplied, so
+ * a page that supplied the wrong one would be believed. Module-level for `setGeometryControls`'s
+ * reason, and page-side for the same one: nothing here is reachable from a process.
+ */
+/**
+ * And M13's THIRD: the desktop changing size re-clamps nothing, which is the world this file was in
+ * until M13 — frames hanging outside a desktop that shrank, with their captions out of reach, and
+ * a kernel still accounting the boxes they used to have.
+ */
+let hostControls = { staleGeom: false, noRelayout: false };
+
+export function setHostControls(opts = {}) {
+  hostControls = {
+    staleGeom: opts.staleGeom === true,
+    noRelayout: opts.noRelayout === true,
+  };
+  return { ...hostControls };
 }
 
 export class WinHost {
@@ -77,7 +103,11 @@ export class WinHost {
       // clipboard publishes seen.
       drags: 0, dragAts: 0, dragDrops: 0, dragTargets: 0, copies: 0,
       // M12: how many times the governor changed the flat set, and how many frames are flat now.
-      blurs: 0, flat: 0 };
+      blurs: 0, flat: 0,
+      // M14: show-state changes rendered, roles rendered, item lists rendered, item activations
+      // reported, and faults in a watcher — a shell that throws must not take the window table
+      // down with it, and a fault nobody counted is a shell that silently stopped updating.
+      shows: 0, roles: 0, itemLists: 0, itemAsks: 0, watcherFaults: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -112,6 +142,124 @@ export class WinHost {
     /** The key counts of windows that have GONE. Summed into `keyCounts` so a check that reads the
      *  count after a session ended does not read zero for keys that were really pressed. */
     this.retired = { trusted: 0, synthetic: 0 };
+    /** How many times the desktop changed size and every frame was re-clamped, and what the last
+     *  one did. Set before the observer below, which fires once on `observe`. */
+    this.relayouts = 0;
+    this.skippedRelayouts = 0;
+    this.lastRelayout = null;
+    /**
+     * THE DESKTOP CHANGING SIZE IS A GEOMETRY EVENT, and until M13 nothing was listening.
+     *
+     * `Win.apply` clamps against the desktop's CURRENT rect, so the clamp was correct at every
+     * gesture and stale at every resize: a desktop that shrank left frames hanging outside it with
+     * their title bars out of reach, and nothing reported a box that had stopped being true. The
+     * two-box design (`src/wm/window.mjs`) is what makes the recovery free — `box` is still what
+     * the process asked for, so a desktop that grows back puts each window where the user put it.
+     *
+     * M14 needs the same callback for a reason that is not a resize at all: the taskbar takes a
+     * strip off the bottom, so the WORK AREA changes when the shell appears.
+     */
+    this.observer = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => this.relayout("resize"))
+      : null;
+    if (this.observer) this.observer.observe(this.into);
+    /**
+     * M14. HOW MUCH OF THE DESKTOP'S BOTTOM EDGE THE SHELL HAS TAKEN, in CSS px.
+     *
+     * The taskbar reserves it (`reserve`), and the WORK AREA is what is left. A maximized window
+     * fills the work area and not the desktop, because a window covering the taskbar is a window a
+     * user cannot get out from under — and the desktop window itself is laid out in it, because an
+     * icon under the taskbar is an icon nobody can click.
+     */
+    this.reserved = 0;
+    /** Whoever wants to know when the window table changed: the shell, so a taskbar button appears
+     *  the moment a window does. ONE list of callbacks and no DOM events — a CustomEvent would put
+     *  the shell's wiring in the document, where two hosts over one desktop would both answer. */
+    this.watchers = [];
+  }
+
+  /**
+   * Reserve a strip off the bottom of the desktop for the shell, and re-lay-out every frame.
+   *
+   * IT RE-CLAMPS, which is the half that is easy to leave out: a maximized window laid out before
+   * the taskbar appeared is a maximized window covering it. `relayout` is M13's own addition and
+   * this is the second caller it was written for.
+   */
+  reserve(px) {
+    const want = Math.max(0, px | 0);
+    if (want === this.reserved) return this.reserved;
+    this.reserved = want;
+    this.relayout("reserve");
+    return this.reserved;
+  }
+
+  /** The work area, in desktop coordinates: everything the shell has not taken. */
+  workArea() {
+    const r = this.into.getBoundingClientRect();
+    return {
+      x: 0,
+      y: 0,
+      w: Math.round(r.width),
+      h: Math.max(1, Math.round(r.height) - this.reserved),
+    };
+  }
+
+  /** Subscribe to "the window table changed". Returns the watcher, so a caller can keep it. */
+  watch(fn) {
+    if (typeof fn === "function") this.watchers.push(fn);
+    return fn;
+  }
+
+  /** Tell the watchers, naming what happened. A THROW IN ONE WATCHER MUST NOT STOP THE OTHERS or
+   *  the rest of this message's handling — the shell is a renderer and the window table is the
+   *  product. */
+  #changed(why) {
+    for (const fn of this.watchers) {
+      try {
+        fn(why, this);
+      } catch (error) {
+        this.stats.watcherFaults += 1;
+        this.lastWatcherFault = `${why}: ${error && error.message}`;
+      }
+    }
+  }
+
+  /**
+   * Re-clamp every frame against the desktop as it is NOW, and tell the kernel what each settled
+   * on. Returns how many frames moved.
+   *
+   * IT REPORTS, which is the half that is easy to leave out: a re-clamp the kernel is not told
+   * about leaves `/proc` and the blur governor accounting a box nobody renders — the ~17× under-read
+   * constraint 49 exists to forbid, arrived at from the other direction.
+   */
+  relayout(why = "") {
+    // COUNTED, NOT SILENT: "the re-clamp was skipped" and "there was nothing to re-clamp" are
+    // different facts, and a control that cannot be seen to have taken effect is a control nobody
+    // can tell from a green run over an unmodified world.
+    if (hostControls.noRelayout) {
+      this.skippedRelayouts += 1;
+      return 0;
+    }
+    this.relayouts += 1;
+    let moved = 0;
+    for (const entry of this.frames.values()) {
+      const before = { ...entry.win.placed };
+      entry.win.apply();
+      const after = entry.win.placed;
+      if (before.x !== after.x || before.y !== after.y
+        || before.w !== after.w || before.h !== after.h) moved += 1;
+      this.#report(entry);
+    }
+    this.lastRelayout = { why: String(why), moved, frames: this.frames.size };
+    return moved;
+  }
+
+  /** Stop watching the desktop. A page that boots a second kernel builds a second host over the
+   *  same element, and an observer nobody disconnected keeps re-clamping frames for a kernel that
+   *  is gone. */
+  dispose() {
+    if (this.observer) this.observer.disconnect();
+    this.observer = null;
   }
 
   /** Every kernel message this host owns. Returns true if it handled it, so a page can keep its
@@ -126,6 +274,10 @@ export class WinHost {
     if (m.t === "win-surface") { this.#surface(m); return true; }
     if (m.t === "win-draw") { this.#draw(m); return true; }
     if (m.t === "win-blur") { this.#blur(m); return true; }
+    // M14. The three the shell renders: a show state, a role, and a window's published rows.
+    if (m.t === "win-show") { this.#show(m); return true; }
+    if (m.t === "win-role") { this.#role(m); return true; }
+    if (m.t === "win-items") { this.#items(m); return true; }
     if (m.t === "win-stack") { this.#stack(m); return true; }
     if (m.t === "win-blocked") { this.#blocked(m); return true; }
     if (m.t === "win-modal") { this.#modal(m); return true; }
@@ -166,6 +318,14 @@ export class WinHost {
       title: m.title || `window ${id}`,
       into: this.into,
       x: m.x, y: m.y, w: m.w, h: m.h,
+      /* M14. THE CAPTION BUTTONS AND THE SNAP GESTURE ASK, and this is the one route: the kernel
+       * owns the show state, so a frame that minimized itself would be a second authority on what
+       * is on screen. `win-show` comes back and `Win.setState` renders it. */
+      onState: (state) => this.askState(id, state),
+      /* AND THE WORK AREA IS A CALLBACK, not a value: the shell may take a strip off the desktop
+       * at any moment, and a frame laid out against a stale work area is a maximized window
+       * covering the taskbar. */
+      workArea: () => this.workArea(),
       /* THE X BUTTON ASKS AND DOES NOT ACT, which is M9 and constraint 44: "a close MUST be a
        * request the owner can refuse... without a close-request event, unsaved work is discarded
        * silently". It posts WEV_CLOSE and NOTHING ELSE — no `win-gone` — so the frame stays until
@@ -196,6 +356,12 @@ export class WinHost {
     // Exactly one of the two is set; see `#surface`.
     const entry = {
       id, win, term, surface: null, pid: m.pid | 0, owner: m.owner | 0, health: [],
+      // M14. What the shell needs about this window, as the KERNEL last said it: its show state,
+      // its role, the rows it published, and the program behind it — which is what a Superbar
+      // groups buttons by. `prog` comes from the kernel's own `win-create`, because the page has
+      // no way to learn what a pid is running.
+      state: WST_NORMAL, role: WROLE_NORMAL, items: [],
+      prog: String(m.prog || ""),
     };
     this.frames.set(id, entry);
     /* NOT FLAT UNTIL THE KERNEL SAYS SO, and the flag is WRITTEN rather than left absent: "this
@@ -229,6 +395,9 @@ export class WinHost {
     // Focus is an EVENT and not a query, because the process that wants it is asleep in `poll`.
     term.el.addEventListener("focus", () => this.#focus(id, 1));
     term.el.addEventListener("blur", () => this.#focus(id, 0));
+    // M14. The shell learns of the window here, and of its title and death below: a taskbar button
+    // that appeared a message late would be a button for a window that is already gone.
+    this.#changed("create");
     return entry;
   }
 
@@ -410,12 +579,14 @@ export class WinHost {
       this.destroyed.push(id);
       this.stats.destroys += 1;
     }
+    this.#changed("destroy");
   }
 
   #title(m) {
     const entry = this.get(m.win | 0);
     if (!entry) { this.stats.unknown += 1; return; }
     entry.win.setTitle(m.title || "");
+    this.#changed("title");
   }
 
   #box(m) {
@@ -438,7 +609,9 @@ export class WinHost {
   /** Tell the kernel the box and the CELL COUNT the frame settled on. The cell count is the page's
    *  to compute — it is the side with the font — and it is what a terminal needs for TIOCSWINSZ. */
   #report(entry) {
-    const placed = entry.win.placed;
+    // THE BOX THE CLAMP SETTLED ON, which is the whole contract. `staleGeom` reports the REQUESTED
+    // one instead, so the kernel believes a geometry no frame ever had (see `setHostControls`).
+    const placed = hostControls.staleGeom ? entry.win.box : entry.win.placed;
     const body = entry.win.bodyEl.getBoundingClientRect();
     this.stats.geoms += 1;
     this.post({
@@ -473,6 +646,7 @@ export class WinHost {
     // has to reach the frame's own chrome, which is drag and arrow-key moves, and those are
     // page-side from end to end (constraint 233).
     this.blockedSet = new Set((Array.isArray(m.blocked) ? m.blocked : []).map((id) => id | 0));
+    this.#changed("stack");
     ids.forEach((id, at) => {
       const entry = this.get(id);
       if (!entry) return;
@@ -524,6 +698,74 @@ export class WinHost {
       entry.win.el.classList.toggle("is-flat", on);
       entry.win.el.dataset.flat = on ? "1" : "0";
     }
+  }
+
+  /* ---- M14: the three things a shell renders ------------------------------------------------- */
+
+  /**
+   * The kernel changed a window's SHOW STATE. The frame follows, and the box it settled on is
+   * reported back.
+   *
+   * THE REPORT IS THE HALF THAT MATTERS BEYOND THE PIXELS: a maximize is an area-changing event,
+   * and constraint 49's admission controller sees it exactly because the page says what geometry
+   * it settled on — the same route a drag takes. A minimized frame is NOT reported, because its
+   * client area is 0x0 while hidden and a cell grid of zero would be a lie about a terminal that
+   * is still perfectly alive; the kernel already knows the state, and `blurCost` charges it
+   * nothing.
+   */
+  #show(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    this.stats.shows += 1;
+    entry.state = m.state | 0;
+    entry.win.setState(m.state | 0, m.restore || null);
+    if (entry.state !== WST_MIN) this.#report(entry);
+    this.#changed("show");
+  }
+
+  /** The kernel changed a window's ROLE. A desktop window loses its frame and takes the work
+   *  area; what goes INSIDE it is the shell's business, which is why this only renders the frame
+   *  and then tells the watchers. */
+  #role(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    this.stats.roles += 1;
+    entry.role = m.role | 0;
+    entry.win.setRole(m.role | 0);
+    this.#report(entry);
+    this.#changed("role");
+  }
+
+  /** A window published its rows. STORED AND NOT DRAWN HERE: this file owns frames, and where a
+   *  row appears — the desktop, the start menu, a jump list — is the shell's reading of the flags
+   *  on it. */
+  #items(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    this.stats.itemLists += 1;
+    entry.items = (Array.isArray(m.items) ? m.items : []).map((row) => ({
+      icon: row.icon | 0, flags: row.flags | 0, label: String(row.label || ""),
+    }));
+    this.#changed("items");
+  }
+
+  /**
+   * The shell says one of a window's rows was activated. Reported, never acted on.
+   *
+   * `where` is the `WITEM_*` bit saying which rendering it came from, because a row on the desktop
+   * and the same row in a jump list are the same row and a program may care which was clicked.
+   * The kernel validates the index against the list it holds — a page cannot name a row nothing
+   * published.
+   */
+  activateItem(win, index, where) {
+    this.stats.itemAsks += 1;
+    this.post({ t: "win-item-ask", win: win | 0, index: index | 0, where: where | 0 });
+  }
+
+  /** Ask the kernel for a show state. The one route a shell has, and the same shape as
+   *  `win-raise`: the page says what the user did and the kernel decides. */
+  askState(win, state) {
+    this.post({ t: "win-show-ask", win: win | 0, state: state | 0 });
   }
 
   /** A raise the kernel refused, with the window that refused it. FLASHED AND NOT SWALLOWED: a
@@ -702,6 +944,26 @@ export class WinHost {
       zIndex: Object.fromEntries([...this.frames].map(
         ([id, e]) => [id, Number(e.win.el.style.zIndex || 0)])),
       cell: this.cell,
+      // M14. What the shell is working from: the reserved strip, the work area it leaves, and the
+      // show state, role, program and row count of every live frame — the kernel's facts as this
+      // file is rendering them, which is the second reading `frameBlocked` exists for.
+      reserved: this.reserved,
+      workArea: this.workArea(),
+      shell: Object.fromEntries([...this.frames].map(([id, e]) => [id, {
+        state: e.state, role: e.role, prog: e.prog, items: e.items.length,
+        hidden: e.win.el.hidden === true,
+        frameState: Number(e.win.el.dataset.state || 0),
+        armed: Number(e.win.el.dataset.armed || 0),
+      }])),
+      lastWatcherFault: this.lastWatcherFault || null,
+      // M13. The desktop-resize re-clamp: how many times it ran, and what the last one moved.
+      relayouts: this.relayouts,
+      skippedRelayouts: this.skippedRelayouts,
+      lastRelayout: this.lastRelayout || null,
+      // The CONTROLS in force, read back out of the module that owns them rather than from the
+      // page's own query parsing: a control a check believed was on and was not is a green run
+      // over an unmodified world.
+      controls: { ...hostControls, ...geometryControlsInForce() },
       // M10. The drag as the kernel announced it, the target as this file RENDERED it, and the
       // end it reported. Two readings of the target on purpose, for `frameBlocked`'s reason: the
       // second is what a reader actually sees.
