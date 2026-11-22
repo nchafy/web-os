@@ -1,0 +1,344 @@
+// `desktop`: the process behind the desktop and the start menu.
+//
+// The contract this program is written against is in src/bin/true.mjs.
+//
+// THIS IS M14's HEADLINE AS A PROGRAM YOU CAN RUN, and the thing it demonstrates is that the shell
+// is DATA from a process rather than a page's hard-coded list. It opens one window, takes the
+// `WROLE_DESKTOP` role, reads the filesystem, and publishes what it found as rows: the files in
+// `/desktop` flagged for the desktop, the programs in `/usr/bin` flagged for the start menu. The
+// page draws those rows as icons and menu entries, and when one is activated the kernel queues a
+// `WEV_ITEM` on this window's own fd — so this program decides what opening something means.
+//
+// WHY THAT DIVISION. A desktop icon needs a label, a picture, a double-click, a selection, a
+// rubber band and a context menu. A display list has no text op and no image op, and a
+// `WEV_POINTER` only arrives while a button is down (`src/abi.mjs`, `src/wm/winhost.mjs`) — so a
+// process cannot DRAW a desktop, and the page cannot read a filesystem. The row is the seam:
+// `docs/DECISIONS.md` D39.
+//
+// WHAT IT DOES NOT DO, stated here rather than discovered: it does not watch the filesystem. There
+// is no inotify in this ABI, so the desktop is re-read when a reader asks for it — the `Refresh`
+// row in the start menu — and not when something changes underneath.
+
+import {
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
+  WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_STATE, WEV_ITEM,
+  WROLE_DESKTOP, WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_CONTAINER, WITEM_SEPARATOR,
+  WICON_COMPUTER, WICON_FOLDER, WICON_TERMINAL,
+  DT_DIR,
+} from "/src/abi.mjs";
+
+const NAME = "desktop";
+
+/** Where a reader's own files live. Created if it is missing, which is the one write this program
+ *  makes to the volume — and it is a mkdir rather than a seed: a desktop that invented files would
+ *  be a desktop that disagreed with the filesystem. */
+const DESK_DIR = "/desktop";
+
+/** Where the programs are. The start menu is a listing of this directory, so a program added to
+ *  `src/kernel/providerfs.mjs`'s manifest appears in the menu with no change here. */
+const BIN_DIR = "/usr/bin";
+
+/** `sh` ALONE IS NOT RUNNABLE FROM A MENU. It needs a terminal — a pty, a window and a relay — and
+ *  `term` is the program that provides all three, so a menu row for the shell starts that instead.
+ *  Recorded here rather than silently substituted somewhere a reader cannot see it. */
+const NEEDS_TERMINAL = new Set(["sh"]);
+
+/** Programs the menu does not list. ONE ENTRY AND A REASON: a second `desktop` is refused by the
+ *  kernel with -EBUSY (there is one desktop, and `WinMgr.setRole` enforces it), so a row for it
+ *  would be a row that always fails. Everything else in `/usr/bin` is listed, including the ones
+ *  that do their work without a window — a menu that hid programs a reader can run would be a
+ *  menu that disagreed with the filesystem. */
+const HIDDEN_FROM_MENU = new Set([NAME]);
+
+/** How long one `poll` waits before the loop looks at its own clock. */
+const POLL_MS = 250;
+
+/** A desktop is meant to outlive everything else on screen, so its ceiling is an hour rather than
+ *  the minute a demonstration program takes. `-c` overrides it. */
+const CEILING_MS = 3600000;
+
+/** Programs that open a FILE when they are given one. Everything else is launched bare. */
+const OPENS_FILES = Object.freeze({
+  png: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  rgba: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  txt: { prog: "editor", argv: (path) => ["editor", path] },
+  md: { prog: "editor", argv: (path) => ["editor", path] },
+});
+
+function extOf(path) {
+  const name = String(path).split("/").pop() || "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+function unInterrupted(call) {
+  const first = call();
+  if (first !== -EINTR) return first;
+  return call();
+}
+
+export function run(env) {
+  const argv = (env.argv || []).map(String);
+  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "c:");
+  if (bad) return env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE);
+  const ceiling = flags.c === undefined ? CEILING_MS : env.std.wholeNumber(flags.c);
+  if (ceiling === null || ceiling <= 0) {
+    return env.std.complain(env, NAME, `-c ${flags.c}`, "wants a positive number of ms",
+      env.std.EXIT_USAGE);
+  }
+  const t0 = performance.now();
+  const account = {
+    program: NAME, win: 0, fd: 0, role: 0, items: 0, publishes: 0,
+    activations: 0, launched: [], refusals: [], states: [], why: "",
+    deskDir: DESK_DIR, madeDeskDir: false,
+  };
+
+  /* THE WINDOW FIRST, THEN THE ROLE. `win_create` carries no role — it has no spare register and
+   * `win_set` is where a field of a window changes — so there is one frame's worth of time in
+   * which this is an ordinary window. The alternative is a seventh argument to `win_create` for a
+   * case that happens once per session. */
+  const made = env.win.create({ title: "Desktop", w: 800, h: 600, x: 0, y: 0 });
+  if (typeof made === "number") {
+    return { exit: 2, ...account, why: `win_create: ${env.std.errnoName(made)}`, errno: -made };
+  }
+  account.win = made.win;
+  account.fd = made.fd;
+  const role = env.win.setRole(made.fd, WROLE_DESKTOP);
+  if (role < 0) {
+    env.win.destroy(made.fd);
+    return { exit: 3, ...account, why: `win_set ROLE: ${env.std.errnoName(role)}`, errno: -role };
+  }
+  account.role = WROLE_DESKTOP;
+
+  /** The rows, and what each one MEANS — which is this program's own array and is never sent
+   *  anywhere: `WEV_ITEM` reports an INDEX into it, so the shell never learns a path. */
+  let rows = [];
+
+  /** Make `/desktop` if it is not there. A DIRECTORY AND NOTHING IN IT: a program that wrote
+   *  example files would be a program that invented a reader's documents. */
+  const ensureDeskDir = () => {
+    const st = env.fs.stat(DESK_DIR);
+    if (typeof st !== "number") return 0;
+    const r = env.fs.mkdir(DESK_DIR, 0o755);
+    if (r < 0) {
+      account.refusals.push(`mkdir ${DESK_DIR}: ${env.std.errnoName(r)}`);
+      return r;
+    }
+    account.madeDeskDir = true;
+    return 0;
+  };
+
+  /**
+   * Read the filesystem and publish. Returns how many rows went out, or a negative errno.
+   *
+   * THE ORDER IS THE ORDER A READER SEES: the fixed rows first, then `/desktop`'s contents, then
+   * the programs. Every row carries its own `WITEM_*` flags, which is what lets ONE list be a
+   * desktop, a start menu and a jump list at once (`src/abi.mjs`).
+   */
+  const publish = () => {
+    rows = [];
+    /* THE SHORTCUTS, which are this program's own idea rather than files — Windows 7's fresh
+     * desktop has the same kind: Computer, a user's folder, the Recycle Bin. EVERY ONE OF THEM
+     * DOES SOMETHING, which is the rule the caption buttons follow too: a row that opened nothing
+     * would be the live-looking-button defect with a label on it. They are what makes a desktop
+     * usable before a reader has put anything in `/desktop`.
+     *
+     * THERE IS NO RECYCLE BIN, and that is why: nothing in this system has a trash. A row for it
+     * would be a drawing of a feature. */
+    rows.push({
+      icon: WICON_COMPUTER,
+      flags: WITEM_DESKTOP | WITEM_MENU,
+      label: "Computer",
+      run: () => ["files", "/"],
+    });
+    rows.push({
+      icon: WICON_FOLDER,
+      flags: WITEM_DESKTOP | WITEM_CONTAINER,
+      label: "Programs",
+      run: () => ["files", BIN_DIR],
+    });
+    rows.push({
+      icon: WICON_FOLDER,
+      flags: WITEM_DESKTOP | WITEM_CONTAINER,
+      label: "Shared files",
+      run: () => ["files", "/usr/share"],
+    });
+    rows.push({
+      icon: WICON_TERMINAL,
+      flags: WITEM_DESKTOP | WITEM_MENU,
+      label: "Terminal",
+      run: () => ["term", "--ceiling", String(ceiling)],
+    });
+
+    ensureDeskDir();
+    const desk = env.std.listDir(env, DESK_DIR);
+    if (typeof desk === "number") {
+      account.refusals.push(`${DESK_DIR}: ${env.std.errnoName(desk)}`);
+    } else {
+      for (const entry of desk) {
+        if (entry.name === "." || entry.name === "..") continue;
+        const path = `${DESK_DIR}/${entry.name}`;
+        const isDir = entry.type === DT_DIR;
+        const open = OPENS_FILES[extOf(entry.name)];
+        rows.push({
+          icon: env.std.iconForPath(path, { isDir }),
+          flags: WITEM_DESKTOP | (isDir ? WITEM_CONTAINER : 0),
+          label: entry.name,
+          /* A DIRECTORY OPENS IN THE FILE MANAGER, a known file in the program that can show it,
+           * and ANYTHING ELSE OPENS ITS FOLDER — which is honest: nothing here can display an
+           * arbitrary file, and `files` at least shows it beside its siblings and lets it be
+           * dragged to something that can. */
+          run: () => {
+            if (isDir) return ["files", path];
+            if (open) return open.argv(path);
+            return ["files", DESK_DIR];
+          },
+        });
+      }
+    }
+
+    const bin = env.std.listDir(env, BIN_DIR);
+    if (typeof bin === "number") {
+      account.refusals.push(`${BIN_DIR}: ${env.std.errnoName(bin)}`);
+    } else {
+      const names = bin
+        .filter((e) => e.name !== "." && e.name !== "..")
+        .map((e) => e.name)
+        .sort();
+      for (const name of names) {
+        if (HIDDEN_FROM_MENU.has(name)) continue;
+        const launch = NEEDS_TERMINAL.has(name) ? "term" : name;
+        rows.push({
+          icon: env.std.iconForPath(`${BIN_DIR}/${name}`, { isProgram: true }),
+          flags: WITEM_MENU,
+          label: NEEDS_TERMINAL.has(name) ? `${name} (in a terminal)` : name,
+          run: () => (launch === "term"
+            ? ["term", "--ceiling", String(ceiling)]
+            : [launch]),
+        });
+      }
+    }
+
+    /* AND THE START MENU'S OWN TWO. A separator, because a Windows 7 menu groups with lines rather
+     * than gaps, and Refresh — which is the answer to "this ABI has no inotify": the desktop is
+     * re-read when a reader asks. */
+    rows.push({ icon: 0, flags: WITEM_MENU | WITEM_SEPARATOR, label: "", run: null });
+    rows.push({
+      icon: WICON_FOLDER,
+      flags: WITEM_MENU | WITEM_JUMP,
+      label: "Refresh the desktop",
+      run: null,
+      refresh: true,
+    });
+    /* A JUMP LIST FOR THIS WINDOW, so the taskbar has something to show for the desktop — and so
+     * one list really does serve three renderings. `term` is the row a reader wants from a
+     * right-click on the desktop's own button. */
+    rows.push({
+      icon: WICON_TERMINAL,
+      flags: WITEM_JUMP,
+      label: "Open a terminal",
+      run: () => ["term", "--ceiling", String(ceiling)],
+    });
+
+    const sent = env.win.items(made.fd, rows.map((row) => ({
+      icon: row.icon, flags: row.flags, label: row.label,
+    })));
+    if (sent < 0) {
+      account.refusals.push(`win_items: ${env.std.errnoName(sent)}`);
+      return sent;
+    }
+    account.publishes += 1;
+    account.items = sent;
+    return sent;
+  };
+
+  /** Run one row. `spawn` AND NOT A SHELL: the path is this program's, the argv is this program's,
+   *  and there is no string for a shell to re-parse. */
+  const launch = (row) => {
+    if (row.refresh) {
+      publish();
+      return "refresh";
+    }
+    if (typeof row.run !== "function") return "inert";
+    const argvOf = row.run();
+    const path = `${BIN_DIR}/${argvOf[0]}`;
+    const pid = env.proc.spawn(path, argvOf);
+    if (pid < 0) {
+      account.refusals.push(`spawn ${path}: ${env.std.errnoName(pid)}`);
+      return `refused ${env.std.errnoName(pid)}`;
+    }
+    account.launched.push({ pid, argv: argvOf });
+    env.std.say(env, `${NAME}: ${argvOf.join(" ")} -> pid ${pid}\n`);
+    return `pid ${pid}`;
+  };
+
+  publish();
+  env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, ${account.items} rows published\n`);
+  env.std.say(env, "double-click an icon, or use the start menu. Ctrl-C here ends the session.\n");
+
+  for (;;) {
+    if (performance.now() - t0 > ceiling) {
+      account.why = `ceiling ${ceiling} ms reached`;
+      break;
+    }
+    const r = unInterrupted(() => env.tty.poll([{ fd: made.fd, events: POLLIN }], POLL_MS));
+    if (typeof r === "number") {
+      if (r === -EINTR) { account.why = "interrupted"; break; }
+      account.why = `poll: ${env.std.errnoName(r)}`;
+      break;
+    }
+    const rev = r.fds[0].revents;
+    if (rev & (POLLHUP | POLLERR | POLLNVAL)) {
+      account.why = "the window hung up";
+      break;
+    }
+    if (!(rev & POLLIN)) continue;
+    const evs = env.win.read(made.fd, 64);
+    if (typeof evs === "number") {
+      if (evs === -EHOSTGONE) { account.why = "the window was destroyed"; break; }
+      if (evs !== -EINTR) { account.why = `read: ${env.std.errnoName(evs)}`; break; }
+      continue;
+    }
+    let done = false;
+    for (const ev of evs) {
+      if (ev.type === WEV_RESIZE || ev.type === WEV_FOCUS || ev.type === WEV_POINTER) continue;
+      if (ev.type === WEV_STATE) {
+        // THE DESKTOP HAS NO SHOW STATE — the kernel refuses one (`WinMgr.setState`) — so an event
+        // here would mean the two sides disagree. Recorded rather than ignored.
+        account.states.push({ a: ev.a, b: ev.b });
+        continue;
+      }
+      if (ev.type === WEV_ITEM) {
+        account.activations += 1;
+        const row = rows[ev.a];
+        if (!row) {
+          account.refusals.push(`item ${ev.a} is not a row this process published`);
+          continue;
+        }
+        env.std.say(env, `${NAME}: ${row.label} (row ${ev.a}) -> ${launch(row)}\n`);
+        continue;
+      }
+      if (ev.type === WEV_KEY) continue;
+      if (ev.type === WEV_CLOSE) {
+        /* A DESKTOP DOES NOT CLOSE ON A CLOSE REQUEST, and it has no X to send one — the frame has
+         * no caption. If one arrives it is counted and refused, which is a program exercising the
+         * close CONTRACT: the request is the page's and the answer is the program's
+         * (constraint 44). */
+        account.refusals.push("a close request: a desktop has nothing to close to");
+        continue;
+      }
+      if (ev.type === WEV_DESTROYED) {
+        account.why = `win ${ev.a} was destroyed`;
+        done = true;
+        break;
+      }
+    }
+    if (done) break;
+  }
+
+  env.win.items(made.fd, []);
+  env.win.destroy(made.fd);
+  env.std.say(env, `${NAME}: ${account.why}. ${account.activations} activations, `
+    + `${account.launched.length} launched\n`);
+  return { exit: 0, ...account };
+}

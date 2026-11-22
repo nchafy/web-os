@@ -903,6 +903,44 @@ under what is not done, because the honest version of this decision names what i
 
 *Evidence: measured. Constraints 36, 267; `PLAN.md` §5.*
 
+## D39 — the shell is page-side chrome, and its contents are a process's published rows
+
+**Decided:** the taskbar, the start menu, a jump list and the desktop's icons are rendered by the
+PAGE, and what they SHOW comes from a process through `win_items`. **Rejected:** a taskbar process
+holding a second, separately gated management endpoint, which is what
+`docs/research/09-hobbyist-os-actions.md` §4 recommends and what SerenityOS does.
+
+**Why the endpoint is not needed here, which is a conclusion and not a shortcut.** A taskbar needs
+cross-process window enumeration no ordinary client may have — that is the research's point, and it
+stands. But in this architecture the page ALREADY holds every window's frame: `win-create` built
+it, `win-stack` ordered it, `win-title` named it. A taskbar rendered by the page reads facts the
+page was already told, so it adds no capability to anything and there is nothing to gate. A taskbar
+as a PROCESS would need the endpoint, and if one is ever written that is the design to follow.
+
+**And a process could not draw one.** The display list has `DL_CLEAR`, `DL_FILL_RECT`,
+`DL_STROKE_RECT` and `DL_LINE` — no text op and no image op — and `WEV_POINTER` is only delivered
+while a button is down (`src/wm/winhost.mjs`, constraint 223's arithmetic). So a process-drawn
+Superbar could have no labels and no hover, which are two of the three things a Superbar is, and a
+rubber band is not expressible as a stream of filled rectangles. Giving the display list text and
+images, and hover events a queue could survive, is a larger milestone than M14 and would be the
+real prerequisite.
+
+**What keeps the division honest.** A shell that invented its own contents would be a page
+pretending to be an operating system, and it would look identical. So the contents are a process's:
+`src/bin/desktop.mjs` reads `/usr/bin` and `/desktop` through the filesystem and publishes rows,
+each flagged for where it appears, and activation returns as `WEV_ITEM` with an INDEX the kernel
+validates against the list it holds. **`--negative no-items` is the run that tells the two apart**:
+the kernel accepts a published list and discards it, and thirteen expectations go red — the
+desktop's icons, the start menu's programs, every mouse action on an icon, and the jump list.
+
+**What this gives up:** a third-party taskbar. Nothing outside the page can enumerate windows, so a
+replacement shell is a change to `src/wm/` rather than a program somebody writes. For a system whose
+window manager is already page-side (`src/wm/window.mjs` since M4a) that is the existing boundary
+rather than a new one, but it is the cost and it is not small.
+
+*Evidence: judgement, forced by two measurements. Constraints 223, 275; `MILESTONES.md` M14;
+`docs/research/09-hobbyist-os-actions.md` §4.*
+
 ## Corrections on the record
 
 Two errors were made during planning and caught by critics. They are kept here because the record

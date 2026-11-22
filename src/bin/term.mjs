@@ -20,7 +20,8 @@
 import {
   MAX_INLINE, O_RDONLY, POLLIN, POLLHUP, POLLERR, POLLNVAL,
   SIGHUP, EINTR, EHOSTGONE, SPAWN_DUP2, SPAWN_CLOSE,
-  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED, keyBytesOf,
+  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED, WEV_ITEM, keyBytesOf,
+  WITEM_JUMP, WICON_TERMINAL,
 } from "/src/abi.mjs";
 
 const SHELL = "/usr/bin/sh";
@@ -103,6 +104,8 @@ export function run(env) {
     win: 0, keyBytes: 0, cellBytes: 0, events: 0, resizes: 0, closes: 0,
     polls: 0, wakes: 0, interrupted: 0,
     shellPid: 0, shellStatus: null, why: "",
+    // M14: jump-list rows acted on, and the terminals opened from one.
+    items: 0, spawned: [],
   };
 
   const zero = ensureStdin(env);
@@ -116,6 +119,21 @@ export function run(env) {
   }
   const con = made.fd;
   account.win = made.win;
+
+  /**
+   * M14. A JUMP LIST: "New terminal", which is Windows 7's own first row for most programs and is
+   * a thing this one can really do — it is the program that owns a window, a pty and a shell, so
+   * another terminal is another one of itself.
+   *
+   * IT IS PUBLISHED BEFORE THE PTY EXISTS, so a refusal is reported next to the window's own and
+   * not after a shell has been started. A failure here is not fatal: a terminal with no jump list
+   * is a terminal.
+   */
+  const JUMP_NEW = 0;
+  const jumped = env.win.items(made.fd, [
+    { icon: WICON_TERMINAL, flags: WITEM_JUMP, label: "New terminal" },
+  ]);
+  if (jumped < 0) account.why = `win_items: ${env.std.errnoName(jumped)}`;
 
   const pty = env.tty.ptyOpen();
   if (typeof pty === "number") {
@@ -233,6 +251,21 @@ export function run(env) {
             // real, and until then a relay that pretended to refuse would be lying to the user.
             account.closes += 1;
             why = "the window asked to close";
+          } else if (ev.type === WEV_ITEM) {
+            /* A JUMP-LIST ROW. The index is into the list THIS process published, which the kernel
+             * validated against that list — so the only row that exists is row 0, and anything
+             * else is a page naming something that was never published. `spawn` and not a shell
+             * command: the path and the argv are this program's own, and there is no string for
+             * anything to re-parse. */
+            account.items += 1;
+            if (ev.a === JUMP_NEW) {
+              const pid = env.proc.spawn("/usr/bin/term", ["term", "--ceiling", String(ceiling)]);
+              if (pid < 0) {
+                account.why = `spawn term: ${env.std.errnoName(pid)}`;
+              } else {
+                account.spawned.push(pid);
+              }
+            }
           } else if (ev.type === WEV_DESTROYED) {
             why = "the window was destroyed";
           }

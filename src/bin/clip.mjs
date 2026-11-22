@@ -19,7 +19,7 @@
 
 import {
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_WHERE_CLIPBOARD,
-  O_RDONLY, fmtsOf, fmtName,
+  fmtsOf, fmtName,
 } from "/src/abi.mjs";
 
 const NAME = "clip";
@@ -46,17 +46,6 @@ export function run(env) {
   if (verb === "list") return list(env);
   env.std.warn(env, USAGE);
   return { exit: env.std.EXIT_USAGE, program: NAME, why: "no verb" };
-}
-
-/** Read a whole file, or a negative errno. `slurp` is the library's loop; this adds the open. */
-function readFile(env, path) {
-  const fd = env.fs.open(path, O_RDONLY);
-  if (fd < 0) return fd;
-  try {
-    return env.std.slurp(env, fd);
-  } finally {
-    env.fs.close(fd);
-  }
 }
 
 function copy(env, files) {
@@ -126,7 +115,9 @@ function copy(env, files) {
       written.push(DOBJ_PATHS);
     }
     if (own && granted.includes(own)) {
-      const body = readFile(env, files[0]);
+      // `env.std.readFileBytes` SINCE M14: this program had its own copy of the open-slurp-close
+      // loop, and `imgview -f` needed the same three lines. One definition, in the library.
+      const body = env.std.readFileBytes(env, files[0]);
       if (typeof body === "number") {
         return { exit: env.std.complainErrno(env, NAME, files[0], body), program: NAME };
       }

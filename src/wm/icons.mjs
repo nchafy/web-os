@@ -25,6 +25,60 @@ import {
   WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH, WICON_LIMIT,
 } from "../abi.mjs";
 
+/* THE PROGRAM TABLE IS BELOW THE IMPORTS AND ABOVE THE DRAWINGS, because it is the one thing in
+ * this file that is about PROGRAMS rather than about pixels. */
+
+/**
+ * WHICH ICON A PROGRAM GETS, and the basename it is keyed by.
+ *
+ * IT LIVES HERE AND NOT IN THE TASKBAR because two places need it: a taskbar button and a window's
+ * CAPTION, which is Windows 7's own arrangement — the frame shows the program's icon at the left
+ * of its caption and the bar shows the same icon. A second copy is how the two come to disagree
+ * about what a terminal looks like.
+ *
+ * A SHELL CONVENTION, page-side, and the honest place for it: a window does not publish an icon
+ * for itself — `win_create` has no spare register, and an icon is a property of the PROGRAM rather
+ * than of a window — so the shell recognises the programs it ships with and falls back for
+ * everything else. Same shape as `FORMAT_BY_EXT` in `src/libos/std.mjs`.
+ */
+const ICON_BY_PROG = Object.freeze({
+  term: WICON_TERMINAL,
+  sh: WICON_TERMINAL,
+  winopen: WICON_PROGRAM,
+  paint: WICON_PAINT,
+  editor: WICON_EDITOR,
+  files: WICON_FILES,
+  imgview: WICON_IMAGE,
+  desktop: WICON_COMPUTER,
+  clip: WICON_TEXT,
+});
+
+/**
+ * The name a program is known by: the basename of what the kernel reported, WITHOUT a module
+ * extension.
+ *
+ * THE EXTENSION IS WHY THIS IS A FUNCTION. A program started from `/usr/bin` is `term`, and one
+ * the page spawned by URL is `/src/bin/term.mjs` — `src/kernel/providerfs.mjs` drops the extension
+ * from a mount name on purpose, so the two spellings of one program reach the shell differently.
+ * Measured by LOOKING at the desktop: a jump list titled `term.mjs` with a generic icon, because
+ * neither the table above nor a reader recognises that as the terminal.
+ */
+export function progName(prog) {
+  const path = String(prog || "");
+  const at = path.lastIndexOf("/");
+  const base = (at >= 0 ? path.slice(at + 1) : path) || "program";
+  return base.endsWith(".mjs") ? base.slice(0, -4) : base;
+}
+
+/** The icon id for a program path, by the name above. `WICON_PROGRAM` for anything unrecognised,
+ *  which is what a reader should see for a program this shell was not written for. */
+export function iconForProgram(prog) {
+  const name = progName(prog);
+  return Object.prototype.hasOwnProperty.call(ICON_BY_PROG, name)
+    ? ICON_BY_PROG[name]
+    : WICON_PROGRAM;
+}
+
 /** Gradient ids must be unique per DOCUMENT, not per icon: two icons of the same kind on one
  *  desktop would otherwise both resolve `#page-gloss` to whichever was appended last, and an
  *  icon's fill would change when an unrelated icon was removed. */

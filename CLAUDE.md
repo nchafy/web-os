@@ -107,6 +107,9 @@ src/
                   image as a DOBJ_BITMAP payload, and a text file. M10's proofs need real bytes
   wm/             userland window manager
     window.mjs    the frame: geometry, clamp, drag, arrow keys — and M11's FOUR glass strips.
+                  M14's eight resize grips, Aero Snap's three thresholds and `boxForState` are
+                  here too: what a docked state MEANS as geometry, in one place, so the snap
+                  ghost cannot promise a rectangle the window will not take
                   It builds the structure and names nothing about how it looks, which is what
                   lets M7-M10's checks drive an unskinned frame
     aero.mjs      M11: every number Windows 7's glass is made of, once, and the stylesheet
@@ -208,7 +211,15 @@ row below rather than restate it.
 | Which format a file's bytes are | `FORMAT_BY_EXT` + `formatForPath` in `src/libos/std.mjs`. A USERLAND convention — the kernel knows no names — and three programs need it, so a second copy is how `clip` and `files` come to disagree about a `.rgba` |
 | A data object's lifetime, the clipboard slot and the drag session | `src/kernel/dataobj.mjs`, and nowhere else. `WinMgr.pointer` is the one record of whether a button is down, because `feed` is the one place a pointer event enters the kernel |
 | Where a drop landed, in a window's own unit | `WinHost.#dropPointAt` in `src/wm/winhost.mjs`: surface pixels for a surfaced window, CELLS for a text one — the two units `WEV_POINTER` and `WEV_RESIZE` already use |
-| The 270 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| A window's SHOW STATE and ROLE, and what a published row is | `WST_*`, `WROLE_*`, `WITEM_*`, `WICON_*` + `encodeWinItems`/`decodeWinItems`/`winItemSize` in `src/abi.mjs`. The kernel validates a row's index and the shell draws its label, which is the two sides |
+| Aero Snap's three thresholds | `SNAP_ARM_PX`, `SNAP_RELEASE_PX` and `MAX_RELEASE_PX` in `src/wm/window.mjs`, read by `releaseDistance` and nowhere else. The arm and the release are a hysteresis PAIR (constraint 273) |
+| What a docked state means as geometry | `Win.boxForState` in `src/wm/window.mjs`. The snap ghost and the layout both read it, so a preview cannot promise a rectangle the window will not take |
+| The WORK AREA, and the strip the shell reserved | `WinHost.reserve`/`workArea` in `src/wm/winhost.mjs`. Reserving re-clamps every existing frame, because a maximized window laid out before the taskbar appeared is laid out against a desktop that is gone |
+| The shell's own metrics | `TASKBAR_H`, `TASK_BTN_*`, `ORB`, `ICON_PX`, `ICON_CELL_*`, `THUMB_*` in `src/wm/aero.mjs`, with the stylesheet derived from them — `TASKBAR_H` is not a look, it is the strip `reserve` subtracts |
+| An icon's drawing | `src/wm/icons.mjs`, one function per `WICON_*`, with `selfTest` asserting the ABI's table is covered. Gradient ids are per-document, because two icons of one kind in one document would otherwise share them |
+| Which icon a FILE gets, and which a PROGRAM's button gets | `iconForPath` in `src/libos/std.mjs` (userland's convention, beside `formatForPath`) and `ICON_BY_PROG` in `src/wm/taskbar.mjs` (the shell's, for a window that publishes no icon of its own) |
+| A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
+| The 278 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -217,7 +228,9 @@ pasted into nine `www/*.html` pages; `class Serving` and `chrome_full_version` a
 between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; `src/bin/files.mjs`'s row
 geometry is restated in `bench/m10-data/shell.py`, which is outside the process and cannot import
 it — a drift there arrives as the WRONG FILE being dragged, which the run prints; and four files hand-roll
-the CDP connect sequence that `scripts/cdp.py` already provides.
+the CDP connect sequence that `scripts/cdp.py` already provides. **One row left this list in M14**:
+`src/bin/clip.mjs`'s own open-slurp-close loop became `std.readFileBytes` when `imgview -f` needed
+the same three lines.
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 
 ## Architecture rules
@@ -240,6 +253,16 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
   enumerate. So the honest form of the invariant is **a second, separately-gated management
   interface** — still a capability the kernel granted, so the boundary survives, but it is not the
   same interface. (`docs/research/09-hobbyist-os-actions.md` §4)
+  **M14 resolved it the other way, and the resolution is `docs/DECISIONS.md` D39.** The Superbar,
+  the start menu, a jump list and the desktop's icons are rendered PAGE-SIDE, so no endpoint is
+  needed: the page already holds every window's frame — `win-create` built it, `win-stack` ordered
+  it — and a shell reading facts the page was already told adds no capability to anything. A
+  taskbar as a *process* would still need that second endpoint, and a process could not draw one
+  anyway: the display list has no text op and no image op, and a `WEV_POINTER` arrives only while a
+  button is down. **What keeps the division honest is that the shell's CONTENTS are a process's**:
+  `src/bin/desktop.mjs` reads the filesystem and publishes rows through `win_items`, and
+  `scripts/check.py --negative no-items` is the run that tells that apart from a page drawing a
+  hard-coded menu. (constraints 275, 223)
 - **No `fork`.** `spawn` + `pipe` + `setpgid` only. (20)
 - **Processes get fds, never paths.** Resolve a path to an inode once, in the kernel, and cache.
   `getDirectoryHandle` is 85 µs per component. (24)
@@ -406,6 +429,8 @@ scripts/serve.py                    # serves the repo root with COOP/COEP on 800
 scripts/serve.py --no-isolation     # omit the headers, to prove a check fails without them
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
+python3 bench/m7-win/drive.py --page m14 --live   # THE WINDOWS 7 DESKTOP, in a real Chrome
+python3 bench/m14-shell/input-probe.py  # WHICH DOM events CDP input really delivers (279)
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
 node bench/m8-surface/probe.mjs   # M8's surface accounting and the display-list codec

@@ -86,6 +86,19 @@ export function setDrawReaches(on) {
   drawReaches = !!on;
 }
 
+/**
+ * M14's FOURTH NEGATIVE CONTROL, boot-gated on bench=1: `win_items` accepts a list, counts it and
+ * DISCARDS it. `setDrawReaches`'s shape, and for its reason: everything that CARRIES the rows keeps
+ * working — the program encodes them, the call succeeds, the page is told a list arrived — so what
+ * disappears is the rows themselves, which is the only cut that tells a shell drawing a process's
+ * data from a shell drawing a list of its own.
+ */
+let itemsReach = true;
+
+export function setItemsReach(on) {
+  itemsReach = !!on;
+}
+
 /** M9's FIRST NEGATIVE CONTROL, in `PLAN.md` §5's words: "remove the owner chain; the dialog must
  *  fall behind and the check must fail". A raise moves the window ALONE and leaves the windows
  *  that ride with it where they were — which is constraint 44's defect exactly: "without an owner
@@ -550,6 +563,7 @@ export class WinMgr {
       stateChanges: 0, roleChanges: 0, refusedState: 0, refusedRole: 0,
       desktopRaises: 0,
       itemPublishes: 0, itemActivations: 0, refusedItems: 0, badItems: 0,
+      droppedItems: 0,
       // Window events the PAGE tried to post that only the kernel may produce. See `feed`.
       forgedKernelEvents: 0,
     };
@@ -839,14 +853,18 @@ export class WinMgr {
     if (win.destroyed || !win.attached) return -EHOSTGONE;
     if (role === win.role) return 0;
     if (role === WROLE_DESKTOP) {
+      /* THE WINDOW'S OWN DISQUALIFICATION FIRST, and the order is the point: an OWNED window can
+       * never be the desktop, and -EBUSY would tell it to try again later. A permanent refusal
+       * outranks a transient one, which is the same reason `surface` answers -ENOMEM rather than
+       * -EAGAIN for a budget. */
+      if (win.owner !== 0 || win.children.length > 0) {
+        this.stats.refusedRole += 1;
+        return -EINVAL;
+      }
       const held = this.desktop();
       if (held && held.id !== win.id) {
         this.stats.refusedRole += 1;
         return -EBUSY;
-      }
-      if (win.owner !== 0 || win.children.length > 0) {
-        this.stats.refusedRole += 1;
-        return -EINVAL;
       }
       /* A DESKTOP IS NEVER MINIMIZED OR MAXIMIZED, so a window that was either becomes normal as
        * it takes the role. Leaving a hidden window as the desktop would be a desktop nobody can
@@ -885,8 +903,11 @@ export class WinMgr {
       this.stats.refusedItems += 1;
       return -EINVAL;
     }
-    win.items = rows.map((r) => ({ icon: r.icon | 0, flags: r.flags | 0, label: String(r.label) }));
+    win.items = itemsReach
+      ? rows.map((r) => ({ icon: r.icon | 0, flags: r.flags | 0, label: String(r.label) }))
+      : [];
     this.stats.itemPublishes += 1;
+    if (!itemsReach) this.stats.droppedItems += rows.length;
     K.post({ t: "win-items", win: win.id, items: win.items.map((r) => ({ ...r })) });
     return win.items.length;
   }

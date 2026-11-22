@@ -23,7 +23,7 @@
 // draw.
 
 import {
-  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE,
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT,
@@ -84,13 +84,13 @@ export function pngSize(bytes) {
 
 export function run(env) {
   const argv = (env.argv || []).map(String);
-  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "p");
+  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "pf:");
   if (bad) {
     return { exit: env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE), program: NAME };
   }
   const t0 = performance.now();
   const account = {
-    program: NAME, win: 0, fd: 0, enters: 0, leaves: 0, drops: 0, pastes: 0,
+    program: NAME, win: 0, fd: 0, enters: 0, leaves: 0, drops: 0, pastes: 0, opened: "",
     shown: [], refusals: [], why: "",
   };
 
@@ -238,9 +238,54 @@ export function run(env) {
     }
   };
 
+  /**
+   * M14. `-f path`: SHOW A FILE, which is what a double-click on a desktop icon has to mean.
+   *
+   * IT GOES THROUGH `show`, the same renderer a drop and a paste go through, by making a data
+   * object out of the file's bytes under the format its extension names (`std.formatForPath`). So
+   * one path renders every image this program ever sees, and a format nothing here can draw is
+   * refused BY NAME whether it arrived from a drag, the clipboard or the filesystem — which is the
+   * whole of what a typed clipboard bought (constraint 247).
+   */
+  const openFile = (path) => {
+    const format = env.std.formatForPath(path);
+    if (!format) {
+      refuse(`${path}: no format rule covers this extension`);
+      return -EINVAL;
+    }
+    const body = env.std.readFileBytes(env, path);
+    if (typeof body === "number") {
+      refuse(`${path}: ${env.std.errnoName(body)}`);
+      return body;
+    }
+    const obj = env.data.create([format]);
+    if (typeof obj === "number") {
+      refuse(`${path}: dataobj_create: ${env.std.errnoName(obj)}`);
+      return obj;
+    }
+    try {
+      const set = env.data.set(obj.fd, format, body);
+      if (set < 0) {
+        refuse(`${path}: dataobj_set: ${env.std.errnoName(set)}`);
+        return set;
+      }
+      account.opened = path;
+      return show(obj.fd, obj.offer, `file ${path}`);
+    } finally {
+      // THE FD GOES EITHER WAY. The object is refcounted and this process is its only holder, so
+      // closing is what frees the payload — a viewer that leaked one per file opened would spend
+      // the kernel's whole data budget on pictures it had finished with.
+      env.fs.close(obj.fd);
+    }
+  };
+
   env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, surface ${SURFACE_W}x${SURFACE_H}\n`);
   env.std.say(env, "drop a file on this window, or press v to paste. q quits.\n");
   if (flags.p === true) paste();
+  if (typeof flags.f === "string") {
+    env.win.setTitle(made.fd, `${NAME} — ${flags.f}`);
+    openFile(flags.f);
+  }
 
   for (;;) {
     if (performance.now() - t0 > CEILING_MS) {

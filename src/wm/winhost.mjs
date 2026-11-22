@@ -21,6 +21,13 @@ import { Win, geometryControlsInForce } from "./window.mjs";
 // again: a Ctrl-C is 0x03 whatever is inside the window (constraint 161's file is where it lives).
 import { Terminal, bytesForKey } from "./terminal.mjs";
 import { Surface } from "./surface.mjs";
+// A CAPTION'S ICON IS THE SHELL'S ANSWER TO "which program is this", and the same answer a taskbar
+// button uses — one table, in the module that owns the drawings.
+import { iconMarkup, iconForProgram } from "./icons.mjs";
+// M14's THIRD CONTENT MODE. A window is text, pixels, or ITEMS — and which one is decided by the
+// window's ROLE rather than by a call, because the desktop is the only window whose inside is a
+// set of rows the shell draws. See `#role`.
+import { IconView } from "./desktop.mjs";
 import {
   WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
@@ -107,7 +114,7 @@ export class WinHost {
       // M14: show-state changes rendered, roles rendered, item lists rendered, item activations
       // reported, and faults in a watcher — a shell that throws must not take the window table
       // down with it, and a fault nobody counted is a shell that silently stopped updating.
-      shows: 0, roles: 0, itemLists: 0, itemAsks: 0, watcherFaults: 0 };
+      shows: 0, roles: 0, itemLists: 0, itemAsks: 0, iconViews: 0, watcherFaults: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -303,6 +310,21 @@ export class WinHost {
     return this.frames.get(id | 0) || null;
   }
 
+  /**
+   * ASK A WINDOW TO CLOSE. The X button's route and a jump list's "Close window" row, which is why
+   * it is a method: the second caller is what justifies the name.
+   *
+   * IT ASKS AND DOES NOT ACT (constraint 44): `WEV_CLOSE` is posted and nothing else — no
+   * `win-gone` — so the frame stays until the window's own process calls `win_destroy`. A shell
+   * that could close a window would be a way around the close contract, and the unsaved work that
+   * contract exists for.
+   */
+  requestClose(id) {
+    this.stats.closes += 1;
+    this.post({ t: "win-in", win: id | 0, evs: [{ type: WEV_CLOSE }] });
+    return true;
+  }
+
   /** The widget of the newest live window, which is what a page wants to focus. */
   newest() {
     let best = null;
@@ -336,8 +358,7 @@ export class WinHost {
        * the caption greys at 1,000 ms and End Process appears at 5,000 ms. The user's escape hatch
        * is the one that was already there. */
       onClose: () => {
-        this.stats.closes += 1;
-        this.post({ t: "win-in", win: id, evs: [{ type: WEV_CLOSE }] });
+        this.requestClose(id);
         return false;
       },
       /* AND THAT ESCAPE HATCH KILLS THE PROCESS, not the frame. Removing the frame would leave the
@@ -360,7 +381,7 @@ export class WinHost {
       // its role, the rows it published, and the program behind it — which is what a Superbar
       // groups buttons by. `prog` comes from the kernel's own `win-create`, because the page has
       // no way to learn what a pid is running.
-      state: WST_NORMAL, role: WROLE_NORMAL, items: [],
+      state: WST_NORMAL, role: WROLE_NORMAL, items: [], icons: null,
       prog: String(m.prog || ""),
     };
     this.frames.set(id, entry);
@@ -373,7 +394,11 @@ export class WinHost {
      * set that is current here — an earlier version toggled the class against that stale set,
      * which could only ever be a no-op. The `win-blur` arriving next is what degrades it. */
     win.el.dataset.flat = "0";
-    this.created.push({ win: id, pid: m.pid | 0, owner: m.owner | 0, title: m.title });
+    // THE CAPTION'S ICON, from the program the KERNEL named: the page cannot learn what a pid is
+    // running, which is why `win-create` carries `prog` at all.
+    if (entry.prog) win.setIconMarkup(iconMarkup(iconForProgram(entry.prog), 16));
+    this.created.push({ win: id, pid: m.pid | 0, owner: m.owner | 0, title: m.title,
+      prog: entry.prog });
     this.stats.creates += 1;
     // The box the CLAMP settled on, reported straight back: the kernel asked for a geometry and
     // records only what the page actually did with it.
@@ -574,6 +599,9 @@ export class WinHost {
         this.retired.synthetic += entry.term.synthKeys;
       }
       if (entry.surface) entry.surface.destroy();
+      // M14. The desktop's icon view goes with its window, like a surface: it holds listeners on
+      // an element that is about to be removed and a selection of rows that no longer exist.
+      if (entry.icons) entry.icons.destroy();
       entry.win.destroy();
       this.frames.delete(id);
       this.destroyed.push(id);
@@ -732,6 +760,28 @@ export class WinHost {
     this.stats.roles += 1;
     entry.role = m.role | 0;
     entry.win.setRole(m.role | 0);
+    /**
+     * BECOMING THE DESKTOP CHANGES WHAT IS INSIDE THE WINDOW, which is `#surface`'s rule for a
+     * second case: a window is a TEXT window, a SURFACE window, or the DESKTOP, and exactly one of
+     * the three renderers is live. The terminal widget goes the way it goes for a surface — with
+     * its key counts retired rather than lost — because a desktop that kept a hidden text widget
+     * would have two things able to take the keyboard.
+     */
+    if (entry.role === WROLE_DESKTOP && !entry.icons) {
+      if (entry.term) {
+        this.retired.trusted += entry.term.trustedKeys;
+        this.retired.synthetic += entry.term.synthKeys;
+        entry.term.el.remove();
+        entry.term = null;
+      }
+      if (entry.surface) {
+        entry.surface.destroy();
+        entry.surface = null;
+      }
+      entry.icons = new IconView({ into: entry.win.bodyEl, host: this, win: entry.id });
+      entry.icons.setItems(entry.items);
+      this.stats.iconViews += 1;
+    }
     this.#report(entry);
     this.#changed("role");
   }
@@ -746,6 +796,9 @@ export class WinHost {
     entry.items = (Array.isArray(m.items) ? m.items : []).map((row) => ({
       icon: row.icon | 0, flags: row.flags | 0, label: String(row.label || ""),
     }));
+    // AND THE DESKTOP REDRAWS AT ONCE. Every other rendering of these rows is a menu that reads
+    // them when it opens; the icons are on screen already.
+    if (entry.icons) entry.icons.setItems(entry.items);
     this.#changed("items");
   }
 
@@ -956,6 +1009,9 @@ export class WinHost {
         armed: Number(e.win.el.dataset.armed || 0),
       }])),
       lastWatcherFault: this.lastWatcherFault || null,
+      icons: Object.fromEntries([...this.frames]
+        .filter(([, e]) => e.icons)
+        .map(([id, e]) => [id, e.icons.report()])),
       // M13. The desktop-resize re-clamp: how many times it ran, and what the last one moved.
       relayouts: this.relayouts,
       skippedRelayouts: this.skippedRelayouts,

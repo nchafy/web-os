@@ -192,6 +192,16 @@ export class Win {
     bar.setAttribute("role", "toolbar");
     this.#glassLayers(bar);
 
+    /* THE CAPTION'S ICON, which is Windows 7's own arrangement and was missing until a screenshot
+     * showed it: a frame draws the program's icon at the left of its caption, and the taskbar
+     * draws the same one. It is `innerHTML` of markup from `src/wm/icons.mjs` — never of anything
+     * a program supplied — and it is EMPTY until the host says which program this is, so an
+     * unskinned page and a window whose program is unknown both get nothing rather than a guess. */
+    const icon = document.createElement("span");
+    icon.className = "window-icon";
+    icon.setAttribute("aria-hidden", "true");
+    this.iconEl = icon;
+
     const heading = document.createElement("h2");
     heading.id = `${this.id}-title`;
     heading.textContent = this.titleText;
@@ -222,7 +232,7 @@ export class Win {
     body.className = "window-body";
     this.bodyEl = body;
 
-    bar.append(heading, boxes);
+    bar.append(icon, heading, boxes);
     /** The three edge strips. Each is its own filtered border box, which is what makes the four of
      *  them sum to the ring rather than to the window. */
     this.edgeEls = ["aero-left", "aero-right", "aero-bottom"].map((side) => {
@@ -429,6 +439,14 @@ export class Win {
    * anything held here: the page is a renderer that may be re-laid-out at any moment, and a window
    * whose restore point lived only in the page would come back to the wrong place after one.
    */
+  /** The caption's icon, as MARKUP from `src/wm/icons.mjs`. The host calls this with the id it
+   *  derived from the program the kernel named, so the frame and the taskbar button cannot
+   *  disagree about what a terminal looks like. */
+  setIconMarkup(markup) {
+    this.iconEl.innerHTML = String(markup || "");
+    return this.iconEl.childElementCount;
+  }
+
   /** What the kernel said this window IS. The ONLY writer of `role`. A desktop window loses its
    *  caption and its grips to the skin and its gestures to the guards in `#startDrag` and
    *  `#startResize` — the backdrop is not a thing a user drags. */

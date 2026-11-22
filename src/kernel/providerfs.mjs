@@ -55,6 +55,11 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "bin/clip", path: "src/bin/clip.mjs" }),
   Object.freeze({ name: "bin/files", path: "src/bin/files.mjs" }),
   Object.freeze({ name: "bin/imgview", path: "src/bin/imgview.mjs" }),
+  // M14: the process behind the desktop and the start menu. It is in `/usr/bin` like everything
+  // else because it IS like everything else — one window, the same syscalls, no privilege — and
+  // because the start menu is a listing of this directory, so it has to be here to be startable
+  // from a prompt at all.
+  Object.freeze({ name: "bin/desktop", path: "src/bin/desktop.mjs" }),
   /* `/usr/share`: THE FIRST DATA FILES IN THIS FILESYSTEM, and M10 is why they exist. A typed
    * clipboard has nothing to prove against text a program made up — the claim is that bytes of a
    * format nothing here can decode (a PNG) cross two processes untouched, and that an image a

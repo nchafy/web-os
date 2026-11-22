@@ -312,6 +312,16 @@ export function styleSheet() {
  * colour has a contrast ratio. Windows 7 solves it with DrawThemeTextEx and a glow size; here that
  * is a halo of the opposite luminance, which gives the glyph LOCAL contrast wherever it lands.
  * 'scripts/check.py''s m11 check asserts exactly that, at both ends of a black/white seam. */
+/* THE CAPTION'S ICON. 16 px is Windows 7's own caption icon, and it sits before the title with
+   the same 6 px gap the caption's flex row uses. It is EMPTY on a window whose program the shell
+   does not recognise, so the rule must not reserve space for nothing. */
+.aero-desktop .window-icon {
+  flex: 0 0 auto;
+  display: flex; align-items: center;
+  position: relative; z-index: 2;
+  filter: drop-shadow(0 1px 1px rgba(0,16,38,.75));
+}
+.aero-desktop .window-icon:empty { display: none }
 .aero-desktop .window-title h2 {
   font: 600 ${FONT_PX}px/1 ${UI_FONT};
   margin: 0; flex: 1 1 auto; min-width: 0;

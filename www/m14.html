@@ -1,0 +1,1087 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M14 — Aero Snap, the Superbar, the desktop</title>
+<style>
+/* STRUCTURAL ONLY. Every pixel of the look comes from `src/wm/aero.mjs`, as M11, M12 and M13 do
+   it: this file positions a log and a desktop and says nothing about how either appears. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M11's measured reason: a growing log moves the desktop out from under every
+   device rect this page publishes, and the pixel proof reads those rects out of a screenshot. */
+#log { margin:8px; white-space:pre-wrap; height:132px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+/* THE HARD SEAM the glass is sampled across. Behind everything, including the taskbar: over a flat
+   backdrop `blur(flat) == flat` and a glass assertion passes with the blur switched off
+   (constraint 50). */
+#seam { position:absolute; inset:0; z-index:0;
+        background:linear-gradient(to right, #000 0 50%, #fff 50% 100%) }
+#seam[hidden] { display:none }
+</style>
+</head>
+<body>
+<pre id="log">M14 starting…</pre>
+<div id="desktop"><div id="seam"></div></div>
+<script>
+  globalThis.M14 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M14's page harness: AERO SNAP, THE SUPERBAR, JUMP LISTS, THE TRAY AND THE DESKTOP.
+ *
+ *   PROOF 1  SNAP, AT BOTH EDGES OF BOTH THRESHOLDS. A real drag to within 1 px of the left edge
+ *            arms a ghost and snaps on release; a 19 px drag-out HOLDS and a 21 px one releases; a
+ *            drag to the top maximizes, and a maximized window holds a 49 px side-move and
+ *            releases a 51 px one. Two thresholds, two edges each, which is what constraint 39
+ *            asks of a threshold on a continuous input
+ *   PROOF 2  THE WORK AREA. A maximized window stops at the taskbar rather than covering it, and
+ *            the strip it stops at is the one the shell reserved
+ *   PROOF 3  MINIMIZE IS AN AREA-CHANGING EVENT, which closes M12's own open item: the blur
+ *            governor is an admission controller over the events constraint 49 lists, and until
+ *            M14 nothing had ever driven a minimize through it
+ *   PROOF 4  THE SUPERBAR GROUPS BY PROGRAM AND ACTS. Two windows of one program are one button
+ *            with a count; a real click raises, and a real click on the front group opens its
+ *            window list
+ *   PROOF 5  A JUMP LIST IS THE PROGRAM'S OWN ROWS. The desktop process published one; a real
+ *            right-click shows exactly those labels, and a real click on one arrives at the
+ *            process as a `WEV_ITEM` it acts on
+ *   PROOF 6  THE DESKTOP'S ICONS COME FROM THE FILESYSTEM. The rows are what `/usr/bin` and
+ *            `/desktop` hold, and a real double-click starts the program a row names
+ *   PROOF 7  EVERY MOUSE ACTION ON THE DESKTOP: a rubber band that selects, a ctrl-click that
+ *            toggles, and a drag that moves an icon and leaves it there
+ *   PROOF 8  THE TRAY. The clock advances, and Show desktop minimizes everything and puts it back
+ *   PROOF 9  THE TASKBAR IS GLASS, read out of the composited pixels across a hard seam — because
+ *            a glass class in the DOM and a blur that happened are different claims (constraint 50)
+ *
+ * THE GESTURES ARE REAL. `gestureAsker` publishes what is needed and blocks until something
+ * performs it (`www/pagekernel.mjs`); `scripts/check.py`'s `drive_gestures` is the other half, and
+ * a human reading this page performs the same asks by hand. A page cannot drive its own pointer:
+ * a synthesised `PointerEvent` is `isTrusted === false` and `setPointerCapture` refuses a
+ * pointerId no live pointer owns (constraint 175).
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setGeometryControls, SNAP_ARM_PX, SNAP_RELEASE_PX, MAX_RELEASE_PX } from '/src/wm/window.mjs'
+import { Taskbar, setShellControls } from '/src/wm/taskbar.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import {
+  WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WROLE_DESKTOP,
+  WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, blurRingArea,
+} from '/src/abi.mjs'
+import {
+  bootKernel, spawnProgram, ask as askKernel, until, sleep, gestureAsker,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const seam = document.getElementById('seam')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  /** The snap release collapses onto the arm, so there is one threshold instead of two:
+   *  `PLAN.md` §5's own control for M14 — "remove the hysteresis band; the 19 px case must start
+   *  failing". */
+  noSnapHysteresis: params.get('no_snap_hysteresis') === '1',
+  /** A maximized window fills the DESKTOP rather than the work area, so it covers the taskbar. */
+  noWorkArea: params.get('no_workarea') === '1',
+  /** The Superbar draws one button per WINDOW instead of one per program. */
+  noGroup: params.get('no_group') === '1',
+  /** The kernel accepts a published item list and DISCARDS it: everything that carries the rows
+   *  keeps working and what disappears is the rows. */
+  noItems: params.get('no_items') === '1',
+  liveOnly: params.get('live') === '1',
+}
+globalThis.M14.config = CFG
+
+setGeometryControls({
+  noSnapHysteresis: CFG.noSnapHysteresis,
+  noWorkArea: CFG.noWorkArea,
+})
+setHostControls({})
+setShellControls({ noGroup: CFG.noGroup })
+
+const DESKTOP = '/src/bin/desktop.mjs'
+const WINOPEN = '/src/bin/winopen.mjs'
+const TERM = '/src/bin/term.mjs'
+
+globalThis.M14.proofs = {
+  snap: null, workarea: null, minimize: null, superbar: null, jumplist: null,
+  icons: null, mouse: null, tray: null, pixels: null,
+}
+
+const ask = gestureAsker(globalThis.M14)
+let HOST = null
+let SHELL = null
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M14.state = 'aborted'
+  globalThis.M14.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no windows, no shell.'
+  out.className = 'bad'
+  say(globalThis.M14.why)
+} else {
+  main().catch((e) => {
+    globalThis.M14.state = 'error'
+    globalThis.M14.why = String((e && e.stack) || e)
+    say(globalThis.M14.why)
+  })
+}
+
+async function bootHost () {
+  const k = await bootKernel({
+    label: 'm14', bench: 1,
+    noItems: CFG.noItems ? 1 : 0,
+  }, globalThis.M14, say)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  /* THE SHELL IS BUILT AFTER THE SKIN AND BEFORE ANY WINDOW, which is the order that matters: the
+   * taskbar reserves its strip in its constructor, and a window laid out before that reservation
+   * is a maximized window covering the bar. */
+  const shell = new Taskbar({ into: desktop, host })
+  HOST = host
+  SHELL = shell
+  return { k, host, shell }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window's row out of the kernel's own report, which is the authority on its state. */
+async function rowOf (k, id) {
+  const st = await winState(k)
+  return (st.windows || []).find((w) => w.id === id) || {}
+}
+
+/** Wait for the KERNEL to say a window is in a state. Returns the ms waited, or -1. */
+async function awaitState (k, id, want) {
+  return until(async () => (await rowOf(k, id)).state === want, 6000)
+}
+
+const roundBox = (b) => ({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w),
+  h: Math.round(b.h) })
+
+/** A client point on a caption, `offset` px in from its left edge and clamped into the desktop —
+ *  M13's own helper, and for its reason: a press outside the desktop lands on the page, and a
+ *  grab in the middle of a caption cannot push a window's left edge to the right-hand bound. */
+function capPoint (entry, offset = 8) {
+  const r = entry.win.barEl.getBoundingClientRect()
+  const d = desktop.getBoundingClientRect()
+  return {
+    x: Math.round(Math.min(Math.max(r.left, d.left) + offset, d.right - 2)),
+    y: Math.round(Math.min(Math.max(r.top + r.height / 2, d.top + 2), d.bottom - 2)),
+  }
+}
+
+/**
+ * WHAT IS ACTUALLY UNDER A POINT, as the browser answers it.
+ *
+ * MEASURED, AND IT COST A RUN: this page's first proof grabbed a caption at coordinates computed
+ * off the right window's rect — and another window was ON TOP of that point, so every gesture went
+ * to the terminal while the proof measured the window it meant to drag. Nothing failed loudly: the
+ * subject simply never moved. A gesture whose target is not asserted is a gesture aimed at the
+ * stacking order of the moment.
+ */
+function frameUnder (at) {
+  const el = document.elementFromPoint(at.x, at.y)
+  const win = el && el.closest ? el.closest('.window') : null
+  return win ? win.id : (el ? el.className || el.id : '')
+}
+
+/** Raise a window, put it where this page wants it, and return a caption point that is really on
+ *  it. The returned row carries the hit test, so a proof can assert it rather than hope. */
+async function grabOn (entry, box) {
+  if (box) {
+    entry.win.box = { ...box }
+    entry.win.apply()
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  }
+  HOST.post({ t: 'win-raise', win: entry.id })
+  await sleep(120)
+  const at = capPoint(entry)
+  return { at, under: frameUnder(at), want: `win-${entry.id}` }
+}
+
+/** The windows a reader would call windows: everything but the desktop. */
+function appFrames (host) {
+  return [...host.frames.values()]
+    .filter((e) => e.role !== WROLE_DESKTOP)
+    .sort((a, b) => a.id - b.id)
+}
+
+function deskRect () {
+  return desktop.getBoundingClientRect()
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: SNAP, at both edges of both thresholds.
+   -------------------------------------------------------------------------------------------- */
+async function proofSnap (k, host) {
+  const entry = appFrames(host)[0]
+  const d = deskRect()
+  const evidence = {
+    arm: SNAP_ARM_PX, release: SNAP_RELEASE_PX, maxRelease: MAX_RELEASE_PX,
+    workArea: host.workArea(),
+  }
+
+  // ---- arm at the left edge, and snap on release ----
+  /* RAISED AND HIT-TESTED FIRST. Three windows are open and two of them overlap this one's
+   * caption; a press that landed on the wrong frame would drag the wrong window and leave this
+   * proof measuring a window nobody touched. */
+  const grabbed = await grabOn(entry, { x: 60, y: 60, w: 420, h: 260 })
+  evidence.grabbed = grabbed
+  const grab = grabbed.at
+  await ask({ kind: 'press', name: 'snap-press', at: grab })
+  const edge = { x: Math.round(d.left + SNAP_ARM_PX), y: Math.round(d.top + 180) }
+  await ask({ kind: 'move', name: 'snap-to-the-edge', at: edge })
+  const ghost = entry.win.snapEl
+  evidence.armed = {
+    armedAs: entry.win.armed,
+    ghostShown: Boolean(ghost && !ghost.hidden),
+    ghostBox: ghost && !ghost.hidden
+      ? roundBox({
+        x: parseFloat(ghost.style.left), y: parseFloat(ghost.style.top),
+        w: parseFloat(ghost.style.width), h: parseFloat(ghost.style.height),
+      })
+      : null,
+    wantGhost: roundBox(entry.win.boxForState(WST_SNAP_L)),
+  }
+  await ask({ kind: 'release', name: 'snap-release', at: edge })
+  const snappedMs = await awaitState(k, entry.id, WST_SNAP_L)
+  evidence.snapped = {
+    waitedMs: Math.round(snappedMs),
+    state: (await rowOf(k, entry.id)).state,
+    placed: roundBox(entry.win.placed),
+    want: roundBox(entry.win.boxForState(WST_SNAP_L)),
+    kernel: (() => { const r = entry.win; return { x: r.placed.x, y: r.placed.y } })(),
+  }
+
+  /* ---- THE DRAG-OUT, AT BOTH EDGES OF THE THRESHOLD. 19 px must hold and 21 px must release,
+   * which is the pair `PLAN.md` §5 names and the pair `--negative no-snap-hysteresis` breaks. ---- */
+  const hold = capPoint(entry)
+  await ask({ kind: 'press', name: 'drag-out-press', at: hold })
+  await ask({ kind: 'move', name: 'drag-out-19', at: { x: hold.x + SNAP_RELEASE_PX - 1, y: hold.y } })
+  evidence.held19 = {
+    state: entry.win.state,
+    placed: roundBox(entry.win.placed),
+    heldFor: entry.win.drag ? entry.win.drag.heldFor : -1,
+  }
+  await ask({ kind: 'move', name: 'drag-out-21', at: { x: hold.x + SNAP_RELEASE_PX + 1, y: hold.y } })
+  evidence.released21 = {
+    state: entry.win.state,
+    placed: roundBox(entry.win.placed),
+  }
+  await ask({ kind: 'release', name: 'drag-out-release',
+    at: { x: hold.x + SNAP_RELEASE_PX + 1, y: hold.y } })
+  const floatMs = await awaitState(k, entry.id, WST_NORMAL)
+  evidence.released21.kernelAgreedMs = Math.round(floatMs)
+
+  // ---- the top edge maximizes ----
+  const up = capPoint(entry)
+  await ask({ kind: 'press', name: 'max-press', at: up })
+  const top = { x: Math.round(d.left + 300), y: Math.round(d.top + SNAP_ARM_PX) }
+  await ask({ kind: 'move', name: 'max-to-the-top', at: top })
+  evidence.armedMax = entry.win.armed
+  await ask({ kind: 'release', name: 'max-release', at: top })
+  const maxMs = await awaitState(k, entry.id, WST_MAX)
+  evidence.maximized = {
+    waitedMs: Math.round(maxMs),
+    state: (await rowOf(k, entry.id)).state,
+    placed: roundBox(entry.win.placed),
+    want: roundBox(host.workArea()),
+  }
+
+  /* ---- AND A MAXIMIZED WINDOW'S OWN THRESHOLD, which is a different number for a stated reason:
+   * its caption is at the top of the work area, so a user reaching for it drags downward
+   * constantly and a total-distance rule would un-maximize on every brush. ---- */
+  const side = capPoint(entry)
+  await ask({ kind: 'press', name: 'max-out-press', at: side })
+  await ask({ kind: 'move', name: 'max-out-49', at: { x: side.x + MAX_RELEASE_PX - 1, y: side.y } })
+  evidence.held49 = { state: entry.win.state, heldFor: entry.win.drag ? entry.win.drag.heldFor : -1 }
+  await ask({ kind: 'move', name: 'max-out-51', at: { x: side.x + MAX_RELEASE_PX + 1, y: side.y } })
+  evidence.released51 = { state: entry.win.state, placed: roundBox(entry.win.placed) }
+  await ask({ kind: 'release', name: 'max-out-release',
+    at: { x: side.x + MAX_RELEASE_PX + 1, y: side.y } })
+  await awaitState(k, entry.id, WST_NORMAL)
+
+  evidence.grabLanded = grabbed.under === grabbed.want
+  evidence.ghostPromisedWhatItTook = evidence.grabLanded
+    && evidence.armed.armedAs === WST_SNAP_L
+    && evidence.armed.ghostShown === true
+    && JSON.stringify(evidence.armed.ghostBox) === JSON.stringify(evidence.armed.wantGhost)
+  evidence.snappedToTheHalf = evidence.snapped.state === WST_SNAP_L
+    && JSON.stringify(evidence.snapped.placed) === JSON.stringify(evidence.snapped.want)
+  // BOTH EDGES. The hold is the clause the control breaks; the release is the clause that makes
+  // the hold more than a window that cannot be dragged at all.
+  evidence.heldAt19 = evidence.held19.state === WST_SNAP_L
+    && evidence.held19.heldFor >= SNAP_RELEASE_PX - 2
+  evidence.releasedAt21 = evidence.released21.state === WST_NORMAL
+    && evidence.released21.kernelAgreedMs >= 0
+  evidence.maximizedFromTheTop = evidence.armedMax === WST_MAX
+    && evidence.maximized.state === WST_MAX
+    && JSON.stringify(evidence.maximized.placed) === JSON.stringify(evidence.maximized.want)
+  evidence.heldAt49 = evidence.held49.state === WST_MAX
+    && evidence.held49.heldFor >= MAX_RELEASE_PX - 2
+  evidence.releasedAt51 = evidence.released51.state === WST_NORMAL
+  evidence.ok = evidence.ghostPromisedWhatItTook && evidence.snappedToTheHalf
+    && evidence.heldAt19 && evidence.releasedAt21 && evidence.maximizedFromTheTop
+    && evidence.heldAt49 && evidence.releasedAt51
+  globalThis.M14.proofs.snap = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'snap: left half ' + evidence.snappedToTheHalf +
+    ', held at 19 ' + evidence.heldAt19 + ' released at 21 ' + evidence.releasedAt21 +
+    ', maximized ' + evidence.maximizedFromTheTop + ', held at 49 ' + evidence.heldAt49 +
+    ' released at 51 ' + evidence.releasedAt51)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE WORK AREA. A maximized window stops at the taskbar.
+   -------------------------------------------------------------------------------------------- */
+async function proofWorkArea (k, host) {
+  const entry = appFrames(host)[0]
+  host.askState(entry.id, WST_MAX)
+  const ms = await awaitState(k, entry.id, WST_MAX)
+  await sleep(80)
+  const frame = entry.win.el.getBoundingClientRect()
+  const bar = SHELL.el.getBoundingClientRect()
+  const d = deskRect()
+  const evidence = {
+    waitedMs: Math.round(ms),
+    reserved: host.reserved,
+    taskbarHeight: Math.round(bar.height),
+    workArea: host.workArea(),
+    desk: { w: Math.round(d.width), h: Math.round(d.height) },
+    frame: { top: Math.round(frame.top - d.top), bottom: Math.round(frame.bottom - d.top) },
+    barTop: Math.round(bar.top - d.top),
+    kernel: await rowOf(k, entry.id),
+  }
+  // THE STRIP THE SHELL RESERVED IS THE STRIP IT OCCUPIES. A reservation that did not match the
+  // bar would leave either a gap of bare desktop or a window under the clock.
+  evidence.reservationMatchesTheBar = evidence.reserved === evidence.taskbarHeight
+    && evidence.workArea.h === evidence.desk.h - evidence.reserved
+  // AND THE WINDOW STOPS AT IT. Measured off the RENDERED frame, not off the box the page wrote.
+  evidence.stopsAtTheBar = Math.abs(evidence.frame.bottom - evidence.barTop) <= 1
+  evidence.kernelRecordsIt = evidence.kernel.h === evidence.workArea.h
+    && evidence.kernel.state === WST_MAX
+  evidence.ok = evidence.reservationMatchesTheBar && evidence.stopsAtTheBar
+    && evidence.kernelRecordsIt
+  globalThis.M14.proofs.workarea = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'workarea: reserved ' + evidence.reserved +
+    ' px, frame bottom ' + evidence.frame.bottom + ' against a bar top of ' + evidence.barTop)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: MINIMIZE IS AN AREA-CHANGING EVENT THE GOVERNOR SEES.
+
+   M12 recorded this as owed: "MINIMIZE, SNAP AND PEEK ARE NOT AMONG THE EVENTS IT SEES, because
+   they do not exist yet... nothing has yet driven a minimize through it, so the claim that the
+   list is covered rests on the shape of the ABI rather than on a run." This is the run.
+   -------------------------------------------------------------------------------------------- */
+async function proofMinimize (k, host) {
+  const entry = appFrames(host)[0]
+  host.askState(entry.id, WST_NORMAL)
+  await awaitState(k, entry.id, WST_NORMAL)
+  await sleep(60)
+  const before = await winState(k)
+  const costBefore = (((before.wins || {}).blur) || {}).cost || {}
+  const allGlassBefore = (before.wins || {}).blurPxIfAllGlass | 0
+  const box = roundBox(entry.win.placed)
+
+  host.askState(entry.id, WST_MIN)
+  const ms = await awaitState(k, entry.id, WST_MIN)
+  await sleep(80)
+  const after = await winState(k)
+  const costAfter = (((after.wins || {}).blur) || {}).cost || {}
+  const evidence = {
+    win: entry.id,
+    waitedMs: Math.round(ms),
+    box,
+    dprSq: (((after.wins || {}).blur) || {}).dprSq,
+    ringCss: blurRingArea(box.w, box.h),
+    costBefore: costBefore[entry.id] | 0,
+    costAfter: costAfter[entry.id] | 0,
+    allGlassBefore,
+    allGlassAfter: (after.wins || {}).blurPxIfAllGlass | 0,
+    minimizedList: ((after.wins || {}) || {}).minimized || [],
+    frameHidden: entry.win.el.hidden === true,
+    // The taskbar must still have a button for it, or there is no way back.
+    taskbarButtons: SHELL.report().buttons,
+    /* THE GROUP THIS WINDOW IS IN, and its cue. A group of TWO windows with one minimized is NOT
+     * "minimized" — the other is still on screen — so what is asserted here is that the button
+     * still CARRIES this window. The `min` cue is asserted in the tray proof, where everything is
+     * minimized at once and the cue is the only thing a reader has left. */
+    group: SHELL.report().groups.find((g) => g.wins.includes(entry.id)) || null,
+  }
+  evidence.frameWentAway = evidence.frameHidden === true
+    && evidence.minimizedList.includes(entry.id)
+  // THE ACCOUNTING MOVED, by exactly this window's ring: a minimized window filters nothing, and
+  // the governor's input is the sum of what every window WOULD cost on glass.
+  evidence.chargedNothing = evidence.costAfter === 0 && evidence.costBefore > 0
+  evidence.governorSawIt =
+    evidence.allGlassBefore - evidence.allGlassAfter === evidence.costBefore
+  evidence.stillOnTheBar = evidence.taskbarButtons > 0 && Boolean(evidence.group)
+    && evidence.group.wins.includes(entry.id)
+  evidence.ok = evidence.frameWentAway && evidence.chargedNothing && evidence.governorSawIt
+    && evidence.stillOnTheBar
+  globalThis.M14.proofs.minimize = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'minimize: cost ' + evidence.costBefore + ' -> ' +
+    evidence.costAfter + ' dev px, all-glass total ' + evidence.allGlassBefore + ' -> ' +
+    evidence.allGlassAfter + ', still on the bar ' + evidence.stillOnTheBar)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: THE SUPERBAR GROUPS BY PROGRAM, AND A REAL CLICK ACTS.
+   -------------------------------------------------------------------------------------------- */
+async function proofSuperbar (k, host) {
+  // Everything back up, so "which button is lit" is about the stack and not about a hidden window.
+  for (const entry of appFrames(host)) host.askState(entry.id, WST_NORMAL)
+  await sleep(200)
+  const groups = SHELL.report().groups
+  /* THE WINDOWS ARE FOUND BY PROGRAM AND NOT BY BUTTON, which is what lets this proof survive its
+   * own negative control: `--negative no-group` keys every button by window, so a lookup for a
+   * button called "winopen" would find nothing and this page would ERROR rather than fail. A
+   * control that breaks the harness proves nothing about the product. */
+  const wanted = [...host.frames.values()]
+    .filter((e) => e.role !== WROLE_DESKTOP && String(e.prog).endsWith('winopen.mjs'))
+    .map((e) => e.id)
+    .sort((a, b) => a - b)
+  const winopen = groups.find((g) => wanted.every((id) => g.wins.includes(id))) || null
+  const evidence = {
+    groups,
+    buttons: SHELL.report().buttons,
+    frames: appFrames(host).length,
+    wanted,
+    winopen,
+    controls: SHELL.report().controls,
+  }
+  // ONE BUTTON FOR TWO WINDOWS OF ONE PROGRAM, which is what a Superbar IS — and the kernel is
+  // where the program name came from, because a page only ever sees a pid and a title.
+  evidence.grouped = wanted.length === 2 && Boolean(winopen) && winopen.wins.length === 2
+    && evidence.buttons < evidence.frames
+
+  // The button carrying the first of those windows, however the bar happened to key it.
+  const btn = [...SHELL.el.querySelectorAll('[data-task-btn]')]
+    .find((b) => String(b.dataset.wins || '').split(',').includes(String(wanted[0])))
+  if (!btn) {
+    evidence.ok = false
+    evidence.why = 'no taskbar button carries the first winopen window'
+    globalThis.M14.proofs.superbar = { ok: false, evidence }
+    say('BAD superbar: ' + evidence.why)
+    return
+  }
+  const at = (() => {
+    const r = btn.getBoundingClientRect()
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+  })()
+  // Put the OTHER program's window in front first, so the click under test has something to raise.
+  const other = appFrames(host).find((e) => !wanted.includes(e.id))
+  if (other) {
+    host.post({ t: 'win-raise', win: other.id })
+    await sleep(150)
+  }
+  const stackBefore = ((await winState(k)).wins || {}).stack || []
+  await ask({ kind: 'click', name: 'click-the-group-button', at })
+  await sleep(200)
+  const stackAfter = ((await winState(k)).wins || {}).stack || []
+  evidence.stackBefore = stackBefore
+  evidence.stackAfter = stackAfter
+  evidence.raisedOnClick = stackAfter.length > 0
+    && wanted.includes(stackAfter[stackAfter.length - 1])
+  // AND A SECOND CLICK ON THE FRONT GROUP OPENS ITS WINDOW LIST, because "which of these two" is
+  // a question a click cannot answer. One button, two windows, two thumbnails.
+  await ask({ kind: 'click', name: 'click-the-front-group', at })
+  await sleep(220)
+  const shell = SHELL.report()
+  evidence.popupKind = shell.popupKind
+  evidence.thumbs = shell.thumbs
+  evidence.listedItsWindows = shell.popupKind === 'thumbs'
+    && shell.thumbs.length === wanted.length
+    && shell.thumbs.every((t) => wanted.includes(t.win))
+  SHELL.closePopup()
+  evidence.ok = evidence.grouped && evidence.raisedOnClick && evidence.listedItsWindows
+  globalThis.M14.proofs.superbar = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'superbar: ' + evidence.buttons + ' button(s) for ' +
+    evidence.frames + ' window(s), raise ' + evidence.raisedOnClick + ', window list ' +
+    JSON.stringify(evidence.thumbs))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: A JUMP LIST IS THE PROGRAM'S OWN ROWS, and clicking one reaches the program.
+   -------------------------------------------------------------------------------------------- */
+async function proofJumpList (k, host) {
+  /* THE SUBJECT IS AN ORDINARY PROGRAM'S WINDOW, and the first version of this proof used the
+   * DESKTOP's — which has no taskbar button at all, by design: the desktop is the surface the
+   * buttons sit on. Measured, as a `hasButton: false`. A jump list is only reachable from an
+   * ordinary button, so `winopen` publishes one and this is it. */
+  const subject = [...host.frames.values()]
+    .filter((e) => e.role !== WROLE_DESKTOP && String(e.prog).endsWith('winopen.mjs'))
+    .sort((a, b) => a.id - b.id)[0] || null
+  const evidence = {
+    subjectWin: subject ? subject.id : 0,
+    published: subject ? subject.items.length : 0,
+    jumpRows: subject
+      ? subject.items.map((row, index) => ({ index, label: row.label, flags: row.flags }))
+        .filter((row) => (row.flags & WITEM_JUMP) !== 0)
+      : [],
+  }
+  const btn = subject
+    ? [...SHELL.el.querySelectorAll('[data-task-btn]')]
+      .find((b) => String(b.dataset.wins || '').split(',').includes(String(subject.id)))
+    : null
+  evidence.hasButton = Boolean(btn)
+  if (!btn) {
+    evidence.ok = false
+    globalThis.M14.proofs.jumplist = { ok: false, evidence }
+    say('BAD jumplist: no taskbar button carries the publishing window')
+    return
+  }
+  const r = btn.getBoundingClientRect()
+  const at = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+  /* HOVER FIRST, DELIBERATELY. The pointer is on the button when a right-click lands, so the
+   * thumbnail timer is always already running — and this is the order a hand produces. It is also
+   * the precedence rule: a menu the user ASKED for outranks a preview they got by moving the
+   * pointer, which is what `openJumpList` cancelling the hover timer is about. */
+  /* AWAY FIRST. `pointerenter` fires on ENTERING, and the Superbar proof left the pointer on this
+   * very button — so a move to the same place produces no enter, no hover timer and no preview.
+   * Measured, as a `popupAfterHover` of '0' with `thumbOpens` climbing elsewhere. */
+  await ask({ kind: 'hover', name: 'move-the-pointer-away',
+    at: { x: Math.round(deskRect().left + 8), y: Math.round(deskRect().top + 8) } })
+  await ask({ kind: 'hover', name: 'hover-the-button-first', at })
+  await sleep(220)
+  evidence.popupAfterHover = SHELL.report().popupKind
+  await ask({ kind: 'rightclick', name: 'right-click-the-button', at })
+  await sleep(200)
+  const shown = SHELL.report()
+  evidence.shellStats = { jumpOpens: shown.jumpOpens, thumbOpens: shown.thumbOpens }
+  evidence.popupKind = shown.popupKind
+  evidence.popupRows = shown.popupRows
+  // THE ROWS ON SCREEN ARE THE ROWS THE PROGRAM PUBLISHED, plus the shell's own Close — which is
+  // the shell's and not the program's, because a close is a REQUEST the program may refuse.
+  /* THE LIST MUST BE NON-EMPTY, and that is not pedantry: `[].every(...)` is TRUE, so a world
+   * where the published rows never arrived would satisfy a clause about the published rows. It is
+   * exactly what `--negative no-items` does, and without this the control would come out green. */
+  evidence.showsTheProgramsRows = shown.popupKind === 'jump'
+    && evidence.jumpRows.length > 0
+    && evidence.jumpRows.every((row) => shown.popupRows.includes(row.label))
+    && shown.popupRows.some((label) => label.startsWith('Close'))
+
+  // ---- and a real click on one reaches the process ----
+  const want = evidence.jumpRows.find((row) => row.label === 'New window')
+  const rowEl = [...SHELL.popup.querySelectorAll('.shell-row')]
+    .find((el) => el.textContent.includes('New window'))
+  evidence.clickable = Boolean(want && rowEl)
+  if (rowEl) {
+    const before = host.frames.size
+    const rr = rowEl.getBoundingClientRect()
+    await ask({ kind: 'click', name: 'click-the-jump-row',
+      at: { x: Math.round(rr.left + rr.width / 2), y: Math.round(rr.top + rr.height / 2) } })
+    /* THE PROOF IS A NEW WINDOW. The row said "New window"; the kernel validated the index against
+     * the list it holds; `winopen` got a `WEV_ITEM` and called `win_create`. A frame is the only
+     * honest evidence that the row did what its label said. */
+    const grew = await until(() => host.frames.size > before, 8000)
+    evidence.framesBefore = before
+    evidence.framesAfter = host.frames.size
+    evidence.spawnedMs = Math.round(grew)
+    evidence.reachedTheProgram = grew >= 0 && host.frames.size > before
+  }
+  SHELL.closePopup()
+  evidence.ok = evidence.hasButton && evidence.showsTheProgramsRows
+    && evidence.clickable && evidence.reachedTheProgram === true
+  globalThis.M14.proofs.jumplist = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'jumplist: ' + JSON.stringify(evidence.popupRows) +
+    ', clicking one opened ' + ((evidence.framesAfter || 0) - (evidence.framesBefore || 0)) +
+    ' window(s)')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 6: THE DESKTOP'S ICONS ARE THE FILESYSTEM'S, and a double-click starts a program.
+   -------------------------------------------------------------------------------------------- */
+/** Park every ordinary window on the right-hand side, so the first column of desktop icons is
+ *  reachable. MEASURED: the terminal's default box covers the first icon, so a double-click went
+ *  to a window and the proof reported that nothing had started. */
+async function clearTheIcons (host) {
+  for (const entry of appFrames(host)) {
+    if (entry.state !== WST_NORMAL) HOST.askState(entry.id, WST_NORMAL)
+  }
+  await sleep(150)
+  for (const entry of appFrames(host)) {
+    entry.win.box = { ...entry.win.placed, x: 620, y: 40 }
+    entry.win.apply()
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  }
+  await sleep(120)
+}
+
+async function proofIcons (k, host) {
+  await clearTheIcons(host)
+  const desk = SHELL.desktopEntry()
+  const view = desk ? desk.icons : null
+  const evidence = {
+    desktopWin: desk ? desk.id : 0,
+    hasView: Boolean(view),
+    published: desk ? desk.items.length : 0,
+  }
+  if (!view) {
+    evidence.ok = false
+    globalThis.M14.proofs.icons = { ok: false, evidence }
+    say('BAD icons: no icon view was built for the desktop window')
+    return
+  }
+  const shown = view.report()
+  evidence.icons = shown.icons
+  evidence.labels = shown.labels
+  evidence.menuRowsPublished = desk.items.filter((r) => (r.flags & WITEM_MENU) !== 0).length
+  evidence.deskRowsPublished = desk.items.filter((r) => (r.flags & WITEM_DESKTOP) !== 0).length
+  // THE ROWS CAME FROM A PROCESS READING THE FILESYSTEM, so what is on screen must be what it
+  // published — and the start menu's rows are the same list under a different flag.
+  evidence.drewWhatWasPublished = shown.icons === evidence.deskRowsPublished
+    && evidence.labels.includes('Computer')
+  // AND THE MENU IS A LISTING OF `/usr/bin`: `files` is a program in it, so a row must name it.
+  SHELL.openStart()
+  await sleep(120)
+  const menu = SHELL.report()
+  evidence.menuRows = menu.popupRows
+  evidence.menuListsPrograms = menu.popupKind === 'start'
+    && menu.popupRows.includes('files') && menu.popupRows.includes('paint')
+  SHELL.closePopup()
+
+  // ---- a REAL DOUBLE-CLICK on Computer, which must start `files` ----
+  const cell = [...view.el.querySelectorAll('.desk-icon')]
+    .find((el) => el.textContent.includes('Computer'))
+  evidence.foundComputer = Boolean(cell)
+  if (cell) {
+    const r = cell.getBoundingClientRect()
+    const before = host.frames.size
+    const at = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + 20) }
+    // HIT-TESTED, for the reason the caption grab is: a window over the icon takes the click and
+    // the proof would report that a double-click started nothing.
+    evidence.under = frameUnder(at)
+    evidence.clickLandedOnTheIcon = Boolean(document.elementFromPoint(at.x, at.y)
+      && document.elementFromPoint(at.x, at.y).closest('.desk-icon') === cell)
+    await ask({ kind: 'dblclick', name: 'double-click-computer', at })
+    await sleep(150)
+    /* THE VIEW'S OWN COUNTERS, so a failure says WHICH half of the path broke: `activations` is
+     * the page reporting the row to the kernel, and a new frame is the process acting on it. A
+     * clause that only read the frame count could not tell a missed double-click from a spawn that
+     * was refused. */
+    evidence.viewStats = view.report()
+    /* AND THE KERNEL'S AND THE PROCESS TABLE'S OWN NUMBERS, so a failure names its half: the view
+     * reporting the row, the kernel accepting the index, and a process appearing are three
+     * different things and only the last one is visible as a window. */
+    const st = await winState(k)
+    evidence.kernelItems = {
+      activations: (st.wins || {}).itemActivations,
+      bad: (st.wins || {}).badItems,
+      dropped: (st.wins || {}).droppedItems,
+    }
+    evidence.procs = (await askKernel(k, 'm4-state')).procs
+      .map((row) => ({ pid: row.pid, state: row.state }))
+    const grew = await until(() => host.frames.size > before, 10000)
+    evidence.framesBefore = before
+    evidence.framesAfter = host.frames.size
+    evidence.openedMs = Math.round(grew)
+    // A WINDOW IS THE EVIDENCE. `files` opens one, so a double-click that produced no frame
+    // produced no program — and the activation went from the page, through the kernel's index
+    // validation, to the desktop process's own `spawn`.
+    evidence.startedAProgram = evidence.clickLandedOnTheIcon === true
+      && grew >= 0 && host.frames.size > before
+    evidence.newTitles = [...host.frames.values()].map((e) => e.win.titleText)
+  }
+  evidence.ok = evidence.drewWhatWasPublished && evidence.menuListsPrograms
+    && evidence.foundComputer && evidence.startedAProgram === true
+  globalThis.M14.proofs.icons = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'icons: ' + evidence.icons + ' drawn of ' +
+    evidence.deskRowsPublished + ' published, menu ' + evidence.menuRows.length +
+    ' rows, double-click started a program ' + evidence.startedAProgram)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 7: EVERY MOUSE ACTION ON THE DESKTOP — the band, the ctrl-click, the drag.
+   -------------------------------------------------------------------------------------------- */
+async function proofMouse (k, host) {
+  const desk = SHELL.desktopEntry()
+  const view = desk ? desk.icons : null
+  const evidence = { hasView: Boolean(view) }
+  if (!view) {
+    evidence.ok = false
+    globalThis.M14.proofs.mouse = { ok: false, evidence }
+    say('BAD mouse: no icon view')
+    return
+  }
+  /* THE ICONS ARE IN THE FIRST COLUMN, so a band down the left edge of the desktop crosses several
+   * of them — and the windows are parked on the right first, because a window over an icon takes
+   * the press and the band would never begin. */
+  await clearTheIcons(host)
+  const cells = [...view.el.querySelectorAll('.desk-icon')]
+  evidence.cells = cells.length
+  if (cells.length < 3) {
+    evidence.ok = false
+    evidence.why = `the desktop has ${cells.length} icons; the band, the ctrl-click and the drag `
+      + 'each need one'
+    globalThis.M14.proofs.mouse = { ok: false, evidence }
+    say('BAD mouse: ' + evidence.why)
+    return
+  }
+  const first = cells[0].getBoundingClientRect()
+  const d = deskRect()
+
+  // ---- the rubber band ----
+  const from = { x: Math.round(d.left + 2), y: Math.round(first.top - 6) }
+  const to = { x: Math.round(first.right + 6), y: Math.round(first.bottom + 6) }
+  await ask({ kind: 'press', name: 'band-press', at: from })
+  await ask({ kind: 'move', name: 'band-drag', at: to })
+  evidence.bandingWhileDown = view.report().banding
+  await ask({ kind: 'release', name: 'band-release', at: to })
+  await sleep(80)
+  evidence.afterBand = view.report().selected
+  evidence.bandSelected = evidence.bandingWhileDown === true && evidence.afterBand.length >= 1
+
+  // ---- ctrl-click adds a second, and the first stays ----
+  const second = cells[1] ? cells[1].getBoundingClientRect() : null
+  if (second) {
+    const addAt = { x: Math.round(second.left + second.width / 2),
+      y: Math.round(second.top + 20) }
+    evidence.ctrlClickAt = addAt
+    evidence.ctrlClickUnder = (() => {
+      const el = document.elementFromPoint(addAt.x, addAt.y)
+      const cell = el && el.closest ? el.closest('.desk-icon') : null
+      return cell ? Number(cell.dataset.index) : frameUnder(addAt)
+    })()
+    /* META AND NOT CTRL, and the reason is the platform rather than taste: on macOS a Ctrl-click
+     * IS the secondary click, so `modifiers: 2` arrives as a right button and opens a context menu
+     * instead of extending a selection. Measured — the selection came back EMPTY. `src/wm/
+     * desktop.mjs` accepts `ctrlKey || metaKey` for exactly this reason, which is also what a Mac
+     * user's hand does. */
+    await ask({ kind: 'click', name: 'meta-click-a-second-icon', modifiers: 4, at: addAt })
+    await sleep(80)
+    evidence.afterCtrlClick = view.report().selected
+    evidence.ctrlAdded = evidence.afterCtrlClick.length === evidence.afterBand.length + 1
+  }
+
+  // ---- and a drag moves an icon and leaves it there ----
+  const third = cells[2] || cells[0]
+  const tr = third.getBoundingClientRect()
+  const grab = { x: Math.round(tr.left + tr.width / 2), y: Math.round(tr.top + 20) }
+  const left0 = parseFloat(third.style.left)
+  const top0 = parseFloat(third.style.top)
+  await ask({ kind: 'press', name: 'icon-drag-press', at: grab })
+  await ask({ kind: 'move', name: 'icon-drag-move', at: { x: grab.x + 160, y: grab.y + 90 } })
+  await ask({ kind: 'release', name: 'icon-drag-release', at: { x: grab.x + 160, y: grab.y + 90 } })
+  await sleep(80)
+  evidence.icon = {
+    index: Number(third.dataset.index),
+    from: { x: left0, y: top0 },
+    to: { x: parseFloat(third.style.left), y: parseFloat(third.style.top) },
+    placed: view.report().placed[third.dataset.index] || null,
+  }
+  evidence.dragMovedIt = Math.abs(evidence.icon.to.x - (left0 + 160)) <= 2
+    && Math.abs(evidence.icon.to.y - (top0 + 90)) <= 2
+  // AND IT STAYS THERE ACROSS A REDRAW, which is what makes it an arrangement rather than a
+  // transient: the view re-renders on every republished list.
+  view.render()
+  await sleep(40)
+  const again = view.el.querySelector(`.desk-icon[data-index="${evidence.icon.index}"]`)
+  evidence.afterRedraw = again
+    ? { x: parseFloat(again.style.left), y: parseFloat(again.style.top) }
+    : null
+  evidence.stayedPut = Boolean(evidence.afterRedraw)
+    && Math.abs(evidence.afterRedraw.x - evidence.icon.to.x) <= 1
+    && Math.abs(evidence.afterRedraw.y - evidence.icon.to.y) <= 1
+  evidence.ok = evidence.bandSelected && evidence.ctrlAdded === true && evidence.dragMovedIt
+    && evidence.stayedPut
+  globalThis.M14.proofs.mouse = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'mouse: band selected ' +
+    JSON.stringify(evidence.afterBand) + ', ctrl-click ' + evidence.ctrlAdded +
+    ', icon drag ' + evidence.dragMovedIt + ' and it stayed ' + evidence.stayedPut)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 8: THE TRAY — a clock that advances, and Show desktop as a toggle.
+   -------------------------------------------------------------------------------------------- */
+async function proofTray (k, host) {
+  const first = SHELL.report()
+  const evidence = { clock: first.clock, clockEpoch: first.clockEpoch }
+  // A CLOCK THAT ADVANCES, which is the one thing a tray clock has to do. Measured over a second
+  // rather than asserted off a format: a frozen picture of a clock reads correctly once.
+  const ticked = await until(() => SHELL.report().clockEpoch > evidence.clockEpoch, 3000)
+  evidence.tickedMs = Math.round(ticked)
+  evidence.clockAfter = SHELL.report().clock
+  evidence.clockAdvances = ticked >= 0
+
+  // ---- hover peeks, which is a LOOK and not an action ----
+  const sr = SHELL.showBtn.getBoundingClientRect()
+  const at = { x: Math.round(sr.left + sr.width / 2), y: Math.round(sr.top + sr.height / 2) }
+  const statesBefore = ((await winState(k)).wins || {}).states || {}
+  await ask({ kind: 'hover', name: 'hover-show-desktop', at })
+  await sleep(100)
+  evidence.peeking = desktop.dataset.peeking === '1'
+  evidence.statesWhilePeeking = ((await winState(k)).wins || {}).states || {}
+  evidence.peekChangedNothing =
+    JSON.stringify(statesBefore) === JSON.stringify(evidence.statesWhilePeeking)
+
+  // ---- and the click minimizes everything, and a second click puts it back ----
+  await ask({ kind: 'click', name: 'click-show-desktop', at })
+  const allDown = await until(async () => {
+    const st = await winState(k)
+    const apps = appFrames(host).map((e) => e.id)
+    const states = ((st.wins || {}).states) || {}
+    return apps.length > 0 && apps.every((id) => states[id] === WST_MIN)
+  }, 8000)
+  evidence.minimizedAllMs = Math.round(allDown)
+  evidence.minimizedAll = allDown >= 0
+  // The desktop window itself must NOT be minimized: the kernel refuses a show state on it, which
+  // is why Show desktop does not leave a blank page behind.
+  const deskRow = SHELL.desktopEntry() ? await rowOf(k, SHELL.desktopEntry().id) : {}
+  evidence.desktopState = deskRow.state
+  evidence.desktopStayed = deskRow.state === WST_NORMAL
+
+  await ask({ kind: 'click', name: 'click-show-desktop-again', at })
+  const allBack = await until(async () => {
+    const st = await winState(k)
+    const apps = appFrames(host).map((e) => e.id)
+    const states = ((st.wins || {}).states) || {}
+    return apps.length > 0 && apps.every((id) => states[id] !== WST_MIN)
+  }, 8000)
+  evidence.restoredAllMs = Math.round(allBack)
+  evidence.restoredAll = allBack >= 0
+  evidence.ok = evidence.clockAdvances && evidence.peeking === true
+    && evidence.peekChangedNothing && evidence.minimizedAll && evidence.desktopStayed
+    && evidence.restoredAll
+  globalThis.M14.proofs.tray = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'tray: clock ' + evidence.clock + ' -> ' +
+    evidence.clockAfter + ', peek ' + evidence.peeking + ' (changed nothing ' +
+    evidence.peekChangedNothing + '), minimize all ' + evidence.minimizedAll +
+    ', restore all ' + evidence.restoredAll)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 9: THE TASKBAR IS GLASS, read out of the composited pixels.
+
+   `aero-strip` in the DOM and a blur that happened are DIFFERENT CLAIMS, and only the second is
+   the product — M11's whole lesson, applied to the one piece of chrome M14 added. The band is
+   sampled across the same hard seam, and `scripts/check.py` asserts the SPREAD with M11's own
+   arithmetic: a step is monotonic too, so monotonicity proves nothing (constraint 256).
+   -------------------------------------------------------------------------------------------- */
+function proofPixels () {
+  const dpr = window.devicePixelRatio
+  const d = deskRect()
+  const bar = SHELL.el.getBoundingClientRect()
+  // The seam goes down the middle of the taskbar's own width, where there is bar on both sides of
+  // it and no window above it.
+  const seamCssX = Math.round(d.width / 2)
+  seam.style.background =
+    'linear-gradient(to right, #000 0 ' + seamCssX + 'px, #fff ' + seamCssX + 'px 100%)'
+  const seamDev = Math.ceil(d.left * dpr) + Math.round(seamCssX * dpr)
+  const evidence = {
+    dpr,
+    seamCssX,
+    seamDeviceX: seamDev,
+    desk: {
+      x: Math.ceil(d.left * dpr), y: Math.ceil(d.top * dpr),
+      w: Math.floor(d.width * dpr), h: Math.floor(d.height * dpr),
+    },
+    // A BAND INSIDE THE BAR, in its empty middle: above the buttons' row of text and below its
+    // top edge, so what is sampled is glass over the seam and not a glyph.
+    barBand: {
+      y: Math.ceil((bar.top + 4) * dpr),
+      rows: Math.max(2, Math.floor(6 * dpr)),
+      filter: getComputedStyle(SHELL.el).backdropFilter,
+      under: frameUnder({ x: Math.round(d.left + seamCssX), y: Math.round(bar.top + 6) }),
+    },
+    /* AND THE BARE SEAM, FOUND BY HIT-TESTING rather than computed as "80 px above the bar".
+     * M12's proof 4 made exactly that mistake twice and this page made it once: a row chosen by
+     * arithmetic landed inside a window's opaque client area and the reference band came back
+     * uniform white — span 0.0 over a seam that was perfectly fine. `elementFromPoint` asks the
+     * browser what is really there. */
+    bareBand: (() => {
+      const x = Math.round(d.left + seamCssX)
+      for (let y = Math.round(bar.top) - 12; y > d.top + 8; y -= 6) {
+        const el = document.elementFromPoint(x, y)
+        if (!el) continue
+        /* WHAT COUNTS AS BARE, and the first version of this got it wrong by asking for the seam
+         * element itself: the DESKTOP WINDOW covers the whole work area, and `elementFromPoint`
+         * returns the topmost BOX regardless of whether it paints anything — so the seam is never
+         * the answer inside the work area even though its pixels are what a reader sees through
+         * the transparent desktop. What must be absent is anything OPAQUE: an ordinary window's
+         * frame, an icon, the bar itself.
+         *
+         * Measured: asking for `#seam` found no row at all and the reference band came back null. */
+        const win = el.closest ? el.closest('.window') : null
+        const opaque = (win && !win.classList.contains('is-desktop'))
+          || (el.closest && (el.closest('.desk-icon') || el.closest('.taskbar')))
+        if (opaque) continue
+        return { y: Math.ceil(y * dpr), rows: Math.max(2, Math.floor(6 * dpr)), cssY: y,
+          under: el.className || el.id }
+      }
+      return null
+    })(),
+  }
+  evidence.barIsAStrip = SHELL.el.classList.contains('aero-strip')
+  evidence.filterPresent = /blur\(/.test(evidence.barBand.filter)
+  /* THE HALO, ON THE SURFACES M14 ADDED. M11's own lesson carried forward: a caption crosses black
+   * and white in one drag, so no (colour, background) pair HAS a contrast ratio and the answer is
+   * a halo that gives a glyph LOCAL contrast wherever it lands (constraint 39). M14 put text in
+   * three more places over unknown backdrops — an icon label over wallpaper, a button's label over
+   * glass, a popup row over a dark sheet — and each one needs the same answer.
+   *
+   * STRUCTURAL AND NOT SAMPLED, which is stated rather than hidden: this asserts the halo is
+   * DECLARED, where M11 samples the pixels at both ends of a seam. `MILESTONES.md` M14 records the
+   * sampled version as owed. */
+  const haloOf = (sel) => {
+    const el = desktop.querySelector(sel)
+    if (!el) return null
+    const st = getComputedStyle(el)
+    return { sel, shadow: st.textShadow, colour: st.color }
+  }
+  evidence.halos = ['.desk-label', '.task-label'].map(haloOf).filter(Boolean)
+  evidence.labelsCarryAHalo = evidence.halos.length === 2
+    && evidence.halos.every((h) => h.shadow && h.shadow !== 'none')
+  evidence.ok = evidence.barIsAStrip && evidence.filterPresent && evidence.labelsCarryAHalo
+  globalThis.M14.proofs.pixels = { ok: evidence.ok, evidence }
+  say((evidence.ok ? 'ok  ' : 'BAD ') + 'pixels: the bar asks for ' + evidence.barBand.filter +
+    ', seam at device x ' + seamDev)
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+async function live () {
+  seam.hidden = true
+  const { k, host, shell } = await bootHost()
+  await spawnProgram(k, DESKTOP, ['desktop', '-c', '3600000'])
+  await until(() => Boolean(shell.desktopEntry()), 10000)
+  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => appFrames(host).length >= 1, 10000)
+  const entry = host.newest()
+  /* CLEAR OF THE ICON COLUMN, because a first-run desktop should show what is on it. `term` asks
+   * for its own geometry and gets it; this is the SHELL placing the one window it opened itself,
+   * through the frame's own route, and it is a decision rather than a default — the icon column is
+   * at the desktop's left edge, which is exactly where a fresh window opens.
+   *
+   * It cost two screenshots and a Firefox run to notice: "4 icons drawn" and a desktop with no
+   * icons on it are both true when a window is sitting on top of them. */
+  if (entry) {
+    const wa = host.workArea()
+    entry.win.box = {
+      x: Math.max(120, Math.round(wa.w * 0.45)), y: 40,
+      w: entry.win.placed.w, h: entry.win.placed.h,
+    }
+    entry.win.apply()
+    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  }
+  if (entry && entry.term) entry.term.focus()
+  /* WHAT THE SHELL ACTUALLY HAS, PRINTED. A second engine gives no other channel — Mozilla
+   * removed CDP, so `bench/m7-win/firefox.py` can only photograph the page — and the first
+   * Firefox run of this desktop showed no icons with no way to tell a desktop process that never
+   * started from an icon view that never drew. These pages print their own log for exactly that
+   * reason (`CLAUDE.md`, the second-engine rule). */
+  const deskEntry = shell.desktopEntry()
+  const view = deskEntry ? deskEntry.icons : null
+  say('')
+  say('desktop:  ' + (deskEntry
+    ? `win ${deskEntry.id}, ${deskEntry.items.length} rows published, `
+      + `${view ? view.report().icons : 'NO ICON VIEW'} icons drawn`
+    : 'NO DESKTOP PROCESS — nothing published a row'))
+  say('shell:    ' + shell.report().buttons + ' taskbar button(s), work area ' +
+    JSON.stringify(host.workArea()))
+  /* AND THE RECTS, because "4 icons drawn" and "4 icons a reader can see" are different claims —
+   * which is constraint 40 in the small. The first Firefox run of this desktop reported four icons
+   * drawn and showed none, and a PNG cannot say whether a box is empty or elsewhere. */
+  if (deskEntry) {
+    const r = (el) => {
+      if (!el) return 'none'
+      const b = el.getBoundingClientRect()
+      return `${Math.round(b.width)}x${Math.round(b.height)} at ${Math.round(b.left)},${Math.round(b.top)}`
+    }
+    say('rects:    frame ' + r(deskEntry.win.el) + ' | body ' + r(deskEntry.win.bodyEl)
+      + ' | view ' + r(view && view.el) + ' | icon 1 '
+      + r(view && view.el.querySelector('.desk-icon')))
+    const svg = view && view.el.querySelector('.desk-icon svg')
+    const path = svg && svg.querySelector('path')
+    say('icon svg: ' + (svg ? `${r(svg)}, ${svg.childElementCount} children, `
+      + `${svg.querySelectorAll('linearGradient').length} gradient(s), first fill `
+      + (path ? getComputedStyle(path).fill : 'no path') : 'NONE'))
+  }
+  say('')
+  say('A LIVE WINDOWS 7 DESKTOP.')
+  say('  double-click an icon, or use the Start orb — both are rows the `desktop` process')
+  say('  published from the filesystem, so the menu is a listing of /usr/bin')
+  say('  drag a caption to an edge to snap, to the top to maximize; 20 px of drag-out releases')
+  say('  right-click a taskbar button for its jump list; hover one for a thumbnail')
+  say('  hover the strip at the far right to peek, click it to minimize everything')
+  globalThis.M14.phase = 'live'
+  globalThis.M14.livePid = row.pid
+}
+
+async function main () {
+  if (CFG.liveOnly) {
+    globalThis.M14.state = 'done'
+    globalThis.M14.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noSnapHysteresis
+    ? 'CONTROL: no_snap_hysteresis (the release threshold collapses onto the arm).'
+    : CFG.noWorkArea ? 'CONTROL: no_workarea (a maximized window covers the taskbar).'
+      : CFG.noGroup ? 'CONTROL: no_group (one button per window instead of per program).'
+        : CFG.noItems ? 'CONTROL: no_items (the kernel accepts published rows and discards them).'
+          : ''
+  say('M14 — Aero Snap, the Superbar, jump lists, the tray and the desktop. ' + which)
+  say('Snap arms at ' + SNAP_ARM_PX + ' px, releases at ' + SNAP_RELEASE_PX +
+    ' px of drag-out, and a maximized window at ' + MAX_RELEASE_PX + ' px of SIDE-move.')
+
+  const { k, host, shell } = await bootHost()
+  globalThis.M14.kernelIsolated = true
+  /* THE MOUNTS, PRINTED. Every row this page measures comes out of the filesystem, so a boot where
+   * `/usr` did not mount is a run whose empty start menu means nothing about the shell. */
+  const mounts = (await askKernel(k, 'm3-state')).m3 || {}
+  globalThis.M14.mounts = Object.keys(mounts)
+  say('mounts: ' + globalThis.M14.mounts.join(' '))
+
+  /* THE DESKTOP PROCESS FIRST, because the shell's icons and its start menu are the rows that
+   * process publishes — a taskbar with no desktop behind it is a taskbar with an empty menu, and
+   * that is a state this page should never be measuring by accident. */
+  await spawnProgram(k, DESKTOP, ['desktop', '-c', '600000'])
+  await until(() => Boolean(shell.desktopEntry()), 10000)
+  await until(() => {
+    const d = shell.desktopEntry()
+    return Boolean(d) && (CFG.noItems || d.items.length > 0)
+  }, 10000)
+
+  // Two windows of ONE program, which is what a group is, and one of another so there is a second
+  // button to raise from.
+  await spawnProgram(k, WINOPEN, ['winopen', '-n', '2', '-c', '600000'])
+  await until(() => appFrames(host).length >= 2, 15000)
+  await spawnProgram(k, TERM, ['term', '--ceiling', '600000'])
+  await until(() => appFrames(host).length >= 3, 15000)
+  await sleep(200)
+
+  await proofSnap(k, host)
+  await proofWorkArea(k, host)
+  await proofMinimize(k, host)
+  await proofSuperbar(k, host)
+  await proofJumpList(k, host)
+  await proofIcons(k, host)
+  await proofMouse(k, host)
+  await proofTray(k, host)
+  /* THE PIXELS LAST, because the driver photographs the page AFTER this function returns: a band
+   * published for a state the screenshot no longer shows still produces numbers, which is the
+   * failure M12's proof 4 was unsound with twice. */
+  proofPixels()
+
+  const proofs = globalThis.M14.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M14.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M14.verdict)
+  globalThis.M14.state = 'done'
+  globalThis.M14.phase = 'rendered'
+}
+</script>
+</body>
+</html>

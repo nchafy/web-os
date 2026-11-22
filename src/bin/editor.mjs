@@ -64,6 +64,7 @@ export function run(env) {
   const account = {
     program: NAME, win: 0, fd: 0, second: 0, dialog: 0, palette: 0,
     typed: "", keys: 0, closes: 0, refusals: 0, suppressedWhileModal: 0,
+    opened: "", openError: "",
     raiseRefused: 0, why: "",
   };
 
@@ -73,9 +74,36 @@ export function run(env) {
   }
   account.win = made.win;
   account.fd = made.fd;
-  env.fs.write(made.fd, env.std.bytes(
-    `${NAME}: win ${made.win} on fd ${made.fd}\r\n`
-    + "type something, then press the X on this window.\r\n\r\n> "));
+  /**
+   * M14. AN OPERAND OPENS A FILE, which is what a double-click on a text icon has to mean: the
+   * desktop names a path and this program shows what is in it.
+   *
+   * IT IS SHOWN AND NOT LOADED FOR EDITING, and the difference is stated because the window invites
+   * typing: this is a text window with a buffer of its own, so the file's bytes are WRITTEN to the
+   * screen and the buffer stays empty. Saving does not exist here — there is no `write` path in
+   * this program at all — and a program that looked like it was editing a file it could not save
+   * would be the live-looking-button defect with a file attached.
+   */
+  const opening = argv.slice(1).find((a) => a[0] !== "-") || "";
+  if (opening) {
+    const body = env.std.readFileText(env, opening);
+    account.opened = opening;
+    if (typeof body === "number") {
+      account.openError = env.std.errnoName(body);
+      env.fs.write(made.fd, env.std.bytes(
+        `${NAME}: ${opening}: ${env.std.errnoName(body)}\r\n\r\n> `));
+    } else {
+      env.win.setTitle(made.fd, `${NAME} — ${opening}`);
+      // CRLF, because a window is a terminal-shaped surface and a bare LF leaves the cursor in
+      // the column it was in (`src/wm/terminal.mjs`).
+      env.fs.write(made.fd, env.std.bytes(
+        `${opening} (read-only view)\r\n\r\n${body.replace(/\n/g, "\r\n")}\r\n\r\n> `));
+    }
+  } else {
+    env.fs.write(made.fd, env.std.bytes(
+      `${NAME}: win ${made.win} on fd ${made.fd}\r\n`
+      + "type something, then press the X on this window.\r\n\r\n> "));
+  }
 
   /** A SECOND WINDOW OF THE SAME PROCESS, under `-a` only: an app-modal dialog blocks it and a
    *  window-modal one does not, and that difference is the whole reason there are two axes. */

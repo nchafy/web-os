@@ -2629,3 +2629,95 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     recomputed from the top of the stack on every run, so the flat set follows the order by
     construction and a raise needs only to call the governor. A governor that walks its own
     previous flags cannot express a swap.
+271. **A WINDOW'S SHOW STATE IS THE KERNEL'S AND ITS GEOMETRY IS THE PAGE'S, AND THE RESTORE BOX
+    GOES WITH THE STATE.** M14 added `WIN_SET_STATE` (`WST_NORMAL | MIN | MAX | SNAP_L | SNAP_R`),
+    and the division is `WIN_SET_BOX`'s: a maximized window fills the WORK AREA, which is the
+    desktop minus whatever the shell has taken off it — a fact only the page has — so the page lays
+    the frame out and reports the box through `win-geom` like every other box, while the kernel
+    records WHICH state, WHO is the desktop, and WHERE a docked window came from. The kernel has to
+    own the state for three reasons that are not aesthetic: minimizing changes the blurred area and
+    constraint 49's admission controller is over that area; a desktop window's place at the bottom
+    of the stack is the z-order, which is the kernel's (226); and "there is one desktop" is a
+    uniqueness two processes that cannot see each other have no way to agree on. **The restore box
+    is the kernel's for a measured reason**: the page is a renderer that may be re-laid-out at any
+    moment (`WinHost.relayout`), so a restore point living only in the page comes back wrong after
+    one. And restoring a MINIMIZED window must give back what it WAS — Win32's `SW_RESTORE` — so
+    `setState` answers the state it SETTLED ON rather than the one it was asked for.
+272. **A MAXIMIZED WINDOW FILLS THE WORK AREA, NOT THE SCREEN, AND RESERVING THE STRIP MUST
+    RE-CLAMP WHAT IS ALREADY THERE.** A window covering the taskbar is a window a user cannot get
+    out from under: there is no keyboard route to the Start orb in this system, so the bar being
+    reachable is the only way back. `WinHost.reserve` therefore calls M13's `relayout`, because a
+    maximized window laid out before the shell appeared is laid out against a desktop that no
+    longer exists. `--negative no-workarea` is the world where it does not.
+273. **A SNAP THRESHOLD IS A PAIR, AND THE TWO GESTURES RELEASE ON DIFFERENT MEASUREMENTS.** Snap
+    ARMS at 1 px of pointer-to-edge and a snapped window RELEASES after 20 px of drag-out; a
+    MAXIMIZED window releases after 50 px of HORIZONTAL movement alone. The pair is constraint 39's
+    rule applied to a pointer — with one threshold a window snapped at the edge un-snaps on the
+    next motion sample and flickers for as long as the button is held — and the second measurement
+    is not a stricter version of the first: a maximized window's caption is at the top of the work
+    area, so a user reaching for it drags downward constantly and a total-distance rule would
+    un-maximize on every brush. Both edges of both thresholds are driven with a real pointer
+    (`www/m14.html` proof 1), and `--negative no-snap-hysteresis` collapses the release onto the arm.
+274. **A WINDOW WITH NO FRAME ON SCREEN FILTERS NOTHING, SO THE BLUR GOVERNOR MUST CHARGE IT
+    ZERO.** Two windows have no frame: a MINIMIZED one is not rendered, and the DESKTOP has no
+    caption or ring by definition. Charging either is constraint 49's under-read arrived at from
+    the other side — an accounting of a ring nobody renders — and it would make a desktop full of
+    minimized windows take the glass off the one in use. This is also what closes M12's own open
+    item: it recorded that nothing had ever driven a minimize through the governor, so the claim
+    that constraint 49's event list was covered rested on the shape of the ABI rather than on a
+    run. `www/m14.html` proof 3 is the run, and it asserts the governor's input dropped by exactly
+    the minimized window's ring.
+275. **THE SHELL IS PAGE-SIDE CHROME AND ITS CONTENTS ARE A PROCESS'S PUBLISHED ROWS.** The
+    taskbar, the start menu, a jump list and the desktop's icons are rendered by the page, and the
+    reason is arithmetic rather than convenience: a display list has no text op and no image op
+    (`src/abi.mjs` `DL_*`), and a `WEV_POINTER` is only delivered while a button is down — so a
+    process-drawn Superbar could have neither labels nor hover, and a rubber band is not
+    expressible as a stream of filled rectangles. What keeps that honest is `win_items`: a window
+    publishes rows, each flagged for where it appears, and activation returns as `WEV_ITEM` with an
+    INDEX the kernel validates against the list it holds. So the desktop's icons are a process
+    reading the filesystem, and `--negative no-items` — the kernel accepting a list and discarding
+    it — is the run that tells that apart from a page drawing a hard-coded menu. **The second,
+    separately-gated management endpoint `docs/research/09-hobbyist-os-actions.md` §4 requires is
+    therefore not needed here**, and that is a conclusion rather than a shortcut: a taskbar needs
+    cross-process window enumeration no ordinary client may have, and the page already holds every
+    window's frame because `win-create` built it. A taskbar as a PROCESS would need the endpoint.
+276. **A PAGE-RENDERED STRING THAT CAME FROM A PROGRAM MUST BE SET AS TEXT, NEVER AS MARKUP.** M14
+    put program-supplied strings into page chrome in four new places — a taskbar button's label, a
+    jump-list row, a start-menu row, a desktop icon's caption — and each one is a window title or
+    an item label a process chose. `textContent` is the whole of the defence, and the icon beside
+    it is drawn from an integer id precisely so that no program ever supplies markup
+    (`src/wm/icons.mjs`). A row's label is also bounded at `WITEM_LABEL_MAX` and its list at
+    `WIN_ITEM_CAP`, because a shell has to lay it out.
+277. **THERE IS ONE DESKTOP, IT LIVES AT THE BOTTOM OF THE STACK, AND IT IS NOT A WINDOW A USER CAN
+    MOVE.** `WROLE_DESKTOP` is refused with -EBUSY while another live window holds it, and refused
+    with -EINVAL for a window with an owner — the owner chain exists so a dialog rides above its
+    owner, and the desktop is the one window nothing may ride above. A raise on it is a no-op
+    rather than a refusal: the page posts `win-raise` for every frame a pointer lands on, so
+    without that a click on the wallpaper would bury every window on screen. It has no show state
+    (minimizing the thing every other window sits on is not a gesture with a meaning), no drag and
+    no resize, and its geometry is the work area rather than anything a process asked for.
+278. **AN ICON SET MUST BE REDRAWN, AND THE DRAWING BELONGS TO THE PAGE WHILE THE CHOICE BELONGS TO
+    THE PROGRAM.** Constraint 37 forbids shipping Microsoft's icons; what crosses the ABI is
+    therefore a `WICON_*` ID, chosen by a program from a closed dense table, and the vector drawing
+    for each lives in `src/wm/icons.mjs` with a self-test that refuses an id the table declares and
+    the drawings do not cover. A program that named a FILE instead would be asking the shell to
+    load an image from the filesystem on its behalf, which is a capability nothing needs. What is
+    reproduced is the GRAMMAR of the Aero style — 3/4 perspective, a light edge on top, a vertical
+    gloss, a 1 px darker outline, saturated accents on a desaturated body — which is observable and
+    is not anybody's property.
+279. **A DRIVEN GESTURE IS NOT THE GESTURE A HAND MAKES, AND THE DIFFERENCES MUST BE MEASURED
+    RATHER THAN ASSUMED.** `bench/m14-shell/input-probe.py` records every DOM event
+    `Input.dispatchMouseEvent` really delivers, and three of its rows decided code. **A pointer
+    capture retargets the compatibility mouse events**: with a capture taken in `pointerdown`,
+    `click` and `dblclick` are dispatched at the CAPTURING element rather than at what is under the
+    pointer — so a desktop icon's double-click arrived at the icon VIEW, `closest('.desk-icon')`
+    was null, and a gesture that landed squarely on an icon activated nothing while the view's own
+    counters read two clicks and zero activations. A handler that needs to know WHAT was hit must
+    fall back to a coordinate hit test. **On macOS a Ctrl-click is the secondary click**: it
+    delivers `contextmenu` and no `click` at all, so a multi-select gesture driven with `ctrlKey`
+    selects nothing and opens a menu — the desktop accepts Meta beside Ctrl and the driver sends
+    Meta. **A right press delivers both `pointerdown` with `button === 2` and `contextmenu`**, which
+    is the opposite of what this probe was written to confirm: the jump list's real defect was a
+    DRIVER that sent a left button for a gesture named `rightclick`, and the measurement is what
+    separated "the browser does not deliver this" from "we never sent it". A harness that cannot
+    tell those apart will blame the product.

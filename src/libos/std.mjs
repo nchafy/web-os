@@ -9,6 +9,7 @@
 import {
   E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName,
   DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
+  WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
 } from "../abi.mjs";
 
 const ENC = new TextEncoder();
@@ -99,6 +100,22 @@ export function readFileText(env, path, cap) {
 /** Split text into lines, without inventing a last empty one. `"a\nb\n".split("\n")` ends in `""`,
  *  which gives `wc -l` and `grep -c` one line too many: a trailing newline terminates the last line
  *  rather than starting another. Text with no trailing newline still has its last line. */
+/**
+ * A whole file's BYTES by path, or a negative errno. `readFileText`'s sibling, and the second
+ * caller is what justifies it being here: `src/bin/clip.mjs` had its own copy, and M14's `imgview
+ * -f` needs the same three lines — a file's bytes under a format are what a typed clipboard is
+ * about, and decoding them as text would corrupt every image.
+ */
+export function readFileBytes(env, path, cap) {
+  const fd = env.fs.open(path, O_RDONLY);
+  if (fd < 0) return fd;
+  try {
+    return slurp(env, fd, cap);
+  } finally {
+    env.fs.close(fd);
+  }
+}
+
 export function lines(s) {
   if (s === "") return [];
   const out2 = s.split("\n");
@@ -252,4 +269,33 @@ export function formatForPath(path) {
   if (dot <= 0) return 0;
   const ext = name.slice(dot + 1).toLowerCase();
   return Object.prototype.hasOwnProperty.call(FORMAT_BY_EXT, ext) ? FORMAT_BY_EXT[ext] : 0;
+}
+
+/**
+ * M14. WHICH ICON A FILE GETS, by extension and by what it is — the other half of the file
+ * association, and userland's for `FORMAT_BY_EXT`'s reason: the kernel carries an icon ID and knows
+ * nothing about names (`src/abi.mjs` WICON_*), and the shell draws an ID and knows nothing about
+ * files. The convention in between belongs to the programs that publish rows.
+ *
+ * A DIRECTORY IS A FOLDER WHATEVER IT IS CALLED, which is why `isDir` is an argument rather than
+ * another extension: `/usr/bin` has no extension and is not a generic file.
+ */
+export const ICON_BY_EXT = Object.freeze({
+  txt: WICON_TEXT,
+  md: WICON_TEXT,
+  png: WICON_IMAGE,
+  rgba: WICON_IMAGE,
+});
+
+/** The icon id for a path. `WICON_FOLDER` for a directory, `WICON_PROGRAM` for something the
+ *  caller says is executable, the table for a known extension, and the generic page otherwise —
+ *  which is what a reader should see for a file nothing recognises. */
+export function iconForPath(path, { isDir = false, isProgram = false } = {}) {
+  if (isDir) return WICON_FOLDER;
+  const name = String(path).split("/").pop() || "";
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  if (Object.prototype.hasOwnProperty.call(ICON_BY_EXT, ext)) return ICON_BY_EXT[ext];
+  if (isProgram) return WICON_PROGRAM;
+  return WICON_GENERIC;
 }

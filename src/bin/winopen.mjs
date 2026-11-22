@@ -23,8 +23,8 @@
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
-  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, keyBytesOf,
-  WMODAL_SYSTEM, WMODE_BLOCKING,
+  WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_ITEM, WEV_STATE, keyBytesOf,
+  WMODAL_SYSTEM, WMODE_BLOCKING, WITEM_JUMP, WICON_PROGRAM,
 } from "/src/abi.mjs";
 
 const NAME = "winopen";
@@ -43,6 +43,8 @@ const POLL_MS = 250;
 const CEILING_MS = 60000;
 
 const EVENT_NAME = {
+  [WEV_STATE]: "state",
+  [WEV_ITEM]: "item",
   [WEV_KEY]: "key",
   [WEV_RESIZE]: "resize",
   [WEV_CLOSE]: "close",
@@ -139,6 +141,30 @@ export function run(env) {
       + `  /proc/${env.pid}/win/${r.win}\n`);
   }
 
+  /**
+   * M14. A JUMP LIST, published on the first window.
+   *
+   * WHY HERE AND NOT ONLY ON THE DESKTOP: the desktop has no taskbar button — it is the surface the
+   * buttons sit on — so a jump list is only reachable at all from an ORDINARY program's button,
+   * which is what this is. Windows 7's own first row for most programs is "open another one", and
+   * that is a thing this program can really do.
+   *
+   * THE ROW IS A ROW AND THE MEANING IS HERE. `WEV_ITEM` reports an INDEX into the list below, so
+   * the shell never learns what "New window" does; the kernel validates the index against the list
+   * it is holding, and the loop acts on it.
+   */
+  const JUMP_NEW = 0;
+  const JUMP_CLOSE_EXTRA = 1;
+  const jumpRows = [
+    { icon: WICON_PROGRAM, flags: WITEM_JUMP, label: "New window" },
+    { icon: WICON_PROGRAM, flags: WITEM_JUMP, label: "Close every window but the first" },
+  ];
+  const publishJump = () => env.win.items(made[0].fd, jumpRows);
+  const published = publishJump();
+  if (published < 0) {
+    env.std.say(env, `${NAME}: win_items: ${env.std.errnoName(published)}\n`);
+  }
+
   if (systemModal && made.length) {
     const r = env.win.setModal(made[0].fd, WMODAL_SYSTEM, WMODE_BLOCKING);
     if (r < 0) return env.std.complainErrno(env, NAME, "win_set MODAL", r);
@@ -168,6 +194,8 @@ export function run(env) {
     // this process is the one thing an owner chain does to it, and `events` includes the geometry
     // the page reports the instant it builds a frame.
     destroyedSeen: 0, hangups: 0, resizes: 0, closes: 0,
+    // M14: jump-list rows acted on, and windows opened from one.
+    items: 0, opened: 0,
   };
   for (;;) {
     if (held.size === 0) { account.why = "every window is gone"; break; }
@@ -242,6 +270,41 @@ export function run(env) {
             }
           }
           if (ev.type === WEV_RESIZE) account.resizes += 1;
+          /* M14. A JUMP-LIST ROW WAS CLICKED. The index is into the list this process published
+           * (the kernel validated it against that list), so the switch is over this program's own
+           * array and the shell never knew what either row meant. */
+          if (ev.type === WEV_ITEM) {
+            account.items += 1;
+            if (ev.a === JUMP_NEW) {
+              if (held.size >= WIN_LIMIT) {
+                env.std.say(env, `${NAME}: ${WIN_LIMIT} windows is the limit\n`);
+              } else {
+                const extra = env.win.create({
+                  title: `${label} ${made.length + 1}`,
+                  w: 420, h: 260, x: 60 + made.length * 48, y: 60 + made.length * 44,
+                });
+                if (typeof extra === "number") {
+                  env.std.say(env, `${NAME}: win_create: ${env.std.errnoName(extra)}\n`);
+                } else {
+                  held.set(extra.fd, { win: extra.win, owner: 0 });
+                  made.push(extra);
+                  account.opened += 1;
+                  env.fs.write(extra.fd, env.std.bytes(
+                    `${label} ${made.length}\r\n  opened from the jump list\r\n`));
+                  env.std.say(env, `${NAME}: jump list opened win ${extra.win}\n`);
+                }
+              }
+            } else if (ev.a === JUMP_CLOSE_EXTRA) {
+              for (const [fd, other] of [...held]) {
+                if (fd === made[0].fd) continue;
+                const ids = env.win.destroy(fd);
+                account.cascades.push(Array.isArray(ids) ? ids : []);
+                held.delete(fd);
+                env.std.say(env, `${NAME}: jump list closed win ${other.win}\n`);
+              }
+            }
+            continue;
+          }
           /* THE CLOSE REQUEST, HONOURED. It is counted because it did not arrive at all until an
            * independent critic found that `destroy` cleared the queue the page had just put it in
            * — and since M9 it is ACTED ON here rather than by the page: the X asks, and a program

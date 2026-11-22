@@ -37,6 +37,7 @@ import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
   WinMgr, installWindowKernel, setCascade, setDrawReaches, setOwnerChain, setModalBlocks,
+  setItemsReach,
   setGovernor,
   NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
@@ -1645,6 +1646,12 @@ async function handle(m) {
       if (cfg.noIsig) {
         if (cfg.bench !== 1) throw new Error("noIsig requires bench=1");
         setPtyDefaultIsig(false);
+      }
+      /* M14's control: a published item list is accepted and discarded, so a shell has nothing to
+       * draw. Bench-gated like every other hook here — a PROCESS must not be able to ask for it. */
+      if (cfg.noItems) {
+        if (cfg.bench !== 1) throw new Error("noItems requires bench=1");
+        setItemsReach(false);
       }
       if (cfg.noPollWake) {
         if (cfg.bench !== 1) throw new Error("noPollWake requires bench=1");

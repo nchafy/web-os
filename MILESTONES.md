@@ -38,10 +38,10 @@ checks is a wish.
 | M10 | Typed clipboard and drag-and-drop | 4 | 0.5 | ✅ done — **ACCEPT**, 37 expectations, 2 controls, 164 host checks, 11 mutations, 3 real-prompt runs, 6 critic findings fixed |
 | M11 | Aero glass, frame-only, plus reskin | 5 | 0.5 | ✅ done — **ACCEPT**, 35 expectations, 5 controls, 1 real-prompt run, 11 critic findings fixed, and a prerequisite experiment that corrected a decision's headline number |
 | M12 | The blur governor | 3 | 0.5 | ✅ done — **ACCEPT**, 27 expectations, 3 controls, 32 host checks, 1 real-prompt run, 11 critic findings fixed, and a prerequisite sweep that found the specified gate cannot fire |
-| **M13** | **The geometry harness** | 5 | | ⬜ **next (option A)** |
-| M14 | Snap, Superbar, jump lists, tray | 6 | | ⬜ A |
-| — | Icons and fonts, redrawn | 4 | | ⬜ A |
-| | **Option A total** | **74.5** | | |
+| M13 | The geometry harness | 5 | 0.5 | ✅ done — **ACCEPT**, 38 expectations, 3 controls, 1 product defect found (the resize re-clamp) |
+| M14 | Snap, Superbar, jump lists, tray | 6 | 1 | ✅ done — **ACCEPT**, 51 expectations, 4 controls, and M12's own open item closed by a run |
+| — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
+| | **Option A total** | **74.5** | **12.75** | **the window half is complete** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
 | D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
 | D2 | Traps, timer, real preemption | 2 | | ⬜ D |
@@ -2417,6 +2417,261 @@ same reason the area budget is, and it is recorded here rather than guarded.
 one 120 Hz panel at dpr 2 with one GPU. An integrated GPU has far less and a 60 Hz panel twice the
 per-frame budget. Nothing adapts the budget to the machine, and doing so would need the frame-rate
 measurement this environment cannot take.
+
+---
+
+## M13 — the geometry harness · done · 0.5 days · ~1,400 LoC
+
+The only proof M7–M12 have that the numbers they trade are about the window a reader can touch.
+`www/m13.html` is seven proofs over the clamp, the gestures, the kernel's record, the glass ring,
+the stack, a desktop that changes size and the minimum size; `scripts/check.py`'s `check_m13` reads
+them and drives every gesture with a real pointer and real keys.
+
+### The page asks and the check performs, which is a protocol rather than a convention
+
+A page cannot drive its own pointer. A synthesised `PointerEvent` carries `isTrusted === false`,
+and `setPointerCapture` refuses a pointerId no live pointer owns (constraint 175) — so a window
+manager driven by the page under test is a window manager nobody has moved. `gestureAsker`
+(`www/pagekernel.mjs`) publishes the gesture a page needs at coordinates it measures off its own
+rects and blocks until something performs it; `drive_gestures` (`scripts/check.py`) is the other
+half and uses `Input.dispatchMouseEvent`. **A human reading the page performs the same asks by
+hand**, which is what the bench shells have always done. One definition of the handshake, because
+two sides agreeing about it by hand is how a page comes to wait for a gesture nobody is sending.
+
+### The three edges of the clamp are three different gestures, and that is arithmetic
+
+The right and bottom bounds sit INSIDE the desktop, so a pointer can overshoot them without leaving
+the viewport. The top bound is reachable the same way. **The left bound is not**: it is
+`MIN_VISIBLE - w`, which for a 420 px window is 348 px of window off the left edge, and a pointer
+would have to travel to a negative client coordinate. The keyboard route — `#barKey`, `moveBy`,
+`apply`, the host's `keyup` report — reaches it with real trusted keys, which is why
+`src/wm/window.mjs` gives every gesture a keyboard spelling.
+
+### What M13 found in the product, which is what a harness is for
+
+**A desktop that changed size re-clamped nothing.** `Win.apply` clamps against the desktop's
+CURRENT rect, so the clamp was correct at every gesture and stale at every resize: a desktop that
+shrank left frames hanging outside it with their captions out of reach, and the kernel was never
+told the boxes had stopped being true. `WinHost.relayout` and a `ResizeObserver` are M13's own
+addition; `--negative no-relayout` is the world without them. M14 needed the same callback
+immediately, for something that is not a resize at all — the taskbar takes a strip off the bottom,
+so the WORK AREA changes when the shell appears.
+
+### The seven proofs, and what each control moved
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the clamp | dragged past the bottom-right corner, dragged above the top and arrow-keyed off the left edge, the frame stops at the bound — and in every clamped state a grabbable strip of caption is still over the desktop, measured on the RENDERED caption |
+| 2 | the gesture | an unclamped drag moves the frame by exactly the pointer's delta, a drag after a clamped one starts from where the frame IS, and both ends of the keyboard step move |
+| 3 | the kernel's record | the kernel's box is the box the clamp settled on, and its cell grid is what the rendered client area divides into |
+| 4 | the ring and the chrome | the four glass strips do not overlap and their rendered areas sum to `blurRingArea`, which is what makes M12's accounting a fact about the product |
+| 5 | the stack | a real click on a buried window's sliver raises it, and the window under that same point afterwards is the one that came up |
+| 6 | the resize | a desktop that shrinks pulls every frame back inside it AND tells the kernel; one that grows back returns each window to the box it asked for |
+| 7 | the floor | a box under the minimum is floored on screen, and the kernel records the floor rather than the request |
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-clamp` | 11 | 27 | a frame can be dragged out of reach — and the MIN_W/MIN_H floor goes with it, because `clampBox` is where that floor lives |
+| `stale-geom` | 7 | 31 | the host reports the box that was ASKED for, so the kernel's whole record is a geometry no frame ever had |
+| `no-relayout` | 5 | 33 | a desktop that shrinks leaves its frames outside it |
+
+### A control found a clause that could not fail, and that is the run worth keeping
+
+`--negative stale-geom` came out **green** the first time: proof 3 read the kernel's box against the
+page's `placed`, and with every window inside the desktop `box` and `placed` hold the same numbers
+— so a host reporting the REQUESTED box reported an identical number and the clause about exactly
+that could not move. The fixture is now asked for a position far outside the desktop and
+`fixtureIsClamped` is part of the clause, so a future desktop large enough to hold that request
+fails the proof instead of passing it vacuously. **Inversion could not have found this**: the
+clause inverted and fired, because it was an assertion over two copies of one number.
+
+---
+
+## M14 — Aero Snap, the Superbar, jump lists, the tray and the desktop · done · 1 day · ~4,900 LoC
+
+The last row of the window half, and the one a reader sees: `src/wm/taskbar.mjs` is the Superbar,
+its thumbnails, its jump lists, the start menu and the tray; `src/wm/desktop.mjs` is the icon view
+and every mouse action on it; `src/wm/icons.mjs` is eleven redrawn icons; `src/bin/desktop.mjs` is
+the process behind the desktop and the menu. The ABI gained a show state, a role and an item list.
+
+### Where the shell lives, and why that is a conclusion rather than a shortcut
+
+`docs/research/09-hobbyist-os-actions.md` §4 records that a taskbar needs cross-process window
+enumeration no ordinary client may have, and that SerenityOS answers it with a SECOND, separately
+gated management endpoint. **This project needs no such endpoint, and the reason is specific to its
+architecture**: the page already holds every window's frame — `win-create` built it, `win-stack`
+ordered it, `win-title` named it — so a taskbar rendered by the page reads facts the page was
+already told and adds no capability to anything. A taskbar as a PROCESS would need the endpoint.
+
+And a process could not draw one anyway, which is the arithmetic half of the same decision: the
+display list has no text op and no image op (`src/abi.mjs` `DL_*`), and a `WEV_POINTER` is only
+delivered while a button is down — so a process-drawn Superbar could have neither labels nor hover,
+and a rubber band is not expressible as a stream of filled rectangles. Recorded as **D39** and
+constraint 275.
+
+**What keeps it honest is `win_items`.** A window publishes rows, each flagged for where it appears
+— `WITEM_DESKTOP | WITEM_MENU | WITEM_JUMP` — and activation comes back as `WEV_ITEM` carrying an
+INDEX the kernel validates against the list it holds. So the desktop's icons and the start menu are
+a process reading the filesystem: `src/bin/desktop.mjs` lists `/usr/bin` and `/desktop` and
+publishes what it found. `--negative no-items` is the world where the kernel accepts those rows and
+discards them, and it exists because **a page drawing a hard-coded list of programs would look
+identical** without it.
+
+### M12's own open item, closed by a run
+
+M12 recorded: "MINIMIZE, SNAP AND PEEK ARE NOT AMONG THE EVENTS IT SEES, because they do not exist
+yet… **nothing has yet driven a minimize through it**, so the claim that the list is covered rests
+on the shape of the ABI rather than on a run." Proof 3 is that run. A minimized window's ring cost
+goes to zero — `blurCost` charges nothing for a window with no frame on screen, which is also true
+of the desktop — and the governor's input drops by exactly that window's ring, asserted as an
+equality rather than as a direction (constraint 274).
+
+### Both edges of both thresholds, because they are two different measurements
+
+`PLAN.md` §5 names three numbers: snap arms at 1 px of pointer-to-edge, releases at 20 px of
+drag-out, and 50 px of side-move restores a top-maximized window. All three are here, and the two
+RELEASES are measured differently on purpose: a snapped window releases on total distance, a
+maximized one on HORIZONTAL distance alone — its caption is at the top of the work area, so a user
+reaching for it drags downward constantly and a total-distance rule would un-maximize on every
+brush. Both edges of both are driven with a real pointer: 19 px holds, 21 px releases, 49 px holds,
+51 px releases. Constraint 273.
+
+### The nine proofs, and what each control moved
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | snap | the ghost promises the box the window takes, a release at the edge snaps to the half, 19 px holds and 21 px releases, a drag to the top maximizes, 49 px holds and 51 px releases |
+| 2 | the work area | the strip the shell reserved is the strip the bar occupies, a maximized frame stops at the bar, and the kernel records it |
+| 3 | minimize | the frame leaves the screen, the window is charged no blurred area, the governor's input drops by exactly its ring, and its taskbar button stays |
+| 4 | the Superbar | two windows of one program are one button, a real click raises the group, and a second click on the front group lists its windows |
+| 5 | the jump list | the rows on screen are the rows a program published, plus the shell's own Close — and a real click on one reaches the program, which opens a window |
+| 6 | the icons | the icons drawn are the rows the process published, the start menu is a listing of `/usr/bin`, and a real double-click starts the program a row names |
+| 7 | every mouse action | a rubber band selects what it touches, a modifier-click adds to the selection, a drag moves an icon, and it stays there across a redraw |
+| 8 | the tray | the clock advances, hovering Show desktop peeks and changes no state, a click minimizes everything while the desktop stays, and a second click puts it all back |
+| 9 | the glass | the taskbar's own band reads as a spread ramp across a hard seam, where the bare backdrop reads as a step |
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-snap-hysteresis` | 4 | 47 | `PLAN.md`'s own: the release collapses onto the arm, so both HOLD clauses go and both releases still work |
+| `no-workarea` | 6 | 45 | a maximized window covers the taskbar, and the kernel records the full height |
+| `no-group` | 4 | 47 | one button per window, which is the pre-Windows-7 bar: the grouping goes and the window list with it |
+| `no-items` | 13 | 38 | every published row is discarded, so the desktop, the menu and the jump list have nothing to show |
+
+### What four runs found, and every one of them was a defect rather than a flaky check
+
+1. **`TextDecoder` refuses a view onto a SharedArrayBuffer.** The first `win_items` carrying a
+   label threw inside the kernel, `handle()` turned it into a PANIC, and every syscall after it
+   answered -EIO — so the desktop process reported `win_items: EIO` and a `/usr/bin: ENOENT` from
+   the same cascade. `readTitle` had always copied for this reason; the item path did not. The
+   kernel copies the region once and `decodeWinItems` slices each label, so the codec is safe on
+   either side of the channel.
+2. **Every gesture went to the wrong window.** The snap proof grabbed a caption at coordinates
+   computed off the right window's rect — and another window was ON TOP of that point, so the drag
+   moved the terminal while the proof measured the window it meant to drag. Nothing failed loudly:
+   the subject simply never moved. Gestures are hit-tested with `elementFromPoint` now and the hit
+   test is part of the clause.
+3. **The desktop has no taskbar button, so a jump list could not be opened on it.** It is the
+   surface the buttons sit on. `src/bin/winopen.mjs` publishes a jump list instead — "New window"
+   really opens one — which is both what the feature is for and the only way to reach one.
+4. **On macOS a Ctrl-click IS the secondary click.** `modifiers: 2` arrived as a right button and
+   opened a context menu instead of extending the selection, and the selection came back empty.
+   The gesture uses Meta, which `src/wm/desktop.mjs` already accepts beside Ctrl and which is what
+   a Mac user's hand does.
+
+A fifth was a race rather than a defect: the pointer is on a taskbar button when a right-click
+lands, so the thumbnail timer was already running and replaced the jump list 120 ms later. A
+deliberately opened menu cancels a pending hover now, and the proof hovers first on purpose so the
+precedence is what is being asserted.
+
+### And then the probe corrected a hypothesis it was written to confirm
+
+Two of those cost a run each because a DRIVEN gesture is not the gesture a hand makes, so
+`bench/m14-shell/input-probe.py` records every DOM event `Input.dispatchMouseEvent` really
+delivers. It found that **a right press DOES deliver `contextmenu`** — the opposite of what was
+assumed from `jumpOpens: 0` — and that the jump list's real defect was in the DRIVER, which sent a
+left button for a gesture named `rightclick`. A left click on a taskbar button is a perfectly good
+gesture that does something else, so nothing looked broken. **The measurement is what separated
+"the browser does not deliver this" from "we never sent it"**, which is a distinction a harness
+cannot make by reasoning (constraint 279).
+
+It also found the two that were already fixed by then, and both for better reasons than the guesses
+they replaced: a pointer capture retargets `click` and `dblclick` to the CAPTURING element, and on
+macOS a Ctrl-click is the secondary click — it delivers `contextmenu` and no `click` at all.
+
+### What LOOKING AT IT found, which is now five milestones running
+
+`bench/m14-shell/shell.py` boots the live desktop, types at the shell, snaps a window with a real
+drag, opens a menu and photographs the result. Three things only a picture showed:
+
+1. **THE DESKTOP HAD NO ICONS IN THE PICTURE** — and they were there the whole time, behind the
+   terminal. The icon column is at the desktop's left edge, which is exactly where a fresh window
+   opens. The harness parks the windows before the shot now, which is what a reader does with their
+   hand, and the m14 check's own `clearTheIcons` does the same before its icon proofs.
+2. **A JUMP LIST TITLED `term.mjs`, WITH A GENERIC ICON.** A program started from `/usr/bin` is
+   `term` and one the page spawned by URL is `/src/bin/term.mjs` — `src/kernel/providerfs.mjs`
+   drops the extension from a mount name on purpose, so the two spellings of one program reached
+   the shell differently and the icon table matched neither. `progName` strips the extension, and
+   it and the icon table moved into `src/wm/icons.mjs` for a second reason:
+3. **A WINDOW'S CAPTION HAD NO ICON.** Windows 7 draws the program's icon at the left of every
+   caption, and the bar draws the same one — which is why the table cannot live in the taskbar.
+   `Win.setIconMarkup` is the frame's half, and the host fills it from the program the KERNEL
+   named, because the page cannot learn what a pid is running.
+
+A fourth was a gap rather than a defect: `term` published no jump list, so a right-click on the one
+button a fresh desktop has said "This program published no tasks". It publishes "New terminal" now
+— Windows 7's own first row for most programs, and a thing the program that owns a window, a pty
+and a shell can really do.
+
+### And a second engine, which is the fifth milestone running — but this time it found nothing
+
+`bench/m7-win/firefox.py --page m14 --live`. Headless Firefox rendered the shell, the frames, the
+caption icons, the Superbar and the tray **and showed no desktop icons** — which is exactly the
+shape of the four engine defects this rule exists for, and it was not one.
+
+Mozilla removed CDP, so a PNG is the only channel: the page prints its own log for that reason, and
+what it printed settled it. `desktop: win 1, 26 rows published, 4 icons drawn` ruled out the
+process and the view; `icon 1 92x77 at 16,156` and `icon svg: 48x48 at 38,161, 6 children, 2
+gradient(s)` ruled out the layout and the gradients — and then named the cause, because the
+terminal window was at `8,148` and 639 px wide. **The icons were behind it, in both engines**, and
+the first two Chrome screenshots had the same thing wrong with them.
+
+So the finding is about the product rather than about Firefox: **the live desktop opened its one
+window on top of its own icons**. It opens clear of the icon column now, which is what a first-run
+desktop owes a reader — and the diagnostic lines stayed in the page, because they are what turned
+an invisible desktop into a located one in a single run.
+
+### What is not done
+
+**THE NEW SURFACES' CONTRAST IS STRUCTURAL, NOT SAMPLED.** M11 samples the caption's legibility out
+of real pixels at both ends of a seam. M14 added three more places where text sits over an unknown
+backdrop — a desktop icon's label over wallpaper, a taskbar button's label over glass, a popup row
+over a dark sheet — and each carries the same halo the caption does, but nothing measures the
+contrast ratio at those positions. The `PLAN.md` icons row asks for exactly that re-check.
+
+**THE TASKBAR'S OWN BLURRED AREA IS NOT GOVERNED.** It is one `aero-strip`, so M12's admission
+controller does not account it: the governor sums window rings. At 1,264×40 CSS px that is about
+202,000 device px at dpr 2 — a fifth of one window's ring — and it is constant, which is why this
+is recorded rather than guarded.
+
+**A TEXT WINDOW'S THUMBNAIL IS A READING, NOT A PICTURE.** A surfaced window's preview is its own
+canvas, drawn exactly. A text window is a DOM widget and there is no way to rasterise one from
+script, so its preview is the last nine lines of its screen drawn small. Windows 7 gets a real DWM
+thumbnail; this is the honest approximation and it is labelled as one in the code.
+
+**NOTHING IS PERSISTED.** A dragged icon keeps its cell for as long as the view lives, pinned
+taskbar buttons do not exist, and the start menu has no recently-used list — all three need a place
+to write preferences, which is a decision about where user state lives rather than a shell feature.
+
+**THE DESKTOP IS NOT WATCHED.** There is no inotify in this ABI, so the desktop re-reads the
+filesystem when a reader asks — the start menu's "Refresh the desktop" row — and not when something
+changes underneath it.
+
+**MINIMIZE HAS NO ANIMATION AND PEEK HAS NO THUMBNAIL OF THE DESKTOP.** Windows 7 animates a window
+into its button and Aero Peek fades the frames out; both are opacity or transform animations on a
+window wrapper, which is exactly what severs the blur chain for everything inside it
+(`docs/designs/REVIEW-FINDINGS.md` §8). Peek is implemented as the strips and client areas going to
+zero opacity, which leaves the frame's outline and does not touch the chain — the animation is not
+worth the risk and is recorded here instead.
 
 ---
 

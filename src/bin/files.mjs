@@ -24,7 +24,7 @@
 // to stdout, where there is a terminal that can draw letters.
 
 import {
-  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE, DT_DIR,
   WEV_KEY, WEV_POINTER, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_DRAG_DONE,
   WPTR_DOWN, WPTR_UP, WPTR_MOVE, pointerAt, keyBytesOf,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT,
@@ -55,6 +55,9 @@ const BAND = {
   [DOBJ_TEXT]: 0x8a8f98ff,
 };
 const BAND_UNKNOWN = 0x3a3f48ff;
+/** A DIRECTORY'S BAND, which is a kind rather than a format: amber, because that is the colour the
+ *  shell's folder icon is drawn in (`src/wm/icons.mjs`) and a reader should see one thing. */
+const BAND_DIR = 0xe8aa3cff;
 
 /**
  * HOW FAR THE POINTER MUST MOVE BEFORE A PRESS BECOMES A DRAG, in surface pixels.
@@ -106,18 +109,37 @@ export function run(env) {
       exit: env.std.complainErrno(env, NAME, dir, entries), program: NAME, errno: -entries,
     };
   }
-  /* A ROW PER FILE WHOSE FORMAT THIS SYSTEM KNOWS. A file no rule covers is NOT offered: a program
-   * that put arbitrary bytes under TEXT would hand a receiver a payload it will decode as UTF-8,
-   * which is the guess a typed clipboard exists to refuse (`std.formatForPath`). */
+  /* A ROW PER ENTRY, AND A DIRECTORY IS AN ENTRY — which M14 is why: `files /` showed NOTHING,
+   * because the root holds only directories and this program listed only files whose format it
+   * knew. So a double-click on the desktop's Computer icon opened a program that exited at once
+   * with "no file here has a known format", and a reader saw a live-looking icon do nothing. A
+   * file manager that cannot show a folder is not a file manager.
+   *
+   * A DIRECTORY IS NOT A DRAG SOURCE. It has no format — there are no bytes to offer, and a
+   * program that put a directory's PATH under TEXT would be making the guess a typed clipboard
+   * exists to refuse (constraint 247) — so its band is drawn in the unknown colour and
+   * `startDrag` refuses it by name. A FILE no format rule covers is kept for the same reason the
+   * directory is: a row a reader can see and cannot drag is honest, and an invisible file is not.
+   */
   const rows = entries
-    .map((e) => ({ name: e.name, format: env.std.formatForPath(e.name) }))
-    .filter((r) => r.format !== 0)
-    .sort((a, b) => (a.name < b.name ? -1 : 1))
+    .filter((e) => e.name !== "." && e.name !== "..")
+    .map((e) => ({
+      name: e.name,
+      dir: e.type === DT_DIR,
+      format: e.type === DT_DIR ? 0 : env.std.formatForPath(e.name),
+    }))
+    .sort((a, b) => {
+      // Directories first, then by name, which is every file manager's order.
+      if (a.dir !== b.dir) return a.dir ? -1 : 1;
+      return a.name < b.name ? -1 : 1;
+    })
     .map((r) => ({ ...r, path: dir.endsWith("/") ? `${dir}${r.name}` : `${dir}/${r.name}` }));
-  account.rows = rows.map((r) => ({ name: r.name, format: fmtName(r.format) }));
+  account.rows = rows.map((r) => ({
+    name: r.name, format: r.dir ? "DIR" : fmtName(r.format),
+  }));
   if (rows.length === 0) {
     return {
-      exit: env.std.complain(env, NAME, dir, "no file here has a known format"), program: NAME,
+      exit: env.std.complain(env, NAME, dir, "this directory is empty"), program: NAME,
       ...account,
     };
   }
@@ -151,7 +173,10 @@ export function run(env) {
   const paint = (hot) => {
     const ops = [{ op: DL_CLEAR, a0: PAPER }];
     for (let i = 0; i < rows.length; i += 1) {
-      const colour = BAND[rows[i].format] || BAND_UNKNOWN;
+      // A DIRECTORY'S OWN COLOUR. Three kinds of row — a typed file, a directory, and a file
+      // whose format nothing covers — and a reader has to be able to tell them apart, because
+      // only the first can be dragged.
+      const colour = rows[i].dir ? BAND_DIR : (BAND[rows[i].format] || BAND_UNKNOWN);
       ops.push({
         op: DL_FILL_RECT, a0: PAD, a1: rowTop(i), a2: SURFACE_W - PAD * 2, a3: ROW_H, a4: colour,
       });
@@ -167,7 +192,8 @@ export function run(env) {
   paint(-1);
 
   env.std.say(env, `${NAME}: win ${made.win}, ${rows.length} row(s) in ${dir}\n`);
-  rows.forEach((r, i) => env.std.say(env, `  row ${i + 1}  ${r.name}\t${fmtName(r.format)}\n`));
+  rows.forEach((r, i) => env.std.say(env,
+    `  row ${i + 1}  ${r.name}\t${r.dir ? "directory" : fmtName(r.format)}\n`));
   env.std.say(env, "press a row and drag it onto another window. q quits.\n");
 
   /** Publish one row as a drag. The object's fd is CLOSED immediately and on purpose: the session
@@ -175,6 +201,15 @@ export function run(env) {
    *  outlives this program (constraint 241). */
   const startDrag = (i) => {
     const row = rows[i];
+    /* A DIRECTORY AND AN UNKNOWN FORMAT ARE REFUSED HERE, by name and counted: there are no bytes
+     * to offer for either, and a drag that published a path under TEXT would be the guess a typed
+     * clipboard exists to refuse. */
+    if (row.dir || row.format === 0) {
+      account.refusedDrags += 1;
+      account.why = `${row.name}: ${row.dir ? "a directory" : "an unknown format"} has no bytes `
+        + "to offer";
+      return -EINVAL;
+    }
     const body = readFile(env, row.path);
     if (typeof body === "number") {
       account.why = `${row.path}: ${env.std.errnoName(body)}`;

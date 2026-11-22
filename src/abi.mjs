@@ -1497,7 +1497,12 @@ export function decodeWinItems(bytes, length = bytes.length) {
     if (len > WITEM_LABEL_MAX) return null;
     const size = winItemSize(len);
     if (at + size > length) return null;
-    const label = dec.decode(bytes.subarray(at + WITEM_HEADER, at + WITEM_HEADER + len));
+    /* `slice` AND NOT `subarray`, which is not a style choice: `TextDecoder.decode` refuses a view
+     * onto a SharedArrayBuffer, and the kernel's byte region is one. `slice` copies into a fresh
+     * ArrayBuffer, so this codec is safe wherever it is called from — the kernel copies the whole
+     * region as well, but a codec that only works on one side of the channel is a codec with a
+     * precondition nobody can see. */
+    const label = dec.decode(bytes.slice(at + WITEM_HEADER, at + WITEM_HEADER + len));
     // A NUL IN A LABEL IS REFUSED, for the reason a title's is: the page renders the rest as text
     // and a reader sees a row whose name stops in the middle.
     if (label.includes("\0")) return null;

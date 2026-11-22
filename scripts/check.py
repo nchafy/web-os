@@ -711,6 +711,19 @@ class Control:
     #: was in until M13 — frames left hanging outside a shrunken desktop with their captions out of
     #: reach, and a kernel still accounting the boxes they used to have.
     NO_RELAYOUT = "no-relayout"
+    #: M14's first, and `PLAN.md` §5's own: the snap release threshold collapses onto the arm, so
+    #: there is one threshold instead of two and a snapped window will not stay snapped.
+    NO_SNAP_HYSTERESIS = "no-snap-hysteresis"
+    #: M14's second: a maximized window fills the DESKTOP rather than the work area, so it covers
+    #: the taskbar — a window a user cannot get out from under.
+    NO_WORKAREA = "no-workarea"
+    #: M14's third: the Superbar draws one button per WINDOW instead of one per program, which is
+    #: the pre-Windows-7 taskbar and loses the window list with the grouping.
+    NO_GROUP = "no-group"
+    #: M14's fourth: the kernel accepts a published item list and DISCARDS it, so a shell has
+    #: nothing to draw — the desktop's icons, the start menu's programs and a jump list's commands
+    #: are all one mechanism, and this is the world where that mechanism carries nothing.
+    NO_ITEMS = "no-items"
     ONCE = "once"
 
 
@@ -756,6 +769,10 @@ CONTROL_RUNS = {
     Control.NO_CLAMP: ("no-clamp",),
     Control.STALE_GEOM: ("stale-geom",),
     Control.NO_RELAYOUT: ("no-relayout",),
+    Control.NO_SNAP_HYSTERESIS: ("no-snap-hysteresis",),
+    Control.NO_WORKAREA: ("no-workarea",),
+    Control.NO_GROUP: ("no-group",),
+    Control.NO_ITEMS: ("no-items",),
 }
 
 
@@ -1944,15 +1961,24 @@ def _perform_gesture(page, want: Dict[str, Any], *, held: bool) -> bool:
     """
     kind = str(want.get("kind") or "")
     at = want.get("at") or want.get("from") or {}
-    button = str(want.get("button") or "left")
+    # THE KIND IMPLIES THE BUTTON, and the first version made the spec carry it: a page asking for
+    # a `rightclick` without also saying `button: "right"` got a LEFT click, which on a taskbar
+    # button is a perfectly good gesture that does something else entirely. The jump-list proof
+    # found a window list on screen and the shell's own counter said `jumpOpens: 0`.
+    button = str(want.get("button") or ("right" if kind == "rightclick" else "left"))
     mask = _BUTTONS.get(button, 1)
+
+    # Chrome's `modifiers` bitmask: Alt 1, Ctrl 2, Meta 4, Shift 8 — the same one `cdp.py` uses for
+    # keys. A gesture asks for it by number because that is what the protocol takes, and a ctrl-click
+    # is a real modifier-held click rather than a second kind of event.
+    modifiers = int(want.get("modifiers") or 0)
 
     def mouse(event_type, point, *, buttons, clicks=0):
         # `button` is WHICH button this event is about and `buttons` is what is held. A move with
         # nothing held must say `none`, or Chrome reports a drag of a button that is not down.
         params = {"type": event_type, "x": int(point["x"]), "y": int(point["y"]),
                   "button": button if (buttons or event_type != "mouseMoved") else "none",
-                  "buttons": buttons}
+                  "buttons": buttons, "modifiers": modifiers}
         if clicks:
             params["clickCount"] = clicks
         page.call("Input.dispatchMouseEvent", **params)
@@ -4066,6 +4092,209 @@ _NO_RELAYOUT_FAILS = (
 )
 
 
+# ======================================================================================
+# M14 — Aero Snap, the Superbar, jump lists, the tray and the desktop
+#
+# THE LAST ROW OF THE WINDOW HALF, and the one a reader actually sees. Every gesture below is real
+# input through `Input.dispatchMouseEvent`, and every clause is read off a RENDERED rect, a KERNEL
+# report, or a composited pixel — because an inert shell and a working one are the same picture.
+# ======================================================================================
+
+M14_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+    # PROOF 1. Snap, at both edges of BOTH thresholds — which is what constraint 39 asks of a
+    # threshold on a continuous input, twice over, because a snap and a maximize release on
+    # different measurements for a stated reason.
+    "snap ok",
+    "the ghost promised the box the window took",
+    "a release at the edge snaps to the half of the work area",
+    "a 19 px drag-out HOLDS the snap",
+    "and a 21 px drag-out releases it",
+    "a drag to the top maximizes to the work area",
+    "a 49 px side-move HOLDS the maximize",
+    "and a 51 px side-move releases it",
+    # PROOF 2. The work area, which is the whole reason a taskbar can be got back to.
+    "workarea ok",
+    "the strip the shell reserved is the strip the bar occupies",
+    "a maximized frame stops at the bar rather than covering it",
+    "and the kernel records the work area's height",
+    # PROOF 3. M12's own open item, closed by a run rather than by the shape of the ABI.
+    "minimize ok",
+    "the frame left the screen",
+    "a minimized window is charged no blurred area",
+    "and the governor's input dropped by exactly that window's ring",
+    "while its taskbar button stayed, so there is a way back",
+    # PROOF 4. The Superbar.
+    "superbar ok",
+    "two windows of one program are one button",
+    "a real click raises the group",
+    "and a second click on the front group lists its windows",
+    # PROOF 5. A jump list is the program's own rows.
+    "jumplist ok",
+    "the jump list shows the rows the program published, plus the shell's own Close",
+    "and a real click on one reached the program, which spawned",
+    # PROOF 6. The desktop's icons are the filesystem's.
+    "icons ok",
+    "the icons drawn are the rows the process published",
+    "the start menu is a listing of /usr/bin",
+    "and a real double-click started the program a row names",
+    # PROOF 7. Every mouse action on the desktop.
+    "mouse ok",
+    "a real rubber band selects what it touches",
+    "a ctrl-click adds to the selection",
+    "a drag moves an icon",
+    "and it stays there across a redraw",
+    # PROOF 8. The tray.
+    "tray ok",
+    "the tray clock advances",
+    "hovering Show desktop peeks, and changes no window's state",
+    "a click minimizes every window while the desktop itself stays",
+    "and a second click puts them all back",
+    # PROOF 9. The glass, read out of the pixels.
+    "pixels ok",
+    "the taskbar is a glass strip and asks for a blur",
+    "the desktop's icon labels and the bar's own carry a halo",
+    "the BARE backdrop reads as a hard step, so the seam is real",
+    "and the taskbar's own band reads as a spread ramp",
+    "verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m14.html",
+)
+
+M14_DOCUMENT = "/www/m14.html"
+
+M14_READY = ("(() => { const M = globalThis.M14 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M14 = """(() => {
+  const M = globalThis.M14 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    live: [...document.querySelectorAll('.window')].length,
+    snap: one(P.snap),
+    workarea: one(P.workarea),
+    minimize: one(P.minimize),
+    superbar: one(P.superbar),
+    jumplist: one(P.jumplist),
+    icons: one(P.icons),
+    mouse: one(P.mouse),
+    tray: one(P.tray),
+    pixels: one(P.pixels),
+  }
+})()"""
+
+M14_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool,
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "live": int,
+    "snap": (dict, type(None)),
+    "workarea": (dict, type(None)),
+    "minimize": (dict, type(None)),
+    "superbar": (dict, type(None)),
+    "jumplist": (dict, type(None)),
+    "icons": (dict, type(None)),
+    "mouse": (dict, type(None)),
+    "tray": (dict, type(None)),
+    "pixels": (dict, type(None)),
+}
+
+#: What COLLAPSING THE SNAP RELEASE ONTO THE ARM must break. `PLAN.md` §5's own control for M14:
+#: "remove the hysteresis band; the 19 px case must start failing."
+#:
+#: ONLY THE TWO HOLD CLAUSES GO, which is what makes this a control rather than a broken world: a
+#: window still snaps, the ghost still promises the right box, a maximize still fills the work area,
+#: and both RELEASES still release. What a reader sees is a window that will not stay snapped — the
+#: oscillation constraint 39 is about, with the band removed.
+_NO_SNAP_HYSTERESIS_FAILS = (
+    "snap ok",
+    "a 19 px drag-out HOLDS the snap",
+    "a 49 px side-move HOLDS the maximize",
+    "verdict is ok",
+)
+
+#: What MAXIMIZING TO THE DESKTOP rather than to the work area must break.
+#:
+#: The reservation still happens — the bar is still there and still 40 px — so what fails is the
+#: LAYOUT: a maximized frame runs under the taskbar, the kernel records the full height, and the
+#: snap proof's "maximizes to the work area" clause goes with it, because the page compares the
+#: frame against the work area the SHELL reserved while the window was laid out against the whole
+#: desktop. The two halves of the snap gesture are untouched.
+_NO_WORKAREA_FAILS = (
+    "snap ok",
+    "a drag to the top maximizes to the work area",
+    "workarea ok",
+    "a maximized frame stops at the bar rather than covering it",
+    "and the kernel records the work area's height",
+    "verdict is ok",
+)
+
+#: What ONE BUTTON PER WINDOW must break: the Superbar's whole claim.
+#:
+#: This is the pre-Windows-7 taskbar and it is the plausible implementation — every window is a
+#: button, which is simpler and is what a page with no program name could do. The grouping clause
+#: goes, and the window list goes with it: "which of these three" is a question that only exists
+#: once a button stands for several windows. THE RAISE STILL WORKS, which is the point of keeping
+#: that clause separate.
+_NO_GROUP_FAILS = (
+    "superbar ok",
+    "two windows of one program are one button",
+    "and a second click on the front group lists its windows",
+    "verdict is ok",
+)
+
+#: What DISCARDING EVERY PUBLISHED ROW must break, which is every rendering of a row.
+#:
+#: The kernel accepts the list, counts it and drops it (the cfg.noItems hook, refused without a
+#: bench boot). Everything that CARRIES the rows keeps working — the program encodes them, the call
+#: succeeds, the page is told a list arrived — so what disappears is the rows, and with them the
+#: desktop's icons, the start menu's programs and the jump list's commands.
+#:
+#: THE MOUSE PROOF GOES TOO, and that is honest rather than collateral: every one of its gestures
+#: acts on an icon, so with no icons there is nothing to band, ctrl-click or drag. The page says so
+#: — it reports the icon count and fails the proof — rather than throwing, because a control that
+#: breaks the harness proves nothing about the product.
+_NO_ITEMS_FAILS = (
+    "jumplist ok",
+    "the jump list shows the rows the program published, plus the shell's own Close",
+    "and a real click on one reached the program, which spawned",
+    "icons ok",
+    "the icons drawn are the rows the process published",
+    "the start menu is a listing of /usr/bin",
+    "and a real double-click started the program a row names",
+    "mouse ok",
+    "a real rubber band selects what it touches",
+    "a ctrl-click adds to the selection",
+    "a drag moves an icon",
+    "and it stays there across a redraw",
+    # AND THE HALO CLAUSE, which the gate caught me declaring as held: with every row discarded
+    # there is no icon on the desktop, so there is no `.desk-label` to carry a halo. The clause is
+    # about a surface that does not exist in this world, and the honest place for it is here.
+    # The glass clauses either side of it hold, because the BAR is still glass over the same seam.
+    "pixels ok",
+    "the desktop's icon labels and the bar's own carry a halo",
+    "verdict is ok",
+)
+
+
 M4A_LABELS = (
     "cell reported",
     "page isolated",
@@ -4435,6 +4664,16 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "and nothing to govern. The GLASS could still be drawn, which is why the page "
                 "refuses before it installs the skin. UNMEASURABLE rather than FAIL, because a "
                 "FAIL would claim a desktop was accounted and degraded wrongly.",
+        ), "m14": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and no desktop process publishes a row — so "
+                "there is nothing to snap, nothing to group and no icon to double-click. THE "
+                "TASKBAR WOULD STILL BE DRAWN, which is this check's sharpest case of constraint "
+                "40 and is why the page refuses before it builds a shell: a glass bar with a live "
+                "clock over a convincing wallpaper is a picture of a desktop that no process is "
+                "behind. UNMEASURABLE rather than FAIL, because a FAIL would claim a window was "
+                "snapped and landed wrongly.",
         ), "m13": Expect(
             UNMEASURABLE,
             why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
@@ -5240,6 +5479,109 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="a desktop that shrinks must leave its frames outside it",
             failed=_NO_RELAYOUT_FAILS,
             held=held_rest(M13_LABELS, _NO_RELAYOUT_FAILS),
+        )},
+    ),
+    "no-snap-hysteresis": NegativeControl(
+        name="no-snap-hysteresis",
+        why="no_snap_hysteresis=1: the snap RELEASE threshold collapses onto the ARM threshold, so "
+            "there is one number instead of two (the `setGeometryControls` hook in "
+            "src/wm/window.mjs). `PLAN.md` §5's own control for M14 in its own words: 'remove the "
+            "hysteresis band; the 19 px case must start failing'.\n"
+            "WHAT MUST BREAK: the two HOLD clauses, and only those. A snapped window lets go after "
+            "one pixel of travel, and so does a maximized one.\n"
+            "WHAT MUST HOLD: the rest of the gesture. A drag to the edge still arms a ghost that "
+            "promises the right box, a release still snaps to the half, a drag to the top still "
+            "maximizes to the work area, and both RELEASES still release — so what moved is the "
+            "band between the two edges and nothing else.\n"
+            "WHAT IT IS ABOUT: constraint 39's rule applied to a pointer. With one threshold a "
+            "window snapped at the edge un-snaps on the next motion sample, re-snaps on the one "
+            "after, and flickers for as long as the button is held. The two numbers are also "
+            "DIFFERENT numbers for a stated reason — 20 px out of a snap, 50 px SIDEWAYS out of a "
+            "maximize, because a maximized window's caption is at the top of the work area and a "
+            "user reaching for it drags downward constantly.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_snap_hysteresis", "1"),),
+        expects={"m14": Expect(
+            Outcome.FAIL,
+            why="a snapped window must stop holding against a 19 px drag-out",
+            failed=_NO_SNAP_HYSTERESIS_FAILS,
+            held=held_rest(M14_LABELS, _NO_SNAP_HYSTERESIS_FAILS),
+        )},
+    ),
+    "no-workarea": NegativeControl(
+        name="no-workarea",
+        why="no_workarea=1: a maximized or snapped window is laid out against the whole DESKTOP "
+            "instead of the work area the shell reserved (the `setGeometryControls` hook).\n"
+            "WHAT MUST BREAK: the layout, in both places it is read — the rendered frame runs "
+            "under the taskbar, and the kernel records the full height. The snap proof's "
+            "'maximizes to the work area' clause goes with them, because the page compares the "
+            "frame against the strip the SHELL reserved while the window was laid out against the "
+            "desktop.\n"
+            "WHAT MUST HOLD: the reservation itself (the bar is still there and still 40 px), both "
+            "snap thresholds, the Superbar, the desktop and the glass.\n"
+            "WHAT IT IS ABOUT: a window covering the taskbar is a window a user cannot get out "
+            "from under — there is no keyboard route to the Start orb in this system, so the bar "
+            "being reachable is the only way back. It is also the reason `WinHost.reserve` "
+            "re-clamps every existing frame rather than only new ones.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_workarea", "1"),),
+        expects={"m14": Expect(
+            Outcome.FAIL,
+            why="a maximized window must cover the taskbar",
+            failed=_NO_WORKAREA_FAILS,
+            held=held_rest(M14_LABELS, _NO_WORKAREA_FAILS),
+        )},
+    ),
+    "no-group": NegativeControl(
+        name="no-group",
+        why="no_group=1: the Superbar keys its buttons by WINDOW instead of by program (the "
+            "`setShellControls` hook in src/wm/taskbar.mjs), which is the pre-Windows-7 taskbar.\n"
+            "WHAT MUST BREAK: the grouping, and the window list that only exists because of it — "
+            "'which of these three' is a question that arises only once a button stands for "
+            "several windows.\n"
+            "WHAT MUST HOLD: the raise. A click on a button still brings its window up, which is "
+            "why that clause is separate: the control moves what a button MEANS and not whether "
+            "clicking one works.\n"
+            "WHAT IT IS ABOUT: the program name is the only thing that makes grouping possible, "
+            "and the page cannot learn it — it sees a pid and a title, and a title is whatever a "
+            "program says it is. `win-create` carries `prog` for exactly this, so this control is "
+            "also the world where that field is unused.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_group", "1"),),
+        expects={"m14": Expect(
+            Outcome.FAIL,
+            why="two windows of one program must become two buttons",
+            failed=_NO_GROUP_FAILS,
+            held=held_rest(M14_LABELS, _NO_GROUP_FAILS),
+        )},
+    ),
+    "no-items": NegativeControl(
+        name="no-items",
+        why="noItems=1: `win_items` accepts a published list, counts it and DISCARDS it (the "
+            "cfg.noItems hook, refused without a bench boot). `setDrawReaches`'s shape applied to "
+            "the shell's own data path.\n"
+            "WHAT MUST BREAK: every rendering of a row, which is the point — the desktop's icons, "
+            "the start menu's programs and the jump list's commands are ONE mechanism, and this is "
+            "the world where that mechanism carries nothing. The mouse proof goes too, and that is "
+            "honest rather than collateral: every one of its gestures acts on an icon.\n"
+            "WHAT MUST HOLD: everything about windows. Snap, the work area, minimize, the "
+            "Superbar's grouping and its raise, the tray and the glass are all untouched — so the "
+            "shell still works and only its CONTENTS are gone.\n"
+            "WHAT IT IS ABOUT: `docs/DECISIONS.md` D39. The shell is page-side chrome, and the one "
+            "thing keeping it honest is that what it SHOWS comes from a process reading the "
+            "filesystem. A page that drew a hard-coded list of programs would look identical with "
+            "this control on, which is exactly what this run rules out.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_items", "1"),),
+        expects={"m14": Expect(
+            Outcome.FAIL,
+            why="a shell must have nothing to draw when the rows are dropped",
+            failed=_NO_ITEMS_FAILS,
+            held=held_rest(M14_LABELS, _NO_ITEMS_FAILS),
         )},
     ),
     "flat-desk": NegativeControl(
@@ -11179,6 +11521,292 @@ def check_m13(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m13.html", env.served_matches_disk(env.document),
                     "the m13.html served does not match www/m13.html on disk")
+
+
+@check(
+    name="m14",
+    milestone="m14",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SNAP_HYSTERESIS,
+              Control.NO_WORKAREA, Control.NO_GROUP, Control.NO_ITEMS),
+    labels=M14_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M14_DOCUMENT,
+    ready_expr=M14_READY,
+    ready_what="globalThis.M14 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m14.html)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M14 && globalThis.M14.state",
+    refusal_want="aborted",
+    note="THE LAST ROW OF THE WINDOW HALF: Aero Snap, the Superbar, jump lists, the tray and the "
+         "desktop. `PLAN.md` §5 costs it at six days and names the thresholds — 'snap arms at 1 px "
+         "of pointer-to-edge, releases at 20 px of drag-out, 50 px side-move to restore a "
+         "top-maximized window. Both edges of every threshold get checked, because a threshold on "
+         "a continuous input without hysteresis oscillates'. All three are here, and both edges of "
+         "both release thresholds are driven with a real pointer.\n"
+         "WHERE THE SHELL LIVES, AND WHY. The taskbar, the start menu and the desktop's icons are "
+         "PAGE-SIDE chrome (`docs/DECISIONS.md` D39). A display list has no text op and no image "
+         "op, and a `WEV_POINTER` is only delivered while a button is down — so a process-drawn "
+         "Superbar could have neither labels nor hover, and a rubber band is not expressible as a "
+         "stream of filled rectangles. What keeps it honest is that its CONTENTS come from a "
+         "process: `src/bin/desktop.mjs` reads `/usr/bin` and `/desktop` and publishes rows "
+         "through `win_items`, and `--negative no-items` is the world where those rows are "
+         "dropped — a page drawing a hard-coded list would look identical.\n"
+         "AND `docs/research/09-hobbyist-os-actions.md` §4's SECOND ENDPOINT IS NOT NEEDED HERE, "
+         "which is a conclusion rather than a shortcut: a taskbar needs cross-process window "
+         "enumeration no ordinary client may have, and the page already holds every window's frame "
+         "because `win-create` built it. A taskbar as a PROCESS would need that endpoint.\n"
+         "M12's OWN OPEN ITEM IS CLOSED BY A RUN. It recorded that 'minimize, snap and peek are "
+         "not among the events [the blur governor] sees, because they do not exist yet' and that "
+         "'nothing has yet driven a minimize through it, so the claim that the list is covered "
+         "rests on the shape of the ABI rather than on a run'. Proof 3 is that run: the window's "
+         "ring cost goes to zero and the governor's input drops by exactly that much.\n"
+         "negative controls: --negative no-snap-hysteresis is `PLAN.md`'s own — the release "
+         "collapses onto the arm, so the 19 px and 49 px HOLDS fail while both releases still "
+         "work. --negative no-workarea maximizes to the desktop, so a window covers the taskbar. "
+         "--negative no-group keys buttons by window, which is the pre-Windows-7 bar. "
+         "--negative no-items drops every published row, so the shell has nothing to show. "
+         "--negative no-isolation must come out BROKEN: no SAB, no kernel, and a taskbar with "
+         "nothing behind it.",
+)
+def check_m14(env: Env) -> None:
+    performed = drive_gestures(env, "M14", timeout=400.0)
+
+    got = env.read(READ_M14, M14_SHAPE)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m14.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m14.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed and no desktop process "
+            "publishes a row." % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/m14.html never reached a terminal state (state=%r)" % got["state"])
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "kernel errors: %s" % "; ".join(got["errors"][:4]))
+    # EVERY GESTURE THIS PAGE NEEDS IS REAL, and the count is asserted: a page that finished without
+    # asking for one would have measured a desktop nobody touched.
+    env.expect_that("the page was really driven",
+                    performed >= 20 and got["gestures"] == performed,
+                    {"performed": performed, "pageLogged": got["gestures"]})
+    cfg = got["cfg"] or {}
+
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def section_ok(name):
+        row = got[name]
+        return bool(row and row.get("ok"))
+
+    # THE WORLD IS ASSERTED TO BE THE ONE ASKED FOR, read back out of the two modules that own the
+    # switches rather than out of the page's query parsing.
+    sb = ev("superbar")
+    live = {**(ev("snap").get("controls") or {}), **(sb.get("controls") or {})}
+    env.expect_that("the controls the page reports are the ones asked for",
+                    bool(sb.get("controls")) is True
+                    and (sb["controls"].get("noGroup") is bool(cfg.get("noGroup"))),
+                    {"asked": cfg, "inForce": live, "shell": sb.get("controls")})
+
+    # ---- PROOF 1: snap, at both edges of both thresholds -------------------------------------
+    s = ev("snap")
+    env.expect_that("snap ok", section_ok("snap"), s)
+    # THE GHOST IS PART OF THE CONTRACT: it promises where the window will land, and a preview that
+    # promised a different rectangle would be worse than none.
+    env.expect_that("the ghost promised the box the window took",
+                    s.get("ghostPromisedWhatItTook") is True,
+                    {"armed": s.get("armed")})
+    env.expect_that("a release at the edge snaps to the half of the work area",
+                    s.get("snappedToTheHalf") is True,
+                    {"snapped": s.get("snapped"), "workArea": s.get("workArea")})
+    # BOTH EDGES OF THE FIRST THRESHOLD. The hold is what `--negative no-snap-hysteresis` breaks;
+    # the release is what makes the hold more than a window that cannot be dragged at all.
+    env.expect_that("a 19 px drag-out HOLDS the snap", s.get("heldAt19") is True,
+                    {"held19": s.get("held19"), "releaseAt": s.get("release")})
+    env.expect_that("and a 21 px drag-out releases it", s.get("releasedAt21") is True,
+                    {"released21": s.get("released21")})
+    env.expect_that("a drag to the top maximizes to the work area",
+                    s.get("maximizedFromTheTop") is True,
+                    {"armedMax": s.get("armedMax"), "maximized": s.get("maximized")})
+    # AND BOTH EDGES OF THE SECOND, which is a different measurement for a stated reason: a
+    # maximized window's caption is at the top of the work area, so a user reaching for it drags
+    # downward constantly and a total-distance rule would un-maximize on every brush.
+    env.expect_that("a 49 px side-move HOLDS the maximize", s.get("heldAt49") is True,
+                    {"held49": s.get("held49"), "releaseAt": s.get("maxRelease")})
+    env.expect_that("and a 51 px side-move releases it", s.get("releasedAt51") is True,
+                    {"released51": s.get("released51")})
+
+    # ---- PROOF 2: the work area ---------------------------------------------------------------
+    w = ev("workarea")
+    env.expect_that("workarea ok", section_ok("workarea"), w)
+    env.expect_that("the strip the shell reserved is the strip the bar occupies",
+                    w.get("reservationMatchesTheBar") is True,
+                    {"reserved": w.get("reserved"), "barHeight": w.get("taskbarHeight"),
+                     "workArea": w.get("workArea"), "desk": w.get("desk")})
+    env.expect_that("a maximized frame stops at the bar rather than covering it",
+                    w.get("stopsAtTheBar") is True,
+                    {"frame": w.get("frame"), "barTop": w.get("barTop")})
+    env.expect_that("and the kernel records the work area's height",
+                    w.get("kernelRecordsIt") is True,
+                    {"kernel": w.get("kernel"), "workArea": w.get("workArea")})
+
+    # ---- PROOF 3: minimize is an area-changing event ------------------------------------------
+    m = ev("minimize")
+    env.expect_that("minimize ok", section_ok("minimize"), m)
+    env.expect_that("the frame left the screen", m.get("frameWentAway") is True,
+                    {"hidden": m.get("frameHidden"), "minimized": m.get("minimizedList")})
+    env.expect_that("a minimized window is charged no blurred area",
+                    m.get("chargedNothing") is True,
+                    {"before": m.get("costBefore"), "after": m.get("costAfter"),
+                     "ringCss": m.get("ringCss"), "dprSq": m.get("dprSq")})
+    # M12's OWN OPEN ITEM, CLOSED BY A RUN: constraint 49 lists minimize among the events an
+    # admission controller must see, and until M14 nothing had ever driven one through it.
+    env.expect_that("and the governor's input dropped by exactly that window's ring",
+                    m.get("governorSawIt") is True,
+                    {"allGlassBefore": m.get("allGlassBefore"),
+                     "allGlassAfter": m.get("allGlassAfter"), "cost": m.get("costBefore")})
+    env.expect_that("while its taskbar button stayed, so there is a way back",
+                    m.get("stillOnTheBar") is True,
+                    {"buttons": m.get("taskbarButtons"), "state": m.get("buttonState")})
+
+    # ---- PROOF 4: the Superbar ----------------------------------------------------------------
+    env.expect_that("superbar ok", section_ok("superbar"), sb)
+    env.expect_that("two windows of one program are one button", sb.get("grouped") is True,
+                    {"groups": sb.get("groups"), "buttons": sb.get("buttons"),
+                     "frames": sb.get("frames"), "wanted": sb.get("wanted")})
+    env.expect_that("a real click raises the group", sb.get("raisedOnClick") is True,
+                    {"before": sb.get("stackBefore"), "after": sb.get("stackAfter")})
+    env.expect_that("and a second click on the front group lists its windows",
+                    sb.get("listedItsWindows") is True,
+                    {"popup": sb.get("popupKind"), "thumbs": sb.get("thumbs")})
+
+    # ---- PROOF 5: the jump list ---------------------------------------------------------------
+    j = ev("jumplist")
+    env.expect_that("jumplist ok", section_ok("jumplist"), j)
+    env.expect_that("the jump list shows the rows the program published, plus the shell's own Close",
+                    j.get("showsTheProgramsRows") is True,
+                    {"published": j.get("jumpRows"), "onScreen": j.get("popupRows"),
+                     "popup": j.get("popupKind")})
+    # A PID IS THE EVIDENCE. The row said "open a terminal"; the kernel validated the index against
+    # the list it holds; the desktop process got a `WEV_ITEM` and spawned.
+    env.expect_that("and a real click on one reached the program, which spawned",
+                    j.get("reachedTheProgram") is True,
+                    {"before": j.get("procsBefore"), "after": j.get("procsAfter"),
+                     "waitedMs": j.get("spawnedMs")})
+
+    # ---- PROOF 6: the desktop's icons ---------------------------------------------------------
+    i = ev("icons")
+    env.expect_that("icons ok", section_ok("icons"), i)
+    env.expect_that("the icons drawn are the rows the process published",
+                    i.get("drewWhatWasPublished") is True,
+                    {"drawn": i.get("icons"), "published": i.get("deskRowsPublished"),
+                     "labels": i.get("labels")})
+    env.expect_that("the start menu is a listing of /usr/bin",
+                    i.get("menuListsPrograms") is True,
+                    {"rows": i.get("menuRows"), "published": i.get("menuRowsPublished")})
+    env.expect_that("and a real double-click started the program a row names",
+                    i.get("startedAProgram") is True,
+                    {"framesBefore": i.get("framesBefore"), "framesAfter": i.get("framesAfter"),
+                     "waitedMs": i.get("openedMs"), "titles": i.get("newTitles")})
+
+    # ---- PROOF 7: every mouse action on the desktop -------------------------------------------
+    mo = ev("mouse")
+    env.expect_that("mouse ok", section_ok("mouse"), mo)
+    env.expect_that("a real rubber band selects what it touches", mo.get("bandSelected") is True,
+                    {"bandingWhileDown": mo.get("bandingWhileDown"),
+                     "selected": mo.get("afterBand"), "cells": mo.get("cells"),
+                     "why": mo.get("why")})
+    env.expect_that("a ctrl-click adds to the selection", mo.get("ctrlAdded") is True,
+                    {"before": mo.get("afterBand"), "after": mo.get("afterCtrlClick")})
+    env.expect_that("a drag moves an icon", mo.get("dragMovedIt") is True, {"icon": mo.get("icon")})
+    # AND IT STAYS, which is what makes it an arrangement rather than a transient: the view
+    # re-renders on every republished list, and a position it forgot would snap back to the grid.
+    env.expect_that("and it stays there across a redraw", mo.get("stayedPut") is True,
+                    {"afterRedraw": mo.get("afterRedraw"), "icon": mo.get("icon")})
+
+    # ---- PROOF 8: the tray --------------------------------------------------------------------
+    t = ev("tray")
+    env.expect_that("tray ok", section_ok("tray"), t)
+    env.expect_that("the tray clock advances", t.get("clockAdvances") is True,
+                    {"before": t.get("clock"), "after": t.get("clockAfter"),
+                     "waitedMs": t.get("tickedMs")})
+    # PEEK IS A LOOK AND NOT AN ACTION, which is the whole of what makes it safe: nothing is
+    # minimized, so there is nothing to undo.
+    env.expect_that("hovering Show desktop peeks, and changes no window's state",
+                    t.get("peeking") is True and t.get("peekChangedNothing") is True,
+                    {"peeking": t.get("peeking"), "states": t.get("statesWhilePeeking")})
+    env.expect_that("a click minimizes every window while the desktop itself stays",
+                    t.get("minimizedAll") is True and t.get("desktopStayed") is True,
+                    {"waitedMs": t.get("minimizedAllMs"), "desktopState": t.get("desktopState")})
+    env.expect_that("and a second click puts them all back", t.get("restoredAll") is True,
+                    {"waitedMs": t.get("restoredAllMs")})
+
+    # ---- PROOF 9: the glass, out of the pixels ------------------------------------------------
+    px = ev("pixels")
+    env.expect_that("pixels ok", section_ok("pixels"), px)
+    env.expect_that("the taskbar is a glass strip and asks for a blur",
+                    px.get("barIsAStrip") is True and px.get("filterPresent") is True,
+                    {"filter": (px.get("barBand") or {}).get("filter"),
+                     "isStrip": px.get("barIsAStrip")})
+    # M11's ANSWER, CARRIED TO THE SURFACES M14 ADDED. A caption crosses black and white in one
+    # drag, so no (colour, background) pair has a contrast ratio and the answer is a halo that
+    # gives a glyph local contrast wherever it lands (constraint 39). STRUCTURAL rather than
+    # sampled: this asserts the halo is declared, where M11 reads the pixels at both ends of a
+    # seam, and `MILESTONES.md` M14 records the sampled version as owed.
+    env.expect_that("the desktop's icon labels and the bar's own carry a halo",
+                    px.get("labelsCarryAHalo") is True, {"halos": px.get("halos")})
+
+    shot = env.shoot("m14-shell")
+    try:
+        img = Png.decode(shot.read_bytes())
+    except Exception as error:                 # noqa: BLE001 - named, never swallowed
+        env.unmeasurable("the screenshot at %s could not be decoded (%s), so no pixel below was "
+                         "measured" % (_relative(shot), error))
+    dpr = px.get("dpr") or VIEWPORT_SCALE
+    seam = int(px.get("seamDeviceX") or 0)
+
+    def band(spec):
+        if not spec:
+            return None
+        try:
+            _, lumas = band_profile(
+                img, seam_x=seam, y=int(spec["y"]), rows=int(spec.get("rows") or M11_BAND_ROWS),
+                dpr=dpr, reach_css=M11_REACH_CSS)
+        except Exception:                      # noqa: BLE001 - the decoder raises on a bad read
+            return None
+        return transition(lumas)
+
+    bare = band(px.get("bareBand"))
+    bar = band(px.get("barBand"))
+    # THE REFERENCE FIRST, which is M11's and M12's rule: over a flat backdrop `blur(flat) == flat`,
+    # so "spread" would be satisfied with the blur switched off and the clause would be about a
+    # constant (constraint 50).
+    env.expect_that("the BARE backdrop reads as a hard step, so the seam is real",
+                    bare is not None and bare.concentration >= M11_STEP_MIN and bare.span >= 64.0,
+                    {"bare": bare.as_dict() if bare else None, "seamDeviceX": seam,
+                     "band": px.get("bareBand"), "shot": _relative(shot)})
+    # AND THE BAR ITSELF BLURS IT. `aero-strip` in the DOM and a blur that happened are different
+    # claims, and only the second is the product — M11's lesson applied to M14's one new surface.
+    env.expect_that("and the taskbar's own band reads as a spread ramp",
+                    bar is not None and bar.concentration <= M11_SPREAD_MAX
+                    and bar.span >= M11_SPAN_MIN,
+                    {"bar": bar.as_dict() if bar else None, "band": px.get("barBand"),
+                     "want": {"concentrationAtMost": M11_SPREAD_MAX,
+                              "spanAtLeast": M11_SPAN_MIN},
+                     "bareForComparison": bare.as_dict() if bare else None})
+
+    env.expect("verdict is ok", got["verdict"], "ok")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m14.html", env.served_matches_disk(env.document),
+                    "the m14.html served does not match www/m14.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

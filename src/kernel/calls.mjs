@@ -1085,7 +1085,14 @@ HANDLERS.win_items = (p, k) => {
   const length = Atomics.load(p.ctl, LEN_I32);
   if (length < 0 || length > MAX_INLINE) return -EINVAL;
   if (length === 0) return k.wins.items(d.win, []);
-  const rows = decodeWinItems(p.bytes.subarray(DATA_OFF, DATA_OFF + length), length);
+  /* A COPY, AND `readTitle` MAKES ONE FOR THE SAME REASON: `TextDecoder.decode` REFUSES a view
+   * onto a SharedArrayBuffer — "The provided ArrayBufferView value must not be shared" — and the
+   * byte region is exactly that. Measured the first time this call carried a label: the throw
+   * reached `handle()`, which turned it into a kernel PANIC, and every syscall after it answered
+   * -EIO. The decoder also guards itself (`decodeWinItems` slices each label), so the copy here is
+   * the cheap one: one allocation per call instead of one per row. */
+  const region = new Uint8Array(p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+  const rows = decodeWinItems(region, length);
   if (rows === null) return -EINVAL;
   return k.wins.items(d.win, rows);
 };

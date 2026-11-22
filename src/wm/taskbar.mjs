@@ -35,47 +35,42 @@
 
 import {
   WST_NORMAL, WST_MIN, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR, WITEM_DISABLED,
-  WROLE_DESKTOP, WEV_CLOSE,
-  WICON_PROGRAM, WICON_TERMINAL, WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_IMAGE,
-  WICON_COMPUTER,
+  WROLE_DESKTOP, WICON_PROGRAM,
 } from "../abi.mjs";
-import { iconMarkup } from "./icons.mjs";
+// `progName` AND `iconForProgram` ARE THE ICON MODULE'S, because a window's CAPTION needs the
+// same answer this bar does — see `iconForProgram`'s own note.
+import { iconMarkup, iconForProgram, progName } from "./icons.mjs";
 import { TASKBAR_H, THUMB_W, THUMB_H } from "./aero.mjs";
-
-/**
- * WHICH ICON A PROGRAM'S BUTTON GETS. A SHELL CONVENTION, page-side, and the honest place for it:
- * a window does not publish an icon for itself — `win_create` has no spare register and an icon is
- * not a property of a window but of the program behind it — so the shell recognises the programs it
- * ships with and falls back for everything else.
- *
- * It is the same shape as `FORMAT_BY_EXT` in `src/libos/std.mjs`: a convention over names, in one
- * place, with a stated default. A program that wants a particular icon can publish a row with one.
- */
-const ICON_BY_PROG = Object.freeze({
-  term: WICON_TERMINAL,
-  sh: WICON_TERMINAL,
-  winopen: WICON_PROGRAM,
-  paint: WICON_PAINT,
-  editor: WICON_EDITOR,
-  files: WICON_FILES,
-  imgview: WICON_IMAGE,
-  desktop: WICON_COMPUTER,
-});
 
 /** How long the pointer must rest on a button before its thumbnails appear. Windows 7 waits about
  *  this long; shorter and the previews flash past as the pointer crosses the bar. */
 const HOVER_MS = 120;
 
+/**
+ * M14's THIRD NEGATIVE CONTROL: the bar draws one button per WINDOW instead of one per program.
+ *
+ * That is the pre-Windows-7 taskbar, and it is the plausible implementation — every window is a
+ * button, which is simpler and is what a page with no `prog` field could do. What it loses is the
+ * whole of what a Superbar IS: two terminals become two buttons, the bar fills up at a dozen
+ * windows, and the window list that answers "which of these three" never appears.
+ *
+ * Module-level and page-side, which is `setGeometryControls`'s shape and for its reason: nothing
+ * in `src/wm/` is reachable from a process, and the page is the supervisor.
+ */
+let shellControls = { noGroup: false };
+
+export function setShellControls(opts = {}) {
+  shellControls = { noGroup: opts.noGroup === true };
+  return { ...shellControls };
+}
+
+export function shellControlsInForce() {
+  return { ...shellControls };
+}
+
 /** The last few lines of a text window, drawn into its thumbnail. More than this is unreadable at
  *  thumbnail size and costs a `fillText` each. */
 const THUMB_LINES = 9;
-
-/** The basename of a program path, which is what a button is labelled and keyed by. */
-function progName(prog) {
-  const path = String(prog || "");
-  const at = path.lastIndexOf("/");
-  return (at >= 0 ? path.slice(at + 1) : path) || "program";
-}
 
 export class Taskbar {
   /**
@@ -225,7 +220,11 @@ export class Taskbar {
     const by = new Map();
     for (const [id, entry] of this.host.frames) {
       if (entry.role === WROLE_DESKTOP) continue;
-      const key = progName(entry.prog) || `pid ${entry.pid}`;
+      // THE KEY IS THE PROGRAM, which is what makes this a Superbar. The control keys by WINDOW
+      // instead, which is the pre-Windows-7 bar: one button each, and no window list.
+      const key = shellControls.noGroup
+        ? `${progName(entry.prog) || "window"} ${id}`
+        : (progName(entry.prog) || `pid ${entry.pid}`);
       if (!by.has(key)) by.set(key, { key, prog: entry.prog, wins: [] });
       by.get(key).wins.push({ id, entry });
     }
@@ -256,7 +255,7 @@ export class Taskbar {
       btn.className = "task-btn";
       btn.dataset.taskBtn = group.key;
       btn.dataset.wins = group.wins.map((w) => w.id).join(",");
-      const icon = ICON_BY_PROG[group.key] ?? WICON_PROGRAM;
+      const icon = iconForProgram(group.prog);
       const live = group.wins.filter((w) => w.entry.state !== WST_MIN);
       const active = group.wins.some((w) => w.id === top);
       const allMin = live.length === 0;
@@ -284,10 +283,27 @@ export class Taskbar {
         e.stopPropagation();
         this.clickGroup(group);
       });
-      // RIGHT-CLICK IS THE JUMP LIST, which is where a window's published rows are shown.
-      btn.addEventListener("contextmenu", (e) => {
+      /* THE JUMP LIST OPENS ON THE RIGHT BUTTON'S PRESS, which is Windows 7's own timing and is
+       * also the only signal that reliably exists: a `contextmenu` event is produced by the
+       * BROWSER's own input pipeline, and `Input.dispatchMouseEvent` with `button: "right"` does
+       * not generate one — measured, as a jump-list proof that found `jumpOpens: 0` after a real
+       * right-press landed on the button. `pointerdown` with `button === 2` is the event that
+       * actually arrives, from a hand and from a driver alike. */
+      btn.addEventListener("pointerdown", (e) => {
+        if (e.button !== 2) return;
         e.preventDefault();
         e.stopPropagation();
+        this.openJumpList(group, btn);
+      });
+      // And the browser's own menu is refused, or a right-click would show Chrome's.
+      btn.addEventListener("contextmenu", (e) => e.preventDefault());
+      /* AND IT HAS A KEYBOARD SPELLING, because every gesture in this shell does: Shift+F10 and
+       * the Menu key are the platform's own bindings for "the context menu of what has focus", and
+       * a taskbar button is a real `<button>` that can take focus. */
+      btn.addEventListener("keydown", (e) => {
+        const wants = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+        if (!wants) return;
+        e.preventDefault();
         this.openJumpList(group, btn);
       });
       btn.addEventListener("pointerenter", () => this.#hoverIn(group, btn));
@@ -409,8 +425,13 @@ export class Taskbar {
     title.className = "shell-title";
     title.textContent = group.key;
     this.popup.append(title);
-    // The newest window of the group owns the list, which is the one a user just used.
-    const target = group.wins[group.wins.length - 1];
+    /* THE FIRST WINDOW THAT PUBLISHED ROWS owns the list, and the first version took the NEWEST —
+     * which found an empty list, because a program publishes its jump list once, on the window it
+     * opened first. A jump list belongs to a PROGRAM in Windows 7 and this is the nearest honest
+     * reading of that in an ABI where rows hang off a window. */
+    const target = group.wins.find(
+      (w) => (w.entry.items || []).some((row) => (row.flags & WITEM_JUMP) !== 0))
+      || group.wins[group.wins.length - 1];
     const rows = (target.entry.items || [])
       .map((row, index) => ({ ...row, index }))
       .filter((row) => (row.flags & WITEM_JUMP) !== 0);
@@ -687,6 +708,7 @@ export class Taskbar {
     }));
     return {
       ...this.stats,
+      controls: shellControlsInForce(),
       height: TASKBAR_H,
       reserved: this.host.reserved,
       workArea: this.host.workArea(),
