@@ -2840,6 +2840,111 @@ negative control that breaks the thing the proof is about.**
 **Order is risk-first.** D0 re-measures the one figure option D rests on, against a real workload
 rather than the 5-instruction loop that produced 455 MIPS.
 
+### What a reader found by opening the page, and what it was actually about
+
+Four complaints arrived from someone using the desktop in Firefox. **Three of them were not
+defects, and the fourth was five.** The single cause of the three is worth more than the fixes.
+
+**`www/m14.html` ran the PROOFS by default**, with the desktop behind `?live=1`. The proofs stage
+their own fixture windows and then block in `gestureAsker` waiting for a driver to perform a
+gesture — so a person who opens the obvious URL gets windows nobody asked for, caption buttons that
+belong to a sequence halfway through, and `Error: nothing performed the … gesture` sixty seconds
+later. Every symptom reads as a broken desktop:
+
+- *"I'm unable to open anything."* On the live desktop a double-click on Terminal opens a terminal.
+  Measured, in Chrome: two windows before, three after.
+- *"The minimize button doesn't work."* On the live desktop it does: state 0 → 1, the frame hidden,
+  and the taskbar button puts it back. Measured both ways.
+- *"The white half of the screen."* That is `#seam`, the hard black/white backdrop the glass is
+  sampled across, which constraint 50 requires and which `live()` hides. It is a proof fixture doing
+  its job on a page a reader should not have been on.
+
+So the default is the desktop now and `?proofs=1` is the harness's to ask for — and because the
+same trap exists on six other pages, `gestureAsker` paints a banner after 2,500 ms naming the
+gesture it is waiting for and the URL that gives the product. It is removed the moment anything
+drives it, so a driven run never shows it. **Constraint 283.**
+
+### And five real defects behind the fourth complaint
+
+**THE HOVER THUMBNAILS RENDERED OUTSIDE THE GLASS.** `.shell-popup`'s `max-width: 320px` is right
+for a menu row and wrong for a 208 px thumbnail, so a group of two laid out 422 px of content
+inside a 218 px panel and `overflow: visible` painted the second one on the bare desktop. Measured
+at 1320x900: cell 2 at x=434 in a panel spanning 220..438; 432 px wide with both inside after. The
+cap is derived from `THUMB_W` and `THUMBS_PER_ROW` now and the strip wraps. **And the thumbnail
+itself read as a blank white rectangle** — nine lines of 9 px text on a near-white fill — so a text
+window's preview is drawn as a miniature window: a caption strip in the same blue, its title, and
+the text below as the texture it becomes at that scale. A preview at 196x120 cannot be legible and
+Windows 7's is not either; what it has to be is recognisable. **Constraint 285.**
+
+**THE OUTLINES HAD NO CONTRAST ON A LIGHT BACKDROP.** A near-white 2 px border is crisp over a dark
+desktop and invisible over a pale one, which is the snap ghost and the rubber band over any light
+wallpaper. Both carry a dark ring outside the light one now: whichever tone the backdrop swallows,
+the other shows. Constraint 50's argument about glass, applied to an edge. **Constraint 286.**
+
+**THE LIVE DESKTOP STOPPED 190 px SHORT OF THE WINDOW.** `#desktop { height: 560px }` is the
+PROOFS' geometry and it is load-bearing for them — the pixel proof reads device rects out of a
+screenshot and a growing log would move the desktop out from under them — but applied to the live
+page it left page background below a Windows 7 taskbar. Live mode is a flex column now: the log
+capped at 22vh, the desktop taking the rest. Measured: 0 px of slack where there were 190.
+
+**AND THE ICONS DID NOT SNAP TO A GRID**, which is what was asked for. `#cellAt` is the declared
+inverse of `#boxFor` — the relationship `src/wm/surface.mjs` states between `clientAt` and
+`pointAt` — so a drop lands exactly where the auto-layout would have put it. The arrangement holds
+a CELL and not a pixel, so a resized desktop re-lays it out rather than stranding an icon. Snapping
+MAKES STACKING REACHABLE, because before it a dropped icon sat between cells and never exactly on
+one — so the dragged cells are reserved before anything is laid out and a drop takes the nearest
+FREE cell. Measured: a drag of (173, 61) from (54, 507) landed on cell (2, 4) = (180, 360), and
+held across a redraw. **Constraint 284.**
+
+### What the harness said about all this, including about itself
+
+**`bench/m7-win/drive.py --live` OPENED NO WINDOW.** The command `CLAUDE.md` advertises as "the
+Windows 7 desktop, in a real Chrome, left open to type into" took `cdp.Browser()` at its default,
+which is headless — then span for 300 s waiting for a terminal state a live page never reaches. It
+also spawned `scripts/serve.py --port 8711` with both streams sent to DEVNULL, so a busy port
+arrived as a blank page with no message, and 8711 appeared in no document while `scripts/serve.py`
+alone serves 8000. A reader reported that as the contradiction it is. Every driver binds
+`serve.Server` in process on port 0 now and prints the URL; `bench/m10-data/shell.py` and
+`bench/shell-reports/repro.py` had both claimed 8717. **Constraint 287.**
+
+**A `const` COST 420 SECONDS.** Renaming the drop target collided with a binding fifty lines above
+it, and `scripts/check.py --only m14` reported it as BROKEN with `never became true within 420.0s`
+— correct and honest, and a four-hundred-fold waste, because the page threw before it rendered and
+a harness can only wait for a state that will never arrive. `scripts/check_pages.py` runs
+`node --check` over every page's inline module in about a second, and `--prove-failure` injects a
+redeclaration into all eighteen and requires every one to report it. **Constraint 288.**
+
+**THE REGISTRY REFUSED THE FIRST DECLARATION OF THE NEW CONTROL**, which is the gate earning its
+keep. `--negative no-icon-grid` answered: *"m14 recorded 'and on the NEAREST cell to where it was
+let go' and it HELD under this control, so whatever turned the check red is not the thing this
+control is named for."* It holds for a reason worth keeping — a loose drop lands at EXACTLY the
+pointer's pixel, so a half-cell bound is satisfied by zero. That clause cannot stand alone; what it
+is for is telling a view that snaps to the nearest cell apart from one that snaps everything to a
+fixed cell. Re-declared, the control scores **3 red and 54 intact**.
+
+**AND THE CLAUSE IT REPLACED WAS NOT ABOUT THE GRID AT ALL.** "A drag moves an icon" asserted the
+icon arrived at exactly `+160,+90`, which is a statement about the POINTER and true of a view with
+no grid whatever. The delta is 173x61 against an 86x88 cell now, and the drop having been off-grid
+in the first place is asserted separately — because if `want` happened to be a cell corner, "it
+snapped" and "it did not move" are the same picture.
+
+### One thing found and NOT changed, with the reason
+
+**RESTORING A WINDOW THAT WAS SNAPPED BY A DRAG PUTS IT WHERE THE DRAG ENDED, NOT WHERE IT
+STARTED.** Measured: a window at `{x: 594, y: 40}` dragged to the left edge snaps to
+`{x: 0, y: 0, w: 660, h: 649}`, and a caption restore returns it to `{x: -9, y: 185}` — the box the
+drag left it in, nine pixels off the left edge, because `setState` takes the restore point on the
+way out of a floating state and by then the drag's own `pointerup` has already recorded the new
+box.
+
+It is arguably right: dragging a window OUT of a snap in Windows 7 puts it under the cursor, and
+this is the same box. What Windows 7 does for a caption-button restore of a drag-snapped window is
+**not something this note can state** — nobody here has measured it — so it is recorded as an open
+question rather than fixed in either direction. It is also the machinery the critic's worst finding
+was about (the restore point that outlived the return it paid for), so moving when the point is
+taken needs its own proof and its own control, not a nudge. Nothing reported it; it was found while
+checking why a harness printed a box that disagreed with its own state.
+
 ### D0 — RV32I interpreter + one real binary · 4 d
 
 **Build.** RV32I base integer set, decode-and-execute from memory. One prebuilt binary committed

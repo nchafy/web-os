@@ -68,9 +68,16 @@ export function shellControlsInForce() {
   return { ...shellControls };
 }
 
-/** The last few lines of a text window, drawn into its thumbnail. More than this is unreadable at
- *  thumbnail size and costs a `fillText` each. */
-const THUMB_LINES = 9;
+/* What a thumbnail is drawn out of. A preview at `THUMB_W`x`THUMB_H` is a picture of a window and
+ * not a readable page, so these are sized to make it RECOGNISABLE: a caption strip deep enough for
+ * a title, and a body line height small enough that a terminal's text reads as the texture it is.
+ * How MANY lines fit is derived from the space left, never written — see `#drawThumb`. */
+const THUMB_CAP_H = 15;
+const THUMB_TITLE_PX = 9;
+const THUMB_TEXT_PX = 6;
+const THUMB_LEAD = 7;
+const THUMB_COLS = 62;
+const THUMB_UI_FONT = '"Segoe UI", system-ui, -apple-system, sans-serif';
 
 export class Taskbar {
   /**
@@ -553,11 +560,33 @@ export class Taskbar {
         canvas.dataset.thumbError = String(error && error.name);
       }
     }
-    const lines = entry.term ? entry.term.screen().split("\n").slice(-THUMB_LINES) : [];
-    g.fillStyle = "#17242f";
-    g.font = "9px ui-monospace, Menlo, Consolas, monospace";
+    /* A MINIATURE WINDOW AND NOT A PAGE OF SHRUNKEN PROSE. Nine lines of 9 px text on a near-white
+     * fill is what this drew before, and at 196x120 it reads as a blank white rectangle — which is
+     * how it was reported. A preview at this size cannot be legible and Windows 7's is not either;
+     * what it has to be is RECOGNISABLE as the window it stands for, so it is drawn as one: a
+     * caption strip in the same blue, the title in it, and the text below as the texture it
+     * becomes at this scale. The line count is DERIVED from the space left, never written. */
+    const cap = THUMB_CAP_H;
+    const grad = g.createLinearGradient(0, 0, 0, cap);
+    grad.addColorStop(0, "#dceaf7");
+    grad.addColorStop(1, "#9ec0dd");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, canvas.width, cap);
+    g.fillStyle = "rgba(10,30,52,.35)";
+    g.fillRect(0, cap - 1, canvas.width, 1);
+    g.fillStyle = "#13293d";
+    g.font = `${THUMB_TITLE_PX}px ${THUMB_UI_FONT}`;
+    g.fillText(String(entry.win.titleText || "").slice(0, 34), 4, cap - 4);
+
+    const body = canvas.height - cap;
+    g.fillStyle = "#fff";
+    g.fillRect(0, cap, canvas.width, body);
+    const fits = Math.max(1, Math.floor((body - 4) / THUMB_LEAD));
+    const lines = entry.term ? entry.term.screen().split("\n").slice(-fits) : [];
+    g.fillStyle = "#1d2b36";
+    g.font = `${THUMB_TEXT_PX}px ui-monospace, Menlo, Consolas, monospace`;
     lines.forEach((line, i) => {
-      g.fillText(line.slice(0, 44), 5, 12 + i * 11);
+      g.fillText(line.slice(0, THUMB_COLS), 3, cap + THUMB_LEAD + i * THUMB_LEAD);
     });
     canvas.dataset.thumb = entry.term ? "text" : "blank";
     return canvas.dataset.thumb;

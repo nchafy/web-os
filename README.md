@@ -20,9 +20,16 @@ Superbar, jump lists, a tray and a desktop whose icons are rows a PROCESS publis
 scripts/serve.py          # then open http://127.0.0.1:8000/www/
 ```
 
-**Or go straight to the desktop:** `http://127.0.0.1:8000/www/m14.html?live=1` — double-click an
+**Or go straight to the desktop:** `http://127.0.0.1:8000/www/m14.html` — double-click an
 icon, use the Start orb, drag a caption to an edge to snap it, right-click a taskbar button for its
-jump list. Every row in that menu is `/usr/bin` as a process read it.
+jump list, drag an icon and watch it take a grid cell. Every row in that menu is `/usr/bin` as a
+process read it.
+
+That page is the DESKTOP. `?proofs=1` is the harness, and it is the harness's to open: the proofs
+stage their own windows and then block waiting for a driver to perform a gesture, so a person who
+opens them gets fixture windows and a thrown `nothing performed the … gesture` a minute later. It
+used to be the other way around, which is how three defects came to be reported that were not
+defects. Any proof page says so on itself now, in a banner, if nothing drives it.
 
 That serves a preflight which checks the seven capabilities the kernel needs and refuses to
 proceed if any are missing. `scripts/serve.py --no-isolation` makes it fail on purpose, which is
@@ -85,7 +92,7 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
 - **There is a Windows 7 desktop, and everything on it is a process.** M13 and M14:
-  `http://127.0.0.1:8000/www/m14.html?live=1`. The icons and the start menu are rows
+  `http://127.0.0.1:8000/www/m14.html`. The icons and the start menu are rows
   `/usr/bin/desktop` published after reading the filesystem, a jump list is rows the program that
   owns the window published, and a snap is a real drag the kernel records as a show state — so the
   shell is a renderer and not an authority. `scripts/check.py --only m14` is 52 expectations over

@@ -20,15 +20,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
-import subprocess
 import sys
+import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
-import cdp  # noqa: E402
+import cdp    # noqa: E402
+import serve  # noqa: E402
 
 
 def main(argv=None) -> int:
@@ -36,18 +38,27 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cmd", default="paint -w 160 -h 120",
                     help="the command line to type at the prompt")
-    ap.add_argument("--port", type=int, default=8713)
+    ap.add_argument("--port", type=int, default=0,
+                    help="0 (the default) asks the OS for a free port; a fixed one can collide")
     ap.add_argument("--out", default=str(REPO / "bench" / "m8-surface" / "shell.png"))
     ap.add_argument("--hold", type=float, default=0.0,
                     help="seconds to leave the browser open at the end")
     args = ap.parse_args(argv)
 
-    server = subprocess.Popen(
-        [sys.executable, str(REPO / "scripts" / "serve.py"), "--port", str(args.port)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(REPO))
+    # THE SERVER IS BOUND HERE, ON A PORT THE OS PICKS. It used to spawn `scripts/serve.py` on a
+    # FIXED port with both streams sent to DEVNULL, so a port already in use arrived as a blank
+    # page with no message - and `bench/m10-data/shell.py` and `bench/shell-reports/repro.py` both
+    # claimed 8717, which is the collision stated as a fact. `serve.Server` is the same COOP/COEP
+    # handler `scripts/serve.py` installs; in process there is no second interpreter whose failure
+    # could go unread. This is the form `bench/m11-glass`, `m12-governor` and `m14-shell` already
+    # use.
+    os.chdir(REPO)
+    httpd = serve.Server(("127.0.0.1", args.port), serve.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         time.sleep(0.7)
-        url = "http://127.0.0.1:%d/www/m8.html?live=1" % args.port
+        url = "http://127.0.0.1:%d/www/m8.html?live=1" % port
         print("url      %s" % url)
         with cdp.Browser() as browser:
             page = browser.page()
@@ -124,7 +135,7 @@ def main(argv=None) -> int:
                 time.sleep(args.hold)
         return 0
     finally:
-        server.terminate()
+        httpd.shutdown()
 
 
 if __name__ == "__main__":

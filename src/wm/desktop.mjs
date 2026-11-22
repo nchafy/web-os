@@ -33,6 +33,91 @@ const BAND_PX = 4;
 /** The grid's margin, so the first icon is not against the edge. Windows 7 leaves about this. */
 const PAD = 8;
 
+/** The view's negative-control switches. `snapToGrid` off is the world the grid clauses are about:
+ *  a dropped icon keeps the raw pixel the pointer left it on, which is what this view did before
+ *  it aligned, so the control shows those clauses are coupled to the snapping. */
+const viewControls = { snapToGrid: true };
+
+export function setViewControls(next) {
+  Object.assign(viewControls, next || {});
+  return { ...viewControls };
+}
+
+/* ---------------------------------------------------------------------------------------------
+   THE GRID, AS ONE ARITHMETIC IN BOTH DIRECTIONS — AND AS PURE FUNCTIONS.
+
+   `cellAtPoint` is the declared inverse of `boxForCell`, the same relationship `src/wm/surface.mjs`
+   states between `clientAt` and `pointAt`, and it is what lets a DROPPED icon land exactly where
+   the auto-layout would have put it. Two copies of that map is how a dragged icon comes to sit a
+   few pixels off the column its neighbours are in, which is the whole visible difference between a
+   desktop and a pile.
+
+   THEY ARE MODULE FUNCTIONS AND NOT METHODS for `src/fs/`'s reason, in the small: this is the part
+   with arithmetic worth checking, and it is only checkable in plain node — no DOM, no browser —
+   while it closes over nothing. `bench/m14-shell/probe.mjs` asserts the round trip, the tie-break
+   and the full-desktop case directly. The view's own methods measure a rect and call these.
+   --------------------------------------------------------------------------------------------- */
+
+/** How many whole cells fit a view of this size. At least one of each: a view too small for a
+ *  single cell still has to place the icons it was given somewhere. */
+export function gridFor(width, height) {
+  return {
+    cols: Math.max(1, Math.floor((width - PAD * 2) / ICON_CELL_W)),
+    rows: Math.max(1, Math.floor((height - PAD * 2) / ICON_CELL_H)),
+  };
+}
+
+/** A cell's top-left, in view pixels. */
+export function boxForCell(cell) {
+  return { x: PAD + cell.col * ICON_CELL_W, y: PAD + cell.row * ICON_CELL_H };
+}
+
+/** The order cells are filled: down the first column, then the next, which is Windows 7's own and
+ *  is why a desktop with eleven icons has them beside each other rather than wrapped across the
+ *  top. A slot past the last cell overflows to the RIGHT rather than wrapping back over an icon
+ *  that is already there. */
+export function slotCell(slot, grid) {
+  return { col: Math.floor(slot / grid.rows), row: slot % grid.rows };
+}
+
+/** The cell a point falls in. ROUNDED and not floored, so an icon let go past a cell's midpoint
+ *  takes the next one — which is what makes a short nudge read as "it snapped back" rather than as
+ *  a move that half happened. Clamped into the grid for the window clamp's reason: a cell outside
+ *  it is an icon nobody can reach. */
+export function cellAtPoint(x, y, grid) {
+  return {
+    col: Math.min(Math.max(Math.round((x - PAD) / ICON_CELL_W), 0), grid.cols - 1),
+    row: Math.min(Math.max(Math.round((y - PAD) / ICON_CELL_H), 0), grid.rows - 1),
+  };
+}
+
+/**
+ * The nearest FREE cell to the one a drop asked for. Windows 7 does not stack two icons in one
+ * square, and a drop that silently overlapped would hide a row the keyboard can still reach.
+ *
+ * `taken` is a set of `"col,row"` keys. Every cell is considered and the closest free one wins;
+ * the scan is column-major, so a tie goes to the lower column and then the lower row.
+ * Deterministic on purpose — a check asserts which cell a given drop takes, and "whichever the
+ * loop found first" is not a rule. The grid is a few hundred cells and this runs once per dropped
+ * icon.
+ *
+ * A FULL desktop keeps the asked-for cell: refusing the drop would lose the gesture, and there is
+ * no free square to honour it with.
+ */
+export function nearestFreeCell(want, taken, grid) {
+  const key = (col, row) => `${col},${row}`;
+  if (!taken.has(key(want.col, want.row))) return want;
+  let best = null;
+  for (let col = 0; col < grid.cols; col += 1) {
+    for (let row = 0; row < grid.rows; row += 1) {
+      if (taken.has(key(col, row))) continue;
+      const d = (col - want.col) ** 2 + (row - want.row) ** 2;
+      if (!best || d < best.d) best = { col, row, d };
+    }
+  }
+  return best ? { col: best.col, row: best.row } : want;
+}
+
 export class IconView {
   /** `spec.into` is the desktop window's client area, `spec.host` the `WinHost`, and `spec.win`
    *  the winid whose rows this view is showing — the one it reports activations against. */
@@ -97,17 +182,26 @@ export class IconView {
       .filter((row) => (row.flags & WITEM_DESKTOP) !== 0 && (row.flags & WITEM_SEPARATOR) === 0);
   }
 
-  /**
-   * Where an icon goes if nobody has dragged it: down the first column, then the next, which is
-   * Windows 7's own order and is why a desktop with eleven icons has them beside each other rather
-   * than wrapped across the top.
-   */
-  #cell(slot) {
+  /** How many cells fit the view, measured. The only part of the grid that touches the DOM. */
+  #grid() {
     const r = this.el.getBoundingClientRect();
-    const rows = Math.max(1, Math.floor((r.height - PAD * 2) / ICON_CELL_H));
-    const col = Math.floor(slot / rows);
-    const row = slot % rows;
-    return { x: PAD + col * ICON_CELL_W, y: PAD + row * ICON_CELL_H };
+    return gridFor(r.width, r.height);
+  }
+
+  #boxFor(cell) {
+    return boxForCell(cell);
+  }
+
+  #slotCell(slot) {
+    return slotCell(slot, this.#grid());
+  }
+
+  #cellAt(x, y) {
+    return cellAtPoint(x, y, this.#grid());
+  }
+
+  #freeCell(want, taken) {
+    return nearestFreeCell(want, taken, this.#grid());
   }
 
   /** What the kernel says this window published. Replaces the list whole, for the reason the
@@ -131,8 +225,37 @@ export class IconView {
     // The band and the menu are kept; everything else is rebuilt.
     for (const node of [...this.el.querySelectorAll(".desk-icon")]) node.remove();
     const visible = this.#visible();
-    visible.forEach((row, slot) => {
-      const at = this.placed.get(row.index) || this.#cell(slot);
+    /* THE DRAGGED CELLS ARE RESERVED BEFORE ANYTHING IS LAID OUT, and the rest fall into the free
+     * cells in column order. Without the reservation an icon dragged onto a cell and an icon the
+     * layout then puts there are given the same square — two icons in one place and one label
+     * unreadable — which is the state snapping to a grid would otherwise have made REACHABLE,
+     * since before it a dropped icon sat between cells and never exactly on one. */
+    const taken = new Set();
+    const key = (cell) => `${cell.col},${cell.row}`;
+    for (const row of visible) {
+      const held = this.placed.get(row.index);
+      // A LOOSE placement holds pixels and no cell: it is what the `no_icon_grid` control
+      // produces, and it reserves nothing because it sits on no square.
+      if (held && !held.loose) taken.add(key(held));
+    }
+    // MEASURED ONCE. `#grid` reads `getBoundingClientRect`, which forces layout, and this used to
+    // call it twice per icon inside the scan — up to 52 forced reads for a desktop of 26 rows,
+    // during the render those reads are part of.
+    const grid = this.#grid();
+    const total = grid.cols * grid.rows;
+    let next = 0;
+    const boxFor = (row) => {
+      const held = this.placed.get(row.index);
+      if (held && held.loose) return { x: held.x, y: held.y };
+      if (held) return boxForCell(held);
+      while (next < total && taken.has(key(slotCell(next, grid)))) next += 1;
+      const cell = slotCell(next, grid);
+      next += 1;
+      taken.add(key(cell));
+      return boxForCell(cell);
+    };
+    visible.forEach((row) => {
+      const at = boxFor(row);
       const cell = document.createElement("div");
       cell.className = "desk-icon";
       cell.dataset.index = String(row.index);
@@ -246,8 +369,11 @@ export class IconView {
     this.#beginBand(event);
   }
 
-  /** Drag the selection. Icons move by the pointer's delta and stay where they are let go — the
-   *  view's own arrangement, which is why `placed` is keyed by publisher index. */
+  /** Drag the selection. Icons follow the pointer while the button is down and SNAP TO THE GRID
+   *  when they are let go — Windows 7's "Align icons to grid", which is on by default there. The
+   *  arrangement is the view's own, which is why `placed` is keyed by publisher index; it holds a
+   *  CELL and not a pixel, so a desktop that is resized re-lays the arrangement out instead of
+   *  stranding an icon off the edge. */
   #beginIconDrag(event, hit) {
     const moving = [...(this.selection.size ? this.selection : [hit.index])];
     const from = new Map();
@@ -273,12 +399,16 @@ export class IconView {
         const y = Math.min(Math.max(at.y + dy, 0), Math.max(r.height - ICON_CELL_H, 0));
         cell.style.left = `${Math.round(x)}px`;
         cell.style.top = `${Math.round(y)}px`;
-        this.placed.set(index, { x: Math.round(x), y: Math.round(y) });
+        // NOT WRITTEN TO `placed` HERE. The arrangement is what the icon LANDS on, and recording
+        // every intermediate pixel would make a cancelled drag an arrangement too.
       }
     };
     const up = (e) => {
       if (e.pointerId !== gesture.id) return;
-      if (gesture.moved) this.stats.drags += 1;
+      if (gesture.moved) {
+        this.stats.drags += 1;
+        this.#dropOnGrid(from, e.clientX - gesture.x, e.clientY - gesture.y);
+      }
       this.el.removeEventListener("pointermove", move);
       this.el.removeEventListener("pointerup", up);
       this.el.removeEventListener("pointercancel", up);
@@ -293,6 +423,56 @@ export class IconView {
       // listeners are already on, so the drag still works without the capture.
       this.lastCaptureError = `${error.name}: ${error.message}`;
     }
+  }
+
+  /**
+   * WHERE A DROP LANDS: the nearest free cell to the pixel the hand let go on.
+   *
+   * The occupancy is built from the icons that are NOT part of this gesture, and each dropped icon
+   * is added as it lands, so a selection of several dragged together cannot be given one square.
+   * The asks are resolved in the order the rows are published, which makes the outcome of a
+   * multiple drop a function of the list rather than of a Set's iteration order.
+   *
+   * `snapToGrid` off is a negative control, not a preference: it restores the old behaviour — the
+   * raw pixel the pointer left the icon on — so a run can show the grid clauses are coupled to the
+   * snapping and not to something that happens to be true of any drop.
+   */
+  #dropOnGrid(from, dx, dy) {
+    const r = this.el.getBoundingClientRect();
+    const key = (cell) => `${cell.col},${cell.row}`;
+    const moving = new Set(from.keys());
+    const taken = new Set();
+    const visible = this.#visible();
+    let next = 0;
+    for (const row of visible) {
+      if (moving.has(row.index)) continue;
+      const held = this.placed.get(row.index);
+      if (held && !held.loose) {
+        taken.add(key(held));
+        continue;
+      }
+      if (held) continue;
+      // An un-dragged icon's cell is the one `render` will give it, which is the next free slot.
+      const total = this.#grid().cols * this.#grid().rows;
+      while (next < total && taken.has(key(this.#slotCell(next)))) next += 1;
+      taken.add(key(this.#slotCell(next)));
+      next += 1;
+    }
+    for (const row of visible) {
+      if (!moving.has(row.index)) continue;
+      const at = from.get(row.index);
+      if (!at) continue;
+      const x = Math.min(Math.max(at.x + dx, 0), Math.max(r.width - ICON_CELL_W, 0));
+      const y = Math.min(Math.max(at.y + dy, 0), Math.max(r.height - ICON_CELL_H, 0));
+      if (!viewControls.snapToGrid) {
+        this.placed.set(row.index, { x: Math.round(x), y: Math.round(y), loose: true });
+        continue;
+      }
+      const got = this.#freeCell(this.#cellAt(x, y), taken);
+      taken.add(key(got));
+      this.placed.set(row.index, got);
+    }
+    this.render();
   }
 
   /** The rubber band: a marquee over the bare desktop, selecting everything it touches. */
@@ -466,7 +646,16 @@ export class IconView {
       icons: this.el.querySelectorAll(".desk-icon").length,
       labels: [...this.el.querySelectorAll(".desk-label")].map((n) => n.textContent),
       selected: [...this.selection].sort((a, b) => a - b),
+      /* THE ARRANGEMENT, AS CELLS AND AS PIXELS. A check needs both: the cell is what the view
+       * decided, the pixel is what the reader sees, and asserting only the first would pass for a
+       * grid whose own cell-to-pixel map is wrong. */
       placed: Object.fromEntries([...this.placed]),
+      grid: { ...this.#grid(), pad: PAD, cellW: ICON_CELL_W, cellH: ICON_CELL_H },
+      cells: [...this.el.querySelectorAll(".desk-icon")].map((node) => ({
+        index: Number(node.dataset.index),
+        x: parseFloat(node.style.left) || 0,
+        y: parseFloat(node.style.top) || 0,
+      })),
       menu: this.menuEl.hidden ? "" : (this.menuEl.dataset.popup || ""),
       menuRows: [...this.menuEl.querySelectorAll(".shell-label")].map((n) => n.textContent),
       banding: this.bandEl.hidden === false,

@@ -18,6 +18,16 @@ body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 #seam { position:absolute; inset:0; z-index:0;
         background:linear-gradient(to right, #000 0 50%, #fff 50% 100%) }
 #seam[hidden] { display:none }
+/* LIVE: THE DESKTOP IS THE WINDOW. The fixed heights above are the PROOFS' — the pixel proof reads
+   device rects out of a screenshot and a growing log would move the desktop out from under them —
+   and applying them to the live desktop was a reported defect: a Windows 7 desktop that stopped
+   190 px short of the bottom of the browser window, with page background below it. The log stays,
+   capped and scrollable, because a second engine gives no other channel (CLAUDE.md's
+   second-engine rule) — but the desktop gets everything else. */
+body.live { height:100vh; display:flex; flex-direction:column; overflow:hidden }
+body.live #log { flex:0 0 auto; height:auto; max-height:22vh; margin:0; padding:6px 10px;
+                 border-bottom:1px solid #1b2430 }
+body.live #desktop { flex:1 1 auto; height:auto; margin:0 }
 </style>
 </head>
 <body>
@@ -68,6 +78,7 @@ body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
 import { setGeometryControls, SNAP_ARM_PX, SNAP_RELEASE_PX, MAX_RELEASE_PX } from '/src/wm/window.mjs'
 import { Taskbar, setShellControls } from '/src/wm/taskbar.mjs'
+import { setViewControls } from '/src/wm/desktop.mjs'
 import * as aero from '/src/wm/aero.mjs'
 import {
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WROLE_DESKTOP,
@@ -95,7 +106,19 @@ const CFG = {
   /** The kernel accepts a published item list and DISCARDS it: everything that carries the rows
    *  keeps working and what disappears is the rows. */
   noItems: params.get('no_items') === '1',
-  liveOnly: params.get('live') === '1',
+  /** A dropped desktop icon keeps the raw pixel the pointer left it on, instead of taking a cell.
+   *  The world the grid clauses are about. */
+  noIconGrid: params.get('no_icon_grid') === '1',
+  /* THE DESKTOP IS THE DEFAULT, AND THE PROOFS ARE THE OPT-IN. It was the other way around and
+   * that was a defect, found the way this project's page defects are always found — a person
+   * opened the obvious URL. The proofs STAGE their own windows and then block in `ask` waiting for
+   * a driver to perform a gesture, so a human who opens `www/m14.html` gets fixture windows,
+   * buttons that belong to a half-run sequence, and `Error: nothing performed the … gesture`
+   * sixty seconds later. Every symptom reads as a broken desktop and none of them is one.
+   *
+   * `?live=1` is still accepted, because it is written in CLAUDE.md, README.md and six bench
+   * scripts, and a URL that silently changed meaning is worse than a redundant one. */
+  proofs: params.get('proofs') === '1',
 }
 globalThis.M14.config = CFG
 
@@ -105,6 +128,7 @@ setGeometryControls({
 })
 setHostControls({})
 setShellControls({ noGroup: CFG.noGroup })
+setViewControls({ snapToGrid: !CFG.noIconGrid })
 
 const DESKTOP = '/src/bin/desktop.mjs'
 const WINOPEN = '/src/bin/winopen.mjs'
@@ -774,24 +798,71 @@ async function proofMouse (k, host) {
     evidence.ctrlAdded = evidence.afterCtrlClick.length === evidence.afterBand.length + 1
   }
 
-  // ---- and a drag moves an icon and leaves it there ----
+  /* ---- and a drag moves an icon AND IT TAKES A CELL ----
+   *
+   * THE DELTA IS DELIBERATELY OFF-GRID. 173 and 61 are prime to the 86x88 cell, so a drop that
+   * kept the pointer's own pixel cannot land on a cell by arithmetic accident — which the earlier
+   * form of this clause could not tell apart, because it asserted the icon arrived at exactly
+   * `+160,+90` and that is a statement about the POINTER, true of a view with no grid at all.
+   *
+   * The cell is asserted three ways, because each alone passes for something broken: ON a cell
+   * (a grid exists), WITHIN half a cell of the drop (it is the NEAREST one, not merely some cell
+   * — a view that snapped everything to 0,0 satisfies the first), and NO TWO ICONS SHARING a
+   * position (the stacking the snapping newly made reachable, since before it a dropped icon sat
+   * between cells and never exactly on one). */
   const third = cells[2] || cells[0]
   const tr = third.getBoundingClientRect()
   const grab = { x: Math.round(tr.left + tr.width / 2), y: Math.round(tr.top + 20) }
   const left0 = parseFloat(third.style.left)
   const top0 = parseFloat(third.style.top)
+  const DX = 173
+  const DY = 61
+  const dropAt = { x: grab.x + DX, y: grab.y + DY }
   await ask({ kind: 'press', name: 'icon-drag-press', at: grab })
-  await ask({ kind: 'move', name: 'icon-drag-move', at: { x: grab.x + 160, y: grab.y + 90 } })
-  await ask({ kind: 'release', name: 'icon-drag-release', at: { x: grab.x + 160, y: grab.y + 90 } })
+  await ask({ kind: 'move', name: 'icon-drag-move', at: dropAt })
+  await ask({ kind: 'release', name: 'icon-drag-release', at: dropAt })
   await sleep(80)
+  const grid = view.report().grid
+  evidence.grid = grid
+  /* RE-QUERIED, NOT REUSED. `third` is the element that was grabbed, and the drop re-renders the
+   * view — every `.desk-icon` is removed and rebuilt — so the old node is detached and still
+   * carries the last pixel of the DRAG. Reading it reported the pointer's position for the cell's,
+   * which failed this clause against a view that had snapped correctly. */
+  const index = Number(third.dataset.index)
+  const landed = view.el.querySelector(`.desk-icon[data-index="${index}"]`)
   evidence.icon = {
-    index: Number(third.dataset.index),
+    index,
     from: { x: left0, y: top0 },
-    to: { x: parseFloat(third.style.left), y: parseFloat(third.style.top) },
-    placed: view.report().placed[third.dataset.index] || null,
+    want: { x: left0 + DX, y: top0 + DY },
+    to: landed
+      ? { x: parseFloat(landed.style.left), y: parseFloat(landed.style.top) }
+      : null,
+    placed: view.report().placed[index] || null,
   }
-  evidence.dragMovedIt = Math.abs(evidence.icon.to.x - (left0 + 160)) <= 2
-    && Math.abs(evidence.icon.to.y - (top0 + 90)) <= 2
+  evidence.iconStillDrawn = Boolean(landed)
+  evidence.dragMovedIt = Boolean(evidence.icon.to)
+    && (evidence.icon.to.x !== left0 || evidence.icon.to.y !== top0)
+  /* THE GRID IS THE VIEW'S OWN METRICS, read back rather than written here: a page that restated
+   * 86 and 88 would assert against its own copy and pass while the view used something else. */
+  evidence.dropOnGrid = Boolean(grid) && Boolean(evidence.icon.to)
+    && (evidence.icon.to.x - grid.pad) % grid.cellW === 0
+    && (evidence.icon.to.y - grid.pad) % grid.cellH === 0
+  evidence.dropOffBy = evidence.icon.to ? {
+    x: Math.abs(evidence.icon.to.x - evidence.icon.want.x),
+    y: Math.abs(evidence.icon.to.y - evidence.icon.want.y),
+  } : null
+  evidence.tookNearestCell = Boolean(grid) && Boolean(evidence.dropOffBy)
+    && evidence.dropOffBy.x <= grid.cellW / 2
+    && evidence.dropOffBy.y <= grid.cellH / 2
+  /* AND THE DROP WAS NOT ALREADY ON A CELL, which is what makes the clause above capable of
+   * failing: if `want` happened to be a cell corner, "it snapped" and "it did not move" are the
+   * same picture. */
+  evidence.dropWasOffGrid = Boolean(grid)
+    && ((evidence.icon.want.x - grid.pad) % grid.cellW !== 0
+      || (evidence.icon.want.y - grid.pad) % grid.cellH !== 0)
+  const spots = view.report().cells.map((c) => `${c.x},${c.y}`)
+  evidence.spots = spots
+  evidence.noneStacked = new Set(spots).size === spots.length
   // AND IT STAYS THERE ACROSS A REDRAW, which is what makes it an arrangement rather than a
   // transient: the view re-renders on every republished list.
   view.render()
@@ -800,15 +871,20 @@ async function proofMouse (k, host) {
   evidence.afterRedraw = again
     ? { x: parseFloat(again.style.left), y: parseFloat(again.style.top) }
     : null
-  evidence.stayedPut = Boolean(evidence.afterRedraw)
+  evidence.stayedPut = Boolean(evidence.afterRedraw) && Boolean(evidence.icon.to)
     && Math.abs(evidence.afterRedraw.x - evidence.icon.to.x) <= 1
     && Math.abs(evidence.afterRedraw.y - evidence.icon.to.y) <= 1
   evidence.ok = evidence.bandSelected && evidence.ctrlAdded === true && evidence.dragMovedIt
+    && evidence.dropOnGrid === true && evidence.tookNearestCell === true
+    && evidence.dropWasOffGrid === true && evidence.noneStacked === true
     && evidence.stayedPut
   globalThis.M14.proofs.mouse = { ok: evidence.ok, evidence }
   say((evidence.ok ? 'ok  ' : 'BAD ') + 'mouse: band selected ' +
     JSON.stringify(evidence.afterBand) + ', ctrl-click ' + evidence.ctrlAdded +
-    ', icon drag ' + evidence.dragMovedIt + ' and it stayed ' + evidence.stayedPut)
+    ', icon drag ' + evidence.dragMovedIt + ', dropped on the grid ' + evidence.dropOnGrid +
+    ' at ' + JSON.stringify(evidence.icon.to) + ' off a ' +
+    JSON.stringify(evidence.icon.want) + ' ask (nearest ' + evidence.tookNearestCell +
+    ', none stacked ' + evidence.noneStacked + ') and it stayed ' + evidence.stayedPut)
 }
 
 /* --------------------------------------------------------------------------------------------
@@ -962,6 +1038,11 @@ function proofPixels () {
 
 async function live () {
   seam.hidden = true
+  /* THE CLASS BEFORE THE KERNEL, because the desktop's size is what the shell reserves its strip
+   * out of and what every frame is clamped into: a window laid out against a 560 px desktop and
+   * then handed a 740 px one is M13's own lesson (`WinHost.relayout`), and the cheap way not to
+   * need it is to be the right size before anything is placed. */
+  document.body.classList.add('live')
   const { k, host, shell } = await bootHost()
   await spawnProgram(k, DESKTOP, ['desktop', '-c', '3600000'])
   await until(() => Boolean(shell.desktopEntry()), 10000)
@@ -992,6 +1073,12 @@ async function live () {
    * reason (`CLAUDE.md`, the second-engine rule). */
   const deskEntry = shell.desktopEntry()
   const view = deskEntry ? deskEntry.icons : null
+  /* PUBLISHED FOR A DRIVER, because the live desktop is a path with no assertions on it and this
+   * is the handle a probe reads the arrangement back through. It carries no capability a page did
+   * not already have: the view is a DOM widget the page built. */
+  globalThis.M14.view = view
+  globalThis.M14.shell = shell
+  globalThis.M14.host = host
   say('')
   say('desktop:  ' + (deskEntry
     ? `win ${deskEntry.id}, ${deskEntry.items.length} rows published, `
@@ -1029,7 +1116,7 @@ async function live () {
 }
 
 async function main () {
-  if (CFG.liveOnly) {
+  if (!CFG.proofs) {
     globalThis.M14.state = 'done'
     globalThis.M14.verdict = 'live'
     await live()

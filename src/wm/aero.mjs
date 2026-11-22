@@ -145,6 +145,11 @@ export const ICON_CELL_H = 88;
 export const THUMB_W = 196;
 export const THUMB_H = 120;
 
+/** How many thumbnails sit in one row of a preview panel before it wraps. The panel's own width
+ *  is DERIVED from this and `THUMB_W`; a cap written as a pixel number is how a strip comes to be
+ *  wider than the glass it is drawn on. */
+export const THUMBS_PER_ROW = 4;
+
 /**
  * Segoe UI MUST NOT be shipped — it is not redistributable, and Microsoft routes distribution
  * licensing through Monotype (constraint 37). So the family is REFERENCED and never served: a
@@ -474,11 +479,21 @@ export function styleSheet() {
    NO TRANSITION AND NO OPACITY ANIMATION. An animated opacity on a child of the backdrop root
    would establish one and sever the blur chain for a frame at a time, which is the failure with no
    symptom (docs/designs/REVIEW-FINDINGS.md section 8). */
+/* TWO TONES, DARK OUTSIDE LIGHT, because one tone only has contrast against one backdrop. A
+   near-white 2 px border is crisp over a dark desktop and INVISIBLE over a light one — reported
+   from a page whose right half is white, and true of any pale wallpaper. Pairing the light ring
+   with a dark one outside it means whichever tone the backdrop swallows, the other is the one that
+   shows: the edge carries its own contrast rather than borrowing the desktop's. Windows 7's own
+   preview pane is drawn the same way. */
 .aero-desktop .snap-preview {
   z-index: 2147483000;
   border-radius: 3px;
   background: rgba(146,200,245,.22);
-  box-shadow: inset 0 0 0 2px rgba(220,240,255,.85), 0 0 18px rgba(120,190,245,.45);
+  box-shadow:
+    inset 0 0 0 2px rgba(220,240,255,.9),
+    inset 0 0 0 3px rgba(10,30,52,.75),
+    0 0 0 1px rgba(10,30,52,.55),
+    0 0 18px rgba(120,190,245,.45);
 }
 .aero-desktop .snap-preview[hidden] { display: none }
 
@@ -745,8 +760,19 @@ export function styleSheet() {
 }
 
 /* A hover thumbnail: the panel, a canvas, and the window's title above it — which is the order
-   Windows 7 uses, because the title is what tells two identical terminals apart. */
-.aero-desktop .task-thumbs { display: flex; gap: 6px }
+   Windows 7 uses, because the title is what tells two identical terminals apart.
+
+   THE STRIP WRAPS, AND THE PANEL IS NOT CAPPED AT A MENU'S WIDTH. It was, and the result was the
+   defect a reader photographed: the shell-popup max-width of 320px is right for a menu and wrong
+   for two 208 px thumbnails, so a group of two laid out 422 px of content inside a 218 px panel
+   and an overflow of visible painted the second one OUTSIDE the glass — a bare white canvas on
+   the desktop with no panel behind it. Measured at 1320x900: cell 2 at x=434 in a panel spanning
+   220..438. The cap is now derived from the thumbnail, and beyond ${THUMBS_PER_ROW} the strip
+   wraps to a second row instead of leaving the panel. */
+.aero-desktop .shell-popup[data-popup="thumbs"] {
+  max-width: ${THUMBS_PER_ROW * (THUMB_W + 16) + 16}px;
+}
+.aero-desktop .task-thumbs { display: flex; flex-wrap: wrap; gap: 6px }
 .aero-desktop .task-thumb {
   display: grid; gap: 4px;
   padding: 4px;
@@ -810,9 +836,12 @@ export function styleSheet() {
 }
 .aero-desktop .desk-icon[data-disabled="1"] { color: rgba(255,255,255,.55) }
 /* The rubber band: a marquee, drawn while a drag crosses the bare desktop. */
+/* The rubber band carries its own contrast for the snap ghost's reason: a selection marquee over a
+   pale wallpaper is the same invisible edge. */
 .aero-desktop .rubber {
   position: absolute;
   border: 1px solid rgba(220,245,255,.9);
+  outline: 1px solid rgba(10,30,52,.6);
   background: rgba(140,205,250,.22);
   pointer-events: none;
 }

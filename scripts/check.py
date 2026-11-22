@@ -724,6 +724,9 @@ class Control:
     #: nothing to draw — the desktop's icons, the start menu's programs and a jump list's commands
     #: are all one mechanism, and this is the world where that mechanism carries nothing.
     NO_ITEMS = "no-items"
+    #: M14's fifth: a dropped desktop icon keeps the raw pixel the pointer left it on instead
+    #: of taking a cell, which is what the icon view did before it aligned to the grid.
+    NO_ICON_GRID = "no-icon-grid"
     ONCE = "once"
 
 
@@ -773,6 +776,7 @@ CONTROL_RUNS = {
     Control.NO_WORKAREA: ("no-workarea",),
     Control.NO_GROUP: ("no-group",),
     Control.NO_ITEMS: ("no-items",),
+    Control.NO_ICON_GRID: ("no-icon-grid",),
 }
 
 
@@ -4155,6 +4159,10 @@ M14_LABELS = (
     "a real rubber band selects what it touches",
     "a ctrl-click adds to the selection",
     "a drag moves an icon",
+    "a dropped icon lands exactly on a grid cell",
+    "and on the NEAREST cell to where it was let go",
+    "and the drop it snapped from was itself off-grid",
+    "and no two icons share a position",
     "and it stays there across a redraw",
     # PROOF 8. The tray.
     "tray ok",
@@ -4174,7 +4182,11 @@ M14_LABELS = (
     "served m14.html",
 )
 
-M14_DOCUMENT = "/www/m14.html"
+#: `?proofs=1` AND NOT THE BARE PAGE. The page's default is the LIVE desktop, because the obvious
+#: URL has to be the product — a human who opened the bare page used to get the proof harness,
+#: which stages fixture windows and then blocks waiting for a driver. The harness asks for the
+#: harness explicitly; see the `proofs` note in `www/m14.html`.
+M14_DOCUMENT = "/www/m14.html?proofs=1"
 
 M14_READY = ("(() => { const M = globalThis.M14 || {}; const s = M.state; "
              "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
@@ -4269,6 +4281,33 @@ _NO_GROUP_FAILS = (
     "verdict is ok",
 )
 
+#: What a DROPPED ICON KEEPING ITS OWN PIXEL must break, which is the alignment and nothing else.
+#:
+#: `setViewControls({snapToGrid: false})` restores what the view did before it aligned: the raw
+#: pixel the pointer left the icon on. Everything about the gesture still works — the icon moves,
+#: the arrangement survives a redraw, the band and the ctrl-click are untouched — so a run that
+#: moved anything else would be reporting collateral rather than a control.
+#:
+#: TWO OF THE FOUR GRID CLAUSES HOLD UNDER IT, and the registry's own gate is what established
+#: that — the first declaration listed the NEAREST clause as failing and the run answered that it
+#: "HELD under this control, so whatever turned the check red is not the thing this control is
+#: named for".
+#:
+#: It holds for a reason worth keeping: a loose drop lands at EXACTLY the pixel the pointer left,
+#: so "within half a cell of where it was let go" is satisfied trivially, by zero. That clause
+#: therefore cannot stand alone — it distinguishes a view that snaps to the NEAREST cell from one
+#: that snaps everything to a fixed cell, and nothing else. "On a grid cell" is the clause this
+#: control is about, and the pair is what covers the behaviour.
+#:
+#: "and the drop it snapped from was itself off-grid" holds too, and is a statement about the ASK
+#: rather than the outcome: the delta is 173x61 whether the view snaps or not. That is what makes
+#: it a usable guard on the other clauses rather than a restatement of them.
+_NO_ICON_GRID_FAILS = (
+    "mouse ok",
+    "a dropped icon lands exactly on a grid cell",
+    "verdict is ok",
+)
+
 #: What DISCARDING EVERY PUBLISHED ROW must break, which is every rendering of a row.
 #:
 #: The kernel accepts the list, counts it and drops it (the cfg.noItems hook, refused without a
@@ -4292,6 +4331,10 @@ _NO_ITEMS_FAILS = (
     "a real rubber band selects what it touches",
     "a ctrl-click adds to the selection",
     "a drag moves an icon",
+    "a dropped icon lands exactly on a grid cell",
+    "and on the NEAREST cell to where it was let go",
+    "and the drop it snapped from was itself off-grid",
+    "and no two icons share a position",
     "and it stays there across a redraw",
     # AND THE HALO CLAUSE, which the gate caught me declaring as held: with every row discarded
     # there is no icon on the desktop, so there is no `.desk-label` to carry a halo. The clause is
@@ -5564,6 +5607,37 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="two windows of one program must become two buttons",
             failed=_NO_GROUP_FAILS,
             held=held_rest(M14_LABELS, _NO_GROUP_FAILS),
+        )},
+    ),
+    "no-icon-grid": NegativeControl(
+        name="no-icon-grid",
+        why="no_icon_grid=1: a dropped desktop icon keeps the raw pixel the pointer left it on "
+            "instead of taking a cell (the `setViewControls` hook in src/wm/desktop.mjs). What "
+            "this view did before it aligned.\n"
+            "WHAT MUST BREAK: the alignment, and only it. The drop lands off-grid.\n"
+            "WHAT HOLDS THAT LOOKS LIKE IT SHOULD NOT: 'on the NEAREST cell to where it was let "
+            "go'. A loose drop lands at EXACTLY the pointer's pixel, so a half-cell bound is "
+            "satisfied by zero — which is why that clause cannot stand alone, and what it is "
+            "really for is telling a view that snaps to the nearest cell apart from one that "
+            "snaps everything to a fixed cell. This registry's own gate established that, by "
+            "refusing the first declaration of this control.\n"
+            "WHAT MUST HOLD: the whole gesture. The icon still moves, the arrangement still "
+            "survives a redraw, the rubber band and the ctrl-click are untouched, and no two icons "
+            "stack — a loose placement reserves no square, so it cannot collide with the layout "
+            "the way a snapped one can.\n"
+            "WHAT IT IS ABOUT: the clause this control exists to keep honest asserted that a "
+            "dragged icon arrived at exactly `+160,+90`, which is a statement about the POINTER "
+            "and true of a view with no grid at all. The delta is 173x61 against an 86x88 cell now "
+            "for the same reason: a drop that keeps its own pixel must not be able to land on a "
+            "cell by arithmetic accident.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_icon_grid", "1"),),
+        expects={"m14": Expect(
+            Outcome.FAIL,
+            why="a dropped icon must take a cell, not the pixel it was let go on",
+            failed=_NO_ICON_GRID_FAILS,
+            held=held_rest(M14_LABELS, _NO_ICON_GRID_FAILS),
         )},
     ),
     "no-items": NegativeControl(
@@ -11535,7 +11609,8 @@ def check_m13(env: Env) -> None:
     name="m14",
     milestone="m14",
     controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SNAP_HYSTERESIS,
-              Control.NO_WORKAREA, Control.NO_GROUP, Control.NO_ITEMS),
+              Control.NO_WORKAREA, Control.NO_GROUP, Control.NO_ITEMS,
+              Control.NO_ICON_GRID),
     labels=M14_LABELS,
     requires_isolation=True,
     root=Root.REPO,
@@ -11740,6 +11815,24 @@ def check_m14(env: Env) -> None:
     env.expect_that("a ctrl-click adds to the selection", mo.get("ctrlAdded") is True,
                     {"before": mo.get("afterBand"), "after": mo.get("afterCtrlClick")})
     env.expect_that("a drag moves an icon", mo.get("dragMovedIt") is True, {"icon": mo.get("icon")})
+    # THE DROP TAKES A CELL. Three separate assertions, because each alone passes for something
+    # broken: on a cell says a grid exists; within half a cell says it is the NEAREST cell and not
+    # a fixed one; and the drop having been off-grid in the first place is what makes the other two
+    # capable of failing - a `want` that was already a corner makes "it snapped" and "it did not
+    # move" the same picture. The delta is 173x61 against an 86x88 cell for that reason.
+    env.expect_that("a dropped icon lands exactly on a grid cell", mo.get("dropOnGrid") is True,
+                    {"grid": mo.get("grid"), "icon": mo.get("icon")})
+    env.expect_that("and on the NEAREST cell to where it was let go",
+                    mo.get("tookNearestCell") is True,
+                    {"offBy": mo.get("dropOffBy"), "grid": mo.get("grid"),
+                     "icon": mo.get("icon")})
+    env.expect_that("and the drop it snapped from was itself off-grid",
+                    mo.get("dropWasOffGrid") is True,
+                    {"want": (mo.get("icon") or {}).get("want"), "grid": mo.get("grid")})
+    # NO TWO ICONS IN ONE SQUARE. Snapping is what made this reachable: before it a dropped icon
+    # sat between cells and never exactly on one, so a drop could not collide with the layout.
+    env.expect_that("and no two icons share a position", mo.get("noneStacked") is True,
+                    {"spots": mo.get("spots")})
     # AND IT STAYS, which is what makes it an arrangement rather than a transient: the view
     # re-renders on every republished list, and a position it forgot would snap back to the grid.
     env.expect_that("and it stays there across a redraw", mo.get("stayedPut") is True,

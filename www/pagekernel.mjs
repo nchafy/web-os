@@ -253,6 +253,43 @@ export async function ask(k, kind, ms = 5000) {
  * `report.want` is the ask, `report.driven` is the receipt, and the id makes a second ask for the
  * same gesture distinguishable from a stale receipt — the `CALLID` argument, one layer up.
  */
+/** How long a gesture may go unperformed before the page SAYS it is waiting for a driver. Short
+ *  enough that a person sees it before they start pressing things, long enough that a driven run
+ *  never paints it — `drive_gestures` answers an ask in about 40 ms. */
+const DRIVER_HINT_MS = 2500;
+
+/**
+ * SAY, ON SCREEN, THAT THIS PAGE IS WAITING FOR A DRIVER.
+ *
+ * A proof page that blocks in `ask` looks exactly like a broken product: fixture windows it staged
+ * itself, a caption button that belongs to a sequence halfway through, and a thrown
+ * `nothing performed the … gesture` a minute later. That is how this page's defects have actually
+ * been reported, twice, and the page had nothing on it that said so. The banner is removed the
+ * moment anything drives the gesture, so a driven run never shows it.
+ */
+function driverHint(spec, live) {
+  let hint = document.getElementById("driver-hint");
+  if (!hint) {
+    hint = document.createElement("div");
+    hint.id = "driver-hint";
+    hint.setAttribute("role", "status");
+    hint.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:2147483647;"
+      + "background:#7f1d1d;color:#fff;font:13px/1.5 ui-monospace,monospace;padding:8px 12px;"
+      + "box-shadow:0 2px 8px rgba(0,0,0,.5)";
+    document.body.append(hint);
+  }
+  hint.textContent = `THIS PAGE IS A PROOF HARNESS, and it is waiting for a driver to perform the `
+    + `${spec.kind} gesture "${spec.name || spec.kind}". The windows on it are fixtures it staged, `
+    + `so its buttons belong to a half-run sequence. To USE the desktop, open ${live}. `
+    + `To run the proofs, let the harness drive them: scripts/check.py`;
+  return hint;
+}
+
+function clearDriverHint() {
+  const hint = document.getElementById("driver-hint");
+  if (hint) hint.remove();
+}
+
 export function gestureAsker(report) {
   let serial = 0;
   report.want = null;
@@ -263,7 +300,13 @@ export function gestureAsker(report) {
     const id = `${spec.name || spec.kind}#${serial}`;
     report.want = { id, ...spec };
     report.phase = "await-input";
+    // The live URL is this page's own, with the proofs switched off — derived and never written,
+    // so a page that is reached some other way still names a URL that exists.
+    const live = `${location.pathname}?live=1`;
+    const timer = setTimeout(() => driverHint(spec, live), DRIVER_HINT_MS);
     const waited = await until(() => report.driven === id, ms);
+    clearTimeout(timer);
+    clearDriverHint();
     report.want = null;
     report.phase = `drove ${id}`;
     report.gestureLog.push({ id, kind: spec.kind, waited: Math.round(waited) });

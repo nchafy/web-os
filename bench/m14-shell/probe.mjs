@@ -17,6 +17,10 @@
 // the kernel changed without telling the page shows up here as a missing message.
 import { WinMgr, installWindowKernel } from "../../src/kernel/wins.mjs";
 import {
+  gridFor, boxForCell, slotCell, cellAtPoint, nearestFreeCell,
+} from "../../src/wm/desktop.mjs";
+import { ICON_CELL_W } from "../../src/wm/aero.mjs";
+import {
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP,
   WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_DISABLED, WIN_ITEM_CAP,
@@ -251,6 +255,73 @@ const drain = (win) => {
   // what a pid is running. A FRESH window, because this block cleared the posts above.
   m.create(9, { title: "named", w: 200, h: 120 });
   check("win-create carries the program", postAt("win-create", -1).prog, "/usr/bin/p9");
+}
+
+/* ---------------------------------------------------------------------------------------------
+   THE DESKTOP'S ICON GRID, which is arithmetic and so belongs here rather than in a browser.
+
+   The view's own methods measure a rect and call these; the functions close over nothing, so the
+   round trip, the tie-break and the full-desktop case are checkable in milliseconds. The ROUND
+   TRIP is the one that matters: `cellAtPoint` is declared the inverse of `boxForCell`, and if it
+   is not then a dropped icon lands a few pixels off the column its neighbours are in — which is
+   the whole visible difference between a desktop and a pile (constraint 284).
+   --------------------------------------------------------------------------------------------- */
+{
+  const g = gridFor(1320, 689);
+  check("a 1320x689 desktop is 15 by 7 cells", g, { cols: 15, rows: 7 });
+
+  // EVERY cell, not a sample: the map is cheap and an off-by-one at one edge is the defect.
+  let roundTripBad = 0;
+  for (let col = 0; col < g.cols; col += 1) {
+    for (let row = 0; row < g.rows; row += 1) {
+      const box = boxForCell({ col, row });
+      const back = cellAtPoint(box.x, box.y, g);
+      if (back.col !== col || back.row !== row) roundTripBad += 1;
+    }
+  }
+  check("cellAtPoint is the exact inverse of boxForCell, for all 105 cells", roundTripBad, 0);
+
+  // ROUNDED, NOT FLOORED: past the midpoint takes the next cell. Both sides of one boundary,
+  // because a threshold checked on one side is a threshold half checked.
+  const mid = boxForCell({ col: 1, row: 1 });
+  check("a point just before a cell's midpoint stays in it",
+        cellAtPoint(mid.x + ICON_CELL_W / 2 - 1, mid.y, g), { col: 1, row: 1 });
+  check("and just past it takes the next",
+        cellAtPoint(mid.x + ICON_CELL_W / 2 + 1, mid.y, g), { col: 2, row: 1 });
+
+  // CLAMPED, for the window clamp's reason: a cell outside the grid is an icon nobody can reach.
+  check("a point left of the grid clamps to column 0", cellAtPoint(-500, -500, g),
+        { col: 0, row: 0 });
+  check("and one past the far corner clamps to the last cell", cellAtPoint(99999, 99999, g),
+        { col: g.cols - 1, row: g.rows - 1 });
+
+  // COLUMNS FIRST, which is Windows 7's own fill order.
+  check("slots fill the first column before the second",
+        [0, 1, 6, 7].map((slot) => slotCell(slot, g)),
+        [{ col: 0, row: 0 }, { col: 0, row: 1 }, { col: 0, row: 6 }, { col: 1, row: 0 }]);
+
+  // THE COLLISION SEARCH. A free cell is returned unchanged; a taken one moves to the nearest,
+  // and the tie between four equidistant neighbours is broken by column then row so that a check
+  // can assert WHICH cell a drop takes.
+  check("a free cell is taken as asked", nearestFreeCell({ col: 2, row: 3 }, new Set(), g),
+        { col: 2, row: 3 });
+  check("a taken cell moves to the nearest, column-major on a tie",
+        nearestFreeCell({ col: 2, row: 3 }, new Set(["2,3"]), g), { col: 1, row: 3 });
+  check("and it keeps looking while the neighbours are taken too",
+        nearestFreeCell({ col: 2, row: 3 }, new Set(["2,3", "1,3", "3,3", "2,2", "2,4"]), g),
+        { col: 1, row: 2 });
+
+  // A FULL DESKTOP KEEPS THE ASK rather than looping or returning nothing: refusing the drop
+  // would lose the gesture and there is no square to honour it with.
+  const everything = new Set();
+  for (let col = 0; col < g.cols; col += 1) {
+    for (let row = 0; row < g.rows; row += 1) everything.add(`${col},${row}`);
+  }
+  check("a full desktop keeps the asked-for cell",
+        nearestFreeCell({ col: 4, row: 4 }, everything, g), { col: 4, row: 4 });
+
+  // A VIEW TOO SMALL FOR ONE CELL still has to place what it was given.
+  check("a tiny view is still one cell", gridFor(10, 10), { cols: 1, rows: 1 });
 }
 
 const failed = results.filter((r) => !r.ok);

@@ -403,6 +403,27 @@ class Browser:
             time.sleep(0.05)
         raise CDPError("Chrome never reported a debugging port")
 
+    def wait(self, timeout: float | None = None) -> int | None:
+        """Block until the browser exits — a reader closing the window — and return its code.
+
+        WHAT A LIVE SESSION ENDS ON. A driver that holds a desktop open for a fixed number of
+        seconds is guessing how long somebody wants to use it; the honest end of an interactive
+        session is the reader closing the window. Returns None if `timeout` elapsed first, and
+        None immediately if no browser was ever launched, so a caller cannot block for ever on a
+        session that failed to start.
+        """
+        if self._process is None:
+            return None
+        try:
+            return self._process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        except KeyboardInterrupt:
+            # Ctrl-C ends the session rather than escaping as a traceback: __exit__ still runs and
+            # still removes the profile, which is what keeps `showup-chrome-` directories from
+            # accumulating (see __enter__).
+            return None
+
     def page(self) -> Session:
         """A session against Chrome's initial `about:blank` page target."""
         deadline = time.monotonic() + self.timeout

@@ -2749,3 +2749,62 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     **And the publisher's own array must not be replaced until the kernel has accepted the list**:
     `WEV_ITEM` carries an index, so a refused publish that left the two sides holding different
     lists would have a validated index address the wrong row.
+283. **THE PAGE AT THE OBVIOUS URL MUST BE THE PRODUCT, AND A HARNESS MUST SAY THAT IT IS ONE.**
+    `www/m14.html` ran its proofs by default and put the desktop behind `?live=1`. The proofs stage
+    their own fixture windows and then block in `gestureAsker` waiting for a driver, so a person who
+    opened the obvious URL got windows nobody asked for, caption buttons belonging to a sequence
+    halfway through, and `Error: nothing performed the … gesture` sixty seconds later. Three defects
+    were reported off that page and none of them was a defect: minimize works, an icon launches a
+    program, and the half-white backdrop is `#seam`, which the live path hides. The default is the
+    desktop now and `?proofs=1` is the harness's to ask for. **And the general half: any page that
+    blocks on a gesture must SAY SO on itself.** A page waiting for input it cannot generate is
+    indistinguishable from a broken one, so after 2,500 ms `gestureAsker` paints a banner naming the
+    gesture and the URL that gives the product — removed the moment anything drives it, so a driven
+    run never shows it.
+284. **A DROPPED DESKTOP ICON TAKES THE NEAREST FREE CELL, AND THE CELL-TO-PIXEL MAP HAS ONE
+    DEFINITION.** Icons laid out on a grid and dropped on a pixel is a pile. `#cellAt` is the
+    declared inverse of `#boxFor` — the relationship `surface.mjs` states between `clientAt` and
+    `pointAt` — which is what makes a drop land exactly where the auto-layout would have put it;
+    a second copy of that map is how a dragged icon comes to sit a few pixels off its neighbours'
+    column. The arrangement holds a CELL and not a pixel, so a resized desktop re-lays it out
+    instead of stranding an icon off the edge. **Snapping makes stacking reachable**, because before
+    it a dropped icon sat between cells and never exactly on one: so the dragged cells are reserved
+    before anything is laid out, and the drop takes the nearest FREE cell rather than the asked-for
+    one. The old clause asserted the icon arrived at exactly `+160,+90`, which is a statement about
+    the POINTER and true of a view with no grid at all — the delta is 173x61 against an 86x88 cell
+    now, so a drop that kept its own pixel cannot land on a cell by arithmetic accident.
+285. **A PANEL'S WIDTH IS DERIVED FROM WHAT IS IN IT, PER KIND.** `.shell-popup`'s `max-width: 320px`
+    is right for a menu row and wrong for a 208 px thumbnail: a group of two laid out 422 px of
+    content inside a 218 px panel, and `overflow: visible` painted the second thumbnail OUTSIDE the
+    glass — a bare white canvas on the desktop with no panel behind it, which is how it was
+    reported. Measured at 1320x900: cell 2 at x=434 in a panel spanning 220..438, and 432 px wide
+    with both inside after. The cap is derived from `THUMB_W` and `THUMBS_PER_ROW` and the strip
+    wraps beyond it. **And a preview at that size must be RECOGNISABLE rather than legible**: nine
+    lines of 9 px text on a near-white fill reads as a blank rectangle, so a text window's
+    thumbnail is drawn as a miniature window — a caption strip in the same blue, its title, and the
+    text below as the texture it becomes at this scale.
+286. **AN OUTLINE CARRIES ITS OWN CONTRAST, IN TWO TONES.** A near-white 2 px border is crisp over a
+    dark desktop and invisible over a light one, which is the snap ghost and the rubber band over
+    any pale wallpaper. Pairing the light ring with a dark one outside it means whichever tone the
+    backdrop swallows, the other shows. The same argument as constraint 50's about glass: an edge
+    that borrows the backdrop's contrast has none of its own.
+287. **AN INTERACTIVE DRIVER OPENS A WINDOW AND ENDS WHEN IT IS CLOSED, AND BINDS AN EPHEMERAL
+    PORT.** `bench/m7-win/drive.py --live` is the command `CLAUDE.md` advertises as "the Windows 7
+    desktop, in a real Chrome, left open to type into". It took `cdp.Browser()` at its default,
+    which is HEADLESS, so it opened no window at all and then span for 300 s waiting for a terminal
+    state a live page never reaches. It also spawned `scripts/serve.py --port 8711` with both
+    streams sent to DEVNULL, so a port already in use arrived as a blank page with no message —
+    and 8711 appeared in no document while `scripts/serve.py` alone serves 8000, which reads as a
+    contradiction and was reported as one. `bench/m10-data/shell.py` and `bench/shell-reports/
+    repro.py` both claimed 8717. Every driver binds `serve.Server` in process on port 0 now and
+    prints the URL. **A session that exists to be used ends when the person using it closes it**,
+    never after a guess at how long that is.
+288. **AN INLINE PAGE MODULE NEEDS A PARSE GATE, BECAUSE THE BROWSER HARNESS CANNOT NAME ONE.** A
+    `const` that shadowed a binding fifty lines above it in `www/m14.html` took `scripts/check.py
+    --only m14` **420 seconds** to report, as BROKEN with `never became true within 420.0s`: the
+    page threw before it rendered, and a harness can only wait for a state that will never arrive.
+    `scripts/check_pages.py` extracts every `<script type="module">` and runs `node --check` over
+    it in about a second — the same argument `CLAUDE.md` already makes for `node -e "import(…)"`
+    over a worker, applied to the half of the code that lives in HTML and that no file-based tool
+    reads. It parses and does not execute, which is exactly the class of failure that is most
+    expensive to find any other way.

@@ -122,6 +122,15 @@ src/
     surface.mjs   M8: the ONE renderer of a display list. A canvas per surfaced window, and
                   the only place a drawing op becomes a drawing call. `clientAt` is the declared
                   inverse of `pointAt`, which is what lets a driver drag from inside a picture
+    taskbar.mjs   M14: the Superbar, the start menu, a jump list, the tray and the window menu.
+                  Page-side chrome (D39) whose CONTENTS are a process's — it renders rows it was
+                  published and decides nothing about what they are
+    desktop.mjs   M14: the icon view. Selection, the rubber band, both context menus, and the
+                  GRID — `#cellAt` is the declared inverse of `#boxFor`, which is what lets a
+                  dropped icon land where the auto-layout would have put it (constraint 284).
+                  The arrangement holds a CELL, so a resize re-lays it out
+    icons.mjs     M14: one vector drawing per `WICON_*`, with `selfTest` asserting the ABI's
+                  table is covered
 www/
   index.html      boot preflight: refuses to proceed if a capability is missing
   m0.html         the syscall-channel bench page
@@ -147,9 +156,18 @@ www/
                   from the bottom of the stack, both edges of the hysteresis, and a flattened
                   caption reading as a STEP where a glass one is a ramp — then a live desktop
                   with the governor armed at four windows, so `winopen -n 4` degrades it
+  m13.html        M13's seven proofs: the geometry driven with REAL input — drag, resize, the
+                  arrow keys, the clamp at both extremes, and a relayout when the viewport
+                  changes under a window that was already placed
+  m14.html        THE WINDOWS 7 DESKTOP, and it is what you get at the bare URL. Aero Snap, the
+                  Superbar with grouped buttons and hover previews, jump lists, the start menu,
+                  the tray, and a desktop of icons that snap to a grid. `?proofs=1` is the
+                  HARNESS — nine proofs that stage their own windows and block for a driver, so
+                  it is the harness's to open and not a reader's (constraint 283)
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
-                  spawn a program by URL, collect its result. m7, m8 and m11 import it; the
-                  older pages still carry their own copies
+                  spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
+                  the receipt, and the banner a page paints when nothing is driving it. m7, m8,
+                  m11, m13 and m14 import it; the older pages still carry their own copies
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
@@ -216,6 +234,8 @@ row below rather than restate it.
 | What a docked state means as geometry | `Win.boxForState` in `src/wm/window.mjs`. The snap ghost and the layout both read it, so a preview cannot promise a rectangle the window will not take |
 | The WORK AREA, and the strip the shell reserved | `WinHost.reserve`/`workArea` in `src/wm/winhost.mjs`. Reserving re-clamps every existing frame, because a maximized window laid out before the taskbar appeared is laid out against a desktop that is gone |
 | The shell's own metrics | `TASKBAR_H`, `TASK_BTN_*`, `ORB`, `ICON_PX`, `ICON_CELL_*`, `THUMB_*` in `src/wm/aero.mjs`, with the stylesheet derived from them — `TASKBAR_H` is not a look, it is the strip `reserve` subtracts |
+| The desktop's icon GRID, in both directions | `#grid`, `#slotCell`, `#boxFor` and `#cellAt` in `src/wm/desktop.mjs`. `#cellAt` is the declared inverse of `#boxFor`, which is what lets a dropped icon land exactly where the auto-layout would have put it; `#freeCell` is the only place a collision is resolved. The arrangement holds a CELL and not a pixel, so a resize re-lays it out (constraint 284) |
+| A preview panel's width, and how many thumbnails fit a row | `THUMB_W`, `THUMB_H` and `THUMBS_PER_ROW` in `src/wm/aero.mjs`, with the panel's `max-width` DERIVED from them. A menu's 320 px cap applied to a 208 px thumbnail is how the second one came to render outside the glass (constraint 285) |
 | An icon's drawing | `src/wm/icons.mjs`, one function per `WICON_*`, with `selfTest` asserting the ABI's table is covered. Gradient ids are per-document, because two icons of one kind in one document would otherwise share them |
 | Which icon a FILE gets, and which a PROGRAM's button gets | `iconForPath` in `src/libos/std.mjs` (userland's convention, beside `formatForPath`) and `ICON_BY_PROG` in `src/wm/taskbar.mjs` (the shell's, for a window that publishes no icon of its own) |
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
@@ -404,6 +424,16 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   exist.
 - **`node -e "import('./src/kernel/kernel.mjs')"` is the fast syntax check.** A duplicate import
   surfaced in the browser as `worker.onerror` with the message `undefined`; node named it at once.
+- **A PAGE's inline module needs the same gate, and `scripts/check_pages.py` is it.** A `const`
+  shadowing a binding fifty lines above it in `www/m14.html` took `--only m14` **420 seconds** to
+  report, as BROKEN with `never became true within 420.0s`: the page threw before it rendered, and
+  a harness can only wait for a state that will never arrive. `node --check` over the extracted
+  module names the line in about a second. It parses and does not execute (constraint 288).
+- **The page at the obvious URL is the PRODUCT, and the proofs are the opt-in.** `www/m14.html` is
+  the desktop; `?proofs=1` is the harness. It was the other way around and three reported defects
+  came out of it, none of which was a defect — the proofs stage fixture windows and then block in
+  `gestureAsker`, which looks exactly like a broken product. Any page blocking on a gesture now
+  paints a banner saying so (constraint 283).
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
@@ -430,6 +460,8 @@ scripts/serve.py --no-isolation     # omit the headers, to prove a check fails w
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
 python3 bench/m7-win/drive.py --page m14 --live   # THE WINDOWS 7 DESKTOP, in a real Chrome
+                                  # --live is HEADED and waits for you to close the window; it
+                                  # binds its own server on a port the OS picks and prints the URL
 python3 bench/m14-shell/input-probe.py  # WHICH DOM events CDP input really delivers (279)
 scripts/check.py --controls         # what negative controls exist and what each proves
 node bench/m7-win/probe.mjs        # M7's window table and one window, under node
@@ -472,6 +504,8 @@ bench/m6-realm/csp-probe.py         # WHERE a policy must be delivered, measured
 scripts/serve.py --no-csp           # omit the process realm's policy, to prove a check fails
 scripts/fsfuzz.py                   # the fs codecs under Node + 10k torn journals (no browser)
 scripts/check_links.py              # every path reference in the authored docs resolves
+scripts/check_pages.py              # node --check over every www/*.html inline module (1 s)
+scripts/check_pages.py --prove-failure  # ...and it MUST report the redeclaration it injects
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 

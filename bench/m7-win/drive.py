@@ -2,28 +2,41 @@
 """Open `www/m7.html` in a real Chrome, type the keys it waits for, and print what it reported.
 
     python3 bench/m7-win/drive.py                  # the five proofs
-    python3 bench/m7-win/drive.py --live           # the desktop only, left open
+    python3 bench/m7-win/drive.py --page m14 --live # THE WINDOWS 7 DESKTOP, in a window you can use
     python3 bench/m7-win/drive.py --query win_first_fd=1
 
 THE FAST LOOP FOR A WINDOW MILESTONE. `scripts/check.py --only m7` is the gate and asserts labels;
 this prints the page's own log and its evidence, which is what a defect is diagnosed from. It is
 NOT a check: it scores nothing and asserts nothing, and it says so in its exit code — 0 whenever
 the page reached a terminal state, whatever that state was.
+
+`--live` OPENS A WINDOW AND WAITS FOR YOU TO CLOSE IT. It did neither, and both were reported: this
+script took `cdp.Browser()` at its default, which is HEADLESS, so the command CLAUDE.md advertises
+as "the Windows 7 desktop, in a real Chrome, left open to type into" opened no window at all — and
+then span for 300 s waiting for a terminal state the live page never reaches. A session that exists
+to be used ends when the person using it closes it.
+
+THE SERVER IS BOUND HERE, ON A PORT THE OS PICKS. It used to spawn `scripts/serve.py --port 8711`
+with both streams sent to DEVNULL, which meant a port already in use arrived as a blank page with
+no message — and 8711 appeared in no document while `scripts/serve.py` on its own serves 8000, so
+the two numbers read as a contradiction. An ephemeral port cannot collide and is printed.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
-import subprocess
 import sys
+import threading
 import time
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "scripts"))
 
-import cdp  # noqa: E402  (the path has to be set up first)
+import cdp    # noqa: E402  (the path has to be set up first)
+import serve  # noqa: E402
 
 READY = ("(() => { const M = globalThis.%(g)s || {}; const s = M.state; "
          "if (s === 'done' || s === 'aborted' || s === 'error') return s; "
@@ -55,7 +68,13 @@ def main(argv=None) -> int:
     ap.add_argument("--query", action="append", default=[], help="k=v, repeatable")
     ap.add_argument("--hold", type=float, default=0.0,
                     help="seconds to leave the browser open at the end")
-    ap.add_argument("--port", type=int, default=8711)
+    ap.add_argument("--port", type=int, default=0,
+                    help="0 (the default) asks the OS for a free port; a fixed one can collide")
+    ap.add_argument("--headed", action="store_true",
+                    help="open a real window. Implied by --live, which has nothing to show "
+                         "without one")
+    ap.add_argument("--headless", action="store_true",
+                    help="force headless even with --live, for a screenshot-only run")
     ap.add_argument("--page", default="m7", help="which www/<page>.html to drive")
     ap.add_argument("--keys", default="a", help="what to type when the page asks for keys")
     ap.add_argument("--drag", action="store_true",
@@ -63,21 +82,28 @@ def main(argv=None) -> int:
                          "coordinates it published and send real mouse events")
     args = ap.parse_args(argv)
 
-    server = subprocess.Popen(
-        [sys.executable, str(REPO / "scripts" / "serve.py"), "--port", str(args.port)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(REPO))
+    # BOUND BEFORE ANYTHING IS PRINTED, so the port in the URL is the port that is listening.
+    # `serve.Server` is the same COOP/COEP handler `scripts/serve.py` installs; binding it in
+    # process means there is no second interpreter whose failure could go unread.
+    os.chdir(REPO)
+    httpd = serve.Server(("127.0.0.1", args.port), serve.Handler)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    headed = args.headed or (args.live and not args.headless)
     try:
-        time.sleep(0.7)
         query = list(args.query)
         if args.live:
             query.append("live=1")
         glob = args.page.upper()
         ready = READY % {"g": glob}
-        url = "http://127.0.0.1:%d/www/%s.html" % (args.port, args.page)
+        url = "http://127.0.0.1:%d/www/%s.html" % (port, args.page)
         if query:
             url += "?" + "&".join(query)
         print("url      %s" % url)
-        with cdp.Browser() as browser:
+        print("mode     %s" % ("headed - close the window to end the session" if headed
+                               else "headless"))
+        with cdp.Browser(extra_args=("--window-size=1400,1000",) if headed else (),
+                         headless=not headed) as browser:
             page = browser.page()
             page.navigate(url)
             deadline = time.time() + 300
@@ -147,9 +173,15 @@ def main(argv=None) -> int:
                         print("   %s %s" % (mark, label))
             if args.hold:
                 time.sleep(args.hold)
+            elif args.live and headed:
+                # THE SESSION ENDS WHEN THE READER CLOSES THE WINDOW, not after a guess at how
+                # long someone wants to use a desktop. `--hold` still overrides it for a scripted
+                # run that wants a bounded one.
+                print("waiting - close the browser window to finish")
+                browser.wait()
         return 0
     finally:
-        server.terminate()
+        httpd.shutdown()
 
 
 if __name__ == "__main__":

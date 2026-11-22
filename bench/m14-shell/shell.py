@@ -7,7 +7,8 @@
     python3 bench/m14-shell/shell.py --jump           # ...or a jump list
 
 WHY THIS EXISTS, and it is not decoration. `scripts/check.py --only m14` drives the PROOFS path,
-which stages its own windows and arms its own fixtures. The LIVE desktop — `www/m14.html?live=1` —
+which stages its own windows and arms its own fixtures. The LIVE desktop — `www/m14.html`, the
+BARE url, because the product is what the obvious address gives (constraint 283) —
 is a different path with no assertions on it, and that is exactly where this project has been
 bitten before: M12's live desktop never armed its governor and its own log told the reader to watch
 something that could not happen, M11's End Process button was offered on every healthy window the
@@ -217,21 +218,32 @@ def main(argv: list[str]) -> int:
                 click(page, orb)
                 time.sleep(0.5)
 
-            # PARK THE WINDOWS ON THE RIGHT BEFORE THE SHOT. The icon column is at the desktop's
-            # left edge, which is exactly where a fresh window opens — so the first two
-            # screenshots this harness took showed a desktop with no icons on it, and the icons
-            # were behind the terminal the whole time. A reader would drag the window out of the
-            # way; this is the same move, so the picture shows what is on the desktop.
-            page.evaluate("""(() => {
-              for (const el of document.querySelectorAll('.window')) {
-                if (el.dataset.role === '1') continue
-                el.style.left = '660px'
-                el.style.top = '30px'
-                el.dataset.x = '660'
-                el.dataset.y = '30'
+            # RESTORE BEFORE THE SHOT, THROUGH THE REAL ROUTE. A left-snapped window covers the
+            # whole left edge of the desktop, which is the icon column - so a picture taken over
+            # the snap shows a desktop with no icons on it, and in this harness's first two
+            # screenshots the icons were behind the terminal the whole time.
+            #
+            # THIS USED TO POKE `style.left` AND `dataset.x` DIRECTLY, and that was a harness
+            # lying about its own subject: the kernel still held WST_SNAP_L while the dump below
+            # printed {'x': 660, 'y': 30}, a box no snapped window has, so the run reported a
+            # state and a geometry belonging to different worlds. `askState(WST_NORMAL)` is the
+            # route a caption button takes, so the restore is the kernel's and the two agree.
+            restored = page.evaluate("""(() => {
+              const host = globalThis.M14 && globalThis.M14.host
+              if (!host) return -1
+              let n = 0
+              for (const entry of host.frames.values()) {
+                if (entry.role === 1) continue
+                if ((entry.state | 0) === 0) continue
+                host.askState(entry.id, 0)
+                n += 1
               }
+              return n
             })()""")
-            time.sleep(0.3)
+            if restored == -1:
+                bad.append("the page published no host, so nothing could be restored "
+                           "through the kernel")
+            time.sleep(0.8)
             final = at(page, STATE)
             data = page.call("Page.captureScreenshot", format="png").get("data")
             if data:
