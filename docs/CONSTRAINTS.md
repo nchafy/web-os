@@ -2876,13 +2876,42 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     is the only interpretation the kernel does of a display list, and it is validation and not
     rendering — `src/wm/surface.mjs` is still the one renderer, and it uses the same codec so the
     two are not forming separate opinions about the encoding.
-294. **A LIST VIEW WITH NO WHEEL EVENT MUST STATE ITS OVERFLOW, NOT GROW.** `/usr/bin` is 32
-    entries, which at a 22 px row is a 736 px surface — a window taller than the work area with its
-    last rows under the taskbar. The window ABI delivers `WPTR_DOWN`, `WPTR_UP` and `WPTR_MOVE` and
-    no wheel, so a scrollbar would be a control the program cannot receive input for: the
-    live-looking-button defect M11 already recorded. So the surface is capped at `MAX_ROWS` and the
-    remainder is SAID — "+8 more — run `ls /usr/bin` to see them all" — because eight files that do
-    not appear to exist is worse than eight files named as absent.
+294. **A LIST VIEW MUST MAKE ITS OVERFLOW REACHABLE AND SAY WHERE IN THE LIST IT IS.** `/usr/bin` is
+    32 entries, which at a 22 px row is a 736 px surface — a window taller than the work area with
+    its last rows under the taskbar. A list taller than its window is the standing problem; what
+    changed in M17 is the answer.
+    **THIS CONSTRAINT SAID THE OPPOSITE UNTIL M17, AND THE PREMISE IS WHAT WAS FALSIFIED, NOT THE
+    JUDGEMENT.** It read **"A LIST VIEW WITH NO WHEEL EVENT MUST STATE ITS OVERFLOW, NOT GROW"**,
+    and its argument was that the window ABI delivers `WPTR_DOWN`, `WPTR_UP` and `WPTR_MOVE` and no
+    wheel, so a scrollbar would be a control the program cannot receive input for — the
+    live-looking-button defect M11 recorded. The surface was therefore capped at `MAX_ROWS` and the
+    remainder SAID: "+8 more — run `ls /usr/bin` to see them all", because eight files that do not
+    appear to exist is worse than eight files named as absent. **That was correct for the ABI as it
+    stood**, and it is kept here rather than deleted, the way `docs/DECISIONS.md` §Corrections keeps
+    its two.
+    **`WEV_WHEEL` AND `DL_CLIP` REMOVE THE PREMISE.** The ABI now delivers an aimed, signed wheel
+    delta and an op that bounds what a row may paint (`src/abi.mjs`, M17), so the cap is gone from
+    both list views: `START_ROWS` in `src/bin/files.mjs` and `ROWS_WANTED` in `src/bin/taskmgr.mjs`
+    bound the OPENING HEIGHT and no longer the list. The obligation that replaces it has two halves,
+    and the second is not optional — a list that scrolls and does not say where it is is a list a
+    reader is lost in. So the header carries the position — `<first>-<last> of <total>`, right
+    aligned beside the column names — where the old line carried what was unreachable, and the clip
+    is what stops the scrolled row above the viewport painting over that header.
+    **THE EVIDENCE IS A DRIVEN WHEEL, NOT AN ARGUMENT.** `scripts/check.py`'s `m17` check —
+    `check_m17`, over `www/m17.html?proofs=1` — dispatches real `wheel` events over a 40-entry
+    directory and records one expectation per clause: `the row at the viewport top changed`, `a row
+    overhangs the header`, `and the header survived the scroll, as a pixel` (a PIXEL read, because
+    an unclipped row paints over the header and the two worlds are the same display list otherwise)
+    and `it clamped at both ends`. `scripts/check.py --negative no-clip` is the world where the
+    header clause fails and the clamp clauses hold. The magnitude
+    clause is asserted against the delta the page RECEIVED and never against the dispatched number,
+    for constraint 297's reason.
+    **THERE IS STILL NO SCROLLBAR, AND THAT HALF OF THE OLD ARGUMENT SURVIVED.** A thumb is DRAGGED,
+    and press-then-move inside a `files` row is already spoken for: it begins a data-object drag
+    (`src/bin/files.mjs:965-973`), whose session belongs to the kernel once it starts (constraint
+    243). A second meaning for the same gesture would need the program to decide which one a press
+    was for before the motion that distinguishes them. A wheel is aimed and carries no session,
+    which is why it is the gesture that landed first.
     **AND A TYPE COLUMN MUST CARRY INFORMATION.** The first legible version printed `fmt?0` on
     every row of `/usr/bin`, which is `fmtName(0)` for a file whose extension nothing maps — that
     is every program in the system. One `lstat` per row buys the execute bit, which is what `ls -l`
@@ -2923,3 +2952,40 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     mount that quietly stopped being read-only. And `truncate("/dev/null")` now REACHES a guard in
     `calls.mjs` that was unreachable and said so — it refuses, correctly, because the lines below it
     hand the decision to the blob store and a synthetic decision has no blob.
+
+297. **A DRIVEN WHEEL DELTA IS IN DEVICE PIXELS, AND THE `wheel` EVENT REPORTS CSS PIXELS.**
+    `Input.dispatchMouseEvent type=mouseWheel` takes `deltaY` in device px; the listener receives
+    `deltaY / devicePixelRatio`. Measured by `bench/m17-wheel/probe.py` over a grid of four deltas
+    at three ratios: the device-px hypothesis fits **12 of 12** samples and the CSS-px hypothesis
+    fits **4 of 12** — the four at dpr 1, where the two predictions are the same number. At dpr 1.5
+    the delivered values are non-integer (40 → 26.667, 100 → 66.667), which is what rules out a
+    clamp; `bench/m16-resize/probe.py` had recorded 120 → 60 and 120 → 120 and two samples at one
+    dispatched value cannot tell those apart.
+    **SO A CHECK MUST NOT DISPATCH A CONSTANT DELTA AND ASSERT A CONSTANT OFFSET.** That is
+    numerically right at dpr 1 and wrong by the ratio everywhere else, with every expectation
+    green — the failure M11 and M12 each paid a milestone for (constraint 264) and M16 paid a unit
+    defect for. A driver scales its delta by the ratio it is driving at, or asserts against the
+    delta the page actually received. The ABI is unaffected: `WEV_WHEEL` carries surface px like
+    every other window event (constraint 248), and the page converts on the way in, through the
+    scale it already converts a pointer with.
+
+298. **THE WHEEL TRANSPORT DOES NOT COALESCE A SMALL BURST, SO THE KERNEL'S COALESCING IS THE
+    KERNEL'S — AND A LARGE UNPACED ONE IT DOES, SO A DRIVER MUST PACE AND COUNT.**
+    Twelve wheel events dispatched back-to-back arrive as twelve `wheel` events, at dpr 1, 1.5 and
+    2 alike — `bench/m17-wheel/probe.py`'s burst row, 12 → 12 at every ratio. This is the
+    permission M17's coalescing proof needs: it asserts `queued: 1, coalesced: 299` over a
+    300-notch stream, and that arithmetic only credits the kernel if 300 events reached the page. A
+    browser that merged the burst first would have let the transport's coalescing pass for the
+    governor's, and `no-wheel-coalesce` could not have turned the clause it claims. Measured
+    because the alternative was to assume it.
+    **AND IT IS TRUE OF 12 AND FALSE OF 300, WHICH THE PROOF ITSELF FOUND.** A non-passive `wheel`
+    listener makes the compositor hand each event to the main thread and WAIT for the ack, and
+    events that arrive unacked are coalesced BEFORE SCRIPT SEES THEM. Measured on `www/m17.html`:
+    an unpaced 300-notch stream into the window held by `files --no-drain` arrived as **75
+    records**; the same 300 into a DRAINING window arrived as 285-300, because the repaints pace
+    it. So the transport's coalescing is worst exactly where this proof needs it least, and 12
+    survived only because 12 is below the threshold. **A 10 ms gap between notches delivers 300 of
+    300**, which is what `WHEEL_GAP_MS` is — a measurement and not politeness. The headline above
+    stands as the permission it was measured for and NOT as a general claim: a driver that bursts
+    must assert what the page ROUTED, which `thePageRoutedEveryNotch` does, or it credits the
+    compositor's merge to the kernel's governor.

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m17 wheel unit probe</title>
+<style>
+  html, body { margin: 0; background: #202020; color: #e8e8e8;
+               font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  #pad { margin: 24px; width: 420px; height: 280px; display: block;
+         background: #2d3b4d; border: 1px solid #5a6a7d; }
+  #log { margin: 0 24px 24px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<!-- A CANVAS AND NOTHING ELSE. The subject of this probe is the delta a `wheel` listener on a
+     canvas RECEIVES against the delta CDP was asked to dispatch, so the page must not scroll,
+     must not resize, and must hold no kernel: a SAB here would make a failure ambiguous between
+     the transport and the boot. `src/` is not imported at all. -->
+<canvas id="pad" width="420" height="280"></canvas>
+<div id="log">waiting for a wheel</div>
+<script type="module">
+const pad = document.getElementById('pad')
+const log = document.getElementById('log')
+
+/* EVERY EVENT IS KEPT, not just the last one. The question is whether the browser coalesces a
+ * burst before it reaches script — if it does, a count of 3 dispatched against 1 delivered is
+ * the finding, and a probe that stored only `last` could not tell that apart from 3 delivered. */
+const seen = []
+globalThis.__wheel = { events: 0, seen, last: null }
+
+pad.addEventListener('wheel', (e) => {
+  const rec = {
+    dx: e.deltaX, dy: e.deltaY, dz: e.deltaZ,
+    mode: e.deltaMode,            // 0 = DOM_DELTA_PIXEL, 1 = LINE, 2 = PAGE
+    trusted: e.isTrusted,
+    cancelable: e.cancelable,
+    ctrl: e.ctrlKey, shift: e.shiftKey, alt: e.altKey, meta: e.metaKey,
+    /* THE RATIO AT THE MOMENT OF THE EVENT, so a row cannot be read against the wrong one. */
+    dpr: globalThis.devicePixelRatio,
+  }
+  seen.push(rec)
+  globalThis.__wheel.events = seen.length
+  globalThis.__wheel.last = rec
+  log.textContent = `${seen.length} wheel event(s); last dy=${e.deltaY} mode=${e.deltaMode} `
+    + `dpr=${globalThis.devicePixelRatio}`
+  /* NOT PREVENTED. `preventDefault` here would change what the browser does with the gesture and
+   * the question is only what arrives. */
+}, { passive: true })
+
+globalThis.__reset = () => { seen.length = 0; globalThis.__wheel.events = 0
+                             globalThis.__wheel.last = null; return true }
+globalThis.__ready = true
+globalThis.__padAt = () => {
+  const r = pad.getBoundingClientRect()
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+           w: Math.round(r.width), h: Math.round(r.height),
+           store: { w: pad.width, h: pad.height } }
+}
+</script>
+</body>
+</html>

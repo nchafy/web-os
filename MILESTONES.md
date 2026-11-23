@@ -43,6 +43,7 @@ checks is a wish.
 | M15 | The shell's own programs: coreutils, a text op, a readable Explorer, a task manager | — | 1 | ✅ done — **ACCEPT**, 4 reader-reported items, 38 prompt cases, a display-list TEXT op (293), and two second copies retired |
 | M15a | The registration debt, and the rule that stops it recurring | 0.5 | 0.25 | ✅ done — **ACCEPT**, `check_m15` at a real prompt (24 expectations), `audit()` rule 16 over this file's own status table, and `--negative milestone-unchecked` |
 | M16 | The client box IS the surface, in device pixels | 2.5 | 0.5 | ✅ done — **ACCEPT**, 42 expectations at **two device-pixel ratios**, 4 controls, the first driven resize grip in this project, and 3 measurement assumptions retired by a probe |
+| M17 | The wheel, the clip, and a list that scrolls | 2 | — | ✅ done — **ACCEPT**, 35 expectations over 3 driven proofs, **the first REAL WHEEL this suite has dispatched**, 57 clauses under node, 2 controls wired and 2 registered UNMEASURABLE with an address, constraint 294 amended and 298 qualified by the proof itself |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -3270,7 +3271,7 @@ clause in this project had ever run at more than one.
 | --- | --- | --- |
 | 1 | the extent | every surfaced window's canvas fills its client content box to within **1 CSS px**, at four frame sizes including both extremes, and nothing is clipped |
 | 2 | the unit | `files`'s store CHANGED and equals the content box × dpr, and the kernel's `client:` agrees. Measured at dpr 2: 1233×505 CSS → 2466×1010 device, 208×84 → 416×168, 633×349 → 1266×698, 953×179 → 1906×358 |
-| 3 | the content | the row count the program DREW grew from **1 row at 84 CSS px tall to 20 at 505**, read back through `textOfOps`, with the remainder still stated (constraint 294) |
+| 3 | the content | the row count the program DREW grew from **1 row at 84 CSS px tall to 20 at 505**, read back through `textOfOps`, with the remainder still stated — which is the half of constraint 294 M17 then replaced with a scroll |
 | 4 | the pixels (R34) | `imgview`'s drawn extent differs at two client sizes — **480 px at scale 30 then 720 at scale 45**, 256 fill-rects either way — and every sampled block reads back as the colour its own op asked for |
 | 5 | `/proc`, mid-drag | `grep` over `/proc/1/win/1` finds `client:\t2462x1006` and `dpr:\t2` **while the button is still down**, and the pointer is then released OUTSIDE the frame — the case where `setPointerCapture` throws and the frame's own `pointerup` never runs (constraint 175) |
 | 6 | the browser's menu (R8) | a real right-click inside a surface is `defaultPrevented` and counted by the host; one on the bare page is NOT, which is what makes the first clause about this listener |
@@ -3338,6 +3339,140 @@ project four milestones (175, 206, M11's constant-offset blur band, M12's dpr-2 
 M16 is the most dpr-shaped row yet: Firefox renders at dpr 1 on the reference machine, which is the
 ratio at which the unit error is invisible. `www/m16.html` prints its own log and
 `scripts/bidi.py` can drive real trusted input, so the gate exists — it has not been run.
+
+## M17 — the wheel, the clip, and a list that scrolls · done
+
+R3, R20, A1 and A6, and the normative cap that stood in for all four. A surfaced window now receives
+`WEV_WHEEL`, a display list can bound what a row may paint with `DL_CLIP`, and `files` and `taskmgr`
+scroll instead of capping — so **constraint 294 is amended in the same change**, which is the
+deliverable this row owed beyond code. The wall-clock figure is not recorded: this row was written
+as ten parallel slices in one session, each owning a disjoint set of files, so it is not comparable
+to the single-developer rows above and a number invented for the column would be worse than the
+dash.
+
+### The probe came first again, and it moved two of M17's numbers out of reach of a guess
+
+`bench/m17-wheel/probe.py`, before the check was written, for M16's reason: the risk is in the
+proof. M16 had already answered the delivery assumption — CDP `mouseWheel` reaches a `wheel`
+listener on a canvas, 3 of 3, `isTrusted` true — so this probe asked the two questions that answer
+could not.
+
+| question | measured |
+| --- | --- |
+| what UNIT is a dispatched delta in | **device px.** Four deltas at three ratios: the device-px hypothesis (`delivered == dispatched / dpr`) fits **12 of 12** samples, the CSS-px hypothesis **4 of 12** — the four at dpr 1, where the two predictions are one number. At dpr 1.5 the delivered values are non-integer (40 → 26.667), which is what rules out a clamp. Constraint 297 |
+| does the TRANSPORT coalesce a burst | **no.** Twelve dispatched arrive as twelve, at dpr 1, 1.5 and 2 alike. That is the permission the `queued: 1 / coalesced: 299` clause needs — the arithmetic only credits the kernel if 300 events reached the page. Constraint 298 |
+
+**AND THEN THE PROOF QUALIFIED 298 ITSELF, which is the measurement this row is most likely to be
+re-read for.** 12 dispatched arrive as 12; **300 unpaced do not.** A non-passive `wheel` listener
+makes the compositor hand each event to the main thread and WAIT for the ack, and unacked events are
+coalesced before script sees them — so an unpaced 300-notch stream into the window held by `files
+--no-drain` arrived as **75 records**, and the same 300 into a DRAINING window arrived as 285-300
+because the repaints pace it. The transport's coalescing is therefore worst exactly where this proof
+needs it least: 75 records would have credited the compositor's merge to the kernel's governor and
+left `no-wheel-coalesce` unable to lap a 256-record ring at all. `WHEEL_GAP_MS` is 10 ms because at
+10 ms 300 of 300 arrive, and `the page routed every notch` is the expectation that refuses the run
+rather than the alternative, which is a green proof over a number the kernel did not earn.
+
+**297 IS WHY NO CLAUSE HERE ASSERTS AGAINST A DISPATCHED NUMBER.** `wheelAndRepaint` dispatches
+`cssPx * dpr` and returns `host.lastWheel` — the host's own record of the record it POSTED — and the
+magnitude clause reads that. A constant delta against a constant offset is right at dpr 1 and wrong
+by the ratio everywhere else with every expectation green, which is constraint 264's failure for the
+third time.
+
+### Three driven proofs, 35 expectations, and 57 clauses under node
+
+`www/m17.html` is the desktop at its bare URL and the harness at `?proofs=1` (constraint 283).
+`check_m17` records **one expectation per clause and not one per proof**, because `no-clip` names a
+single clause: a check that recorded "proof 2 passed" could not tell a control that broke the header
+pixel from one that broke the clamp, and a control satisfied by any failure verifies nothing.
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the clip, as a display list | `files` sends exactly ONE `DL_CLIP` and no reset; `taskmgr` sends a setter and then a `DLC_RESET` before its footer; and the renderer COUNTED them, read back as `surface.clips` / `surface.clipResets`. Two shapes, because a batch with one viewport and a batch with two are different arithmetic |
+| 2 | the list scrolls, the header survives it, and it clamps | a 40-entry directory in `/tmp/m17` built by two ordinary programs, in a frame placed at 460×260 so there is more to scroll than proof 3's summed delta. Five stages of real `wheel` events: down 3 × 60 CSS px, then single-CSS-px nudges until a row OVERHANGS the header, then 20 notches past the end, 30 past the top, then 3 × 60 again — and the offset lands within **1 CSS px** of 180. The top row changed, both clamps counted, and the header pixel reads the batch's own `DL_CLEAR` colour where the overhanging fill asked for a different one |
+| 3 | coalescing, over a queue nobody is draining | 300 notches — more than `WIN_EVENT_CAP`'s 256 — into `files --no-drain 28000`, which holds its event loop after the window is painted and before the first `win_read`. `queued` rose by **1**, `coalesced` by **299**, `dropped` by **0**, `grep` over `/proc/<pid>/win/<winid>` publishes the same three numbers, the program drained ONE summed record, and the offset it reached equals the FULL summed delta |
+
+**THE HEADER CLAUSE IS TWO READINGS AND NOT ONE.** `want` is the batch's own `DL_CLEAR` colour and
+`wouldBe` is what the overhanging fill asked for; they MUST differ, or a row painted in the paper
+colour satisfies the clause. Every coordinate and every colour comes out of the batch — a sample
+point modelled from `FILES_METRICS` would be the page re-deriving the program's layout, which is the
+second copy CLAUDE.md's `FILES_METRICS` row already records a drift for.
+
+**`node bench/m17-wheel/probe.mjs` is 57 clauses in seconds, and six of them are about one line.**
+`docs/PLAN-SHELL.md` §5 scheduled the question "does a clip left set by batch N make batch N+1 draw
+nothing?", because that is a window gone blank on its next repaint with no error anywhere. The
+answer is that `replay` resets the clip at the top of every batch, and the probe is what proves the
+reset exists: batch two repaints what batch one clipped away, the pixel is the colour batch two
+asked for, with the reset removed batch two draws NOTHING there, and exactly one baseline `save()`
+is outstanding between batches. The verdict line is printed BEFORE the JSON report deliberately —
+`bench/m8-surface/controls.py` parses from the first `{` to the end of stdout.
+
+### Four controls named, two wired, and the two gaps are stated rather than papered over
+
+| control | world | state |
+| --- | --- | --- |
+| `no-clip` | `setSurfaceControls({noClip})` in `src/wm/surface.mjs`: the op is COUNTED and not applied, so a scrolled row paints over the header. The header clause fails; the clamp clauses hold | **wired**, `?no_clip=1`. ONE definition — `src/bin/files.mjs` deliberately ships no flag that drops the op |
+| `raw-wheel` | `setHostControls({rawWheel})` in `src/wm/winhost.mjs`: the browser's delta posted with the surface scale dropped — M16's unit defect in the one place M17 could repeat it. Only the deltas lose the scale; the aim point is converted either way, so the magnitude clauses move and the aim and both clamps MUST hold | **wired**, `?raw_wheel=1` |
+| `no-wheel-coalesce` | append a notch instead of summing it into the tail. MEASURED: `queued` 3 -> 303, `coalesced` 0, `dropped` 47, `pending` 256 — the deltas are the plan's 300 and 44 exactly, three higher in absolute terms because three notches were queued before the stream | **wired**, `?no_wheel_coalesce=1`, via a bench-gated `cfg.noWheelCoalesce` branch in `src/kernel/kernel.mjs` beside `cfg.noCascade`. Scores **6 red / 29 intact**. The page ASKS and then measures whether the world it asked for arrived, so an unarmed kernel refuses rather than reporting green proofs over itself |
+| `unclamped-scroll` | accept an offset past the END of the list, through `files`' own declared `--unclamped-scroll`. The TOP clamp stays: removing both also turned the magnitude clause, because the page establishes it by scrolling back to the top | **wired**, `?unclamped_scroll=1`. Scores **3 red / 32 intact**. It arrives on ARGV and not in a boot cfg, because the clamp is the PROGRAM's — the one M17 control that does |
+
+**BOTH WORLDS WERE DECLARED-AND-UNBUILT FIRST, AND THE PAGE SAID SO RATHER THAN RUNNING GREEN.**
+`src/kernel/kernel.mjs` consumed no `cfg.noWheelCoalesce` and `src/bin/files.mjs` shipped no clamp
+flag, so each control reported UNMEASURABLE with the address of what it would take. Both are closed
+now — a bench-gated branch beside `cfg.noCascade`, and one argv flag — and every M17 control scores
+a named subset. **The page's own measurement of whether it got the world it asked for is what kept
+the gap visible**, and it is still armed: an unarmed kernel or an ignored flag throws with an
+address instead of reporting the shipped code as evidence for itself.
+
+**TWO PREDICTIONS IN THIS PLAN WERE WRONG, AND THE MEASUREMENT CORRECTS THEM.**
+
+1. **The full-delta clause does not fail under `no-wheel-coalesce`.** `docs/PLAN-SHELL.md` §M17
+   names it as a casualty; it cannot be one. `account.dyTotal` is summed inside `scrollBy`, so it
+   totals the deltas the program RECEIVED and `scroll == dyTotal` survives any number of records
+   the kernel discarded — which `src/bin/files.mjs` states where it accumulates them. Dropping is
+   caught by `every notch reached the program`, which compares against what the PAGE sent and does
+   go red. One clause, one job.
+2. **Removing BOTH clamp edges costs a clause the control is not about.** The first
+   `unclamped-scroll` dropped the top clamp too, and the magnitude clause went red with it: the
+   page establishes that clause by scrolling back to the top and measuring a known delta from
+   there, and a list with no top cannot get there. §M17 asks for "the END clamp" in those words,
+   and the narrower world is the one under which the clamp clauses fail alone. `Expect(failed=..)`
+   refused the wider one — the registry caught it, not a reading of the diff.
+
+### The forged-event guard landed here, and it covers M16's event too
+
+`WinMgr.feed` refuses `WEV_STATE`, `WEV_ITEM` and `WEV_CLIENT` from the page's input port and counts
+`forgedKernelEvents`: those are facts the kernel establishes, and a page-posted `WEV_CLIENT` would
+tell a program its content box is a size it is not. **`WEV_WHEEL` is deliberately NOT on that list**
+— a wheel is a browser event and the page is its only honest source, so refusing one refuses the
+thing itself. What the kernel owns there is `WWHEEL_COALESCED`, which `feed` MASKS off any wheel it
+accepts; a page that could set it would tell a program twenty notches arrived as one, and the
+program would scroll by one notch's delta.
+
+### What is not done
+
+**M17 SHIPS NO `controls.py` BESIDE ITS PROBE**, which M4b, M5, M6, M7, M8, M9 and M10 each do. The
+probe names stable clause addresses for one, and the mutation it would score is already measured:
+subject `src/wm/surface.mjs`, needle the `this.#resetClip()` call immediately after `this.batches +=
+1` in `replay` — not the second occurrence, inside the `DLC_RESET` branch — moving the six
+clip-reset clauses and nothing else.
+
+**IT RUNS AT ONE RATIO, WHERE M16 RAN AT TWO.** `check_m17` loads the page once, at `VIEWPORT_SCALE`
+(2.0), and asserts the ratio it rendered at as a clause of its own — because `raw-wheel` drops a
+scale factor and is arithmetically NOTHING at dpr 1, so a run whose viewport silently came up at
+ratio 1 would report that control as moving no clause and call it a held expectation. The clause
+closes the silent case; what is not done is the second pass.
+
+**NO SCROLLBAR, AND THAT IS CONSTRAINT 294's SURVIVING HALF.** A thumb is dragged, and
+press-then-move in a `files` row already begins a data-object drag whose session belongs to the
+kernel (constraint 243). A wheel is aimed and carries no session, which is why it is the gesture
+that landed first.
+
+**THIS ROW HAS NOT BEEN OPENED IN FIREFOX.** The standing debt: four milestones have cost this
+project a defect found by a human opening the page (175, 206, M11's constant-offset blur band, M12's
+dpr-2 budget figure), and a wheel is the second input path after a resize grip whose delivery
+differs by engine. `scripts/bidi.py` drives real trusted input and `www/m17.html` prints its own
+log, so the gate exists — it has not been run.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

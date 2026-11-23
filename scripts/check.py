@@ -759,6 +759,27 @@ class Control:
     #: is what makes it a negative control rather than a source mutation — it puts committed code
     #: back into the state a reader hit.
     EV_B_POINTER = "ev-b-pointer"
+    #: M17's first, and the only one of its three that selects a world. `Surface` COUNTS the
+    #: `DL_CLIP` op and does not apply it (the `setSurfaceControls({noClip})` hook in
+    #: src/wm/surface.mjs), so a row scrolled under the header paints over it. The op reaching the
+    #: renderer and the pixels being clipped are two facts and this moves only the second.
+    NO_CLIP = "no-clip"
+    #: M17's second, and NOT in `docs/PLAN-SHELL.md` §M17's list of three: `src/wm/winhost.mjs`
+    #: posts the browser's `deltaY` with the surface scale dropped, which is M16's units defect in
+    #: the one place M17 could repeat it. It is a no-op at dpr 1 by arithmetic, so it is scored
+    #: against this suite's dpr-2 viewport and the ratio is a clause.
+    RAW_WHEEL = "raw-wheel"
+    #: M17's third, and DECLARED RATHER THAN SELECTED. `docs/PLAN-SHELL.md` §M17 asks for a world
+    #: with no end clamp; the clamp is `scrollBy` in src/bin/files.mjs and that program ships no
+    #: flag to remove it, so www/m17.html refuses the flag up front with the address. The control
+    #: is registered as UNMEASURABLE: what it proves today is that the page will not run the
+    #: shipped clamp and report it green.
+    UNCLAMPED_SCROLL = "unclamped-scroll"
+    #: M17's fourth, declared the same way and for the same reason. `setWheelCoalesce(false)` is
+    #: exported from src/kernel/wins.mjs and no boot-cfg branch in src/kernel/kernel.mjs calls it,
+    #: so the page asks for the world, MEASURES whether it got it, and throws when the kernel
+    #: coalesced anyway. `node bench/m17-wheel/probe.mjs` is the only driver of that world.
+    NO_WHEEL_COALESCE = "no-wheel-coalesce"
     ONCE = "once"
 
 
@@ -815,6 +836,10 @@ CONTROL_RUNS = {
     Control.FROZEN_SURFACE: ("frozen-surface",),
     Control.CSS_PX_SURFACE: ("css-px-surface",),
     Control.EV_B_POINTER: ("ev-b-pointer",),
+    Control.NO_CLIP: ("no-clip",),
+    Control.RAW_WHEEL: ("raw-wheel",),
+    Control.UNCLAMPED_SCROLL: ("unclamped-scroll",),
+    Control.NO_WHEEL_COALESCE: ("no-wheel-coalesce",),
 }
 
 
@@ -2169,6 +2194,28 @@ def _perform_gesture(page, want: Dict[str, Any], *, held: bool) -> bool:
         return False
     if kind == "hover":
         mouse("mouseMoved", at, buttons=0)
+        return held
+    if kind == "wheel":
+        # `deltaX`/`deltaY` ARE DEVICE PIXELS, and the page is the side that scaled them: a
+        # CDP-dispatched wheel delta is in device px and the `wheel` event delivers
+        # `deltaY / devicePixelRatio` (constraint 297, fitted 12/12 across four deltas and three
+        # ratios in bench/m17-wheel/probe.py). So a driver that dispatched a constant and a page
+        # that asserted a constant would both be right at dpr 1 and wrong by the ratio at dpr 2.
+        #
+        # `gapMs` IS A MEASUREMENT AND NOT POLITENESS. A non-passive `wheel` listener makes the
+        # compositor wait for the main thread's ack, and events that arrive unacked are coalesced
+        # BEFORE script sees them: an unpaced 300-notch burst into a window whose program is not
+        # draining arrived as 75 records, which would credit the transport for the kernel's
+        # coalescing. At 10 ms, 300 of 300 arrive (www/m17.html's WHEEL_GAP_MS).
+        dx = float(want.get("deltaX") or 0)
+        dy = float(want.get("deltaY") or 0)
+        gap = float(want.get("gapMs") or 0) / 1000.0
+        for _ in range(max(1, int(want.get("times") or 1))):
+            page.call("Input.dispatchMouseEvent", type="mouseWheel",
+                      x=int(at["x"]), y=int(at["y"]), deltaX=dx, deltaY=dy,
+                      button="none", buttons=0, modifiers=modifiers)
+            if gap:
+                time.sleep(gap)
         return held
     if kind == "key":
         for _ in range(max(1, int(want.get("times") or 1))):
@@ -5177,6 +5224,207 @@ _EV_B_POINTER_FAILS = (
     "a press selects the row a reader pointed at, at five heights",
 ) + tuple(_m16_label(dpr, "the page's own verdict is ok") for dpr in M16_RATIOS)
 
+
+# ======================================================================================
+# M17 — the wheel, the clip, and a list that scrolls
+#
+# EVERY CLAUSE IS ONE BOOLEAN THE PAGE PUBLISHES, paired here with the label this check records and
+# the evidence keys a failure prints. The pairing is the one definition: a label spelled in a
+# control's declaration and a boolean spelled in www/m17.html are the two sides, and a table is how
+# they cannot drift apart. `--negative no-clip` names ONE of these clauses, which is only
+# meaningful because each is a separate expectation.
+#
+# THE RATIO IS A CLAUSE HERE TOO, for `--negative raw-wheel`'s sake rather than for the geometry's:
+# dropping the surface scale is arithmetically a no-op at dpr 1, so a run that silently rendered at
+# ratio 1 would report that control as moving nothing. This suite's viewport is VIEWPORT_SCALE.
+# ======================================================================================
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1.
+_M17_CLIP = (
+    ("files sends one DL_CLIP setter and no reset",
+     "filesSendsOneSetterAndNoReset", ("files",)),
+    ("taskmgr sends a setter and then a DLC_RESET",
+     "taskmgrSendsASetterThenAReset", ("taskmgr",)),
+    # THE OP REACHING THE RENDERER IS NOT THE PIXELS BEING CLIPPED, and `Surface.clips` counts
+    # before the control is consulted — which is what makes `no-clip` a control over a named
+    # subset rather than one that moves everything and separates nothing.
+    ("and the renderer counted the ops",
+     "theRendererCountedThem", ("files", "taskmgr", "controls")),
+)
+
+#: Proof 2. The three fixture clauses first: each of the readings below is vacuous without a
+#: directory that overflows, a list that can scroll, and a wheel that reached the page.
+_M17_SCROLL = (
+    ("the directory the proofs scroll has forty entries",
+     "theDirectoryHasFortyEntries", ("dir", "account")),
+    ("the list can scroll", "theListCanScroll", ("account", "clientH", "scale")),
+    ("the wheel reached the page", "theWheelReachedThePage", ("stages",)),
+    ("the row at the viewport top changed", "theTopRowChanged", ("stages",)),
+    # THE FIXTURE AND THE CLAUSE, SEPARATELY. Without a row above the clip's edge "the header
+    # survived" is an assertion about an empty band and `no-clip` would hold the clause it is
+    # named for — M16's `hasAspectFixture` is the same lesson, measured.
+    ("a row overhangs the header", "aRowOverhangsTheHeader", ("sample", "nudges", "nudgeLimit")),
+    ("and the header survived the scroll, as a pixel",
+     "theHeaderSurvivedTheScroll", ("sample",)),
+    ("it reached the end", "itReachedTheEnd", ("stages", "account")),
+    ("it came back to the top", "itCameBackToTheTop", ("stages", "account")),
+    ("it clamped at both ends", "itClampedAtBothEnds", ("account",)),
+    # THE ONE CLAUSE NOT ASSERTED AGAINST WHAT THE HOST POSTED, and so the only one `raw-wheel`
+    # can turn: every other reading here divides by the same conversion the host applied, which
+    # proves it self-consistent and nothing more.
+    ("and the scroll matched the wheel the page received",
+     "theScrollMatchedTheWheel", ("known", "account", "dpr", "scale")),
+)
+
+#: Proof 3, over a 300-notch stream into `files --no-drain`. `docs/PLAN-SHELL.md` §M17's three
+#: numbers are the `queued`/`coalesced`/`dropped` clauses; the five before them are the fixture,
+#: and `theStreamExceedsTheQueueCap` is the one that says the ring could lap at all.
+_M17_COALESCE = (
+    ("the stream exceeds the queue cap", "theStreamExceedsTheQueueCap",
+     ("notches", "queueCap")),
+    ("the program held its loop", "theProgramHeldItsLoop", ("holdMs", "account")),
+    ("the hold outlasted the stream", "theHoldOutlastedTheStream",
+     ("preStreamMs", "streamMs", "holdMs")),
+    # CONSTRAINT 298 AS AN ASSERTION. If the TRANSPORT coalesced, the kernel would be credited for
+    # its work and no control could turn the three clauses below.
+    ("the page routed every notch", "thePageRoutedEveryNotch",
+     ("notches", "routed", "unknown", "gapMs", "lastWheel")),
+    # Per-window `coalesced:` counts M16 client replacements AND M17 wheel merges in one number,
+    # so a resize mid-stream would inflate it: this is the reading that says none happened.
+    ("nothing resized mid-stream", "nothingResizedMidStream", ("delta", "frame")),
+    ("queued rose by one", "queuedRoseByOne", ("before", "after", "delta")),
+    ("coalesced rose by the rest", "coalescedRoseByTheRest",
+     ("before", "after", "delta", "notches")),
+    ("nothing was dropped", "nothingWasDropped", ("before", "after", "delta")),
+    ("/proc publishes the same numbers", "procPublishesTheSameNumbers", ("greps",)),
+    ("the program saw one summed record", "theProgramSawOneSummedRecord",
+     ("account", "drainedMs")),
+    # TWO CLAUSES, because an appending stream fails only the first: 256 records of a 300-notch
+    # stream still scroll without clamping, so the offset-equals-delta clause would HOLD while the
+    # reader lost 44 notches.
+    ("every notch reached the program", "everyNotchReachedTheProgram",
+     ("want", "account", "lastWheel")),
+    ("the offset is the full summed delta", "theOffsetIsTheFullSummedDelta",
+     ("want", "account")),
+)
+
+#: proof name -> its clause table. Read by the body and by the inventory, so a clause added to one
+#: reaches the other.
+_M17_PROOFS = (("clip", _M17_CLIP), ("scroll", _M17_SCROLL), ("coalesce", _M17_COALESCE))
+
+M17_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+) + tuple(label for _, table in _M17_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m17.html",
+)
+
+M17_DOCUMENT = "/www/m17.html?proofs=1"
+
+M17_READY = ("(() => { const M = globalThis.M17 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M17 = """(() => {
+  const M = globalThis.M17 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    clip: one(P.clip),
+    scroll: one(P.scroll),
+    coalesce: one(P.coalesce),
+  }
+})()"""
+
+M17_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list,
+    "clip": (dict, type(None)),
+    "scroll": (dict, type(None)),
+    "coalesce": (dict, type(None)),
+}
+
+#: What COUNTING THE `DL_CLIP` OP AND NOT APPLYING IT must break: the header pixel, and nothing
+#: else. MEASURED at dpr 1 and dpr 2 — the op clauses hold because `Surface.clips` is incremented
+#: before the control is consulted, and BOTH CLAMP CLAUSES HOLD, which is `docs/PLAN-SHELL.md`
+#: §M17's requirement of this control in as many words.
+_NO_CLIP_FAILS = (
+    "and the header survived the scroll, as a pixel",
+    "the page's own verdict is ok",
+)
+
+#: What DROPPING THE SURFACE SCALE OUT OF A POSTED WHEEL DELTA must break: the magnitude clause,
+#: and nothing else. The aim and both clamps are converted by `#dropPointAt` whether or not the
+#: delta is, so a reader still scrolls — just by half as much at dpr 2. Measured: deltaY 100 at a
+#: scale of 2 posts `dy: 100` instead of `dy: 200`, with the position unchanged at (400,300).
+#:
+#: IT IS A NO-OP AT dpr 1 BY ARITHMETIC, which is why the ratio is a clause above.
+_RAW_WHEEL_FAILS = (
+    "and the scroll matched the wheel the page received",
+    "the page's own verdict is ok",
+)
+
+#: What REMOVING THE END CLAMP must break: the two clauses about where the list STOPS AT THE
+#: BOTTOM, and nothing else.
+#:
+#: THE TOP CLAMP IS DELIBERATELY LEFT IN, and the first draft of this control is why. Removing both
+#: edges also turned `and the scroll matched the wheel the page received` — not a defect in the
+#: check but a consequence: the page establishes that clause by scrolling back to the top and
+#: measuring a known delta from there, and a list with no top cannot get there. The harness refused
+#: the control for moving a clause it claimed not to touch, which is `Expect(failed=..)` doing
+#: exactly the job CLAUDE.md gives it. `docs/PLAN-SHELL.md` §M17 asks for "the END clamp" in those
+#: words, and the narrower world is the one that makes "the clamp clauses fail alone" true.
+_UNCLAMPED_FAILS = (
+    "it reached the end",
+    "it clamped at both ends",
+    "the page's own verdict is ok",
+)
+
+#: What APPENDING INSTEAD OF SUMMING must break. MEASURED: `queued` 3 -> 303, `coalesced` 0,
+#: `dropped` 47, `pending` 256. The plan predicts 300/0/44; the extra three are notches already
+#: queued before the stream started, so the DELTAS are 300 and 44 exactly as predicted and the
+#: absolute figures are three higher.
+#:
+#: THE FULL-DELTA CLAUSE DOES NOT FAIL HERE, AND THAT CORRECTS `docs/PLAN-SHELL.md` §M17, which
+#: names it as one of this control's casualties. It cannot be: `account.dyTotal` is summed inside
+#: `scrollBy`, so it totals the deltas the program RECEIVED, and `scroll == dyTotal` survives any
+#: number of records the kernel threw away. `src/bin/files.mjs` says so where it is accumulated —
+#: "a notch the kernel dropped is not in either number" — so the clause measures CLAMPING, and
+#: dropping is caught by `every notch reached the program`, which compares against what the PAGE
+#: sent and does go red. One clause, one job, rather than one clause asked to carry two.
+#:
+#: `/proc publishes the same numbers` HOLDS, and that is the point of keeping it out of this tuple:
+#: procfs agreeing with the kernel's own counters is true whatever those counters say.
+_NO_WHEEL_COALESCE_FAILS = (
+    "queued rose by one",
+    "coalesced rose by the rest",
+    "nothing was dropped",
+    "the program saw one summed record",
+    "every notch reached the program",
+    "the page's own verdict is ok",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -5261,6 +5509,15 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "still be drawn by the page, which is why `www/m16.html` refuses before it builds "
                 "a host. UNMEASURABLE rather than FAIL, because a FAIL would claim a program "
                 "re-surfaced and got the unit wrong.",
+        ), "m17": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and no wheel record can be queued anywhere — "
+                "and a list that cannot scroll clamps at nothing. A CANVAS AND A WHEEL LISTENER "
+                "WOULD BOTH STILL WORK, which is this page's own case of constraint 40 and why it "
+                "refuses before it builds a host: scrolling a picture of a file list is not a "
+                "program receiving input. UNMEASURABLE rather than FAIL, because a FAIL would "
+                "claim 300 notches were queued and counted wrongly.",
         ), "m15": Expect(
             UNMEASURABLE,
             why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots and "
@@ -6588,6 +6845,122 @@ CONTROLS: Dict[str, NegativeControl] = {
             why="a press on a row whose y has bit 4 clear must select nothing",
             failed=_EV_B_POINTER_FAILS,
             held=held_rest(M16_LABELS, _EV_B_POINTER_FAILS),
+        )},
+    ),
+    "no-clip": NegativeControl(
+        name="no-clip",
+        why="no_clip=1: `Surface` COUNTS the `DL_CLIP` op and does not apply it (the "
+            "`setSurfaceControls({noClip})` hook in src/wm/surface.mjs), so a row scrolled under "
+            "the header paints over it. `docs/PLAN-SHELL.md` §M17's first control.\n"
+            "WHAT MUST BREAK: the header pixel, and nothing else. THE CLAMP CLAUSES MUST HOLD — "
+            "the plan requires that in as many words, and a control that also moved them would be "
+            "evidence about a page rather than about a clip.\n"
+            "ONE WORLD AND ONE DEFINITION: the op is dropped by the RENDERER and not by the "
+            "program. `src/bin/files.mjs` deliberately ships no flag that omits the op, because "
+            "two ways to produce one world is how they come to disagree.\n"
+            "WHERE IT BITES, because the declaration rests on it: proof 2 hunts for an offset at "
+            "which a row really does overhang the clip's top edge before it reads the pixel. "
+            "Without that fixture the clause is an assertion about an empty band and this control "
+            "would hold the very clause it is named for — M16's `hasAspectFixture` is the same "
+            "lesson, measured.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_clip", "1"),),
+        expects={"m17": Expect(
+            Outcome.FAIL,
+            why="an unclipped row must paint over the header the batch drew before it",
+            failed=_NO_CLIP_FAILS,
+            held=held_rest(M17_LABELS, _NO_CLIP_FAILS),
+        )},
+    ),
+    "raw-wheel": NegativeControl(
+        name="raw-wheel",
+        why="raw_wheel=1: `src/wm/winhost.mjs` posts the BROWSER's `deltaY` with the surface "
+            "scale dropped, through `setHostControls` — M16's units defect in the one place M17 "
+            "could repeat it. NOT one of the three controls `docs/PLAN-SHELL.md` §M17 names; it "
+            "is the host slice's own, and it is registered because it is the only world that "
+            "turns the magnitude clause.\n"
+            "WHAT MUST BREAK: the scroll MAGNITUDE, and nothing else. Measured: a deltaY of 100 "
+            "at a scale of 2 posts `dy: 100` instead of `dy: 200`, and the position stays "
+            "(400,300) — so the aim and both clamps are untouched and a reader still scrolls, "
+            "just by half as far.\n"
+            "IT IS A NO-OP AT dpr 1 BY ARITHMETIC, so it is scored against this suite's dpr-2 "
+            "viewport and the ratio the page rendered at is one of the check's own clauses. M11 "
+            "and M12 each cost a milestone to a figure taken at one ratio (constraint 264); this "
+            "is the same trap from the other side — a control that would prove nothing at the "
+            "wrong one.\n"
+            "WHAT IT SHOWS: that the nine clauses which read `host.lastWheel` back are "
+            "self-consistency and not arithmetic. Measured — not one of them moves under this "
+            "control, because every one of them divides by the conversion the host already got "
+            "wrong.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("raw_wheel", "1"),),
+        expects={"m17": Expect(
+            Outcome.FAIL,
+            why="a wheel posted in the browser's own unit must move the list by the wrong distance",
+            failed=_RAW_WHEEL_FAILS,
+            held=held_rest(M17_LABELS, _RAW_WHEEL_FAILS),
+        )},
+    ),
+    "unclamped-scroll": NegativeControl(
+        name="unclamped-scroll",
+        why="unclamped_scroll=1: `docs/PLAN-SHELL.md` §M17's second control — `scrollBy` in "
+            "src/bin/files.mjs accepts an offset outside [0, maxScroll], through that program's "
+            "own declared `--unclamped-scroll` argv flag. The clamp clauses must fail alone.\n"
+            "IT ARRIVES ON ARGV AND NOT IN A BOOT CFG, which is the one structural difference "
+            "between this control and every other M17 one: the clamp is the PROGRAM's, so the "
+            "world is selected where www/m17.html spawns `files` and not where it boots a kernel. "
+            "bench/m17-wheel/probe.mjs cannot stand in for the same reason.\n"
+            "THE PAGE MEASURES THAT THE FLAG WAS HONOURED and throws with an address if the "
+            "program clamped anyway. A flag that silently fell through to the directory operand "
+            "would let the clamp clauses report GREEN under the control whose whole job is to turn "
+            "them red — which is 'a control a check believed was on and was not', the failure "
+            "every control in this file is written against.\n"
+            "NOTHING COUNTS A CLAMP IN THIS WORLD, deliberately: a clamp that did not happen must "
+            "not be reported as one, or the program's own report would disagree with its "
+            "behaviour and the check reads that report.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("unclamped_scroll", "1"),),
+        expects={"m17": Expect(
+            Outcome.FAIL,
+            why="a list that accepts an offset past either end must fail the three clauses about "
+                "where it stops, and hold the one about how far a notch moved it",
+            failed=_UNCLAMPED_FAILS,
+            held=held_rest(M17_LABELS, _UNCLAMPED_FAILS),
+        )},
+    ),
+    "no-wheel-coalesce": NegativeControl(
+        name="no-wheel-coalesce",
+        why="no_wheel_coalesce=1: `docs/PLAN-SHELL.md` §M17's third control — the kernel APPENDS "
+            "a notch instead of summing it into the tail, so against the same non-draining "
+            "300-notch stream `queued:` must reach 300, `coalesced:` must stay 0, `dropped:` must "
+            "reach 44 and the full-delta clause must fail.\n"
+            "THE SWITCH IS `setWheelCoalesce(false)`, exported from src/kernel/wins.mjs and armed "
+            "by a bench-gated `cfg.noWheelCoalesce` branch in src/kernel/kernel.mjs beside "
+            "`cfg.noCascade`.\n"
+            "THE PAGE MEASURES WHETHER IT GOT THE WORLD IT ASKED FOR and throws when the kernel "
+            "coalesced anyway. FAIL-CLOSED IS THE WHOLE POINT: a page that merely passed the key "
+            "would report green proofs over an unmodified kernel, with the kernel's own "
+            "coalescing silently credited to the control. That is 'a control a check believed was "
+            "on and was not', which every other control in this file is written against — and it "
+            "is not hypothetical here: this control reported UNMEASURABLE until the boot branch "
+            "existed, and the page's own measurement is what said so instead of a green run.\n"
+            "WHAT THE DROPPED COUNT MEANS: `WIN_EVENT_CAP` is 256 and the stream is 300, so 44 "
+            "records lap the ring — and `push` discards the NEWEST, which is the reader's latest "
+            "notch. That is why the offset falls short rather than overshooting, and why the list "
+            "moves the wrong way on a direction change.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_wheel_coalesce", "1"),),
+        expects={"m17": Expect(
+            Outcome.FAIL,
+            why="an appended stream must lap the ring: queued rises by the stream length, "
+                "coalesced stays 0, the newest records are dropped, and the program is told about "
+                "fewer notches than the page sent it",
+            failed=_NO_WHEEL_COALESCE_FAILS,
+            held=held_rest(M17_LABELS, _NO_WHEEL_COALESCE_FAILS),
         )},
     ),
 }
@@ -12872,7 +13245,7 @@ def check_m15(env: Env) -> None:
                     "the m14.html served does not match www/m14.html on disk")
 
 
-def _m16_blame(got: Dict[str, Any]) -> str:
+def _page_blame(got: Dict[str, Any]) -> str:
     """The kernel's own complaints, appended to a reason that cannot name them itself.
 
     A PAGE THAT CANNOT MEASURE NAMES THE WAIT; THE KERNEL NAMES THE CAUSE, and the two are
@@ -12917,15 +13290,15 @@ def _m16_pass(env: Env, dpr: float, *, reload_first: bool) -> Tuple[int, Dict[st
     if got["state"] == "error":
         env.unmeasurable(
             "www/m16.html reported state 'error' at dpr %g before producing proofs: %s. Nothing "
-            "below was measured.%s" % (dpr, got["why"] or "no reason given", _m16_blame(got)))
+            "below was measured.%s" % (dpr, got["why"] or "no reason given", _page_blame(got)))
     if got["state"] == "aborted":
         env.unmeasurable(
             "www/m16.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
             "constructible, so no process runs, no window is framed and no surface is ever asked "
-            "for.%s" % (got["why"] or "no reason given", _m16_blame(got)))
+            "for.%s" % (got["why"] or "no reason given", _page_blame(got)))
     if got["state"] != "done":
         env.unmeasurable("www/m16.html never reached a terminal state at dpr %g (state=%r)%s"
-                         % (dpr, got["state"], _m16_blame(got)))
+                         % (dpr, got["state"], _page_blame(got)))
     return performed, got
 
 
@@ -13160,6 +13533,148 @@ def check_m16(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m16.html", env.served_matches_disk(env.document),
                     "the m16.html served does not match www/m16.html on disk")
+
+
+#: How long the driver waits for www/m17.html to reach a terminal state.
+#:
+#: THE PAGE HAS A WALL-TIME FLOOR AND IT IS NOT A BUDGET: proof 3's fixture is `files --no-drain`
+#: holding its event loop for 28 s, and the program resumes only when that hold ends. On top of it
+#: sit the staging (a 40-entry directory, two programs, a re-place) and the stream itself — 300
+#: `Input.dispatchMouseEvent` round trips at about 24 ms each plus a 10 ms pace, so about 10 s.
+#: Measured at about 42 s at dpr 1. This is a ~4x margin on that, because the one thing a smaller
+#: number buys is a BROKEN run on a slower machine.
+M17_TIMEOUT = 240.0
+
+
+def _m17_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE EXPECTATION PER CLAUSE AND NOT ONE PER PROOF, because `--negative no-clip` names a single
+    clause: a check that recorded "proof 2 passed" could not tell a control that broke the header
+    pixel from one that broke the clamp, and a control satisfied by any failure verifies nothing.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause,
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m17",
+    milestone="m17",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_CLIP, Control.RAW_WHEEL,
+              Control.UNCLAMPED_SCROLL, Control.NO_WHEEL_COALESCE),
+    labels=M17_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M17_DOCUMENT,
+    ready_expr=M17_READY,
+    ready_what="globalThis.M17 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m17.html?proofs=1)",
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M17 && globalThis.M17.state",
+    refusal_want="aborted",
+    note="THE WHEEL, THE CLIP, AND A LIST THAT SCROLLS — the first REAL WHEEL this suite has ever "
+         "dispatched, and `_perform_gesture` grew a `wheel` kind for it. The delta is in DEVICE "
+         "px: a CDP-dispatched wheel delta is device px and the `wheel` event delivers `deltaY / "
+         "devicePixelRatio` (constraint 297, fitted 12/12 across four deltas and three ratios in "
+         "bench/m17-wheel/probe.py), so the page scales what it asks for and no clause here "
+         "asserts against the number that was dispatched.\n"
+         "`gapMs` IS PART OF THE MEASUREMENT. A non-passive `wheel` listener makes the compositor "
+         "wait for the main thread's ack, and unacked events are coalesced BEFORE script sees "
+         "them: an unpaced 300-notch burst into the held window arrived as 75 records, which "
+         "would credit the transport with the kernel's coalescing and leave --negative "
+         "no-wheel-coalesce unable to lap a 256-record ring. At 10 ms, 300 of 300 arrive, and "
+         "`the page routed every notch` is the clause that says so.\n"
+         "TWO OF THE PLAN'S THREE CONTROLS SELECT NO WORLD, AND THE PAGE REFUSES RATHER THAN "
+         "RUNNING GREEN. --negative unclamped-scroll needs an `--unclamped-scroll` flag in "
+         "src/bin/files.mjs, where `scrollBy` owns the clamp; --negative no-wheel-coalesce needs a "
+         "bench-gated `cfg.noWheelCoalesce` branch in src/kernel/kernel.mjs calling the "
+         "`setWheelCoalesce` that src/kernel/wins.mjs already exports. Both are registered as "
+         "UNMEASURABLE with the address, because the alternative is a control that runs the "
+         "shipped code and reports it as evidence for itself. `it clamped at both ends` is "
+         "therefore a clause no control yet turns, and `node bench/m17-wheel/probe.mjs` is the "
+         "only driver of the appending kernel.\n"
+         "negative controls: --negative no-clip counts the `DL_CLIP` op and does not apply it, so "
+         "an overhanging row paints over the header — and it bites only because proof 2 first "
+         "HUNTS for an offset at which a row really overhangs the clip's edge, without which the "
+         "clause is about an empty band. --negative raw-wheel drops the surface scale out of the "
+         "posted delta and turns the ONE clause that does not read the host's own conversion "
+         "back; it is arithmetically a no-op at dpr 1, so the ratio the page rendered at is a "
+         "clause of its own. --negative no-isolation must come out BROKEN: no SAB, no kernel, no "
+         "window, nothing to queue a notch in.",
+)
+def check_m17(env: Env) -> None:
+    performed = drive_gestures(env, "M17", timeout=M17_TIMEOUT)
+    got = env.read(READ_M17, M17_SHAPE)
+    if got["state"] == "error":
+        # THE PAGE'S REFUSALS COME OUT HERE, and two of them are controls: `unclamped_scroll` and
+        # `no_wheel_coalesce` both select worlds nothing in src/ builds, and the page says so with
+        # the address rather than running the shipped code. BROKEN is the declared outcome for
+        # both, so this path is what satisfies them.
+        env.unmeasurable(
+            "www/m17.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m17.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed and there is nothing for a "
+            "wheel record to be queued in.%s" % (got["why"] or "no reason given",
+                                                 _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m17.html never reached a terminal state (state=%r)%s"
+                         % (got["state"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE RATIO, AND IT IS HERE FOR A CONTROL'S SAKE. `--negative raw-wheel` drops the surface
+    # scale, which is arithmetically nothing at dpr 1 — so a run whose viewport silently came up
+    # at ratio 1 would report that control as moving no clause and call it a held expectation.
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN. Every figure below comes from a wheel this driver dispatched; a
+    # page that finished without asking for one would have measured a list nobody turned a wheel
+    # over and still produced an offset.
+    env.expect_that("the page was really driven",
+                    performed >= 5 and got["gestures"] == performed,
+                    {"performed": performed, "pageLogged": got["gestures"],
+                     "phase": got["phase"]})
+    # AND THE WORLD IS THE ONE ASKED FOR, read back out of the modules that own the switches —
+    # `surfaceControlsInForce` and the host's own — rather than out of the page's query parsing.
+    # The two cfg-only flags are checked against the document, because the page refuses them
+    # before anything is in force at all.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    env.expect_that("the controls the page reports are the ones asked for",
+                    bool(live) and bool(cfg.get("proofs"))
+                    and bool(live.get("noClip")) == bool(cfg.get("noClip"))
+                    and bool(live.get("rawWheel")) == bool(cfg.get("rawWheel"))
+                    and bool(cfg.get("noClip")) == ("no_clip=1" in env.document)
+                    and bool(cfg.get("rawWheel")) == ("raw_wheel=1" in env.document)
+                    and bool(cfg.get("noWheelCoalesce")) == ("no_wheel_coalesce=1" in env.document)
+                    and bool(cfg.get("unclampedScroll")) == ("unclamped_scroll=1" in env.document),
+                    {"asked": cfg, "inForce": live, "document": env.document})
+
+    for proof, table in _M17_PROOFS:
+        _m17_record(env, got, proof, table)
+
+    env.expect("the page's own verdict is ok", got["verdict"], "ok")
+
+    # AN ARTIFACT AND NOT AN ASSERTION: a clipped list and an unclipped one differ by one band of
+    # pixels, and the clause that reads it reads a single pixel out of the surface rather than out
+    # of this PNG (constraint 40).
+    env.shoot("m17-scroll")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m17.html", env.served_matches_disk(env.document),
+                    "the m17.html served does not match www/m17.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

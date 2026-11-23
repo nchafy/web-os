@@ -13,8 +13,8 @@
 // revoked, which M12's blur governor needs.
 
 import {
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA,
-  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLC_RESET,
   decodeDrawOps, cssColor, textOfOps,
 } from "../abi.mjs";
 
@@ -40,11 +40,16 @@ export { WPTR_DOWN, WPTR_UP, WPTR_MOVE } from "../abi.mjs";
  *
  * MODULE-LEVEL, which is `src/wm/window.mjs`'s shape for `geometryControls` and its reason: the
  * headline path reads a plain boolean, and nothing here is reachable from a process.
+ *
+ * `noClip` is M17's: the `DL_CLIP` op is COUNTED and not applied, so a scrolled row paints over
+ * the header a program drew. Counted rather than dropped on purpose — the op did reach the
+ * renderer, and a control that also zeroed the counter would move the clauses that assert the op
+ * arrived as well as the pixel clause it is about (`CLAUDE.md`: a control moves a NAMED subset).
  */
-let surfaceControls = { noFill: false };
+let surfaceControls = { noFill: false, noClip: false };
 
 export function setSurfaceControls(opts = {}) {
-  surfaceControls = { noFill: opts.noFill === true };
+  surfaceControls = { noFill: opts.noFill === true, noClip: opts.noClip === true };
   return { ...surfaceControls };
 }
 
@@ -56,6 +61,10 @@ export function surfaceControlsInForce() {
 }
 
 export class Surface {
+  /** Whether a baseline snapshot of the 2D state is outstanding on the canvas's stack. One is,
+   *  at all times once a batch has run — see `#resetClip`. */
+  #clipScope = false;
+
   /** `spec.into` is the window's client area. The canvas is sized in DEVICE pixels — the size the
    *  process asked for — and scaled to fill the client area by CSS, so a process that asks for a
    *  surface smaller than its frame gets a scaled one rather than a corner of one. */
@@ -69,6 +78,12 @@ export class Surface {
     this.unknown = 0;
     /** How many text RUNS were drawn, which a check reads back. */
     this.text = 0;
+    /* HOW MANY CLIPS THE RENDERER WAS ASKED FOR, counted the way `text` is: a page cannot read a
+       canvas's clip back, so this is the only evidence the op arrived. The two are separate
+       because "never clipped" and "clipped and then reset" are different states and a reader
+       telling them apart is the whole of M17's header clause. */
+    this.clips = 0;
+    this.clipResets = 0;
     const canvas = document.createElement("canvas");
     canvas.className = "surface";
     canvas.width = this.w;
@@ -118,6 +133,16 @@ export class Surface {
      * garbage (`CLAUDE.md`, harness honesty). */
     const ops = decodeDrawOps(bytes, bytes.length);
     this.batches += 1;
+    /* THE CLIP IS DROPPED HERE, AT THE TOP OF EVERY BATCH, AND THIS CALL IS LOAD-BEARING. A clip
+     * left set by batch N makes batch N+1 draw NOTHING — a window that goes blank on its next
+     * repaint, with no error anywhere to say why. A canvas `clip()` only ever intersects, so
+     * `restore()` is the only way back out of one and a batch boundary is the only place the
+     * renderer knows a program is done with it.
+     *
+     * AT THE TOP RATHER THAN AT THE END, so a batch that throws part-way through the loop below
+     * cannot leave a clip armed either. The cost is that the baseline snapshot stays outstanding
+     * between batches, which nothing else can observe: this is the only writer of this canvas. */
+    this.#resetClip();
     /* INDEXED, because a text run is a header plus continuation records and the header has to
      * skip past its own data (`textOfOps` says how many). A `for..of` could not. */
     for (let i = 0; i < ops.length; i += 1) {
@@ -179,6 +204,27 @@ export class Surface {
           i += got.records - 1;
           break;
         }
+        case DL_CLIP:
+          if (op.flags & DLC_RESET) {
+            this.clipResets += 1;
+            // a0..a3 ARE IGNORED. A reset is not "clip to the whole surface" — the surface is the
+            // clip's default and a program that does not know its own extent could not name it.
+            this.#resetClip();
+            break;
+          }
+          /* COUNTED BEFORE THE CONTROL IS CONSULTED: the op reached the renderer either way, and
+             the `noClip` world is about what the pixels then do. */
+          this.clips += 1;
+          if (!surfaceControls.noClip) {
+            /* `beginPath` IS NOT OPTIONAL. `DL_LINE` leaves its segment in the current path, and a
+               clip built on top of it would be the region of that path plus this rectangle. A
+               SECOND clip in one batch intersects, which is the canvas's own rule and the reason
+               `DLC_RESET` exists: two viewports in one window need a reset between them. */
+            this.g.beginPath();
+            this.g.rect(op.a0, op.a1, op.a2, op.a3);
+            this.g.clip();
+          }
+          break;
         case DL_TEXT_DATA:
           /* REACHED ONLY WHEN A DATA RECORD HAD NO HEADER, because a well-formed run is skipped
            * past above. That is a malformed batch, and it is counted rather than drawn. */
@@ -190,6 +236,21 @@ export class Surface {
       }
     }
     return ops.length;
+  }
+
+  /**
+   * BACK TO THE SURFACE'S FULL EXTENT, and a fresh baseline for the next clip to be popped to.
+   * Exactly one snapshot is outstanding on the canvas's state stack once a batch has run, so a
+   * `restore` here can never pop past the state the constructor left.
+   *
+   * `restore` also discards the fill, stroke, font and alignment an op set, which is safe only
+   * because every drawing op in `replay` sets its own before drawing. An op that came to rely on
+   * inherited state would start losing it at a reset.
+   */
+  #resetClip() {
+    if (this.#clipScope) this.g.restore();
+    this.g.save();
+    this.#clipScope = true;
   }
 
   /** One pixel, as `rgba(r,g,b,a)` with a 0–255 alpha — WHAT A READER WOULD SEE, read back out of
@@ -265,6 +326,7 @@ export class Surface {
   report() {
     return {
       w: this.w, h: this.h, ops: this.ops, batches: this.batches, unknown: this.unknown,
+      text: this.text, clips: this.clips, clipResets: this.clipResets,
       extent: this.extent(),
     };
   }

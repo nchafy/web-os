@@ -225,6 +225,31 @@ class Firefox:
         actions.append({"type": "pointerUp", "button": 0})
         self.pointer(actions)
 
+    def wheel(self, x: float, y: float, dy: float, *, dx: float = 0, times: int = 1,
+              pause_ms: int = 0) -> None:
+        """Turn the wheel over (x, y). A `wheel` source, which is its own BiDi input type.
+
+        THE DELTA'S UNIT IS NOT CDP'S. `Input.dispatchMouseEvent` takes DEVICE pixels and the
+        `wheel` event reports `deltaY / devicePixelRatio` (constraint 297); BiDi's `scroll` takes
+        CSS pixels, so the page receives what was asked for. A driver that reuses a CDP figure here
+        scrolls by the ratio too far — which is the M11/M12/M16 trap from the other side, so the
+        unit is stated at the one place a caller passes it.
+
+        `pause_ms` separates the notches. A burst with no gap is still delivered one event per
+        notch (constraint 298 measured that in Chrome), but a kernel that coalesces into its tail
+        will merge them, and a gate about scroll DISTANCE does not care while one about record
+        COUNTS does.
+        """
+        actions: list = [{"type": "scroll", "x": int(x), "y": int(y),
+                          "deltaX": int(dx), "deltaY": int(dy)}]
+        for _ in range(max(0, times - 1)):
+            if pause_ms:
+                actions.append({"type": "pause", "duration": int(pause_ms)})
+            actions.append({"type": "scroll", "x": int(x), "y": int(y),
+                            "deltaX": int(dx), "deltaY": int(dy)})
+        self.call("input.performActions", {"context": self.ctx, "actions": [{
+            "type": "wheel", "id": "wheel1", "actions": actions}]})
+
     def type_keys(self, text: str) -> None:
         self.call("input.performActions", {"context": self.ctx, "actions": [{
             "type": "key", "id": "keyboard1",

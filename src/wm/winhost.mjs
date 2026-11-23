@@ -14,6 +14,7 @@
 //   kernel -> win-out     -> cells into the widget
 //   kernel -> win-destroy -> the frame goes, children first
 //   browser keydown       -> win-in with a WEV_KEY record
+//   browser wheel         -> win-in with a WEV_WHEEL record, in the WINDOW's unit
 //   browser drag/resize   -> win-geom with the box the clamp settled on
 
 import { Win, geometryControlsInForce } from "./window.mjs";
@@ -31,9 +32,43 @@ import { IconView } from "./desktop.mjs";
 import {
   WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
   WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
+  WEV_WHEEL, WWHEEL_PAGE, packWheelPoint,
   WMODAL_SYSTEM, WMODE_BLOCKING,
   WST_NORMAL, WST_MIN, WROLE_NORMAL, WROLE_DESKTOP,
 } from "../abi.mjs";
+
+/** The modifiers held, as `mods` bits. ONE mapping for every event type that carries them — a key,
+ *  a pointer and a wheel had three copies of these three lines, and `mods` is one namespace
+ *  (src/abi.mjs). An absent event is no modifiers, which is `#keys`'s synthetic-caller case. */
+function modifierBits(event) {
+  let mods = 0;
+  if (!event) return mods;
+  if (event.shiftKey) mods |= WMOD_SHIFT;
+  if (event.ctrlKey) mods |= WMOD_CTRL;
+  if (event.altKey) mods |= WMOD_ALT;
+  return mods;
+}
+
+/** How far apart the two probe points of `#wheel`'s scale reading are, in CSS px.
+ *
+ *  IT IS LONG ON PURPOSE. `#dropPointAt` rounds to the window's own unit, so differencing it over a
+ *  short span quantizes the answer: a text window's cell is ~16 CSS px, and a notch differenced
+ *  across one cell boundary is worth 7 cells at one pointer position and 6 a pixel lower. Over a
+ *  thousand px the converter's ±1 unit is under a tenth of a percent of the scale. */
+const WHEEL_SCALE_SPAN_PX = 1000;
+
+/** An already-scaled delta rounded to whole units, and NEVER zero where the gesture was not.
+ *
+ *  A notch below one unit must still move the list by one, or a trackpad's fine scrolling leaves a
+ *  window looking dead — and the host cannot carry the remainder instead, because the kernel sums
+ *  records and a remainder held here would be state outside the thing that resets. One cell IS the
+ *  quantum of a text window, so one is the honest answer rather than a rounding up. */
+function wheelUnits(scaled) {
+  const n = Math.round(scaled);
+  if (n !== 0) return n;
+  if (scaled > 0) return 1;
+  return scaled < 0 ? -1 : 0;
+}
 
 /** Cell metrics, measured once per host from a real rendered glyph rather than assumed: the cell
  *  count is what a resize event carries, and a hard-coded 8×16 would make every `stty size` wrong
@@ -71,12 +106,23 @@ function measureCell(into) {
  * until M13 — frames hanging outside a desktop that shrank, with their captions out of reach, and
  * a kernel still accounting the boxes they used to have.
  */
-let hostControls = { staleGeom: false, noRelayout: false };
+/**
+ * And M17's: `#wheel` posts the BROWSER's delta rather than the window's own unit — the defect M16
+ * cost a milestone for, in the one place M17 could repeat it.
+ *
+ * WHAT IT IS ABOUT: a wheel's delta and its position must be in one unit (constraint 248), and the
+ * position is converted by `#dropPointAt` whether or not the delta is — so a run with the scale
+ * dropped still aims at the right row and still clamps at both ends. It scrolls by the wrong
+ * amount, which is the only clause that can tell the two worlds apart: at dpr 2 a surfaced window
+ * moves half as far as the reader asked, and a text window moves a cell per pixel.
+ */
+let hostControls = { staleGeom: false, noRelayout: false, rawWheel: false };
 
 export function setHostControls(opts = {}) {
   hostControls = {
     staleGeom: opts.staleGeom === true,
     noRelayout: opts.noRelayout === true,
+    rawWheel: opts.rawWheel === true,
   };
   return { ...hostControls };
 }
@@ -117,7 +163,11 @@ export class WinHost {
       shows: 0, roles: 0, itemLists: 0, itemAsks: 0, iconViews: 0, watcherFaults: 0,
       // M16: surfaces rebuilt at a new size (as against created), geometry reports coalesced into
       // an animation frame, and right-clicks whose browser menu was refused.
-      resurfaces: 0, geomFrames: 0, contextmenus: 0 };
+      resurfaces: 0, geomFrames: 0, contextmenus: 0,
+      // M17: wheel records routed into a window's queue. What the PAGE sent, as against what the
+      // kernel queued after coalescing — the two differ by design, so neither answers for the
+      // other.
+      wheels: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -146,6 +196,10 @@ export class WinHost {
      *  policy it is supposed to be drawing (constraint 226). */
     this.flatSet = new Set();
     this.lastBlur = null;
+    /** M17. The last `WEV_WHEEL` this file sent, with the browser delta it came from. Declared
+     *  here rather than left absent so "no wheel yet" and "a wheel whose conversion failed" are not
+     *  the same reading. See `#wheel`. */
+    this.lastWheel = null;
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -454,6 +508,22 @@ export class WinHost {
       this.stats.raiseAsks += 1;
       this.post({ t: "win-raise", win: id });
     }, true);
+    /* M17. THE WHEEL, ON THE CLIENT AREA AND NOT ON THE CANVAS. `bodyEl` outlives every content
+     * mode — a text widget, a surface, the desktop's icon view, and a surface replaced by the next
+     * resize — so one listener here is the one route a wheel takes whatever is inside the window,
+     * and `#wheel` asks `#dropPointAt` which unit that is. Wiring it beside the pointer listeners
+     * would need re-wiring on every `#surface` and would reach a text window never.
+     *
+     * NOT PASSIVE, AND THE `preventDefault` IS THE REASON. A wheel inside a window is the window's
+     * gesture; without this the host document ALSO acts on it — the page scrolls under the desktop,
+     * a terminal's `overflow: auto` pre scrolls itself (src/wm/aero.mjs), and Ctrl+wheel zooms the
+     * browser — so one notch gets two responders and the frames move out from under the pointer
+     * that aimed at them. It is M16's refused context menu again (constraint 283's neighbour): a
+     * host behaviour drawn over the operating system. */
+    win.bodyEl.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      this.#wheel(entry, e);
+    }, { passive: false });
     // Drag and arrow-key moves both end in `apply()`, so one listener per frame covers both.
     win.el.addEventListener("pointerup", () => this.#report(entry));
     win.barEl.addEventListener("keyup", () => this.#report(entry));
@@ -470,12 +540,7 @@ export class WinHost {
     const entry = this.get(id);
     if (!entry) return;
     this.stats.keys += 1;
-    let mods = 0;
-    if (event) {
-      if (event.shiftKey) mods |= WMOD_SHIFT;
-      if (event.ctrlKey) mods |= WMOD_CTRL;
-      if (event.altKey) mods |= WMOD_ALT;
-    }
+    const mods = modifierBits(event);
     // ONE RECORD PER KEY, with its UTF-8 bytes inline: a key that needed a second read to collect
     // its payload would be a second readiness edge for one press.
     this.post({ t: "win-in", win: id, evs: [{ type: WEV_KEY, mods, ...packKeyBytes(bytes) }] });
@@ -595,10 +660,7 @@ export class WinHost {
       if (!entry.surface) return;
       const at = entry.surface.pointAt(event);
       if (!at) return;
-      let mods = flags;
-      if (event.shiftKey) mods |= WMOD_SHIFT;
-      if (event.ctrlKey) mods |= WMOD_CTRL;
-      if (event.altKey) mods |= WMOD_ALT;
+      const mods = flags | modifierBits(event);
       this.stats.pointers += 1;
       this.post({
         t: "win-in",
@@ -1031,6 +1093,79 @@ export class WinHost {
     };
   }
 
+  /**
+   * M17. THE WHEEL TURNED INSIDE A WINDOW: one `WEV_WHEEL` on that window's own fd.
+   *
+   * THE UNIT CONVERSION IS THE WHOLE OF THIS METHOD. A `wheel` event's `deltaX`/`deltaY` and its
+   * `clientX`/`clientY` are CSS px; a `WEV_WHEEL` carries SURFACE px for a surfaced window and
+   * CELLS for a text one, deltas and position alike (constraint 248). `#dropPointAt` is already the
+   * one place that choice is made, so the position comes straight out of it and THE SCALE IS READ
+   * BACK OUT OF IT TOO — differenced over `WHEEL_SCALE_SPAN_PX`. `Surface.pointAt` owns the canvas's
+   * CSS scale and `this.cell` owns the glyph; a second reading of either is how a delta comes to
+   * disagree with the position it was aimed at, which is one window scrolling at twice the speed
+   * the pointer says it should.
+   */
+  #wheel(entry, event) {
+    /* `deltaMode`'s values are read off the EVENT, which carries them as its own interface
+     * constants, rather than copied into this file as two integers nothing here can check. An event
+     * carrying neither is pixels, which is `deltaMode`'s own default. */
+    const mode = event.deltaMode | 0;
+    const at = this.#dropPointAt(entry, event);
+    let mods = modifierBits(event);
+    let dx;
+    let dy;
+    if (mode === event.DOM_DELTA_PAGE) {
+      /* A PAGE DELTA PASSES THROUGH UNSCALED, and `WWHEEL_PAGE` is what says so: the delta is in
+       * pages, so multiplying it by a surface scale would turn a viewport-sized jump into a
+       * different gesture (src/abi.mjs, WWHEEL_PAGE). */
+      mods |= WWHEEL_PAGE;
+      dx = Math.round(event.deltaX || 0);
+      dy = Math.round(event.deltaY || 0);
+    } else {
+      /* A LINE DELTA BECOMES CSS PX THROUGH THE ONE LINE HEIGHT THIS HOST MEASURED — the terminal
+       * cell, taken from a real rendered glyph (`measureCell`). There is no `WWHEEL_LINE`, so a
+       * line left as a line would be a record whose unit nothing in the ABI names. */
+      const line = mode === event.DOM_DELTA_LINE;
+      const cssX = (event.deltaX || 0) * (line ? this.cell.w : 1);
+      const cssY = (event.deltaY || 0) * (line ? this.cell.h : 1);
+      const far = this.#dropPointAt(entry, {
+        clientX: event.clientX + WHEEL_SCALE_SPAN_PX,
+        clientY: event.clientY + WHEEL_SCALE_SPAN_PX,
+      });
+      const scaleX = (far.x - at.x) / WHEEL_SCALE_SPAN_PX;
+      const scaleY = (far.y - at.y) / WHEEL_SCALE_SPAN_PX;
+      // NO BOX, NO CONVERSION, AND IT SAYS SO. `Surface.pointAt` answers null for a canvas with no
+      // measurable rect, which `#dropPointAt` renders as 0,0 for both probes — a window mid-resurface.
+      // Posting a record from it would be a delta of 0 aimed at 0,0, which is a lie about a gesture
+      // the reader made. Counted, like `#wirePointer`'s own unmeasurable pointer.
+      if (scaleX === 0 && scaleY === 0) { this.stats.unknown += 1; return; }
+      // THE SCALE IS THE CONTROL'S SUBJECT, so it is the one thing dropped and nothing else is.
+      const sx = hostControls.rawWheel ? 1 : scaleX;
+      const sy = hostControls.rawWheel ? 1 : scaleY;
+      dx = wheelUnits(cssX * sx);
+      dy = wheelUnits(cssY * sy);
+    }
+    this.stats.wheels += 1;
+    /** What the PAGE sent, with the browser's own delta beside it. A driver cannot assert a
+     *  dispatched delta against a scrolled offset — a CDP wheel delta is in DEVICE px and the
+     *  `wheel` event delivers `deltaY / devicePixelRatio` (constraint 297) — so this is the reading
+     *  it asserts against instead.
+     *
+     *  `rawX`/`rawY` ARE IN `mode`'s UNIT and not in CSS px: pixels at `DOM_DELTA_PIXEL`, lines at
+     *  `DOM_DELTA_LINE`, pages at `DOM_DELTA_PAGE`. The mode is published beside them because
+     *  without it a reader cannot tell a 3-line scroll from a 3-pixel one. */
+    this.lastWheel = { win: entry.id, mode, mods, dx, dy, x: at.x, y: at.y,
+      rawX: event.deltaX || 0, rawY: event.deltaY || 0 };
+    this.post({
+      t: "win-in",
+      win: entry.id,
+      // `WWHEEL_COALESCED` IS NEVER SET HERE. It is the kernel's claim to make and `WinMgr.feed`
+      // masks it out of anything this page posts; a page that could assert it would be a page that
+      // could tell a program two notches were one.
+      evs: [{ type: WEV_WHEEL, mods, a: dx, b: dy, c: packWheelPoint(at.x, at.y) }],
+    });
+  }
+
   /** The kernel accepted a `dataobj_offer(DOBJ_WHERE_DRAG)`: a gesture is live. The drag image is
    *  the page's, because a cursor is a picture and the kernel owns no pixels. */
   #dragBegan(m) {
@@ -1174,6 +1309,10 @@ export class WinHost {
       flatSet: [...this.flatSet],
       frameFlat: [...this.frames].filter(([, e]) => e.win.el.dataset.flat === "1").map(([id]) => id),
       lastBlur: this.lastBlur,
+      // M17. The last wheel record this file sent, and the browser delta it came from: what a
+      // driver asserts against, because a dispatched delta is not what the page received
+      // (constraint 297).
+      lastWheel: this.lastWheel,
       dragImage: this.dragEl ? !this.dragEl.hidden : false,
       live: [...this.frames.keys()],
       created: this.created,

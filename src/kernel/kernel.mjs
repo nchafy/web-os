@@ -38,7 +38,7 @@ import { installPipeKernel } from "./pipe.mjs";
 import { installPtyKernel, setPtyDefaultIsig, setPtyWinch, setPtyDetached } from "./pty.mjs";
 import {
   WinMgr, installWindowKernel, setCascade, setDrawReaches, setOwnerChain, setModalBlocks,
-  setItemsReach,
+  setItemsReach, setWheelCoalesce,
   setGovernor,
   NOT_RESPONDING_MS, END_PROCESS_MS,
 } from "./wins.mjs";
@@ -1694,6 +1694,15 @@ async function handle(m) {
       if (cfg.noCascade) {
         if (cfg.bench !== 1) throw new Error("noCascade requires bench=1");
         setCascade(false);
+      }
+      /* M17's control: the wheel APPENDS instead of summing into the tail. An uncoalesced stream
+       * laps a 256-record ring and `push` discards the NEWEST record — the reader's latest notch —
+       * so the list stops following their hand and jumps backwards on a direction change. The
+       * clause it turns is the full-delta one: the offset reached on draining falls short by
+       * exactly the motion that was dropped. */
+      if (cfg.noWheelCoalesce) {
+        if (cfg.bench !== 1) throw new Error("noWheelCoalesce requires bench=1");
+        setWheelCoalesce(false);
       }
       // M8's control: a batch is accepted and counted and never reaches the page.
       benchBoot = cfg.bench === 1;

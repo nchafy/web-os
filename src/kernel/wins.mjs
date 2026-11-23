@@ -24,7 +24,7 @@ import {
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
-  WEV_STATE, WEV_ITEM, WEV_CLIENT,
+  WEV_STATE, WEV_ITEM, WEV_CLIENT, WEV_WHEEL, WWHEEL_COALESCED,
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
   WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED,
@@ -102,6 +102,35 @@ let itemsReach = true;
 
 export function setItemsReach(on) {
   itemsReach = !!on;
+}
+
+/**
+ * M17's NEGATIVE CONTROL, boot-gated on bench=1 (`src/kernel/kernel.mjs`): a wheel APPENDS instead
+ * of summing into the tail. `setDrawReaches`'s shape and for its reason — every other part of the
+ * route keeps working, so what disappears is the summing alone.
+ *
+ * It is the control that turns M17's coalescing clauses: against a 300-notch stream into a program
+ * that is not draining, `queued:` reaches 300, `coalesced:` stays 0, the ring laps and `dropped:`
+ * counts the reader's NEWEST notches (`push` discards those, not the oldest), so the offset the
+ * program reaches falls short of the summed delta by the most recent motion.
+ */
+let wheelCoalesce = true;
+
+export function setWheelCoalesce(on) {
+  wheelCoalesce = !!on;
+}
+
+/**
+ * Sum two of a wheel's signed deltas, SATURATING at what the record's field can carry.
+ *
+ * A delta field is u32 and `wheelAt` restores the sign with `| 0` (constraint 225), so a sum that
+ * wrapped past 2^31 would be read as a scroll in the OPPOSITE direction — the one arithmetic that
+ * turns coalescing from a compression into a lie.
+ */
+const WHEEL_DELTA_MAX = 0x7fffffff;
+
+function sumDelta(a, b) {
+  return Math.max(-WHEEL_DELTA_MAX - 1, Math.min(WHEEL_DELTA_MAX, (a | 0) + (b | 0)));
 }
 
 /** M9's FIRST NEGATIVE CONTROL, in `PLAN.md` §5's words: "remove the owner chain; the dialog must
@@ -273,6 +302,8 @@ export class Window {
       // M16: client events REPLACED at the tail rather than appended. `dropped` cannot see one —
       // it moves only on a full ring, and a ring this replacement keeps drained never fills — so
       // without this counter a control that broke the replacement would move no number anywhere.
+      // M17: AND wheel notches SUMMED into the tail, which is the same instrument for the same
+      // blindness. Records MERGED, never records offered: `queued` counts the offers.
       coalesced: 0,
     };
   }
@@ -395,6 +426,64 @@ export class Window {
      * either value, because `WinMgr.setDpr` refuses a ratio the 16.16 field cannot carry. */
     const dpr = this.mgr ? this.mgr.dpr : 1;
     return this.push({ type: WEV_CLIENT, a: w, b: h, c: dprFixed(dpr) });
+  }
+
+  /**
+   * Queue a WHEEL event, SUMMING it into a tail wheel instead of appending.
+   *
+   * SUMMED AND NOT REPLACED, which is the one way this differs from `pushClient`: a stale size has
+   * no history worth keeping, and a stale notch IS the history. A reader's total scroll survives a
+   * batch nobody read a record at a time.
+   *
+   * AND THE RING MUST NOT LAP, which is the arithmetic that forces coalescing at all. `push`
+   * discards the NEWEST record on a full ring, so an appending wheel over a `WIN_EVENT_CAP` of 256
+   * loses the reader's latest notches — the list stops following the hand and moves the wrong way
+   * on a direction change. 300 notches is the stream `setWheelCoalesce(false)` puts through it.
+   *
+   * THE TAIL IS READ BACK, NOT REMEMBERED, for `pushClient`'s reason: a flag saying what the tail
+   * is desynchronises on the first path that pushes without updating it. The queue is ONE window's,
+   * so a tail wheel is this window's wheel by construction.
+   *
+   * ONLY A LIKE RECORD MERGES — the mods must match apart from the coalesced bit. `WWHEEL_PAGE`
+   * changes the UNIT of the deltas and a modifier changes what the gesture MEANS (a ctrl-wheel is a
+   * zoom, not a scroll), so summing across either reports a total in no unit the reader produced.
+   *
+   * `WWHEEL_COALESCED` IS SET HERE AND NOWHERE ELSE, which is what makes it readable as a fact: a
+   * program that sees the bit knows the KERNEL summed. `WinMgr.feed` masks it off the page's route.
+   *
+   * `queued` DOES NOT MOVE ON A MERGE and `unreadSince` is not restarted. A merged notch entered no
+   * new record, and the detector dates the OLDEST uncollected event — a program that is not
+   * draining is not draining however many notches it has not read.
+   */
+  pushWheel(ev) {
+    if (this.destroyed) return false;
+    if (wheelCoalesce) {
+      const tail = this.#popTail();
+      if (tail) {
+        const dv = new DataView(tail.buffer);
+        const prev = decodeWinEvent(dv, 0);
+        const like = prev.type === WEV_WHEEL
+          && (prev.mods & ~WWHEEL_COALESCED) === ((ev.mods || 0) & ~WWHEEL_COALESCED);
+        if (like) {
+          encodeWinEvent(dv, 0, {
+            type: WEV_WHEEL,
+            mods: prev.mods | WWHEEL_COALESCED,
+            a: sumDelta(prev.a, ev.a),
+            b: sumDelta(prev.b, ev.b),
+            /* THE LATEST AIM POINT AND NOT THE FIRST. A program reads the position to decide WHICH
+             * of its rows the gesture is over, and the answer is where the pointer is now. */
+            c: ev.c,
+          });
+          // The bytes go back where they came from: the pop freed exactly one record's room. No
+          // `pollWake` — a ring holding a record was already readable, so no reader can be parked.
+          this.events.push(tail);
+          this.stats.coalesced += 1;
+          return true;
+        }
+        this.events.push(tail);
+      }
+    }
+    return this.push(ev);
   }
 
   /**
@@ -1593,9 +1682,10 @@ export class WinMgr {
    * "stays on top" and a user could type into the document behind the save dialog. Suppression is
    * the KERNEL's because the blocker is (constraint 226).
    *
-   * ONLY KEYS AND POINTERS. A blocked window must still learn that it was resized, that it lost
-   * focus, that it was asked to close and that it was destroyed — those are not input, and a
-   * window that missed them would be wrong about the world once the modal went away.
+   * ONLY KEYS, POINTERS AND WHEELS. A blocked window must still learn that it was resized, that it
+   * lost focus, that it was asked to close and that it was destroyed — those are not input, and a
+   * window that missed them would be wrong about the world once the modal went away. A wheel IS
+   * input: a list that scrolls under a save dialog is the hole suppression exists to close.
    */
   feed(id, ev) {
     const w = this.get(id);
@@ -1631,7 +1721,7 @@ export class WinMgr {
       this.stats.forgedKernelEvents += 1;
       return false;
     }
-    if (ev.type === WEV_KEY || ev.type === WEV_POINTER) {
+    if (ev.type === WEV_KEY || ev.type === WEV_POINTER || ev.type === WEV_WHEEL) {
       const blocker = this.blockingFor(w);
       if (blocker) {
         // COUNTED, on the window that did not get it: a program whose keys silently stopped
@@ -1658,6 +1748,14 @@ export class WinMgr {
       } else if (ev.mods & WPTR_UP) {
         this.pointer = { win: w.id, down: false };
       }
+    }
+    /* M17. THE WHEEL IS ACCEPTED AND `WWHEEL_COALESCED` IS MASKED OFF IT. A page saying it had
+     * coalesced would tell a program that twenty notches arrived as one, and the program would
+     * scroll by one notch's delta; the bit is `Window.pushWheel`'s to set. Masked rather than
+     * refused, because losing a reader's scroll over a bit the kernel overwrites anyway is the
+     * worse failure — and the record does not carry the sum, so there is nothing to disbelieve. */
+    if (ev.type === WEV_WHEEL) {
+      return w.pushWheel({ ...ev, mods: (ev.mods || 0) & ~WWHEEL_COALESCED });
     }
     return w.push(ev);
   }

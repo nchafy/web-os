@@ -239,11 +239,26 @@ number of records and answers **EINVAL** — never a short read — for a buffer
 | `WEV_DRAG_ENTER` / `WEV_DROP` | M10. `a`, `b` = the position in the window's own unit — surface pixels for a surfaced window, CELLS for a text one (constraint 248) — and **`c` = the OFFER MASK**, so a target can decide whether it can accept before any bytes exist |
 | `WEV_DRAG_LEAVE` | the pointer left. No payload: a target that got an ENTER must get this, or its highlight never goes away |
 | `WEV_DRAG_DONE` | to the SOURCE's window: `a` = the effect that took place (0 for nothing), `b` = the target winid or 0. A MOVE source cannot know whether to delete the original without it |
+| `WEV_CLIENT` | M16. `a`, `b` = the client CONTENT box in DEVICE pixels — the unit `win_surface` takes — and `c` = the device-pixel ratio in `DPR_FIXED_ONE` units, because a process has no other route to it. NOT `WEV_RESIZE`: that one carries cells, and a reinterpretation would resize a terminal's grid to 640×440 columns |
+| `WEV_WHEEL` | M17. `a` = the x delta, `b` = the y delta, both SIGNED, `c` = the aim point packed by `packWheelPoint`. **Deltas and point are in the window's own unit** — surface pixels for a surfaced window, CELLS for a text one (constraint 248) — and never device px. **A positive `b` scrolls toward the END of a list**, the DOM's sign; `wheelAt` restores it with `\| 0`, because a scroll up read with `>>> 0` is four billion (constraint 225). `mods` carries `WWHEEL_PAGE` when the delta is in PAGES instead, and `WWHEEL_COALESCED` when the record is the SUM of more than one notch |
 
 **The queue is bounded and the overflow is defined**: `WIN_EVENT_CAP` records per window, the
 NEWEST dropped and counted, published as `dropped` in `/proc/<pid>/win/<winid>`. That is M1's
 per-fd event budget (constraint 42), charged against the fd that caused it, so a window nobody is
 reading does not starve the same process's pipe.
+
+**TWO EVENT TYPES COALESCE INTO THE TAIL RECORD RATHER THAN LAP THE QUEUE**, and the merge is
+counted as `coalesced` beside `dropped`. `WEV_CLIENT` REPLACES the tail — a stale client box has no
+history worth keeping — and `WEV_WHEEL` SUMS into it, which is why a program MUST read a
+`WWHEEL_COALESCED` record as a sum: scrolling one notch's worth per record loses the rest of the
+gesture. The kernel is the only thing that may claim it coalesced, so `WinMgr.feed` masks
+`WWHEEL_COALESCED` out of anything the page posts. `queued` still counts events OFFERED, so a
+merged notch does not raise it and a host MUST NOT read `offered - queued` as notches lost.
+
+**A KERNEL-AUTHORED EVENT TYPE POSTED BY THE PAGE IS REFUSED AND COUNTED** (`forgedKernelEvents`):
+`WEV_STATE`, `WEV_ITEM` and `WEV_CLIENT` are facts the kernel establishes, so the page's input port
+is not a route to them. A wheel is NOT on that list — a wheel is a browser event and the page is its
+only honest source — which is exactly why the bit the kernel owns there is masked instead.
 
 **`/proc/<pid>/win/<winid>` is a file**, named by winid and not by fd — a window may be held on
 several fds through `dup`, and an owner in another process has no fd for it at all. Each file
@@ -277,6 +292,8 @@ arguments and a reserved word. `DL_MAX_OPS` — how many fit in one call — is 
 | `DL_FILL_RECT` | `a0..a3` = x, y, w, h; `a4` = rgba |
 | `DL_STROKE_RECT` | `a0..a3` = x, y, w, h; `a4` = rgba; `a5` = line width |
 | `DL_LINE` | `a0..a3` = x0, y0, x1, y1; `a4` = rgba; `a5` = line width |
+| `DL_TEXT` + `DL_TEXT_DATA` | M15. The header is `a0`, `a1` = x, y (TOP-left), `a2` = px size, `a3` = the byte length, `a4` = rgba, with `DLT_BOLD` / `DLT_MONO` / `DLT_RIGHT` / `DLT_CENTER` in flags; then `ceil(len / 24)` `DL_TEXT_DATA` records carrying the UTF-8 in `a0..a5` as little-endian words. A record is 32 bytes and a string is not, so the run is a header plus continuations — and a header whose data is missing is refused WHOLE by the kernel, because half a filename reads as a filename (constraint 293) |
+| `DL_CLIP` | M17. `a0..a3` = x, y, w, h in SURFACE px, like every other display-list coordinate. It INTERSECTS, as a canvas clip does, so two viewports in one batch need a `DLC_RESET` between them; `flags & DLC_RESET` drops the clip instead and `a0..a3` are then ignored. **It is the first op that outlives itself**, so `replay` resets the clip at the top of every batch — a clip left set by batch N would make batch N+1 draw nothing, which a reader sees as a window gone blank with no error anywhere |
 
 **Every colour is `0xRRGGBBAA`**, and `src/abi.mjs` renders it for both consumers: `cssColor` for a
 canvas (alpha 0–1) and `pixelColor` for a pixel read back with `getImageData` (alpha 0–255). The
@@ -285,6 +302,14 @@ pixels as four failures (constraint 224).
 
 **The arguments are signed; the colour slot is read unsigned.** A rectangle may start off the left
 edge of a surface, and `0xRRGGBBAA` with alpha set is negative as an i32.
+
+**A `DL_CLIP` THAT NAMES NO REACHABLE PIXEL IS REFUSED, WHOLE BATCH, EINVAL**: `w <= 0`, `h <= 0`,
+or a rectangle entirely outside `win_surface`'s extent. The check runs before anything is drawn and
+before the batch is charged. A PARTIALLY off-surface clip is ACCEPTED deliberately — a list view MAY
+name a viewport that overhangs, and a row drawn at a negative offset MAY be clipped by a rect with a
+negative y, so containment is not required and the far edge is exclusive. A reset is not
+rect-validated at all, since it takes no rectangle. A window with no surface answers EINVAL for the
+older reason: there is nothing to draw on, and the clip rect is never inspected.
 
 **`WEV_POINTER` is how a surface is reached**: `a` and `b` are x and y in SURFACE pixels, `c` is the
 button mask, and `mods` carries `WPTR_DOWN` / `WPTR_UP` / `WPTR_MOVE` beside the keyboard
@@ -321,10 +346,10 @@ is told which window refused, by `win-blocked`, so a click that does nothing can
 grant the kernel posts `win-stack` with the WHOLE order, bottom first: the page renders it and
 never decides it (constraint 226, `docs/DECISIONS.md` D32).
 
-**INPUT TO A BLOCKED WINDOW IS SUPPRESSED** — keys and pointers only. A resize, a focus change, a
-close request and a destroy notice still arrive, because a window that missed those would be wrong
-about the world once the modal went away. `/proc/<pid>/win/<winid>` publishes `scope`, `mode` and
-`suppressed`.
+**INPUT TO A BLOCKED WINDOW IS SUPPRESSED** — keys, pointers and (since M17) wheels. A resize, a
+focus change, a close request and a destroy notice still arrive, because a window that missed those
+would be wrong about the world once the modal went away. `/proc/<pid>/win/<winid>` publishes
+`scope`, `mode` and `suppressed`.
 
 **A CLOSE IS ADVISORY.** The X posts `WEV_CLOSE` and nothing else; the frame stands until the
 process calls `win_destroy`. A process that ignores it is caught by the not-responding detector it

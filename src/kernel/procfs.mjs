@@ -105,9 +105,12 @@ function winLines(win, slot, mgr) {
     // tell a working window from a wedged one.
     `pending:\t${win.events.length / WEV_BYTES}`,
     `dropped:\t${win.stats.dropped}`,
-    // M16. Client events REPLACED at the tail instead of appended. BESIDE `dropped:` because it is
-    // the overflow `dropped` cannot see: the replacement keeps the ring drained, so a full ring
-    // never happens and a broken replacement would move nothing here.
+    // M16. Client events REPLACED at the tail instead of appended, and M17's wheel notches SUMMED
+    // into it. BESIDE `dropped:` because it is the overflow `dropped` cannot see: coalescing keeps
+    // the ring drained, so a full ring never happens and a broken merge would move nothing here.
+    // It counts records MERGED, so `queued:` below stays the count of events OFFERED — a coalesced
+    // 300-notch stream reads `queued: 1`, `coalesced: 299`, `dropped: 0`, and an appending one
+    // reads 300 / 0 / 44.
     `coalesced:\t${win.stats.coalesced}`,
     `parked:\t${win.waitingReaders.length}`,
     `level:\t${win.level}`,

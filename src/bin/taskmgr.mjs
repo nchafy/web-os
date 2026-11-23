@@ -24,6 +24,15 @@
 //            column would cost a read per window per refresh to print a sum of unlike things. This
 //            header claimed a SURF column that no version of the table has had.
 //
+// IT SCROLLS, AND BEFORE M17 IT COULD NOT. The table drew the rows that fit and named the count it
+// was hiding, pointing a reader at `ps` for the rest. That was correct for the ABI as it stood:
+// no event delivered a wheel, and a row drawn above the viewport would have painted over the
+// column headers. Constraint 294 is the statement of it, and M17 removes its premise rather than
+// routing around it. `WEV_WHEEL` is the first half of the answer and `DL_CLIP` the second — the
+// offset moves the rows and the clip keeps them off the header. Neither works without the other:
+// an unclipped scroll is a table whose headers vanish under its own rows, which is exactly what
+// the `no-clip` world shows.
+//
 // THE TABLE FOLLOWS THE WINDOW. Its metrics are CSS pixels and the surface is the client box in
 // device pixels, so `S` converts and `px` is the only place it is applied. A reader who resizes the
 // window gets more rows and more room for a program name, not a stretched picture of the old one.
@@ -48,9 +57,10 @@
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
-  WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_CLIENT,
-  WPTR_DOWN, keyBytesOf,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DLT_BOLD, DLT_MONO, DLT_RIGHT, encodeTextRun,
+  WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_CLIENT, WEV_WHEEL,
+  WPTR_DOWN, WWHEEL_PAGE, WWHEEL_COALESCED, keyBytesOf, wheelAt,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP, DLC_RESET,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, encodeTextRun,
   DL_MAX_OPS, textOpCount, NAME_MAX,
   SIGTERM, SIGKILL,
 } from "/src/abi.mjs";
@@ -80,7 +90,8 @@ const TEXT_DY = 3;
  *  one draws fewer columns correctly. */
 const TABLE_W = 560;
 /** How many rows the DEFAULT window is sized to fit. The live count is `maxRows`, derived from the
- *  client box, because the box is the thing a reader resizes. */
+ *  client box, because the box is the thing a reader resizes. It is no longer how many rows are
+ *  REACHABLE — the wheel reaches the rest (M17). */
 const ROWS_WANTED = 20;
 /** The surface height that fits `ROWS_WANTED`. `maxRows` inverts this arithmetic. */
 const DEFAULT_H = HEAD_H + ROWS_WANTED * ROW_H + FOOT_H;
@@ -129,14 +140,31 @@ const colX = (col, right) => (col.fromRight === undefined ? col.x : right - col.
    `winDraw` splits a batch at `DL_MAX_OPS` (src/libos/syscall.mjs) and the kernel refuses any batch
    whose `DL_TEXT` header is parted from its data records (constraint 293, src/kernel/calls.mjs), so
    a display list over the limit does not scroll — the window goes BLANK. The cap keeps the list
-   under it, and the rows past it are reported by the overflow line the way the fixed 20 were.
+   under it.
+
+   IT BOUNDS THE VIEWPORT NOW, NOT THE TABLE. Before M17 it was the last word on how many rows a
+   reader could ever see, and the rows past it were stated by an overflow line (constraint 294);
+   the wheel reaches them, so this is only the largest viewport one batch can fill — a client box
+   over about 1,250 CSS px tall stops gaining rows and keeps scrolling.
 
    The worst case per row is one text run per cell with a program name at `NAME_MAX`, plus the
    selected row's two rectangles. `CHROME_OPS` covers the clear, the two header strings, the nine
-   column headers, the rule, the overflow line and the legend, with slack. */
+   column headers, the rule, the clip and its reset, the position line and the legend, with slack.
+   The final `- 1` is the PARTIAL row a mid-row scroll offset exposes: a viewport that fits N rows
+   draws N+1 whenever the offset is not a multiple of `ROW_H`. */
 const OPS_PER_ROW = (COLUMNS.length - 1) * textOpCount(16) + textOpCount(NAME_MAX) + 2;
-const CHROME_OPS = 48;
-const ROWS_CAP = Math.floor((DL_MAX_OPS - CHROME_OPS) / OPS_PER_ROW);
+const CHROME_OPS = 50;
+const ROWS_CAP = Math.floor((DL_MAX_OPS - CHROME_OPS) / OPS_PER_ROW) - 1;
+
+/** How many rows a client box of `hCss` CSS px fits. The inverse of `DEFAULT_H`. */
+const maxRowsFor = (hCss) =>
+  Math.max(1, Math.min(ROWS_CAP, Math.floor((hCss - HEAD_H - FOOT_H) / ROW_H)));
+
+/** THE FURTHEST THE TABLE MAY SCROLL, in CSS px: the rows that do not fit, and not one pixel more.
+ *  One arithmetic with two callers — the live clamp inside `run` and `TASKMGR_METRICS.maxScroll`
+ *  for a driver outside the process — because a clamp a driver computes differently is a driver
+ *  that aims past the end and reports the program wrong. */
+const maxScrollFor = (n, rowsFit) => Math.max(0, (n - rowsFit) * ROW_H);
 
 /**
  * THIS PROGRAM'S ROW GEOMETRY, EXPORTED, IN CSS PIXELS — for the reason `FILES_METRICS` is
@@ -152,12 +180,26 @@ const ROWS_CAP = Math.floor((DL_MAX_OPS - CHROME_OPS) / OPS_PER_ROW);
  *
  * `rowMid` is the partner of the `rowAt` inside `run`, which turns a y back into an index, and
  * `maxRows` is the partner of `DEFAULT_H`.
+ *
+ * THE SCROLL OFFSET IS A PARAMETER OF THE GEOMETRY FROM M17 ON, and that is why the `*At` pair
+ * exists. `rowTop(i)` is where the i-th VIEWPORT SLOT is, which is where row i sits only while the
+ * offset is 0; `rowTopAt(i, scroll)` is where the i-th row of the TABLE is at a given offset.
+ * A driver that aims at row N of a scrolled table MUST use the second form with the offset the
+ * program reports (`scrollCss` in its account), or it clicks whichever row happens to be in slot N.
+ * `rowAt` is the declared inverse of `rowTopAt` and takes the same offset.
  */
 export const TASKMGR_METRICS = Object.freeze({
   ROW_H, HEAD_H, FOOT_H, PAD, TABLE_W, ROWS_WANTED, ROWS_CAP, DEFAULT_H,
   rowTop: (i) => HEAD_H + i * ROW_H,
   rowMid: (i) => HEAD_H + i * ROW_H + ROW_H / 2,
-  maxRows: (hCss) => Math.max(1, Math.min(ROWS_CAP, Math.floor((hCss - HEAD_H - FOOT_H) / ROW_H))),
+  rowTopAt: (i, scroll = 0) => HEAD_H + i * ROW_H - scroll,
+  rowMidAt: (i, scroll = 0) => HEAD_H + i * ROW_H + ROW_H / 2 - scroll,
+  rowAt: (yCss, scroll = 0) => Math.floor((yCss + scroll - HEAD_H) / ROW_H),
+  /** The first row the viewport shows at `scroll`, which is the figure a proof of "the row at the
+   *  viewport top changed" asserts on. */
+  firstRowAt: (scroll = 0) => Math.max(0, Math.floor(scroll / ROW_H)),
+  maxRows: maxRowsFor,
+  maxScroll: (n, hCss) => maxScrollFor(n, maxRowsFor(hCss)),
 });
 
 /** Bytes, short enough for a column. Binary units, as a filesystem's own figures are. */
@@ -251,6 +293,15 @@ export function run(env) {
     // M16's units, as figures a harness can read: the box the kernel last granted in DEVICE px,
     // the ratio it came with, and how many of each the box bought.
     resurfaces: 0, refusedSurface: 0, clientW: 0, clientH: 0, dpr: 1, maxRows: ROWS_WANTED,
+    /* M17'S SCROLL, as figures a driver can assert on. `scrollCss` is the live offset in CSS px —
+       the second argument `TASKMGR_METRICS.rowTopAt` wants — and `firstRow` is the row at the
+       viewport top, which is the clause the proof reads. `clampTop` and `clampEnd` are counted
+       SEPARATELY because the two ends are two clauses: a run that only ever hit one of them has
+       not shown the clamp works, and an unclamped build leaves both at 0 while the offset runs
+       past its own end. `wheelsCoalesced` counts records the KERNEL marked as sums, which is this
+       side's half of the `coalesced:` line in `/proc/<pid>/win/<winid>`. */
+    scrollCss: 0, firstRow: 0, wheels: 0, wheelsCoalesced: 0, wheelPages: 0,
+    clampTop: 0, clampEnd: 0, scrolledPx: 0,
     // WHICH WORLD THIS RUN IS IN, so a control that forgot to pass its flag cannot read as a pass.
     evBPointer,
   };
@@ -294,10 +345,27 @@ export function run(env) {
   let S = 1;
   /** How many rows fit the live height. */
   let maxRows = ROWS_WANTED;
+  /** HOW FAR THE TABLE IS SCROLLED, in CSS px, and it may be fractional: a notch is surface px
+   *  divided by `S`, so at dpr 2 an odd delta is half a CSS pixel. Keeping the remainder is what
+   *  makes a slow trackpad gesture move the list at all — rounding each notch to a whole pixel
+   *  loses the sub-pixel part of every one of them. `setScroll` is the only writer. */
+  let scroll = 0;
 
   /** CSS px to surface px. THE ONE PLACE THE FACTOR IS APPLIED: a per-constant scaling is how two
    *  of them come to disagree, which is the defect M16 removes. */
   const px = (v) => Math.round(v * S);
+
+  /** The offset's legal range, both ends, in CSS px. SEPARATE FROM THE COUNTING in the wheel path:
+   *  a resize and a refresh both have to re-clamp, and neither is a reader hitting an end. */
+  const clamp = (v) => Math.min(Math.max(0, v), maxScrollFor(rows.length, maxRows));
+
+  /** THE ONE WRITER OF `scroll`, so the account cannot disagree with the pixels. It takes an
+   *  already-clamped offset — the clamp is separate because its two ends are counted. */
+  const setScroll = (v) => {
+    scroll = v;
+    account.scrollCss = scroll;
+    account.firstRow = TASKMGR_METRICS.firstRowAt(scroll);
+  };
 
   const relayout = (wCss, hCss, dpr) => {
     tableW = Math.max(wCss, TABLE_W);
@@ -306,20 +374,43 @@ export function run(env) {
     // THE INVERSE OF `DEFAULT_H`, written once in one direction and read in both — the same
     // relationship `rowTop` and `rowAt` have for a row's y.
     maxRows = TASKMGR_METRICS.maxRows(hCss);
-    if (selected >= maxRows) selected = maxRows - 1;
     account.maxRows = maxRows;
+    /* A TALLER BOX SHORTENS THE SCROLL RANGE, so an offset that was legal is now past the end and
+     * the table would be drawn against empty space below its last row. The selection is NOT
+     * clamped to the viewport any more — it indexes the whole table — so a resize leaves it alone
+     * and `ensureVisible` brings it back when the reader moves it. */
+    setScroll(clamp(scroll));
   };
 
-  const rowTop = TASKMGR_METRICS.rowTop;
-  /** The inverse of `rowTop`, in CSS px, so a press selects the row a reader is pointing at. */
+  /** The inverse of `rowTopAt`, in CSS px, so a press selects the row a reader is pointing at —
+   *  and the BOUNDS are the viewport band, not the table: a press on the header, on the position
+   *  line or below the last drawn row must find nothing. The partial row a mid-row offset exposes
+   *  is clipped, so a press in its clipped-away part lands outside the band and finds nothing
+   *  either, which is what a reader sees. */
   const rowAt = (y) => {
-    const i = Math.floor((y - HEAD_H) / ROW_H);
-    return i >= 0 && i < Math.min(rows.length, maxRows) ? i : -1;
+    if (y < HEAD_H || y >= HEAD_H + maxRows * ROW_H) return -1;
+    const i = TASKMGR_METRICS.rowAt(y, scroll);
+    return i >= 0 && i < rows.length ? i : -1;
+  };
+
+  /** Scroll the least that puts row `i` wholly inside the viewport. The partner of the u/j keys: a
+   *  selection off the screen is one a reader cannot see `t` or `x` apply to. */
+  const ensureVisible = (i) => {
+    const top = i * ROW_H;
+    if (top < scroll) setScroll(clamp(top));
+    else if (top + ROW_H > scroll + maxRows * ROW_H) {
+      setScroll(clamp(top + ROW_H - maxRows * ROW_H));
+    }
   };
 
   const paint = () => {
-    const shown = rows.slice(0, maxRows);
-    const hidden = rows.length - shown.length;
+    /** The first row the viewport shows, and one more than fits: a mid-row offset exposes the top
+     *  of the row after the last whole one, and `ROWS_CAP` holds a slot for it. */
+    const first = TASKMGR_METRICS.firstRowAt(scroll);
+    const shown = rows.slice(first, first + maxRows + 1);
+    /** The rows band in CSS px, floored at the last row when the table is shorter than the box —
+     *  so the position line and the legend sit under the table rather than under empty space. */
+    const bandH = Math.min(rows.length * ROW_H - scroll, maxRows * ROW_H);
     /** The table's right anchor in CSS px. ONE ANCHOR: the figure columns, the header's caption and
      *  the rule all read it, so none of them can sit past another. */
     const right = tableW - PAD;
@@ -348,8 +439,24 @@ export function run(env) {
       a4: RULE,
     });
 
-    shown.forEach((row, i) => {
-      const top = rowTop(i);
+    /* THE VIEWPORT, AND THE ROWS MAY ONLY PAINT INSIDE IT. It starts at `HEAD_H` and not at the
+     * rule three pixels above it, so a row scrolled up cannot touch the header or the rule —
+     * which is the pixel the proof reads. The width overhangs the surface whenever the client box
+     * is narrower than `TABLE_W`, and that is legal and deliberate: the kernel refuses a clip that
+     * is wholly outside the surface or degenerate, never one that merely extends past an edge
+     * (`src/kernel/calls.mjs`). Both extents floor at one surface pixel for that reason — a
+     * degenerate rect would be refused and the refusal takes the WHOLE batch, so the window would
+     * go blank with no error anywhere. `HEAD_H` is inside the surface at every box the frame's
+     * `MIN_H` admits, which is what makes `a1` safe without a second clamp. */
+    ops.push({
+      op: DL_CLIP,
+      a0: 0, a1: px(HEAD_H), a2: Math.max(1, px(tableW)), a3: Math.max(1, px(maxRows * ROW_H)),
+    });
+
+    shown.forEach((row, n) => {
+      /** The row's own index in the TABLE, which is what `selected` holds. */
+      const i = first + n;
+      const top = TASKMGR_METRICS.rowTopAt(i, scroll);
       if (i === selected) {
         ops.push({
           op: DL_FILL_RECT, a0: px(PAD), a1: px(top), a2: px(tableW - PAD * 2), a3: px(ROW_H),
@@ -373,17 +480,27 @@ export function run(env) {
       }
     });
 
-    const footY = HEAD_H + shown.length * ROW_H + 6;
-    /* THE OVERFLOW NOTICE GOES WHEN IT WOULD LAND ON THE LEGEND. At the smallest window a frame can
-     * be clamped to, one row fits and the two lines are 4 px apart — and two strings drawn over
-     * each other read as neither, so the legend wins: it says how to reach the rest. */
-    if (hidden > 0 && footY + TEXT_PX <= viewH - 16) {
-      ops.push(...encodeTextRun(`+${hidden} more — run \`ps\` to see them all`, {
+    /* THE CLIP IS DROPPED BEFORE ANYTHING ELSE IS DRAWN, because the two lines below sit BELOW the
+     * rows band and a clip only ever intersects — they would be clipped away entirely. The
+     * renderer also resets at the top of every batch, so this is not about leaking state into the
+     * next paint; it is about the rest of THIS one. */
+    ops.push({ op: DL_CLIP, flags: DLC_RESET });
+
+    const footY = HEAD_H + bandH + 6;
+    /* WHERE THE READER IS IN THE TABLE, and it replaces the overflow notice the row cap needed
+     * (constraint 294): the rows past the viewport are reachable now, so the honest line is which
+     * ones are on screen rather than how many are not. It goes when it would land on the legend —
+     * at the smallest window a frame can be clamped to, one row fits and the two lines are 4 px
+     * apart, and two strings drawn over each other read as neither. */
+    if (rows.length > maxRows && footY + TEXT_PX <= viewH - 16) {
+      const last = Math.min(rows.length, first + maxRows);
+      ops.push(...encodeTextRun(`rows ${first + 1}-${last} of ${rows.length}`, {
         x: px(PAD), y: px(footY), size: px(TEXT_PX - 1), rgba: INK_DIM,
       }));
     }
     ops.push(...encodeTextRun(
-      "u/j select   click a row   t = SIGTERM   x = SIGKILL   r = refresh   q = quit", {
+      "u/j select   wheel scrolls   click a row   "
+      + "t = SIGTERM   x = SIGKILL   r = refresh   q = quit", {
         x: px(PAD), y: px(viewH - 16), size: px(TEXT_PX - 1), rgba: INK_DIM,
       }));
     return env.win.draw(made.fd, ops);
@@ -396,6 +513,9 @@ export function run(env) {
     account.refreshes += 1;
     account.rows = rows.length;
     if (selected >= rows.length) selected = Math.max(0, rows.length - 1);
+    /* A SHORTER TABLE SHORTENS THE SCROLL RANGE. Processes exit, so a refresh can leave the offset
+     * past the end of its own table — which draws a viewport of nothing and no error. */
+    setScroll(clamp(scroll));
     paint();
     return 0;
   };
@@ -467,11 +587,58 @@ export function run(env) {
         if (text === "r") refresh();
         else if (text === "t") signal(SIGTERM);
         else if (text === "x") signal(SIGKILL);
-        else if (text === "u") { selected = Math.max(0, selected - 1); paint(); }
-        else if (text === "j") {
-          selected = Math.min(Math.min(rows.length, maxRows) - 1, selected + 1);
+        /* THE SELECTION INDEXES THE TABLE AND NOT THE VIEWPORT, which is M17's change to these two
+         * keys: `j` stopped at `maxRows - 1` because that was the last row that existed on screen,
+         * and a reader could not reach — or signal — a process below the fold at all. It follows
+         * the keys now, and `ensureVisible` scrolls the least that keeps it in sight. */
+        else if (text === "u") {
+          selected = Math.max(0, selected - 1);
+          ensureVisible(selected);
+          paint();
+        } else if (text === "j") {
+          selected = Math.max(0, Math.min(rows.length - 1, selected + 1));
+          ensureVisible(selected);
           paint();
         }
+      } else if (ev.type === WEV_WHEEL) {
+        /* THE WHEEL, IN THE RECORD'S OWN UNIT. `wheelAt` restores the sign — a scroll up is a
+         * negative `dy` and an unsigned read turns it into four billion (constraint 225) — and the
+         * deltas are SURFACE px for a surfaced window, so `/ S` is the same border `px` guards in
+         * the other direction. A `WWHEEL_PAGE` delta is in PAGES and must NOT be divided: it is
+         * not a length in any unit, and scaling it would make a page shorter at a high ratio.
+         *
+         * A COALESCED RECORD IS A SUM AND IS ADDED WHOLE. The kernel merges a run of notches into
+         * one record (`WinMgr.feed`), so a program that scrolled by one notch's worth per record
+         * would lose everything but the last notch of a fast gesture — the list would stop
+         * following the reader's hand. Adding the delta is what makes that automatic.
+         *
+         * THE AIM POINT IS NOT CONSULTED, because this window has exactly one scrollable region.
+         * It rides the record for the program that has two (a Details view's panes, M19), and a
+         * reader of this branch should not conclude the position is unavailable.
+         *
+         * `dx` IS DISCARDED AND THE TABLE DOES NOT SCROLL SIDEWAYS. A box narrower than `TABLE_W`
+         * does clip the right of the grid, so an x offset would have something to reveal; what
+         * this milestone claims is the vertical axis, and the narrow-box answer is column widths a
+         * reader can drag (M19). An undeclared half-working axis is the worse of the two. */
+        const w = wheelAt(ev);
+        const paged = (ev.mods & WWHEEL_PAGE) !== 0;
+        account.wheels += 1;
+        if (ev.mods & WWHEEL_COALESCED) account.wheelsCoalesced += 1;
+        if (paged) account.wheelPages += 1;
+        const by = paged ? w.dy * maxRows * ROW_H : w.dy / S;
+        if (!by) continue;
+        const want = scroll + by;
+        const next = clamp(want);
+        // THE TWO ENDS ARE COUNTED SEPARATELY, because they are two clauses: a run that only ever
+        // reached the end has not shown that the top clamps, and vice versa.
+        if (next !== want) {
+          if (want < 0) account.clampTop += 1;
+          else account.clampEnd += 1;
+        }
+        if (next === scroll) continue;
+        account.scrolledPx += Math.abs(next - scroll);
+        setScroll(next);
+        paint();
       } else if (ev.type === WEV_POINTER) {
         /* `mods` AND NOT `b`. This read `ev.b & WPTR_DOWN`, and `ev.b` is the pointer's Y
          * COORDINATE — `pointerAt` is `{x: ev.a, y: ev.b, buttons: ev.c}` (src/abi.mjs:1424) — so

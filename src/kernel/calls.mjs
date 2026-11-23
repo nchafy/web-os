@@ -17,7 +17,8 @@ import {
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
-  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, decodeDrawOps, textOfOps,
+  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DLC_RESET,
+  decodeDrawOps, textOfOps,
   WMODAL_MAX, WMODE_MAX, decodeWinItems,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
@@ -1098,6 +1099,13 @@ HANDLERS.win_draw = (p, k) => {
    * refused whole rather than drawn partially (constraint 293). `textOfOps` is the same codec the
    * renderer uses, so the kernel is not forming a second opinion about the encoding.
    *
+   * A CLIP MUST LEAVE SOMETHING TO DRAW ON, for the same reason and with the same shape of
+   * failure. `DL_CLIP` is the one op that outlives itself, so every op after an empty clip draws
+   * nowhere: the batch is charged, the caller is told 0, and the reader sees a window that went
+   * blank. A canvas clipped to an empty region raises nothing, so there is no layer below this one
+   * that could report it — the program cannot tell "I clipped to nothing" from "I drew and nothing
+   * showed". Refused whole, like a half-written text run.
+   *
    * It is the only interpretation the kernel does of a display list, and it is validation rather
    * than rendering: `src/wm/surface.mjs` is still the one renderer. */
   const decoded = decodeDrawOps(region, region.length);
@@ -1112,6 +1120,26 @@ HANDLERS.win_draw = (p, k) => {
     // A DATA RECORD WITH NO HEADER is the same defect seen from the other end: a well-formed run
     // is skipped past above, so reaching one here means the header is missing.
     if (op === DL_TEXT_DATA) return -EINVAL;
+    if (op === DL_CLIP) {
+      /* A RESET CARRIES NO RECTANGLE and a0..a3 are ignored (`DLC_RESET`), so validating them as
+       * one would refuse the only op whose arguments mean nothing — a program that resets with a
+       * zeroed rect is the normal case.
+       *
+       * THE TEST IS INTERSECTION, NOT CONTAINMENT. A viewport flush against the bottom edge names
+       * a rectangle that runs past it and still clips to a non-empty region, and a list scrolled
+       * to a negative offset names a negative y; only a degenerate side or a rectangle wholly off
+       * the surface clips to nothing. SURFACE px against the surface's own extent — the frame's
+       * CSS box is a different unit and would refuse an honest clip (constraint 248).
+       *
+       * A WINDOW WITH NO SURFACE IS NOT CHECKED HERE. `WinMgr.draw` refuses that batch and counts
+       * the refusal; deciding it twice is how the two come to disagree about `refusedDraws`. */
+      const s = d.win.surface;
+      if (s && (decoded[i].flags & DLC_RESET) === 0) {
+        const { a0: x, a1: y, a2: w, a3: h } = decoded[i];
+        if (w <= 0 || h <= 0) return -EINVAL;
+        if (x >= s.w || y >= s.h || x + w <= 0 || y + h <= 0) return -EINVAL;
+      }
+    }
   }
   return k.wins.draw(d.win, region);
 };

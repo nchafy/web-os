@@ -1,0 +1,190 @@
+{
+  "ok": true,
+  "notes": [
+    "device-px hypothesis (delivered == dispatched / dpr): 12 of 12 samples fit",
+    "css-px hypothesis   (delivered == dispatched):        4 of 12 samples fit"
+  ],
+  "rows": [
+    {
+      "askedDpr": 1.0,
+      "reportedDpr": "1",
+      "padAt": {
+        "x": 235,
+        "y": 165,
+        "w": 422,
+        "h": 282,
+        "store": {
+          "w": 420,
+          "h": 280
+        }
+      },
+      "singles": [
+        {
+          "dispatched": 40,
+          "delivered": 40,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1
+        },
+        {
+          "dispatched": 100,
+          "delivered": 100,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1
+        },
+        {
+          "dispatched": 120,
+          "delivered": 120,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1
+        },
+        {
+          "dispatched": 240,
+          "delivered": 240,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1
+        }
+      ],
+      "burst": {
+        "dispatched": 12,
+        "delivered": 12,
+        "sumDelivered": 1440.0,
+        "distinctDeltas": [
+          120.0
+        ]
+      }
+    },
+    {
+      "askedDpr": 1.5,
+      "reportedDpr": "1.5",
+      "padAt": {
+        "x": 235,
+        "y": 165,
+        "w": 422,
+        "h": 282,
+        "store": {
+          "w": 420,
+          "h": 280
+        }
+      },
+      "singles": [
+        {
+          "dispatched": 40,
+          "delivered": 26.666666666666668,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1.5
+        },
+        {
+          "dispatched": 100,
+          "delivered": 66.66666666666667,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1.5
+        },
+        {
+          "dispatched": 120,
+          "delivered": 80,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1.5
+        },
+        {
+          "dispatched": 240,
+          "delivered": 160,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 1.5
+        }
+      ],
+      "burst": {
+        "dispatched": 12,
+        "delivered": 12,
+        "sumDelivered": 960.0,
+        "distinctDeltas": [
+          80.0
+        ]
+      }
+    },
+    {
+      "askedDpr": 2.0,
+      "reportedDpr": "2",
+      "padAt": {
+        "x": 235,
+        "y": 165,
+        "w": 422,
+        "h": 282,
+        "store": {
+          "w": 420,
+          "h": 280
+        }
+      },
+      "singles": [
+        {
+          "dispatched": 40,
+          "delivered": 20,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 2
+        },
+        {
+          "dispatched": 100,
+          "delivered": 50,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 2
+        },
+        {
+          "dispatched": 120,
+          "delivered": 60,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 2
+        },
+        {
+          "dispatched": 240,
+          "delivered": 120,
+          "events": 1,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": false,
+          "dprAtEvent": 2
+        }
+      ],
+      "burst": {
+        "dispatched": 12,
+        "delivered": 12,
+        "sumDelivered": 720.0,
+        "distinctDeltas": [
+          60.0
+        ]
+      }
+    }
+  ],
+  "verdict": "A DRIVEN WHEEL DELTA IS IN DEVICE PIXELS and the event reports CSS pixels."
+}

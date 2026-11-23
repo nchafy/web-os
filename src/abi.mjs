@@ -475,7 +475,22 @@ const INTS = {
   //: reinterpretation would resize a terminal's grid to 640x440 columns. It also fires for changes
   //: `WEV_RESIZE` suppresses: a resize that changed no cell count changed every pixel of a surface.
   WEV_CLIENT: 13,
-  WEV_MAX: 13,
+  //: M17. THE WHEEL TURNED. `a` = the x delta, `b` = the y delta, both SIGNED, and `c` = the
+  //: pointer's position packed by `packWheelPoint`. The deltas and the position are in the SAME
+  //: unit, and that unit is the one `WEV_POINTER` and `WEV_RESIZE` already use (constraint 248):
+  //: SURFACE px for a surfaced window, CELLS for a text one. NOT device px — that is
+  //: `win_surface`'s unit and nothing else's.
+  //:
+  //: THE SIGN FOLLOWS THE DOM: a positive `b` scrolls toward the END of a list, which is what a
+  //: reader pushing the wheel away from themselves gets. `wheelAt` restores it with `| 0` for
+  //: constraint 225's reason — a scroll up is negative and `>>> 0` turns it into four billion.
+  //:
+  //: THE POSITION RIDES THE RECORD because a wheel is aimed. A file manager with a tree pane and a
+  //: list pane must scroll the one under the pointer, and a program that only learned the delta
+  //: would have to remember the last `WEV_POINTER` — which is the state a hover does not update
+  //: while a button is up (constraint 223).
+  WEV_WHEEL: 14,
+  WEV_MAX: 14,
 
   //: The scale of `WEV_CLIENT`'s `c`: one unit is 1/65536 of a ratio. `dprFixed` encodes with it
   //: and `clientBoxAt` decodes with it, which are the kernel's side and a process's — so the
@@ -492,6 +507,24 @@ const INTS = {
   WMOD_SHIFT: 0x1,
   WMOD_CTRL: 0x2,
   WMOD_ALT: 0x4,
+
+  /** `mods` on a WEV_WHEEL.
+   *
+   *  THE BITS ARE 0x400 AND 0x800 AND NOT 0x8 AND 0x80, because `mods` is ONE namespace shared by
+   *  every event type: a reader that tests a bit does not first switch on `type`. 0x8 is held for a
+   *  Meta modifier — the three above it stop at Alt and the fourth is the obvious next — and 0x80 is
+   *  held for a double-click flag on a pointer record. Taking either here would make a wheel with a
+   *  modifier held indistinguishable from a different event's flag, and `selfTest` now asserts the
+   *  whole namespace is pairwise disjoint and single-bit rather than checking the sub-tables
+   *  separately, which is how two of them could have overlapped at all.
+   *
+   *  `WWHEEL_PAGE` says the delta is in PAGES rather than the record's normal unit — a reader's
+   *  `deltaMode` is not always pixels and a viewport-sized jump is not a rounding of one.
+   *  `WWHEEL_COALESCED` says this record is the SUM of more than one notch, which a program needs
+   *  in order to report honestly and which `WinMgr.feed` masks out of anything the page posts: the
+   *  kernel is the only thing that may claim it coalesced. */
+  WWHEEL_PAGE: 0x400,
+  WWHEEL_COALESCED: 0x800,
 
   /** How many events one window queues before it drops them, counted and published in
    *  `/proc/<pid>/win/<winid>`. The per-fd bound constraint 42 requires — see src/kernel/wins.mjs.
@@ -644,7 +677,34 @@ const INTS = {
    */
   DL_TEXT: 5,           // a0,a1 = x,y (TOP-left); a2 = px size; a3 = byte length; a4 = rgba
   DL_TEXT_DATA: 6,      // a0..a5 = 24 bytes of UTF-8, little-endian words
-  DL_MAX: 6,
+  /*
+   * THE CLIP, AND WHY A LIST CANNOT SCROLL WITHOUT ONE.
+   *
+   * A scrolled list draws rows at a negative offset, so the row above the viewport paints over the
+   * header and the row below paints past the bottom edge. `files` capped its rows and stated the
+   * overflow instead (constraint 294) because there was no wheel to scroll with AND no way to
+   * bound what a row may paint; this op is the second half.
+   *
+   * a0..a3 = x, y, w, h in SURFACE px, like every other display-list coordinate.
+   *
+   * IT IS STATE, WHICH MAKES IT THE FIRST OP THAT OUTLIVES ITSELF. Every op before this one is a
+   * drawing; this one changes what the ops after it may touch. So `replay` MUST reset the clip at
+   * the top of every batch: a clip left set by batch N makes batch N+1 draw nothing, which a
+   * reader sees as a window that went blank on its next repaint with no error anywhere. That
+   * reset is asserted by `bench/m17-wheel/probe.mjs` — two batches, the second carrying no clip
+   * op, and the second must have drawn.
+   */
+  DL_CLIP: 7,           // a0..a3 = x, y, w, h. flags & DLC_RESET drops the clip instead.
+  DL_MAX: 7,
+
+  /** `DL_CLIP`'s flags. ONE BIT, and it is bit 1 rather than bit 0 so that a zeroed flags word is
+   *  not a reset: an op built by a caller that forgot to set `flags` sets the rectangle it named,
+   *  which is the harmless reading. A reset takes no rectangle and a0..a3 are ignored.
+   *
+   *  A RESET IS NOT "CLIP TO THE WHOLE SURFACE". The surface is the clip's default and a program
+   *  that does not know its own extent cannot name it; `restore()` is also the only way back out of
+   *  a canvas clip, since `clip()` only ever intersects. */
+  DLC_RESET: 2,
 
   //: `DL_TEXT`'s flags. A FAMILY AND AN ALIGNMENT, which is everything a list needs and nothing
   //: more: a column of numbers has to be right-aligned to be comparable, and a monospace run is
@@ -944,9 +1004,10 @@ export const {
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
+  WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_MAX,
-  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_MAX,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLC_RESET,
   SURFACE_BUDGET_PX, SURFACE_MAX_PX,
   WIN_CAP_H, WIN_INSET, BLUR_OFF_AT, BLUR_ON_AT,
 } = INTS;
@@ -1444,6 +1505,42 @@ export function decodeWinEvent(dv, off) {
  */
 export function pointerAt(ev) {
   return { x: ev.a | 0, y: ev.b | 0, buttons: ev.c >>> 0 };
+}
+
+/**
+ * A WHEEL event's deltas and the position it was aimed at. The unit is the record's own —
+ * surface px for a surfaced window, cells for a text one — and both deltas and the position are in
+ * it, so nothing here needs to know which kind of window it came from.
+ *
+ * THE SIGN IS RESTORED ON THE DELTAS AND NOT ON THE POSITION, which is the same split
+ * `clientBoxAt` makes and for the same reason (constraint 225). A scroll up is a negative `dy` and
+ * `>>> 0` would make it 4,294,967,176; a position is inside the surface by the page's own hit test,
+ * so it has no negative value for an unsigned read to mangle.
+ *
+ * THE ONE PLACE `c` IS UNPACKED, with `packWheelPoint` beside it as the declared inverse — the
+ * `keyBytesOf`/`packKeyBytes` pattern. Two 16-bit halves rather than a fourth word because a
+ * record is 16 bytes and `type`/`mods`/`a`/`b`/`c` already spend them; a surface coordinate does
+ * not reach 65,535 in any window `SURFACE_MAX_PX` admits.
+ */
+export function wheelAt(ev) {
+  const c = ev.c >>> 0;
+  return { dx: ev.a | 0, dy: ev.b | 0, x: c & 0xffff, y: (c >>> 16) & 0xffff };
+}
+
+/**
+ * A wheel's aim point as a WEV_WHEEL's `c`. THE DECLARED INVERSE of `wheelAt`'s `x`/`y`.
+ *
+ * IT CLAMPS RATHER THAN THROWS, which is the opposite of `dprFixed` and deliberate. A dpr comes
+ * from the page's own `devicePixelRatio` and an unrepresentable one is a defect; this comes from a
+ * pointer position that a resize can leave momentarily outside the surface it was measured
+ * against, and refusing a whole wheel event over an off-by-one at the edge would lose the reader's
+ * scroll. A clamped position is the nearest point inside the surface, which is where the gesture
+ * was aimed anyway.
+ */
+export function packWheelPoint(x, y) {
+  const cx = Math.min(0xffff, Math.max(0, Math.round(x || 0)));
+  const cy = Math.min(0xffff, Math.max(0, Math.round(y || 0)));
+  return ((cy << 16) | cx) >>> 0;
 }
 
 /**
@@ -2169,7 +2266,8 @@ export function selfTest() {
     if (!threw) fail(`dprFixed accepted ${bad}`);
   }
   const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER,
-    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WEV_STATE, WEV_ITEM, WEV_CLIENT];
+    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WEV_STATE, WEV_ITEM, WEV_CLIENT,
+    WEV_WHEEL];
   if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
   if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
   if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
@@ -2228,7 +2326,8 @@ export function selfTest() {
   if (pixelColor(0x0b0d11ff) === cssColor(0x0b0d11ff)) {
     fail("pixelColor and cssColor agree, so one of them is wrong about alpha");
   }
-  const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA];
+  const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA,
+    DL_CLIP];
   if (new Set(dlOps).size !== dlOps.length) fail("two display-list ops collide");
   if (dlOps.includes(0)) fail("0 is a display-list op: a zeroed buffer would decode as one");
   if (Math.max(...dlOps) !== DL_MAX) fail("DL_MAX is not the largest op");
@@ -2237,6 +2336,43 @@ export function selfTest() {
   if (new Set(dlt).size !== dlt.length) fail("two text flags collide");
   for (const b of dlt) {
     if (b === 0 || (b & (b - 1)) !== 0) fail(`text flag ${b} is not a single bit`);
+  }
+  // A ZEROED FLAGS WORD MUST NOT BE A CLIP RESET. An op built without `flags` sets the rectangle
+  // it names, which is the harmless reading; bit 0 would have made the careless case the
+  // destructive one.
+  if ((0 & DLC_RESET) !== 0) fail("a zeroed flags word reads as a clip reset");
+  if (DLC_RESET === 0 || (DLC_RESET & (DLC_RESET - 1)) !== 0) {
+    fail(`DLC_RESET is ${DLC_RESET}, which is not a single bit`);
+  }
+
+  /* THE WHEEL RECORD, BOTH WAYS. `packWheelPoint` is declared the inverse of `wheelAt`'s x/y, so
+   * the round trip is asserted and not trusted — and the NEGATIVE deltas are the point: a scroll
+   * up is negative, and an unsigned read turns -40 into 4,294,967,256 (constraint 225). The
+   * position is asserted to survive the same record, because both live in `c` and a packer that
+   * swapped the halves would still round-trip a square. */
+  const wheelProbe = new DataView(new ArrayBuffer(WEV_BYTES));
+  for (const [dx, dy, x, y] of [[0, 120, 10, 20], [0, -120, 0, 0], [-40, 40, 65535, 1],
+    [7, -3, 1, 65535], [0, 0, 437, 219]]) {
+    encodeWinEvent(wheelProbe, 0, {
+      type: WEV_WHEEL, mods: WWHEEL_COALESCED, a: dx, b: dy, c: packWheelPoint(x, y),
+    });
+    const got = wheelAt(decodeWinEvent(wheelProbe, 0));
+    if (got.dx !== dx || got.dy !== dy) {
+      fail(`wheelAt gave deltas ${got.dx},${got.dy} for ${dx},${dy}`);
+    }
+    if (got.x !== x || got.y !== y) {
+      fail(`wheelAt gave the point ${got.x},${got.y} for ${x},${y}`);
+    }
+  }
+  // THE HALVES ARE NOT INTERCHANGEABLE, which a square probe cannot see.
+  if (wheelAt({ a: 0, b: 0, c: packWheelPoint(1, 2) }).x !== 1) fail("packWheelPoint swapped x/y");
+  // IT CLAMPS AND DOES NOT WRAP: 70000 & 0xffff is 4464, a point near the left edge of a surface
+  // the gesture was aimed at the right of.
+  if (wheelAt({ a: 0, b: 0, c: packWheelPoint(70000, -5) }).x !== 0xffff) {
+    fail("packWheelPoint wrapped an out-of-range x instead of clamping it");
+  }
+  if (wheelAt({ a: 0, b: 0, c: packWheelPoint(70000, -5) }).y !== 0) {
+    fail("packWheelPoint did not clamp a negative y to 0");
   }
 
   /* THE TEXT RUN, THROUGH THE RECORDS AND BACK. `textOfOps` is declared the inverse of
@@ -2270,15 +2406,36 @@ export function selfTest() {
   if (textOfOps(lone, 0) !== null) fail("textOfOps accepted a header with no data records");
   const short = encodeTextRun("hello.txt", { x: 0, y: 0, size: 10, rgba: 0 }).slice(0, 1);
   if (textOfOps(short, 0) !== null) fail("textOfOps accepted a truncated run");
-  const wptr = [WPTR_DOWN, WPTR_UP, WPTR_MOVE];
-  if (new Set(wptr).size !== 3) fail("two pointer flags collide");
-  for (const b of wptr) {
-    if (b === 0 || (b & (b - 1)) !== 0) fail(`pointer flag ${b} is not a single bit`);
+  // `mods` IS ONE NAMESPACE, AND IT IS CHECKED AS ONE. Every event type shares this 16-bit word
+  // and a reader that tests a bit does not first switch on `type`, so a pointer flag, a modifier
+  // and a wheel flag may not overlap even though no single event carries all three.
+  //
+  // THIS REPLACED THREE SEPARATE CLAUSES, which is the defect and not a tidy-up: the pointer bits
+  // were checked against each other, the modifiers against each other, and the pointer bits
+  // against the modifiers — so a THIRD sub-table could be added and collide with either, unseen.
+  // M17's wheel bits were the third one, and 0x8 and 0x80 are held for a Meta modifier and a
+  // double-click flag that this clause will cover the day they are added.
+  //
+  // THE TABLE IS DERIVED FROM `INTS` BY PREFIX, so adding the next bit is adding data. A list
+  // written here would have been the same hazard one level up: a bit in INTS and not in the list.
+  // `WITEM_*` is deliberately NOT a prefix here — those are an item record's flags, a different
+  // word, and folding them in would assert a constraint that does not exist.
+  const MODS_PREFIXES = ["WPTR_", "WMOD_", "WWHEEL_"];
+  const modsBits = Object.keys(INTS)
+    .filter((k) => MODS_PREFIXES.some((p) => k.startsWith(p)))
+    .map((k) => [k, INTS[k]]);
+  if (modsBits.length < 8) {
+    fail(`the mods namespace lists only ${modsBits.length} bits; the prefixes have gone stale`);
   }
-  // A pointer flag must not collide with a MODIFIER, because both travel in `mods`.
-  for (const b of wptr) {
-    for (const m of [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT]) {
-      if (b === m) fail(`pointer flag ${b} collides with a modifier`);
+  for (const [name, b] of modsBits) {
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`${name} is ${b}, which is not a single bit`);
+    if (b > 0xffff) fail(`${name} is ${b}, which does not fit the 16-bit mods word`);
+  }
+  for (let i = 0; i < modsBits.length; i += 1) {
+    for (let j = i + 1; j < modsBits.length; j += 1) {
+      if (modsBits[i][1] === modsBits[j][1]) {
+        fail(`${modsBits[i][0]} and ${modsBits[j][0]} are the same bit in one mods namespace`);
+      }
     }
   }
   if (SURFACE_MAX_PX > SURFACE_BUDGET_PX) fail("one surface may exceed the whole budget");

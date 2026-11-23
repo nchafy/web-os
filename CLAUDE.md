@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  270 normative constraints  ← cite these
+  CONSTRAINTS.md  298 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -78,6 +78,12 @@ bench/
   coep-tiles/     worked example of the harness discipline, with a working negative control
   syscall-contention/  M0's bench: the saturation sweep and its eight controls
   feasibility/    option D feasibility: RV32I MIPS, Proxy-MMU cost, trace-ring cost
+  m16-resize/     M16's half-day probe, run BEFORE its code: is a resize grip drivable over CDP,
+                  can the suite be driven at a chosen dpr, and does a backing store follow its
+                  client box. It also answered M17's first question as a side-effect
+  m17-wheel/      M17's probes. `probe.py` measured the WHEEL'S UNIT (constraint 297) and that the
+                  transport does not coalesce (298); `probe.mjs` asserts the clip RESET under node;
+                  `firefox-scroll.py` scrolls the list in a SECOND ENGINE with trusted input
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -164,6 +170,15 @@ www/
                   the tray, and a desktop of icons that snap to a grid. `?proofs=1` is the
                   HARNESS — nine proofs that stage their own windows and block for a driver, so
                   it is the harness's to open and not a reader's (constraint 283)
+  m16.html        M16's seven clauses at four frame sizes and BOTH ratios — dpr 2 and dpr 1 —
+                  because the defect it removes is ratio-shaped and INVISIBLE at dpr 1, where a
+                  CSS-px box handed to `win_surface` is numerically right. The first page in this
+                  project to drive a real RESIZE GRIP
+  m17.html        M17's eleven clauses: a driven WHEEL over a 40-entry directory, the clip that
+                  stops a scrolled row painting over the header (read as a PIXEL), both clamp
+                  edges, and the coalescing — a 300-notch stream into a program held in its
+                  declared `--no-drain` mode, scored on `queued:`/`coalesced:`/`dropped:`. The
+                  bare URL is a live desktop you can scroll; `?proofs=1` is the harness
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -243,7 +258,11 @@ row below rather than restate it.
 | Where a window opens when its program has no opinion | `WIN_ORIGIN_X`/`WIN_ORIGIN_Y` in `src/libos/std.mjs` — userland's convention, beside `iconForPath`, because the kernel knows nothing about icons. It is NOT the top-left corner: that is the desktop's icon column, and a window there makes the desktop stop working (constraint 289). The kernel spreads what comes after, by stepping an exact corner collision down-right (`WinMgr.#cascade`, constraint 291) |
 | Which programs open a window of their own | `OPENS_OWN_WINDOW` in `src/bin/desktop.mjs`. An ALLOWLIST: everything else in `/usr/bin` writes to stdout, so a menu row runs it inside a terminal rather than spawning a process with nothing to show (constraint 290) |
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
-| The 282 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| A window's CLIENT BOX and the ratio that relates it to CSS px | `WEV_CLIENT` + `clientBoxAt`/`dprFixed` and `DPR_FIXED_ONE` in `src/abi.mjs`. The box is DEVICE px — the unit `win_surface` takes and `SURFACE_MAX_PX` bounds — and the ratio RIDES THE RECORD because a process has no other route to it. A program's own layout constants are CSS px, and this is what converts them |
+| A WHEEL's deltas and the point it was aimed at | `WEV_WHEEL` + `wheelAt`/`packWheelPoint` and `WWHEEL_PAGE`/`WWHEEL_COALESCED` in `src/abi.mjs`. Surface px for a surfaced window, CELLS for a text one (constraint 248) — never device px. `packWheelPoint` is `wheelAt`'s declared inverse, because x and y share one 32-bit word |
+| The `mods` bit namespace, as ONE table | `selfTest` in `src/abi.mjs`, derived from `INTS` by the prefixes `WPTR_`/`WMOD_`/`WWHEEL_`. It was three separate clauses — pointer bits against each other, modifiers against each other, pointer against modifier — so a THIRD sub-table could collide with either, unseen. M17's wheel bits were the third one |
+| The CLIP, and who resets it | `DL_CLIP` + `DLC_RESET` in `src/abi.mjs`, applied in `Surface.replay` in `src/wm/surface.mjs` — which MUST reset at the top of every batch, because a canvas clip only ever intersects. A clip left set by batch N makes batch N+1 draw nothing: a window blank on its next repaint with no error anywhere. `bench/m17-wheel/probe.mjs` is what proves the reset exists |
+| The 298 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -446,6 +465,13 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
+- **A DRIVEN WHEEL'S DELTA IS NOT IN THE SAME UNIT IN BOTH DRIVERS, so a dispatched constant is
+  not an assertable distance.** CDP's `deltaY` is DEVICE px and the `wheel` event reports
+  `deltaY / devicePixelRatio`; WebDriver BiDi's `scroll` takes CSS px. Measured 12 of 12 over four
+  deltas at three ratios (constraint 297), and the dpr-1.5 non-integers are what ruled out a clamp.
+  **A check that dispatches a constant delta and asserts a constant offset is right at dpr 1 and
+  wrong by the ratio everywhere else, with every expectation green** — the same shape as M11's,
+  M12's and M16's bills. Scale by the ratio, or assert against the delta the page received.
 - **FIREFOX CAN BE DRIVEN NOW, and the rule below is why that matters.** `scripts/bidi.py` speaks
   WebDriver BiDi to Firefox 156: `input.performActions` delivers events carrying
   `isTrusted === true`, verified by its own self-test. `bench/m7-win/firefox.py`'s "Mozilla removed
@@ -530,6 +556,14 @@ python3 bench/m14-shell/firefox-drive.py --prove-failure  # ...and the world whe
 python3 bench/m14-shell/firefox-hover.py  # CAN THE POINTER REACH A THUMBNAIL? the flyout, crossed
 python3 bench/m14-shell/firefox-hover.py --prove-failure  # ...with no grace period, it cannot
 python3 bench/m14-shell/coreutils.py      # mkdir, rm -r, cp, mv, sort, uniq at a REAL prompt
+python3 bench/m17-wheel/probe.py    # WHAT UNIT IS A DRIVEN WHEEL DELTA? four deltas, three ratios
+node bench/m17-wheel/probe.mjs      # ...and the clip RESET between batches, under node
+python3 bench/m17-wheel/firefox-scroll.py  # DOES THE LIST SCROLL IN FIREFOX? real trusted input
+python3 bench/m17-wheel/firefox-scroll.py --prove-failure  # ...and with a zero delta, it must not
+python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
+scripts/check.py --negative no-clip          # a scrolled row painting over its own header
+scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end
+scripts/check.py --negative no-wheel-coalesce # ...and a wheel stream that laps the event ring
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 

@@ -105,7 +105,7 @@ and the free space instead.
 
 ---
 
-### M15a — the registration debt, and the rule that stops it recurring · 0.5 d
+### M15a — the registration debt, and the rule that stops it recurring · 0.5 d · DONE
 
 **Closes.** M15's absence from the registry. Nothing in the product.
 
@@ -137,7 +137,7 @@ gate — which is worse but honest, and the reason is readable.
 
 ---
 
-### M16 — the client box IS the surface, in device pixels · 2 d + 0.5 d probe
+### M16 — the client box IS the surface, in device pixels · 2 d + 0.5 d probe · DONE
 
 **Closes.** R1, R2, R8, R10, R34, A2, A2b, A2c, A2d. The reader's bugs 2 and 4 — all three of bug
 4's causes — and the two transcription defects the audit found beside them.
@@ -204,7 +204,13 @@ clause to a second driver and the row says so.
 
 ---
 
-### M17 — the wheel, the clip, and a list that scrolls · 2 d
+### M17 — the wheel, the clip, and a list that scrolls · 2 d · DONE
+
+**Shipped.** What landed is in `MILESTONES.md` §M17: three driven proofs at 35 expectations, the
+two transport facts measured first (constraints 297 and 298), and **two of the three controls named
+below registered as UNMEASURABLE with the address of what they would need**, because no world in
+`src/` selects them. The specification below is unedited — it is what was asked for, and the
+tracker is what was delivered.
 
 **Closes.** R3, R20, A1, A6.
 
@@ -262,6 +268,23 @@ clauses MUST hold. `unclamped-scroll` removes the end clamp: the clamp clauses M
 300-notch stream, `queued:` MUST reach 300, `coalesced:` MUST stay 0, `dropped:` MUST reach 44, and
 the full-delta clause MUST fail — the offset falls short by the most recent motion, which is why the
 list stops following the reader's hand and moves the wrong way on a direction change.
+
+> **CORRECTION, from the implementation.** Two sentences above this one are wrong, and the run that
+> found each is named beside it. The specification is left as written and corrected here rather than
+> edited, which is this repo's rule for a falsified claim.
+>
+> 1. **The full-delta clause does not fail under `no-wheel-coalesce`, and cannot.**
+>    `account.dyTotal` is summed inside `scrollBy`, so it totals the deltas the program RECEIVED;
+>    `scroll == dyTotal` therefore survives any number of records the kernel discarded.
+>    `every notch reached the program` is the clause that catches dropping, because it compares
+>    against what the PAGE sent, and it does go red. Measured by
+>    `scripts/check.py --negative no-wheel-coalesce`: 6 red / 29 intact.
+> 2. **`dropped:` reaches 47, not 44**, because three notches were already queued when the stream
+>    started. The DELTA is 44 as predicted; the absolute figure is three higher.
+> 3. **`unclamped-scroll` must remove the END clamp only.** Removing both edges also turns the
+>    magnitude clause — the page establishes it by scrolling back to the top and measuring a known
+>    delta from there, which a list with no top cannot do. "The clamp clauses MUST fail alone" is
+>    true of the narrower world and false of the wider one; `Expect(failed=..)` refused the wider.
 
 **The forged-event guard lands here, and it covers M16's event too.** PRD §6 carries the rule:
 `WEV_CLIENT` joins `WinMgr.feed`'s refusal (`src/kernel/wins.mjs:1454-1457`,

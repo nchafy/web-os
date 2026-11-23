@@ -1,0 +1,1066 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M17 — the wheel, the clip, and a list that scrolls</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M16's pages do it,
+   and here it is load-bearing for the same reason it is on M16's page: `.window-body` is the client
+   area a surface fills and the element every CSS-px reading below is measured off. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:160px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M17 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M17 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M17's page: THE WHEEL, THE CLIP, AND A LIST THAT SCROLLS.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * fixture windows and then block in `gestureAsker`, which looks exactly like a broken product.
+ *
+ *   PROOF 1  THE CLIP, AS OPS. `files` sends exactly one `DL_CLIP` and no reset; `taskmgr` sends a
+ *            setter and then a `DLC_RESET`, because its position line and legend sit OUTSIDE the
+ *            table it clipped and a second clip would intersect rather than replace. The renderer's
+ *            own `clips`/`clipResets` are read beside them: the op having reached the renderer and
+ *            the pixels having been clipped are two facts, and `--negative no-clip` separates them
+ *   PROOF 2  THE LIST SCROLLS AND THE HEADER SURVIVES IT (plan §M17). A driven wheel over a
+ *            directory of 40 entries: the row at the viewport top CHANGED, the pixel where an
+ *            overhanging row WOULD have painted still reads the paper the header is drawn on, and
+ *            the offset CLAMPS at both ends
+ *   PROOF 3  COALESCING, over a 300-notch stream into a program held in its declared `--no-drain`
+ *            mode: `queued:` rises by 1, `coalesced:` by 299, `dropped:` by 0, and the offset the
+ *            program reaches on resuming is the FULL summed delta
+ *
+ * CONSTRAINT 297 IS THE TRAP THIS PAGE IS BUILT AROUND, and it is handled TWICE over. A
+ * CDP-dispatched wheel delta is in DEVICE px and the `wheel` event delivers `deltaY / dpr`
+ * (`bench/m17-wheel/probe.py`, fitted 12/12 across four deltas and three ratios). So:
+ *
+ *   1. every delta this page ASKS FOR is scaled by `devicePixelRatio` on the way out, so the page
+ *      RECEIVES the CSS-px figure the arithmetic below is written in at any ratio; and
+ *   2. no clause asserts against the dispatched number. The scroll clauses are asserted against
+ *      `host.lastWheel.dy` — what `src/wm/winhost.mjs` actually posted — and against the
+ *      program's own `scroll`/`dyTotal`, which is the reading the host publishes for exactly this.
+ *
+ * Either alone would be numerically right at dpr 1 and wrong by the ratio at dpr 2, with every
+ * clause green: constraint 264's failure, twice found and twice a milestone.
+ *
+ * THE WHEEL GESTURE IS A GESTURE, AND THE DRIVER OWNS IT. This page publishes
+ * `{kind: 'wheel', at, deltaX, deltaY, times}` through `gestureAsker`, where `deltaY` is in DEVICE
+ * px (CDP's unit) and `times` is how many identical notches to dispatch — the spelling `key`
+ * already uses for a repeat. `scripts/check.py`'s `_perform_gesture` owes the other half:
+ * `Input.dispatchMouseEvent(type="mouseWheel", x, y, deltaX, deltaY, button="none", buttons=0)`,
+ * repeated `times` times, which is the call `bench/m17-wheel/probe.py` measured constraints 297 and
+ * 298 with. A driver that performs no such kind raises rather than silently scrolling nothing.
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import {
+  DL_CLEAR, DL_CLIP, DL_FILL_RECT, DL_TEXT, DLC_RESET, WIN_EVENT_CAP,
+  decodeDrawOps, textOfOps, pixelColor,
+} from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import {
+  bootKernel, spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. One spelling, so a call site cannot be read as a
+ *  condition nobody wrote. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /** The renderer COUNTS the `DL_CLIP` op and does not apply it, so a scrolled row paints over the
+   *  header. `src/wm/surface.mjs` owns it, and it is the ONE `no-clip` world — `src/bin/files.mjs`
+   *  deliberately ships no flag that drops the op, because one fact gets one definition. */
+  noClip: params.get('no_clip') === '1',
+  /** The host posts the BROWSER's delta with the surface scale dropped: M16's units defect in the
+   *  one place M17 could repeat it. It moves the scroll MAGNITUDE and nothing else — the aim and
+   *  both clamps are converted by `#dropPointAt` whether or not the delta is. */
+  rawWheel: params.get('raw_wheel') === '1',
+  /** The kernel APPENDS a notch instead of summing it into the tail. See `wheelCoalesceAsked`
+   *  below: `setWheelCoalesce` is exported from `src/kernel/wins.mjs` and no boot-cfg branch in
+   *  `src/kernel/kernel.mjs` calls it yet, so this page MEASURES whether the world it asked for is
+   *  the world it got and refuses to report green proofs when it is not. */
+  noWheelCoalesce: params.get('no_wheel_coalesce') === '1',
+  /** Declared and REFUSED, which is the only honest spelling available here. The end clamp lives in
+   *  `scrollBy` inside `src/bin/files.mjs` and that program ships no flag to remove it, so there is
+   *  no world for this flag to select. See `main`. */
+  unclampedScroll: params.get('unclamped_scroll') === '1',
+}
+globalThis.M17.config = CFG
+
+/* THE CONTROLS ARE INSTALLED BEFORE THE HOST EXISTS, and read back out of the modules that own them
+ * into `host.report().controls`. BOTH setters are called even where this page sets nothing, because
+ * they are module state and another page may have left them holding something — stating "none" is
+ * the fail-closed spelling (M16's page carries the same note). */
+setSurfaceControls({ noClip: CFG.noClip })
+setHostControls({ rawWheel: CFG.rawWheel })
+
+const FILES = '/src/bin/files.mjs'
+const TASKMGR = '/src/bin/taskmgr.mjs'
+const TERM = '/src/bin/term.mjs'
+const GREP = '/src/bin/grep.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+
+/** THE DIRECTORY THE PROOFS SCROLL, AND IT IS BUILT HERE. `docs/PLAN-SHELL.md` §M17 specifies "a
+ *  directory of 40 entries"; `/usr/bin` holds 33, and the row count is not incidental — the end
+ *  clamp is `scrollMax(rows, clientH)` and a list that fits its window cannot clamp at all. `/tmp`
+ *  is the one writable mount besides the root. */
+const SCROLL_DIR = '/tmp/m17'
+const SCROLL_ROWS = 40
+/** The names, zero-padded so `files`'s own sort order is the numeric one — a reader watching the
+ *  list scroll past `file-07` and then `file-08` can see that it moved by one row, which an
+ *  unpadded sort would not show. `.txt` so the type column reads TEXT rather than a dash. */
+const SCROLL_NAMES = Array.from({ length: SCROLL_ROWS },
+  (unused, i) => `file-${String(i).padStart(2, '0')}.txt`)
+
+/**
+ * ONE NOTCH, IN THE UNIT THE PAGE RECEIVES: CSS pixels. `devFor` is the only place it becomes the
+ * device px CDP takes (constraint 297).
+ *
+ * IT IS 1 FOR AN ARITHMETIC REASON, and the reason is the whole of why proof 3 does not re-place
+ * its window. `STREAM_NOTCHES` notches' worth has to land INSIDE the end clamp, or the
+ * full-summed-delta clause is asserting about a delta the clamp ate — and what the summed delta
+ * comes to is not this number times 300. Each notch is scaled into surface px by the ratio
+ * `#dropPointAt` measures between the canvas's CSS box and the surface the PROGRAM asked for, so a
+ * frame re-placed under a program that has not re-surfaced inflates every notch by the mismatch:
+ * measured at 460x260 against an opening 420x560 surface, a 2-CSS-px notch posted 5 surface px, and
+ * 300 of those are 1,500 against a clamp of 688. Unplaced the ratio is about 0.99, one notch posts
+ * one surface pixel, and 300 come to 300 CSS px against a clamp near 390.
+ */
+const NOTCH_CSS_PX = 1
+/** The stream proof 3 drives. IT MUST EXCEED `WIN_EVENT_CAP` and the program must not drain, or the
+ *  `no-wheel-coalesce` control cannot turn the clause it claims: an appending stream has to LAP the
+ *  ring for `dropped:` to move (plan §M17). 300 against 256 is the smallest stream that reaches
+ *  it, and the cap is imported rather than restated. */
+const STREAM_NOTCHES = 300
+/**
+ * HOW FAR APART A DRIVER MUST SPACE THE NOTCHES, ms — and it is a MEASUREMENT, not politeness.
+ *
+ * A non-passive `wheel` listener makes the compositor hand each event to the main thread and wait
+ * for the ack, and events that arrive unacked are COALESCED BEFORE SCRIPT SEES THEM. Constraint
+ * 298's burst was 12 and survived; 300 does not. Measured on this page: an unpaced 300-notch stream
+ * into the HELD window arrived as 75 records — the transport taking credit for the kernel's work,
+ * which would leave `--negative no-wheel-coalesce` unable to lap a 256-record ring at all. The same
+ * 300 into a DRAINING window arrived as 285-300, because the repaints pace it; so the failure is
+ * worst exactly where this proof needs it least. At 10 ms, 300 of 300 arrive.
+ *
+ * `thePageRoutedEveryNotch` is the assertion that it worked. A run where the pacing was not enough
+ * reports a red clause rather than a kernel silently credited with the compositor's coalescing.
+ */
+const WHEEL_GAP_MS = 10
+/**
+ * How long `files --no-drain` holds its event loop for proof 3, ms.
+ *
+ * IT MUST OUTLAST THE STAGING AND THE WHOLE STREAM, and the stream is not cheap: a notch costs one
+ * `Input.dispatchMouseEvent` round trip, measured at about 24 ms on top of `WHEEL_GAP_MS`, so 300
+ * of them take about 10 s. A hold that expired mid-stream would let the program drain, and the
+ * clause would then be about a queue nobody lapped — `theHoldOutlastedTheStream` is the reading
+ * that says the margin held and `theProgramSawOneSummedRecord` is the one that fails if it did not.
+ *
+ * THE PAGE CANNOT FINISH SOONER THAN THIS. The program resumes when the hold ends, so this is the
+ * floor on proof 3's wall time; 28 s is about a 2.5x margin on a 10 s stream and is what that
+ * margin costs.
+ */
+const HOLD_MS = 28000
+/** A coarse notch for proof 2, which only needs the offset to MOVE a long way. 60 CSS px is under
+ *  three rows, so a reader watching sees a scroll rather than a jump. */
+const COARSE_CSS_PX = 60
+/** How many single-CSS-pixel notches proof 2 may add while hunting for an offset at which a row
+ *  OVERHANGS the clip's top edge. One row's pitch is `ROW_STRIDE`, so a sweep of that length is
+ *  exhaustive; the cap is above it so a run that found nothing says so rather than looping. */
+const NUDGE_LIMIT = FILES_METRICS.ROW_STRIDE + 2
+
+globalThis.M17.proofs = { clip: null, scroll: null, coalesce: null }
+
+const ask = gestureAsker(globalThis.M17)
+
+/** The host, once there is one. */
+let HOST = null
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT, M16's: a `Surface` keeps counts and pixels, not ops, so the only way to read back
+ *  WHAT a program drew is to keep the batch the kernel announced. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a section can wait for a REPAINT rather than a timer. */
+const BATCHES = new Map()
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: `scripts/check.py`
+ *  loads this page once per ratio and the page measures whatever it was given, so a run whose
+ *  emulation silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** A CSS-px wheel delta as the DEVICE-px number CDP takes. THE ONE PLACE constraint 297's ratio is
+ *  applied — a second copy is how a page comes to dispatch a constant and assert a constant. */
+const devFor = (cssPx) => cssPx * dpr()
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M17.state = 'aborted'
+  globalThis.M17.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
+  out.className = 'bad'
+  say(globalThis.M17.why)
+} else {
+  main().catch((e) => {
+    globalThis.M17.state = 'error'
+    globalThis.M17.why = String((e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M17.why)
+  })
+}
+
+async function bootHost () {
+  /* `noWheelCoalesce` IS ASKED FOR THROUGH THE BOOT CFG, which is where every kernel-side control
+   * is asked for (`noCascade`, `noDraw`, `noModal`, `noItems`) and the name is derived from the
+   * setter the same way they are. It is not yet consumed; `proofCoalesce` measures whether it took
+   * and this page refuses rather than reporting green proofs over an unmodified kernel. */
+  const cfg = { label: 'm17', bench: 1 }
+  if (CFG.noWheelCoalesce) cfg.noWheelCoalesce = 1
+  const k = await bootKernel(cfg, globalThis.M17, say)
+  /* THE CAPTURE GOES ON FIRST. `kernelBoot` calls its listeners in order, so a listener added
+   * before the host's sees every batch the host is about to replay. */
+  k.on((m) => {
+    if (m.t !== 'win-draw') return
+    const id = m.win | 0
+    LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+    BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+  })
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  HOST = host
+  globalThis.M17.host = host
+  globalThis.M17.dpr = dpr()
+  /* WHAT A WINDOW LAST DREW, FOR A DRIVER THAT IS NOT THIS PAGE. `LAST_BATCH` is module-private and
+   * the proofs below read it directly, so a driver in ANOTHER ENGINE had no way to see the strings
+   * a program painted — and M17's whole subject is whether a list scrolls, which is a fact about
+   * those strings. `bench/m17-wheel/firefox-scroll.py` is the caller.
+   *
+   * THE PRECEDENT IS `FILES_METRICS`, and the lesson behind it is recorded in CLAUDE.md: a bench
+   * script's excuse for restating a program's geometry was that it sits outside the process and
+   * cannot import the module, which was "true of the PROCESS and false of the page it drives". The
+   * same holds here. Publishing the page's own decoder is what stops a second engine's gate from
+   * growing a second display-list reader that can disagree with this one. */
+  globalThis.M17.lastTextRuns = (what) => {
+    const entry = frameByTitle(host, String(what))
+    if (!entry) return null
+    return textRuns(LAST_BATCH.get(entry.id))
+      .map((r) => ({ text: r.text, x: Math.round(r.x), y: Math.round(r.y) }))
+  }
+  return { k, host }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window as the KERNEL holds it, by winid: the stats `/proc` publishes, among them `queued`,
+ *  `coalesced` and `dropped`. */
+async function kernelWin (k, id) {
+  const st = await winState(k)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/**
+ * The frame a program's window is, by the title it set — and NOT one of `skip`.
+ *
+ * THE EXCLUSION IS NOT COSMETIC. Proof 3 opens a SECOND `files` while the first one's frame may
+ * still be on the desktop: a program's exit and the page's `win-destroy` are two hops, so a plain
+ * title match can return the window that is going away and then read a pixel off a destroyed
+ * canvas. The caller passes the ids it already knew about.
+ */
+function frameByTitle (host, what, skip = null) {
+  for (const entry of host.frames.values()) {
+    if (skip && skip.has(entry.id)) continue
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE and at least one batch in it: an entry with no surface is a
+ *  frame whose canvas has not been built, and reading a pixel off it would throw. */
+async function surfaced (host, title, skip = null, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title, skip)
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title, skip)
+}
+
+/** Put a window at a known box, through `apply()` — M13's `place`, and the `keyup` is what makes the
+ *  page report the box the clamp settled on rather than the one it asked for. */
+function place (entry, box) {
+  entry.win.box = { x: box.x | 0, y: box.y | 0, w: box.w | 0, h: box.h | 0 }
+  entry.win.apply()
+  entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  return { ...entry.win.placed }
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a wheel is delivered by DOM hit-testing and a
+ *  frame above it would take it. The kernel owns the order (constraint 226), so this asks. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/**
+ * WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY, and say how long it took.
+ *
+ * It is proof 3's fixture rather than a tidiness: a `win-geom` arriving mid-stream queues a
+ * `WEV_CLIENT`, and a client record at the tail is not a wheel — so the next notch cannot merge
+ * into it and `queued:` rises a second time. The clause would then fail for a reason that is not
+ * the kernel's coalescing. `geoms` is the host's own count of posts, so this reads the subject.
+ */
+async function geomsSettled (host, quietMs = 400, ms = 8000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = host.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await pause(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/** Every text run in one batch, read through the ABI's own codec. `textOfOps` is the declared
+ *  inverse of the `encodeTextRun` the program drew with, so these are the program's own strings
+ *  and not a second opinion about the encoding (constraint 293). */
+function textRuns (bytes) {
+  if (!bytes || !bytes.length) return []
+  const ops = decodeDrawOps(bytes, bytes.length)
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) {
+      runs.push({ text: null, x: ops[i].a0, y: ops[i].a1 })
+      continue
+    }
+    runs.push({ text: got.text, x: ops[i].a0, y: ops[i].a1, flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/** Every `DL_CLIP` in one batch, in order, with the flags it carried. */
+function clipOps (bytes) {
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length)
+    .filter((op) => op.op === DL_CLIP)
+    .map((op) => ({ x: op.a0, y: op.a1, w: op.a2, h: op.a3, flags: op.flags,
+      reset: (op.flags & DLC_RESET) !== 0 }))
+}
+
+/**
+ * THE POSITION LINE `files` DRAWS IN ITS HEADER, parsed: `{first, last, rows}`, 1-based as drawn.
+ *
+ * IT IS THE PROGRAM'S OWN STATEMENT of which row is at the top of its viewport, read back out of
+ * the display list while the window is still open. `account.firstRow` carries the same fact but
+ * only at exit, and the clause here is about a list being scrolled — so this is the reading, and a
+ * number this page derived from `FILES_METRICS` and an offset would be the program's arithmetic
+ * done twice.
+ */
+const POSITION_RE = /^(\d+)-(\d+) of (\d+)$/
+const ITEMS_RE = /^(\d+) items?$/
+function positionOf (entry) {
+  for (const run of textRuns(LAST_BATCH.get(entry.id))) {
+    if (typeof run.text !== 'string') continue
+    const span = POSITION_RE.exec(run.text)
+    if (span) {
+      return { first: Number(span[1]), last: Number(span[2]), rows: Number(span[3]),
+        text: run.text }
+    }
+    // The unscrolled spelling: the program prints a count instead of a span when `scrollMax` is 0,
+    // which is itself the fact "this list cannot scroll" and must not read as row 1 of a scroll.
+    const all = ITEMS_RE.exec(run.text)
+    if (all) return { first: 1, last: Number(all[1]), rows: Number(all[1]), text: run.text }
+  }
+  return null
+}
+
+/**
+ * WHERE AN UNCLIPPED ROW WOULD HAVE PAINTED OVER THE HEADER, AND WHAT IS ACTUALLY THERE.
+ *
+ * EVERY COORDINATE AND EVERY COLOUR COMES OUT OF THE BATCH. The `DL_CLIP` op carries the viewport's
+ * top edge in surface px and the fills after it carry their own rectangles, so the sample point is
+ * one device row ABOVE that edge, inside a fill the program sent — a point modelled from
+ * `FILES_METRICS` would be this page re-deriving the program's layout, and a colour written here
+ * would be a second definition of the program's palette.
+ *
+ * `want` is the batch's own `DL_CLEAR` colour: the paper the header is drawn on. `wouldBe` is what
+ * the overhanging fill asked for. The two MUST differ, or the clause is satisfied by a row painted
+ * in the paper colour — which is why `headerIsIntact` below is two readings and not one.
+ */
+function headerSample (entry) {
+  const bytes = LAST_BATCH.get(entry.id)
+  if (!bytes || !bytes.length) return null
+  const ops = decodeDrawOps(bytes, bytes.length)
+  const clear = ops.find((op) => op.op === DL_CLEAR)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (!clear || clipAt < 0) return null
+  const clip = ops[clipAt]
+  const y = clip.a1 - 1
+  const box = { x: clip.a0, y: clip.a1, w: clip.a2, h: clip.a3 }
+  if (y < 0) return { clip: box, at: null, over: null }
+  const over = ops.slice(clipAt + 1).find((op) => op.op === DL_FILL_RECT
+    && op.a2 > 0 && op.a3 > 0 && op.a1 <= y && op.a1 + op.a3 > y)
+  if (!over) return { clip: box, at: null, over: null }
+  const x = Math.max(0, Math.min(entry.surface.w - 1, over.a0 + Math.floor(over.a2 / 2)))
+  return {
+    clip: box,
+    at: { x, y },
+    over: { x: over.a0, y: over.a1, w: over.a2, h: over.a3 },
+    read: entry.surface.pixel(x, y),
+    want: pixelColor(clear.a0),
+    wouldBe: pixelColor(over.a4),
+  }
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — which is what `FILES_METRICS`'s own
+ *  docstring prescribes for a driver. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+/**
+ * ASK FOR A WHEEL, AND RETURN WHAT THE PAGE RECEIVED.
+ *
+ * `cssPx` is the delta in the unit the page gets; the dispatched number is `cssPx * dpr`, which is
+ * constraint 297 applied in the one place it is applied. The returned `lastWheel` is the host's own
+ * record of the record it POSTED — the reading every clause below asserts against, because the
+ * dispatched number is not the delivered one at any ratio but 1.
+ */
+async function wheel (host, entry, cssPx, times, name) {
+  const at = entry.surface.clientAt(Math.round(entry.surface.w / 2),
+    Math.round(entry.surface.h / 2))
+  if (!at) throw new Error(`win ${entry.id} has no measurable surface to aim a wheel at`)
+  const before = host.report()
+  const t0 = performance.now()
+  await ask({ kind: 'wheel', name, at, deltaX: 0, deltaY: devFor(cssPx), times,
+    gapMs: WHEEL_GAP_MS })
+  const ms = performance.now() - t0
+  const after = host.report()
+  return {
+    at, cssPx, times, dispatched: devFor(cssPx), gapMs: WHEEL_GAP_MS, ms: Math.round(ms),
+    routed: (after.wheels | 0) - (before.wheels | 0),
+    unknown: (after.unknown | 0) - (before.unknown | 0),
+    lastWheel: after.lastWheel ? { ...after.lastWheel } : null,
+  }
+}
+
+/** Drive a wheel and wait for the program to have REPAINTED, which is the only acknowledgement
+ *  available: there is no channel on which a program says "I scrolled". */
+async function wheelAndRepaint (host, entry, cssPx, times, name) {
+  const had = BATCHES.get(entry.id) || 0
+  const sent = await wheel(host, entry, cssPx, times, name)
+  const repainted = await until(() => (BATCHES.get(entry.id) || 0) > had, 4000)
+  return { ...sent, repaintedMs: Math.round(repainted) }
+}
+
+/** Quit a program by giving its window a `q`, and collect the account it returns.
+ *
+ *  A SYNTHESISED KEY AND IT SAYS SO. This is the page tearing its own fixture down, not a gesture
+ *  under test: `q` is how `src/bin/files.mjs` exits and the account is the only place `scroll`,
+ *  `dyTotal` and the two clamp counts are published. A synthetic key reaches the surface's own
+ *  keydown handler and nothing in front of it, which `WinHost` counts separately for exactly that
+ *  reason — so nothing here can be mistaken for the trusted input the proofs drive. */
+async function quitAndReport (k, entry, pid) {
+  typeSynthetic(entry.surface.el, 'q')
+  const row = await resultOf(k, pid, 20000)
+  return row
+}
+
+/** THE SCROLL FIELDS OF A `files` ACCOUNT, with a shape for a program that never reached them.
+ *
+ *  A refusal path returns an account too — `win_create` failing, an empty directory, a bad
+ *  `--no-drain` — and those rows carry no `clamped`. Defaulting to zeros rather than letting a
+ *  clause dereference `undefined` is what makes such a run report FAILED CLAUSES over a stated exit
+ *  code instead of a thrown page, which is the difference between a proof that failed and a harness
+ *  that broke. */
+function scrollAccount (row) {
+  const clamped = row.clamped || { top: 0, bottom: 0 }
+  return {
+    exit: row.exit,
+    why: row.why || '',
+    rows: (row.rows || []).length,
+    wheels: row.wheels | 0,
+    coalescedWheels: row.coalescedWheels | 0,
+    pageWheels: row.pageWheels | 0,
+    scroll: Number(row.scroll || 0),
+    scrollMax: Number(row.scrollMax || 0),
+    dyTotal: Number(row.dyTotal || 0),
+    clamped: { top: clamped.top | 0, bottom: clamped.bottom | 0 },
+    /* THE RATIO THE PROGRAM IS CONVERTING WITH, which is its `S` and NOT necessarily the display's:
+     * `WEV_CLIENT` is a program's only route to the ratio, so one that has drained none is still
+     * on 1. Every prediction about this program's offset divides by this and never by
+     * `devicePixelRatio`. */
+    dpr: Number(row.dpr || 1),
+    firstRow: row.firstRow | 0,
+    shownRows: row.shownRows | 0,
+    maxRows: row.maxRows | 0,
+    heldMs: Math.round(row.heldMs || 0),
+    noDrainMs: row.noDrainMs | 0,
+  }
+}
+
+/** Build the 40-entry directory the proofs scroll, through two ordinary programs. */
+async function makeScrollDir (k) {
+  const md = await spawnProgram(k, MKDIR, ['mkdir', '-p', SCROLL_DIR])
+  const mdRow = await resultOf(k, md.pid, 20000)
+  const paths = SCROLL_NAMES.map((n) => `${SCROLL_DIR}/${n}`)
+  const tc = await spawnProgram(k, TOUCH, ['touch', ...paths])
+  const tcRow = await resultOf(k, tc.pid, 20000)
+  return { dir: SCROLL_DIR, want: SCROLL_ROWS, mkdir: mdRow.exit, touch: tcRow.exit }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: THE CLIP, AS OPS — and the renderer's count beside the pixels.
+
+   TWO PROGRAMS BECAUSE THERE ARE TWO SHAPES. `files` has one viewport and sends one `DL_CLIP` with
+   no reset, because `Surface.replay` resets at the top of every batch and a trailing reset would be
+   a second definition of that rule. `taskmgr` has a table AND a position line below it, so it sends
+   a setter and then a `DLC_RESET`: `DL_CLIP` INTERSECTS (the canvas's own rule), so a second
+   viewport in one batch is unreachable without one.
+
+   THE RENDERER'S COUNTS ARE READ BESIDE THEM, and that is what makes `--negative no-clip` a control
+   over a NAMED subset: the op reaching the renderer and the pixels being clipped are two facts, the
+   control moves only the second, and `clips` is incremented before the control is consulted.
+   -------------------------------------------------------------------------------------------- */
+async function proofClip (k, host) {
+  const files = frameByTitle(host, 'files')
+  const mgr = frameByTitle(host, 'Task Manager')
+  if (!files || !mgr) throw new Error('proofClip wants both a files and a taskmgr window')
+  const filesClips = clipOps(LAST_BATCH.get(files.id))
+  const mgrClips = clipOps(LAST_BATCH.get(mgr.id))
+  const clip = {
+    files: { clips: filesClips, surface: { clips: files.surface.clips,
+      clipResets: files.surface.clipResets, batches: files.surface.batches } },
+    taskmgr: { clips: mgrClips, surface: { clips: mgr.surface.clips,
+      clipResets: mgr.surface.clipResets, batches: mgr.surface.batches } },
+    /* NESTED, so it is not read as a clause. It is a STATE: what the renderer says is in force,
+     * read back out of the module that owns it rather than out of this page's query parsing. */
+    controls: { noClip: host.report().controls.noClip === true },
+  }
+  clip.filesSendsOneSetterAndNoReset = filesClips.length === 1 && filesClips[0].reset === false
+    && filesClips[0].w > 0 && filesClips[0].h > 0
+  clip.taskmgrSendsASetterThenAReset = mgrClips.length === 2
+    && mgrClips[0].reset === false && mgrClips[1].reset === true
+  /* THE OPS REACHED THE RENDERER, which is a different fact from the pixels having been clipped —
+   * and it is the fact that must HOLD under `no-clip`, or the control moves everything and
+   * separates nothing. */
+  clip.theRendererCountedThem = files.surface.clips >= 1 && files.surface.clipResets === 0
+    && mgr.surface.clips >= 1 && mgr.surface.clipResets >= 1
+  clip.ok = clip.filesSendsOneSetterAndNoReset && clip.taskmgrSendsASetterThenAReset
+    && clip.theRendererCountedThem
+  globalThis.M17.proofs.clip = { ok: clip.ok, evidence: clip }
+  say((clip.ok ? 'ok  ' : 'BAD ') + 'clip: files sends ' +
+    filesClips.map((c) => (c.reset ? 'reset' : `${c.w}x${c.h}@${c.x},${c.y}`)).join(' + ') +
+    '; taskmgr sends ' +
+    mgrClips.map((c) => (c.reset ? 'reset' : `${c.w}x${c.h}@${c.x},${c.y}`)).join(' + ') +
+    '; renderer counted ' + files.surface.clips + '/' + files.surface.clipResets + ' and ' +
+    mgr.surface.clips + '/' + mgr.surface.clipResets + ' (set/reset)')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE LIST SCROLLS, THE HEADER SURVIVES IT, AND IT CLAMPS AT BOTH ENDS.
+
+   `docs/PLAN-SHELL.md` §M17's first clause, driven. Four stages, in this order because each needs
+   the state the last one left:
+
+     a. SCROLL DOWN. The row at the viewport top must CHANGE, read off the program's own position
+        line rather than off an offset this page computed
+     b. FIND THE OVERHANG. One row's pitch of single-CSS-pixel notches at most, until a fill the
+        program sent sits across the clip's top edge. IT IS THE FIXTURE AND NOT THE CLAUSE: without
+        a row above the clip, "the header survived" is an assertion about an empty band, and
+        `--negative no-clip` would hold the very clause it is named for (M16's `hasAspectFixture`
+        is the same lesson, measured)
+     c. TO THE END. Far past `scrollMax`, so the bottom clamp fires and the last drawn row is the
+        last row in the directory
+     d. BACK TO THE TOP. Far past 0, so the top clamp fires too. A threshold checked at one edge is
+        half a threshold
+     e. A KNOWN DISTANCE FROM A KNOWN PLACE, which is the MAGNITUDE clause and the only one here
+        that is not asserted against what the host posted. From the top, three notches of
+        `COARSE_CSS_PX`, nothing clamped: the offset the program reports on exit must be
+        `3 * COARSE_CSS_PX` CSS pixels, because that is what the page RECEIVED (the dispatched
+        number over the ratio, constraint 297) and what a reader's hand asked for.
+
+        IT IS SEPARATE FROM EVERY OTHER CLAUSE ON PURPOSE. Asserting a scroll against
+        `lastWheel.dy` proves the conversion was self-consistent and nothing more — measured:
+        `--negative raw_wheel`, which drops the surface scale in `#wheel`, turned NOT ONE of the
+        clauses above, because every one of them read the delta the host had already got wrong. The
+        chain is `dispatched / dpr -> x scale -> / S`, and a clause has to pin an end of it that
+        the host does not own.
+
+   THE CLAMP COUNTS COME OUT OF THE PROGRAM'S ACCOUNT, because they are counts of CLAMP EVENTS and
+   nothing outside the process can see one: a wheel at an end that moves nothing still counts, which
+   is what separates "it stopped" from "it was never asked".
+   -------------------------------------------------------------------------------------------- */
+async function proofScroll (k, host, pids) {
+  const files = frameByTitle(host, 'files')
+  if (!files) throw new Error('no files window to scroll')
+  await raise(k, files)
+  /* A SHORT FRAME ON PURPOSE: `scrollMax` is `rowTop(n-1) + ROW_H + PAD - clientH`, so a window
+   * that shows fewer rows has more to scroll — and proof 3's 600 CSS px of summed delta has to fit
+   * inside it. Placed here and not in `stage` because this is the geometry the clauses are about. */
+  /* WAIT FOR THE PROGRAM TO HAVE DRAWN AT THIS SIZE, which is a different fact from the page having
+   * built the canvas: `visible()` and `scrollMax` are both functions of the client height, and a
+   * notch applied against the previous layout scrolls by the right amount through the wrong one.
+   * A repaint is the only acknowledgement available — no program says "I resized". */
+  const staged = BATCHES.get(files.id) || 0
+  place(files, { x: 20, y: 20, w: 460, h: 260 })
+  await until(() => (BATCHES.get(files.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+  const scale = scaleOf(files)
+  const clientH = files.win.bodyEl.clientHeight
+  const stages = []
+
+  const record = (name, sent) => {
+    stages.push({ name, sent: sent ? { cssPx: sent.cssPx, times: sent.times,
+      dispatched: sent.dispatched, routed: sent.routed, lastWheel: sent.lastWheel,
+      repaintedMs: sent.repaintedMs } : null,
+    position: positionOf(files), batches: BATCHES.get(files.id) || 0 })
+    return stages[stages.length - 1]
+  }
+
+  const start = record('before-any-wheel', null)
+
+  /* ---- a. SCROLL DOWN --------------------------------------------------------------------- */
+  const down = await wheelAndRepaint(host, files, COARSE_CSS_PX, 3, 'scroll-the-list-down')
+  const scrolled = record('scrolled-down', down)
+
+  /* ---- b. FIND THE OVERHANG --------------------------------------------------------------- */
+  let nudges = 0
+  let sample = headerSample(files)
+  while ((!sample || !sample.over) && nudges < NUDGE_LIMIT) {
+    nudges += 1
+    await wheelAndRepaint(host, files, 1, 1, `nudge-${nudges}-css-px`)
+    sample = headerSample(files)
+  }
+  const overhang = record('a-row-overhangs-the-header', null)
+
+  /* ---- c. TO THE END ---------------------------------------------------------------------- */
+  const end = await wheelAndRepaint(host, files, COARSE_CSS_PX, 20, 'scroll-past-the-end')
+  const atEnd = record('at-the-end', end)
+
+  /* ---- d. BACK TO THE TOP ----------------------------------------------------------------- */
+  const top = await wheelAndRepaint(host, files, -COARSE_CSS_PX, 30, 'scroll-past-the-top')
+  const atTop = record('at-the-top', top)
+
+  /* ---- e. A KNOWN DISTANCE FROM A KNOWN PLACE ---------------------------------------------- */
+  const KNOWN_NOTCHES = 3
+  const knownCssPx = KNOWN_NOTCHES * COARSE_CSS_PX
+  const known = await wheelAndRepaint(host, files, COARSE_CSS_PX, KNOWN_NOTCHES,
+    'scroll-a-known-distance')
+  record('a-known-distance', known)
+
+  const row = await quitAndReport(k, files, pids.files)
+  const scroll = {
+    dir: SCROLL_DIR,
+    dpr: dpr(),
+    scale: Math.round(scale * 1000) / 1000,
+    clientH,
+    nudges,
+    nudgeLimit: NUDGE_LIMIT,
+    sample,
+    stages,
+    known: { notches: KNOWN_NOTCHES, cssPx: knownCssPx },
+    account: scrollAccount(row),
+  }
+
+  /* THE FIXTURE CLAUSES FIRST, because each of the three below is vacuous without one: a directory
+   * of 40 rows, a list that CAN scroll, and a wheel that actually reached the page. */
+  scroll.theDirectoryHasFortyEntries = scroll.account.rows === SCROLL_ROWS
+  scroll.theListCanScroll = scroll.account.scrollMax > 0
+  scroll.theWheelReachedThePage = stages.every(
+    (s) => !s.sent || (s.sent.routed === s.sent.times && s.sent.lastWheel !== null))
+  // THE ROW AT THE VIEWPORT TOP CHANGED, in the program's own words.
+  scroll.theTopRowChanged = Boolean(start.position && scrolled.position
+    && scrolled.position.first > start.position.first)
+  /* THE HEADER IS STILL DRAWN, as a PIXEL. Two readings: a row really does overhang the clip's top
+   * edge (the fixture), and the pixel there is the paper the header sits on rather than the colour
+   * that row asked for. An unclipped row paints over the header, which is what the second reading
+   * is about and what `--negative no-clip` turns. */
+  scroll.aRowOverhangsTheHeader = Boolean(sample && sample.over
+    && sample.want !== sample.wouldBe)
+  scroll.theHeaderSurvivedTheScroll = Boolean(sample && sample.over
+    && sample.read === sample.want)
+  /* BOTH ENDS, AND BOTH COUNTED. The positions are the program's statement of where the viewport
+   * is and the clamp counts are its statement that a delta was STOPPED there — two facts, because
+   * a list that happened to be at its end and one that was pushed against it look the same. */
+  scroll.itReachedTheEnd = Boolean(atEnd.position && atEnd.position.last === SCROLL_ROWS
+    && atEnd.position.first > 1)
+  scroll.itCameBackToTheTop = Boolean(atTop.position && atTop.position.first === 1)
+  scroll.itClampedAtBothEnds = scroll.account.clamped.top >= 1
+    && scroll.account.clamped.bottom >= 1
+  /* THE CONTROL IS MEASURED, NOT ASSUMED, which is the same rule `no_wheel_coalesce` follows below
+   * and for the same reason: `--unclamped-scroll` is passed on argv, and a program that ignored it
+   * — a typo in the flag, a parse that fell through to the directory operand — would run the
+   * shipped clamp and let this page report the clamp clauses GREEN under a control whose whole job
+   * is to turn them red. That is a control verifying nothing, so it fails closed with an address.
+   * `clamped` is the program's own count and it must be zero in this world by construction. */
+  if (CFG.unclampedScroll && scroll.account.clamped.bottom > 0) {
+    throw new Error('unclamped_scroll was asked for and the program clamped at the END anyway: '
+      + scroll.account.clamped.bottom + ' time(s). src/bin/files.mjs took --unclamped-scroll on '
+      + 'argv but an end clamp still bounded the offset, so this control selects no world. There '
+      + 'are TWO end clamps in that file — `scrollBy` and the re-clamp on a client-box change — '
+      + 'and gating only the first left a control that a resize silently undid.')
+  }
+  /* AND IT TRAVELLED THE DISTANCE THE WHEEL ASKED FOR. `knownCssPx` is what the page RECEIVED —
+   * the dispatched delta over the ratio — and `account.scroll` is where the program put the list
+   * starting from the top with nothing to clamp against. The one clause here that does not read
+   * back the host's own conversion, and so the only one `--negative raw_wheel` can turn.
+   *
+   * A ONE-PIXEL SLACK, because `wheelUnits` rounds a notch into whole surface pixels and the
+   * division back into CSS px need not come out whole at a fractional ratio. */
+  scroll.theScrollMatchedTheWheel = Math.abs(scroll.account.scroll - knownCssPx) <= 1
+  scroll.ok = scroll.theDirectoryHasFortyEntries && scroll.theListCanScroll
+    && scroll.theWheelReachedThePage && scroll.theTopRowChanged
+    && scroll.aRowOverhangsTheHeader && scroll.theHeaderSurvivedTheScroll
+    && scroll.itReachedTheEnd && scroll.itCameBackToTheTop && scroll.itClampedAtBothEnds
+    && scroll.theScrollMatchedTheWheel
+  globalThis.M17.proofs.scroll = { ok: scroll.ok, evidence: scroll }
+  say((scroll.ok ? 'ok  ' : 'BAD ') + 'scroll: ' +
+    stages.map((s) => (s.position ? s.position.text : 'no position line')).join(' -> ') +
+    '; header pixel ' + (sample && sample.over
+    ? `${sample.read} where a row asked for ${sample.wouldBe}` : 'NO ROW OVERHANGS THE CLIP') +
+    '; clamped ' + scroll.account.clamped.top + ' top / ' + scroll.account.clamped.bottom +
+    ' end; ' + knownCssPx + ' CSS px asked for from the top put it at ' +
+    Math.round(scroll.account.scroll) + ' of ' + Math.round(scroll.account.scrollMax) +
+    (nudges ? `, ${nudges} nudge(s)` : ''))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: COALESCING, OVER A 300-NOTCH STREAM INTO A PROGRAM THAT IS NOT DRAINING.
+
+   `docs/PLAN-SHELL.md` §M17's second clause. The fixture is `files --no-drain`, which holds its
+   event loop AFTER the window exists and is painted and BEFORE the first `win_read` — so there is
+   something to aim a wheel at and nothing reading it, which is the state the ring laps in.
+
+   THE INSTRUMENTS ARE DELTAS AND THE PLAN'S ABSOLUTES ARE WHY. `queued:` counts every event ever
+   OFFERED to that window's queue, and a window has already been offered the `WEV_CLIENT` its own
+   creation and placement produced before a wheel is driven at all — so `queued: 1` is true of the
+   stream and not of the file. The deltas across the stream are the 1 / 299 / 0 the plan names, and
+   `/proc` is then grepped for the ABSOLUTE numbers the kernel reports, which is what ties the
+   page's reading to the one a person has (M16's proof 5 does the same with `client:`).
+
+   NOTHING MAY RESIZE THIS WINDOW DURING THE STREAM. `coalesced` counts M16's client replacements
+   and M17's wheel merges in one number, so a geometry report mid-stream would both inflate it and
+   split the run — `geomsSettled` is the guard and `geoms` is reported either side.
+   -------------------------------------------------------------------------------------------- */
+async function proofCoalesce (k, host) {
+  const argv = ['files', '--no-drain', String(HOLD_MS), SCROLL_DIR]
+  // EVERY FRAME THAT ALREADY EXISTS, so the window found below is this spawn's and not the one
+  // proof 2 quit a moment ago — see `frameByTitle`.
+  const known = new Set(host.frames.keys())
+  /** WHEN THE HOLD STARTED, as near as this side can know it: the program begins holding once its
+   *  window is painted, which is the first thing after the spawn. Everything between here and the
+   *  end of the stream has to fit inside `HOLD_MS`. */
+  const spawnedAt = performance.now()
+  const held = await spawnProgram(k, FILES, argv)
+  const entry = await surfaced(host, 'files', known)
+  if (!entry) throw new Error('the --no-drain files window never surfaced')
+  /* RAISED AND NOT RE-PLACED, and that is the one piece of staging this proof must not do.
+   *
+   * The held program has drained no `WEV_CLIENT`, so the surface the kernel granted is still the one
+   * it OPENED with — and `files` opens its frame at the client box that surface is sized for. A
+   * frame re-placed under it leaves the two disagreeing, and `#dropPointAt` differences the
+   * disagreement into every delta it posts: measured at 460x260 against a 420x560 surface, a
+   * 2-CSS-px notch arrived as 5 surface px, so the summed stream overran the end clamp and the
+   * clause about the full delta would have been turned by the clamp instead of by the kernel. The
+   * raise is still needed, because a wheel is delivered by DOM hit-testing. */
+  await raise(k, entry)
+  const quietMs = await geomsSettled(host)
+  const geomsBefore = host.report().geoms
+  const before = await kernelWin(k, entry.id)
+  if (!before) throw new Error(`the kernel has no window ${entry.id} to measure`)
+
+  const preStreamMs = performance.now() - spawnedAt
+  const sent = await wheel(host, entry, NOTCH_CSS_PX, STREAM_NOTCHES, 'a-300-notch-stream')
+  const after = await kernelWin(k, entry.id)
+  /* THE FRAME AS IT STANDS, READ BEFORE THE QUIT. `quitAndReport` destroys the window, and a
+   * removed element's `clientWidth` is 0 — so a reading taken after it reports a client box of
+   * 0x0 and a scale of null for a window that was plainly there, which is how the first version
+   * of this evidence described the geometry the whole proof rests on. */
+  const frame = { placed: { ...entry.win.placed },
+    client: { w: entry.win.bodyEl.clientWidth, h: entry.win.bodyEl.clientHeight },
+    store: { w: entry.surface.w, h: entry.surface.h },
+    scale: Math.round(scaleOf(entry) * 1000) / 1000 }
+  const geomsAfter = host.report().geoms
+  const delta = {
+    queued: (after.queued | 0) - (before.queued | 0),
+    coalesced: (after.coalesced | 0) - (before.coalesced | 0),
+    dropped: (after.dropped | 0) - (before.dropped | 0),
+    delivered: (after.delivered | 0) - (before.delivered | 0),
+    geoms: geomsAfter - geomsBefore,
+  }
+
+  /* `/proc`, WHILE THE PROGRAM IS STILL NOT DRAINING. The patterns are built from the numbers the
+   * kernel just reported, so a line that merely EXISTS does not satisfy them — `grep -c` with a
+   * FIXED string (constraint 138) and its exit status is the answer. */
+  const path = `/proc/${held.pid}/win/${entry.id}`
+  const patterns = {
+    queued: `queued:\t${after.queued | 0}`,
+    coalesced: `coalesced:\t${after.coalesced | 0}`,
+    dropped: `dropped:\t${after.dropped | 0}`,
+  }
+  const greps = {}
+  for (const [name, pattern] of Object.entries(patterns)) {
+    const row = await spawnProgram(k, GREP, ['grep', '-c', pattern, path])
+    const got = await resultOf(k, row.pid, 20000)
+    greps[name] = { pattern, exit: got.exit, matched: got.matched }
+  }
+
+  /* NOW LET THE HOLD EXPIRE AND THE PROGRAM DRAIN. The repaint is the acknowledgement: the summed
+   * record is applied in one `scrollBy`, so one batch after the hold is the whole gesture landing. */
+  const had = BATCHES.get(entry.id) || 0
+  const drainedMs = await until(() => (BATCHES.get(entry.id) || 0) > had, HOLD_MS + 8000)
+  const row = await quitAndReport(k, entry, held.pid)
+  const account = scrollAccount(row)
+
+  /**
+   * THE OFFSET THE STREAM ASKED FOR, in the program's own unit.
+   *
+   * Every notch the page ROUTED carried `lastWheel.dy` surface px — they are identical by
+   * construction, which is also what let the kernel merge them — and the program divides the summed
+   * figure by its own scale. So this is `routed * dy / S`, and both terms are read rather than
+   * assumed: `dy` is what `src/wm/winhost.mjs` posted (constraint 297 — never the dispatched
+   * number), and `S` is `account.dpr`, the ratio the PROGRAM is converting with.
+   *
+   * `account.dpr` AND NOT `devicePixelRatio`. A held program has drained no `WEV_CLIENT`, and that
+   * event is a program's only route to the ratio — so its `S` is still 1 on a dpr-2 display, and a
+   * page that divided by the display's ratio would predict half the offset and call the program
+   * wrong. This is the units trap of constraint 248 arriving from the other side.
+   *
+   * `routed` AND NOT `STREAM_NOTCHES`, so this clause names ONE loss site: the kernel's queue. The
+   * transport's is `thePageRoutedEveryNotch` and the clamp's is
+   * `theOffsetIsTheFullSummedDelta`, and a clause that mixed them would be turned by any of three
+   * worlds.
+   */
+  const want = sent.lastWheel && account.dpr
+    ? (sent.routed * sent.lastWheel.dy) / account.dpr
+    : null
+  /** A HALF CSS PIXEL. `wheelUnits` rounds each notch and the kernel sums the rounded figure, so
+   *  the arithmetic is exact at every ratio measured; this is slack against a ratio whose division
+   *  does not come out whole, not a tolerance the clause rests on. */
+  const SLACK_CSS_PX = 0.5
+
+  const coalesce = {
+    pid: held.pid, win: entry.id, path, argv,
+    dpr: dpr(),
+    notches: STREAM_NOTCHES,
+    queueCap: WIN_EVENT_CAP,
+    notchCssPx: NOTCH_CSS_PX,
+    dispatchedPerNotch: sent.dispatched,
+    gapMs: WHEEL_GAP_MS,
+    preStreamMs: Math.round(preStreamMs),
+    streamMs: sent.ms,
+    holdMs: HOLD_MS,
+    lastWheel: sent.lastWheel,
+    routed: sent.routed,
+    unknown: sent.unknown,
+    // UNPLACED: the client box the canvas fills against the surface the program asked for, which
+    // is the ratio `#dropPointAt` differenced into `lastWheel.dy`.
+    frame,
+    quietMs: Math.round(quietMs),
+    before: { queued: before.queued, coalesced: before.coalesced, dropped: before.dropped },
+    after: { queued: after.queued, coalesced: after.coalesced, dropped: after.dropped,
+      pending: after.pending, parked: after.parked, level: after.level },
+    delta,
+    greps,
+    drainedMs: Math.round(drainedMs),
+    want,
+    account,
+  }
+
+  /* THE FIXTURE CLAUSES. Each of the three coalescing clauses is vacuous without them: a stream
+   * longer than the queue, a program that really held, and a page that really routed 300 records.
+   * The last is constraint 298 as an assertion — if the TRANSPORT coalesced, the kernel would be
+   * credited for its work and `--negative no-wheel-coalesce` could turn nothing. */
+  coalesce.theStreamExceedsTheQueueCap = STREAM_NOTCHES > WIN_EVENT_CAP
+  coalesce.theProgramHeldItsLoop = coalesce.account.heldMs >= HOLD_MS - 50
+    && coalesce.account.noDrainMs === HOLD_MS
+  /* AND THE HOLD OUTLASTED THE STREAM, which is the margin stated rather than hoped. A stream that
+   * ran past the hold would be drained halfway through and the coalescing clauses would be about a
+   * queue nobody lapped — `theProgramSawOneSummedRecord` is what fails when it happens, and this is
+   * what says so before it does. */
+  coalesce.theHoldOutlastedTheStream = preStreamMs + sent.ms < HOLD_MS
+  coalesce.thePageRoutedEveryNotch = sent.routed === STREAM_NOTCHES && sent.unknown === 0
+  coalesce.nothingResizedMidStream = delta.geoms === 0
+
+  // THE PLAN'S THREE NUMBERS, as the stream's own deltas.
+  coalesce.queuedRoseByOne = delta.queued === 1
+  coalesce.coalescedRoseByTheRest = delta.coalesced === STREAM_NOTCHES - 1
+  coalesce.nothingWasDropped = delta.dropped === 0
+  coalesce.procPublishesTheSameNumbers = Object.values(greps)
+    .every((g) => g.exit === 0 && g.matched === 1)
+
+  /* AND THE PROGRAM GOT THE WHOLE GESTURE. Two clauses, because an appending stream fails only the
+   * first: 256 records of a 300-notch stream still scroll without clamping, so `scroll === dyTotal`
+   * would HOLD under `no-wheel-coalesce` while the reader lost 44 notches. `dyTotal` against the
+   * delta the page posted is the clause that separates them. */
+  coalesce.theProgramSawOneSummedRecord = coalesce.account.wheels === 1
+    && coalesce.account.coalescedWheels === 1
+  coalesce.everyNotchReachedTheProgram = want !== null
+    && Math.abs(coalesce.account.dyTotal - want) <= SLACK_CSS_PX
+  coalesce.theOffsetIsTheFullSummedDelta = coalesce.account.scroll === coalesce.account.dyTotal
+    && coalesce.account.clamped.bottom === 0
+  coalesce.ok = coalesce.theStreamExceedsTheQueueCap && coalesce.theProgramHeldItsLoop
+    && coalesce.theHoldOutlastedTheStream
+    && coalesce.thePageRoutedEveryNotch && coalesce.nothingResizedMidStream
+    && coalesce.queuedRoseByOne && coalesce.coalescedRoseByTheRest
+    && coalesce.nothingWasDropped && coalesce.procPublishesTheSameNumbers
+    && coalesce.theProgramSawOneSummedRecord && coalesce.everyNotchReachedTheProgram
+    && coalesce.theOffsetIsTheFullSummedDelta
+  globalThis.M17.proofs.coalesce = { ok: coalesce.ok, evidence: coalesce }
+  say((coalesce.ok ? 'ok  ' : 'BAD ') + 'coalesce: ' + STREAM_NOTCHES + ' notches of ' +
+    sent.dispatched + ' device px routed as ' + sent.routed + ' record(s), dy ' +
+    (sent.lastWheel ? sent.lastWheel.dy : '?') + ' surface px each; queued +' + delta.queued +
+    ', coalesced +' + delta.coalesced + ', dropped +' + delta.dropped +
+    '; the program read ' + coalesce.account.wheels + ' record(s) and scrolled ' +
+    Math.round(coalesce.account.scroll) + ' of ' + Math.round(want === null ? 0 : want) +
+    ' CSS px asked for')
+
+  /* THE CONTROL IS MEASURED, NOT ASSUMED. `setWheelCoalesce` is exported from
+   * `src/kernel/wins.mjs` and nothing in `src/kernel/kernel.mjs` consumes a `noWheelCoalesce` boot
+   * cfg yet, so a page that merely passed the key would report green proofs over an unmodified
+   * kernel — the "a control a check believed was on and was not" failure, with the kernel's own
+   * coalescing as the thing being silently credited. FAIL CLOSED. */
+  if (CFG.noWheelCoalesce && delta.coalesced > 0) {
+    throw new Error('no_wheel_coalesce was asked for and the kernel coalesced anyway: '
+      + `coalesced rose by ${delta.coalesced} over ${STREAM_NOTCHES} notches. `
+      + 'src/kernel/kernel.mjs needs a bench-gated `cfg.noWheelCoalesce` branch calling '
+      + '`setWheelCoalesce(false)`, the way `cfg.noCascade` calls `setCascade(false)`. Until it '
+      + 'has one, bench/m17-wheel/probe.mjs is the only driver of that world.')
+  }
+}
+
+/* ---- staging ------------------------------------------------------------------------------- */
+
+/** The two surfaced programs proofs 1 and 2 read, placed out of each other's way. */
+async function stage (k, host) {
+  const pids = {}
+  /* `unclamped_scroll` IS THE PROGRAM'S WORLD AND IT ARRIVES ON ARGV, because the clamp it removes
+   * is `scrollBy`'s in `src/bin/files.mjs` and not the kernel's. Every other control here is a boot
+   * cfg; this one cannot be, which is why it is passed where the program is spawned rather than
+   * where the kernel is booted. The flag is the program's own declared one (see that file's header
+   * comment), so a reader who passes it gets the defect and the check gets its world. */
+  const filesArgv = CFG.unclampedScroll
+    ? ['files', '--unclamped-scroll', SCROLL_DIR]
+    : ['files', SCROLL_DIR]
+  pids.files = (await spawnProgram(k, FILES, filesArgv)).pid
+  pids.taskmgr = (await spawnProgram(k, TASKMGR, ['taskmgr'])).pid
+  for (const title of ['files', 'Task Manager']) {
+    if (!await surfaced(host, title)) throw new Error(`${title} never surfaced`)
+  }
+  /* TALLER THAN THE BOX PROOF 2 USES, and that is deliberate: proof 2 re-places this window and
+   * then waits for a REPAINT at the new size. Staging it at its final geometry would make that
+   * place a no-op, and the wait would be satisfied by whatever repaint happened next — or time out
+   * on a window that was already correct. */
+  place(frameByTitle(host, 'files'), { x: 20, y: 20, w: 460, h: 360 })
+  place(frameByTitle(host, 'Task Manager'), { x: 500, y: 20, w: 620, h: 440 })
+  await geomsSettled(host)
+  globalThis.M17.pids = pids
+  return pids
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+async function live () {
+  const { k, host } = await bootHost()
+  await spawnProgram(k, FILES, ['files', '/usr/bin'])
+  await spawnProgram(k, TASKMGR, ['taskmgr'])
+  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => host.frames.size >= 3, 15000)
+  for (const [title, box] of [
+    /* SHORT ENOUGH TO SCROLL, which is the point of this desktop: `/usr/bin` is 33 rows and a
+     * frame this tall shows about nine of them. NONE OF THE THREE OVERLAPS — a frame over
+     * `taskmgr`'s footer hides the `rows A-B of N` line that says the table scrolled, which is the
+     * one thing a reader came here to see. */
+    ['files', { x: 20, y: 20, w: 460, h: 260 }],
+    ['Terminal', { x: 20, y: 300, w: 460, h: 240 }],
+    ['Task Manager', { x: 500, y: 20, w: 620, h: 460 }],
+  ]) {
+    const entry = frameByTitle(host, title)
+    if (entry) place(entry, box)
+  }
+  const term = frameByTitle(host, 'Terminal')
+  if (term && term.term) term.term.focus()
+  say('')
+  say('A LIVE DESKTOP, and M17 is the row that made a list SCROLL.')
+  say('  turn the wheel over the file list or the task table: the rows move and the header stays')
+  say('  the viewport is a DL_CLIP, so a row scrolled under the header is cut at its edge')
+  say('  push at either end and it stops — the offset clamps at 0 and at the last row')
+  say('  shift, ctrl and alt ride along in the record; a trackpad\'s page mode jumps a viewport')
+  say('  `cat /proc/<pid>/win/<winid>` prints queued:, coalesced: and dropped: for that window')
+  say('  type `files /usr/share` or `taskmgr` at the prompt for more to scroll')
+  globalThis.M17.phase = 'live'
+  globalThis.M17.livePid = row.pid
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M17.state = 'done'
+    globalThis.M17.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noClip
+    ? 'CONTROL: no_clip (the DL_CLIP op is counted and not applied).'
+    : CFG.rawWheel
+      ? 'CONTROL: raw_wheel (the host posts the browser\'s delta, scale dropped).'
+      : CFG.noWheelCoalesce
+        ? 'CONTROL: no_wheel_coalesce (asked for through the boot cfg, and MEASURED below).'
+        : ''
+  say('M17 — the wheel, the clip, and a list that scrolls. ' + which)
+  say('dpr ' + dpr() + '. Every wheel below is REAL input, dispatched in DEVICE px and asserted')
+  say('against the delta the page RECEIVED (constraint 297), never against the number sent.')
+
+  const { k, host } = await bootHost()
+  globalThis.M17.kernelIsolated = true
+  globalThis.M17.controlsInForce = host.report().controls
+  globalThis.M17.scrollDir = await makeScrollDir(k)
+  say('staged ' + SCROLL_DIR + ': mkdir exit ' + globalThis.M17.scrollDir.mkdir +
+    ', touch exit ' + globalThis.M17.scrollDir.touch + ' for ' + SCROLL_ROWS + ' entries')
+  const pids = await stage(k, host)
+
+  await proofClip(k, host)
+  await proofScroll(k, host, pids)
+  await proofCoalesce(k, host)
+
+  const proofs = globalThis.M17.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M17.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M17.verdict)
+  globalThis.M17.state = 'done'
+  globalThis.M17.phase = 'rendered'
+}
+</script>
+</body>
+</html>

@@ -371,9 +371,25 @@ function drawnRows (entry) {
   const runs = textRuns(LAST_BATCH.get(entry.id))
   const names = runs
     .filter((r) => typeof r.text === 'string' && Math.abs(r.x - nameX) <= 1)
-    .filter((r) => r.text !== 'Name' && !r.text.startsWith('+'))
+    .filter((r) => r.text !== 'Name')
     .map((r) => r.text)
-  const overflow = runs.find((r) => typeof r.text === 'string' && r.text.startsWith('+'))
+  /* THE STATEMENT THIS LOOKS FOR CHANGED IN M17, AND THE CLAUSE DID NOT.
+   *
+   * This found a run whose text began with `+`: the "+N more" line constraint 294 required of a
+   * list that could not scroll. M17 amended that constraint and `src/bin/files.mjs` now draws its
+   * POSITION instead — `1-9 of 33` where the list is scrollable, `33 items` where it is not.
+   *
+   * What the M16 clause asserts is unchanged: that the program says what it is showing rather than
+   * GROWING to fit every row. A position statement says it at least as well as an overflow count,
+   * so the expectation keeps its name and its meaning and only its matcher moved. Leaving the `+`
+   * matcher would have been a check asserting the absence of a sentence nothing writes — green on
+   * the day the program stopped drawing anything at all.
+   *
+   * THE `+` FILTER ABOVE WENT WITH IT. Its only job was to keep the overflow line out of `names`;
+   * nothing draws a `+`-prefixed run now, and a file genuinely named `+foo` would have been
+   * dropped from the row count by it. */
+  const overflow = runs.find((r) => typeof r.text === 'string'
+    && (/^\d+-\d+ of \d+$/.test(r.text) || /^\d+ items?$/.test(r.text)))
   return { scale: Math.round(scale * 1000) / 1000, nameX, rows: names.length, names,
     runs: runs.length, overflow: overflow ? overflow.text : '' }
 }
