@@ -1928,6 +1928,14 @@ async function handle(m) {
       return;
     }
     case "win-geom": {
+      /* THE RATIO TRAVELS WITH THE BOX, AND IT HAS TO BE CONSUMED HERE. `WinHost.#report` reads
+       * `devicePixelRatio` per report rather than once per host — a window dragged to a second
+       * display changes it — and scales the box it sends by exactly that value. Storing the box
+       * and dropping the ratio stamps a dpr-3 box with the boot dpr, so a program computes its CSS
+       * size 1.5x too large and draws every constant at the wrong scale: the defect class M16
+       * exists to remove. `setDpr` refuses a ratio the 16.16 field cannot carry, so a bad one is
+       * counted rather than silently believed. Finding 3 of the M16 review. */
+      if (m.dpr > 0) WINDOWS.setDpr(m.dpr);
       const geomWin = WINDOWS.get(m.win | 0);
       /* A GEOMETRY FOR A WINDOW THAT IS GONE IS A RACE, NOT AN ERROR, and it was reported as one.
        * The page builds a frame when the kernel tells it to and reports the box it settled on —

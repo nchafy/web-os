@@ -416,7 +416,14 @@ export function styleSheet() {
   white-space: pre-wrap; overflow: auto;
   outline-offset: -2px;
 }
-.aero-desktop .window-body canvas { display: block; background: #fff }
+/* THE BACKGROUND IS THE SKIN'S AND THE EXTENT IS NOT, which is M16's proposed D40. A surface's
+ * CSS box is its contract with the kernel — the accounted area has to be the visible area or
+ * constraint 49's governor charges for a rectangle nobody renders — so 'src/wm/surface.mjs' sets
+ * width, height, flex and both min-* floors inline, on every host. This file carried no sizing at
+ * all while four proof pages each carried their own, so the shipped desktop was the one place a
+ * surface did NOT fill its client area and no proof could see it. A copy here would make five
+ * statements of a fact with one owner. */
+.aero-desktop .window-body canvas { background: #fff }
 
 /* ---- the states the kernel reports --------------------------------------------------- */
 /* Each is a frame a reader can tell apart, and each is already published as a dataset flag by

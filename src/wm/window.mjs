@@ -157,6 +157,11 @@ export class Win {
     this.onState = spec.onState || null;
     /** Where a right-click on the caption goes: the shell, which owns every menu. */
     this.onMenu = spec.onMenu || null;
+    /** M16. Where "the box changed under a live gesture" goes: the host, which owns the one route
+     *  to the kernel. A callback for `onClose`'s and `onState`'s reason — this file holds no `post`
+     *  and no kernel object — and the host coalesces the calls, because a gesture produces one per
+     *  pointer sample. */
+    this.onGeom = spec.onGeom || null;
     /** The WORK AREA, as a callback rather than a value: the shell may take a strip off the
      *  desktop at any moment (a taskbar appearing) and a window laid out against a stale work area
      *  is a maximized window covering the taskbar. */
@@ -564,6 +569,11 @@ export class Win {
       }
       this.box = { ...gesture.from, x: gesture.from.x + dx, y: gesture.from.y + dy };
       this.apply();
+      /* THE KERNEL LEARNS MID-GESTURE. See the resize handler below for why the release-only
+       * report was a defect with two faces; a move is the same path and the same reasons, and a
+       * window dragged onto a second display changes its device-pixel ratio without changing its
+       * box at all. */
+      if (this.onGeom) this.onGeom("drag");
       // AND THE EDGES ARM AS THE POINTER REACHES THEM, which is the other half of the gesture.
       this.#armSnap(e);
     };
@@ -753,6 +763,14 @@ export class Win {
       }
       this.box = next;
       this.apply();
+      /* THE KERNEL LEARNS MID-DRAG, and the release-only report was a defect with two faces.
+       * `/proc` and `governBlur`'s `blurRingArea(win.box.w, win.box.h)` described the PRE-DRAG
+       * rectangle for the whole gesture — constraint 49's under-read in the direction constraint
+       * 49 exists to forbid. And when `setPointerCapture` throws (Firefox does, constraint 175)
+       * the gesture continues on the document listeners below, so a release outside the frame
+       * never reaches the host's own `pointerup` hook and the kernel kept the pre-drag box
+       * PERMANENTLY. */
+      if (this.onGeom) this.onGeom("resize");
     };
     const up = (e) => {
       if (e.pointerId !== gesture.id) return;

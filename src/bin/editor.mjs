@@ -21,10 +21,15 @@
 //
 // The dialog is a TEXT window and not a surface: a question is words, and a window with no surface
 // shows what a process writes to it (M7). That is why M9 needs no text op.
+//
+// M16: EVERY WINDOW THIS PROGRAM OPENS IS A TEXT WINDOW, so it answers no `WEV_CLIENT` and calls
+// none of `src/libos/std.mjs`'s re-surface helpers. The `WEV_CLIENT` branch below states
+// what asking for a surface here would cost, because a reader diffing M16 across the other four
+// programs will come looking for the call that is absent.
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
-  WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS,
+  WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_CLIENT,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODE_BLOCKING, WMODE_RENDER_ABOVE,
   keyBytesOf,
 } from "/src/abi.mjs";
@@ -63,7 +68,7 @@ export function run(env) {
   const t0 = performance.now();
   const account = {
     program: NAME, win: 0, fd: 0, second: 0, dialog: 0, palette: 0,
-    typed: "", keys: 0, closes: 0, refusals: 0, suppressedWhileModal: 0,
+    typed: "", keys: 0, closes: 0, refusals: 0, clients: 0, suppressedWhileModal: 0,
     opened: "", openError: "",
     raiseRefused: 0, why: "",
   };
@@ -207,7 +212,26 @@ export function run(env) {
       }
       const isDialog = dialog && row.fd === dialog.fd;
       for (const ev of evs) {
-        if (ev.type === WEV_RESIZE || ev.type === WEV_FOCUS) continue;
+        if (ev.type === WEV_FOCUS) continue;
+        // CELLS, not pixels (`src/kernel/wins.mjs`'s `setBox`), and nothing here reflows: the text
+        // is written to the window's own screen and `src/wm/terminal.mjs` owns the grid.
+        if (ev.type === WEV_RESIZE) continue;
+        if (ev.type === WEV_CLIENT) {
+          /**
+           * M16. THIS PROGRAM HOLDS NO SURFACE AND MUST NOT ACQUIRE ONE, so
+           * `env.std.resurface` MUST NOT be called here. The swap is one-way: a window is a text
+           * window until `win_surface` succeeds and a pixel window afterwards, after which
+           * `writeCells` answers -EINVAL to every `write` on the fd and counts it `refusedCells`
+           * (`src/kernel/wins.mjs`). An editor that answered this event the way `files` does
+           * would go blank at its first resize and echo nothing a reader typed.
+           *
+           * COUNTED RATHER THAN DISCARDED SILENTLY, because a deliberate discard and an event
+           * that never fired are the same bare `continue` otherwise. The count is the only thing
+           * that tells them apart from outside the process.
+           */
+          account.clients += 1;
+          continue;
+        }
         if (ev.type === WEV_DESTROYED) {
           if (row.fd === made.fd) account.why = "the editor's window was destroyed";
           continue;

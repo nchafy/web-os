@@ -20,7 +20,7 @@ import { Win, geometryControlsInForce } from "./window.mjs";
 // `bytesForKey` is the TERMINAL's key translation, reused for a surface rather than written
 // again: a Ctrl-C is 0x03 whatever is inside the window (constraint 161's file is where it lives).
 import { Terminal, bytesForKey } from "./terminal.mjs";
-import { Surface } from "./surface.mjs";
+import { Surface, surfaceControlsInForce } from "./surface.mjs";
 // A CAPTION'S ICON IS THE SHELL'S ANSWER TO "which program is this", and the same answer a taskbar
 // button uses — one table, in the module that owns the drawings.
 import { iconMarkup, iconForProgram } from "./icons.mjs";
@@ -114,7 +114,10 @@ export class WinHost {
       // M14: show-state changes rendered, roles rendered, item lists rendered, item activations
       // reported, and faults in a watcher — a shell that throws must not take the window table
       // down with it, and a fault nobody counted is a shell that silently stopped updating.
-      shows: 0, roles: 0, itemLists: 0, itemAsks: 0, iconViews: 0, watcherFaults: 0 };
+      shows: 0, roles: 0, itemLists: 0, itemAsks: 0, iconViews: 0, watcherFaults: 0,
+      // M16: surfaces rebuilt at a new size (as against created), geometry reports coalesced into
+      // an animation frame, and right-clicks whose browser menu was refused.
+      resurfaces: 0, geomFrames: 0, contextmenus: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -376,6 +379,12 @@ export class WinHost {
        * at any moment, and a frame laid out against a stale work area is a maximized window
        * covering the taskbar. */
       workArea: () => this.workArea(),
+      /* M16, A2b. EVERY SAMPLE OF A GESTURE REPORTS, coalesced to one per animation frame. The
+       * frame changes its own box on every pointermove and the kernel learned nothing until the
+       * release, so `/proc` and the blur governor described the pre-drag rectangle for the whole
+       * drag — constraint 49's under-read in the direction constraint 49 exists to forbid. `this.get`
+       * and not the `entry` below, which is still in its temporal dead zone here. */
+      onGeom: () => this.#reportSoon(this.get(id)),
       /* THE X BUTTON ASKS AND DOES NOT ACT, which is M9 and constraint 44: "a close MUST be a
        * request the owner can refuse... without a close-request event, unsaved work is discarded
        * silently". It posts WEV_CLOSE and NOTHING ELSE — no `win-gone` — so the frame stays until
@@ -411,6 +420,9 @@ export class WinHost {
       // no way to learn what a pid is running.
       state: WST_NORMAL, role: WROLE_NORMAL, items: [], icons: null,
       prog: String(m.prog || ""),
+      // M16. The animation frame a gesture's geometry report is waiting on, or 0. Per entry and
+      // not per host, because two windows can be resized by two pointers.
+      geomRaf: 0,
     };
     this.frames.set(id, entry);
     /* NOT FLAT UNTIL THE KERNEL SAYS SO, and the flag is WRITTEN rather than left absent: "this
@@ -471,6 +483,14 @@ export class WinHost {
 
   #focus(id, inward) {
     if (!this.frames.has(id)) return;
+    /* A FOCUS THIS HOST CAUSED ITSELF IS NOT AN EVENT. `#surface` restores the keyboard to a
+     * canvas it has just replaced, and a program must not be told its focus changed when it did
+     * not — the one that would be told is mid-resize, and the record lands between two
+     * `WEV_CLIENT`s and defeats their coalescing. Counted, so a run can see it happened. */
+    if (this.get(id) && this.get(id).silentFocus) {
+      this.stats.silentFocus = (this.stats.silentFocus | 0) + 1;
+      return;
+    }
     this.stats.focus += 1;
     this.post({ t: "win-in", win: id, evs: [{ type: WEV_FOCUS, a: inward }] });
   }
@@ -500,6 +520,19 @@ export class WinHost {
   #surface(m) {
     const entry = this.get(m.win | 0);
     if (!entry) { this.stats.unknown += 1; return; }
+    /* A RE-SURFACE MUST NOT STEAL FOCUS, AND MUST NOT DROP IT EITHER (A2d). Both facts are taken
+     * before the destroy below, because removing the focused element moves focus to the body.
+     *
+     * M16 makes a program re-ask on every resize, so the unconditional `focus()` this method used
+     * to end with — harmless while nothing re-asked — would yank the keyboard to this window on
+     * every animation frame of somebody else's drag. A2d's fix is to focus only a FIRST surface,
+     * and on its own that trades the defect for its mirror: the window being resized destroyed the
+     * canvas that held the keyboard, so its own program would stop receiving keys at its first
+     * resize and never recover. `hadFocus` is what distinguishes the two — the keyboard goes back
+     * where it was, and nowhere else. */
+    const resurface = !!entry.surface;
+    const hadFocus = resurface
+      && entry.surface.el.ownerDocument.activeElement === entry.surface.el;
     if (entry.surface) {
       // A RESIZE, which the kernel has already accounted. The old canvas goes rather than being
       // resized in place: a canvas's `width` assignment clears it anyway, so keeping it would
@@ -521,8 +554,23 @@ export class WinHost {
       into: entry.win.bodyEl, w: m.w, h: m.h, label: entry.win.titleText,
     });
     this.stats.surfaces += 1;
+    this.stats.resurfaces += resurface ? 1 : 0;
+    // `#wirePointer` attaches to the NEW element, so a re-surface leaks no listener and delivers
+    // nothing twice: the old canvas and its listeners went together above.
     this.#wirePointer(entry);
-    entry.surface.el.focus();
+    if (!resurface || hadFocus) {
+      /* THE FOCUS IS RESTORED WITHOUT ANNOUNCING IT, and that is the whole of this branch's
+       * subtlety. `.focus()` fires the canvas `focus` listener `#wirePointer` just installed,
+       * which posts a `WEV_FOCUS` — so during a resize each frame queued `WEV_CLIENT` then
+       * `WEV_FOCUS`, and `Window.pushClient`'s tail replacement found a focus record at the tail
+       * and appended instead of coalescing. Two records per frame against a 256-record ring, with
+       * `stats.coalesced` stuck at 0 and `push` dropping the NEWEST when it laps — which is the
+       * final client box. The keyboard must still come back to a window whose canvas was replaced
+       * under it, so the focus happens and the event does not. Finding 6 of the M16 review. */
+      entry.silentFocus = true;
+      entry.surface.el.focus();
+      entry.silentFocus = false;
+    }
   }
 
   #draw(m) {
@@ -613,6 +661,19 @@ export class WinHost {
      * asleep in `poll`"; for a surface it was neither. */
     el.addEventListener("focus", () => this.#focus(entry.id, 1));
     el.addEventListener("blur", () => this.#focus(entry.id, 0));
+    /* M16, R8. A FOREIGN MENU DRAWN OVER THE OPERATING SYSTEM is the clearest breach of the
+     * surface available, and `#wirePointer` wired pointerdown/move/up/cancel/keydown/focus/blur
+     * and not this one: a right-click inside a window raised the host browser's own menu, over
+     * pixels a process drew.
+     *
+     * THE PROCESS IS NOT TOLD, and cannot be yet: there is no context-menu window event, and
+     * `WEV_POINTER` arrives only while a button is DOWN, so a right-press has no record to travel
+     * in. The menu a process raises at a point is A9, in M20. This refuses the host's and nothing
+     * else, which is the honest half of the fix rather than a menu nobody can populate. */
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.stats.contextmenus += 1;
+    });
   }
 
   #destroy(m) {
@@ -662,13 +723,36 @@ export class WinHost {
     entry.win.setHealth(m.level);
   }
 
-  /** Tell the kernel the box and the CELL COUNT the frame settled on. The cell count is the page's
-   *  to compute — it is the side with the font — and it is what a terminal needs for TIOCSWINSZ. */
+  /**
+   * Tell the kernel the box, the CELL COUNT and the CLIENT CONTENT BOX the frame settled on. The
+   * cell count is the page's to compute — it is the side with the font — and it is what a terminal
+   * needs for TIOCSWINSZ.
+   *
+   * THE CLIENT BOX IS MEASURED AND NEVER MODELLED (A2, PRD §2). `(w - 2*WIN_INSET) by
+   * (h - WIN_CAP_H - WIN_INSET)` is wrong twice over: `.aero-desktop .window-body` carries a
+   * `border-top: 1px solid` and is not `box-sizing: border-box`, so the content box the canvas
+   * fills is a pixel shorter than the model — and four of the five pages that render a surface do
+   * not load that stylesheet at all, so on those hosts the constants describe no element.
+   * Constraint 264's rule: a geometry derived from a measured rect survives a second engine, and
+   * one derived from a constant does not.
+   *
+   * `clientWidth`/`clientHeight` and NOT the bounding rect, which is the border box and so carries
+   * that 1 px. The `cols`/`rows` above keep reading the rect, unchanged: a cell count off by a
+   * pixel of border is not a defect, and moving it would move M4's expectations for nothing.
+   *
+   * IN DEVICE PIXELS, which is the unit `win_surface` takes and the unit `SURFACE_MAX_PX` is sized
+   * in, with the ratio sent beside them — a program holds CSS-px layout constants and the record
+   * is its only route to the factor.
+   */
   #report(entry) {
     // THE BOX THE CLAMP SETTLED ON, which is the whole contract. `staleGeom` reports the REQUESTED
     // one instead, so the kernel believes a geometry no frame ever had (see `setHostControls`).
+    // It does not reach the client box below: that is a reading of a live element, and the control
+    // is about the box the page claims to have placed.
     const placed = hostControls.staleGeom ? entry.win.box : entry.win.placed;
     const body = entry.win.bodyEl.getBoundingClientRect();
+    // Read per report and not once per host: a window dragged to a second display changes it.
+    const dpr = window.devicePixelRatio || 1;
     this.stats.geoms += 1;
     this.post({
       t: "win-geom",
@@ -676,6 +760,34 @@ export class WinHost {
       x: placed.x, y: placed.y, w: placed.w, h: placed.h,
       cols: Math.max(1, Math.floor(body.width / this.cell.w)),
       rows: Math.max(1, Math.floor(body.height / this.cell.h)),
+      clientW: Math.round(entry.win.bodyEl.clientWidth * dpr),
+      clientH: Math.round(entry.win.bodyEl.clientHeight * dpr),
+      dpr,
+    });
+  }
+
+  /**
+   * Report at most once per animation frame. The route a GESTURE takes, because none of `#report`'s
+   * seven call sites is inside one: the drag and the resize end in `apply()` and post nothing, so
+   * the kernel held the pre-drag rectangle for the whole gesture — and permanently when
+   * `setPointerCapture` throws, since the release then never reaches the frame's own `pointerup`
+   * (constraint 175, A2b).
+   *
+   * ONE POST PER FRAME IS THE CEILING AND NOT ONE PER SAMPLE. A `win-geom` per `pointermove` is
+   * the traffic constraint 243 refuses for a drag, and each one raises a client event into a
+   * 256-record queue; the kernel coalesces what does arrive into a single tail record.
+   *
+   * A FRAME DESTROYED BETWEEN THE SCHEDULE AND THE CALLBACK MUST NOT REPORT: the kernel has no
+   * window left to record it against and counts the message as unknown, so the identity is
+   * re-checked rather than assumed to have survived the frame.
+   */
+  #reportSoon(entry) {
+    if (!entry || entry.geomRaf) return;
+    this.stats.geomFrames += 1;
+    entry.geomRaf = requestAnimationFrame(() => {
+      entry.geomRaf = 0;
+      if (this.frames.get(entry.id) !== entry) return;
+      this.#report(entry);
     });
   }
 
@@ -1047,7 +1159,7 @@ export class WinHost {
       // The CONTROLS in force, read back out of the module that owns them rather than from the
       // page's own query parsing: a control a check believed was on and was not is a green run
       // over an unmodified world.
-      controls: { ...hostControls, ...geometryControlsInForce() },
+      controls: { ...hostControls, ...geometryControlsInForce(), ...surfaceControlsInForce() },
       // M10. The drag as the kernel announced it, the target as this file RENDERED it, and the
       // end it reported. Two readings of the target on purpose, for `frameBlocked`'s reason: the
       // second is what a reader actually sees.

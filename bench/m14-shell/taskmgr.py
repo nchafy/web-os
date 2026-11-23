@@ -255,18 +255,33 @@ def main(argv: list[str] | None = None) -> int:
                 box = rows["client"]
                 moved, tried = [], []
                 for i in (0, 1, 2, 3, 4):
-                    # Row i's centre in CLIENT pixels, through the canvas's own scale: the surface
-                    # is 560 wide and the element is not, so a surface y must be converted.
-                    at = ff.evaluate("""JSON.stringify((() => {
+                    # THE ROW GEOMETRY IS THE PROGRAM'S, AND THE SCALE IS MEASURED.
+                    #
+                    # This restated `HEAD_H + i*ROW_H + ROW_H/2` as `40 + i*18 + 9` in CSS px and
+                    # fed it to `clientAt`, which takes SURFACE px. Before M16 those coincided; the
+                    # surface is the client box in DEVICE pixels now, so at dpr 2 every row resolved
+                    # to about half its offset and the gesture clicked the header or row 0 whatever
+                    # `i` was. `src/bin/taskmgr.mjs`'s `TASKMGR_METRICS` docstring names this file
+                    # as wrong from M16 on and exports the arithmetic; finding 4 of the review.
+                    # THE STRINGIFY HAPPENS INSIDE THE ASYNC FUNCTION, because the import makes
+                    # this expression return a Promise. `JSON.stringify(promise)` is `"{}"` —
+                    # not an error, a silent empty object — so the dict check below skipped every
+                    # row and the gate passed by pressing nothing. `scripts/bidi.py` already sets
+                    # `awaitPromise`, so a promise OF a string is what it wants.
+                    at = ff.evaluate("""(async () => {
+                      const m = await import('/src/bin/taskmgr.mjs')
                       const host = globalThis.M14 && globalThis.M14.host
                       for (const e of host.frames.values()) {
                         const t = ((e.win.el.querySelector('h2')||{}).textContent||'').trim()
                         if (t !== 'Task Manager' || !e.surface) continue
-                        const p = e.surface.clientAt(120, %d + %d * 18 + 9)
-                        return p ? { x: Math.round(p.x), y: Math.round(p.y) } : null
+                        const scale = e.surface.w / e.surface.extent().cssW
+                        const p = e.surface.clientAt(
+                          Math.round(e.surface.w / 2),
+                          Math.round(m.TASKMGR_METRICS.rowMid(%d) * scale))
+                        return JSON.stringify(p ? { x: Math.round(p.x), y: Math.round(p.y) } : null)
                       }
-                      return null
-                    })())""" % (40, i))
+                      return JSON.stringify(null)
+                    })()""" % i)
                     if not isinstance(at, dict):
                         continue
                     before = ff.evaluate(SEL)
@@ -278,9 +293,20 @@ def main(argv: list[str] | None = None) -> int:
                         moved.append(i)
                 print("row clicks: %s" % tried)
                 print("rows whose click took effect: %s of %d" % (len(moved), len(tried)))
+                # A RUN THAT PRESSED NOTHING IS NOT A PASS. Every `continue` above is a row whose
+                # coordinate could not be computed, and the guard below used to read
+                # `if tried and ...` — so an expression that returned nothing for all five rows
+                # left `tried` empty and the gate printed its success line. That is the exact
+                # failure CLAUDE.md's harness-honesty rule names: a harness must fail when it is
+                # not reading what it was pointed at. Found by this file's own stringify defect.
+                if len(tried) < 5:
+                    bad.append("only %d of 5 row coordinates resolved, so the click was not "
+                               "exercised at every height: %s" % (len(tried), tried))
                 if tried and len(moved) < len(tried):
                     bad.append("a click selected the row at only %d of %d heights tried: %s"
                                % (len(moved), len(tried), tried))
+            else:
+                bad.append("the task manager's surface was never found, so no row was clicked")
             ff.screenshot(HERE / "taskmgr.png")
             print("shot     %s" % (HERE / "taskmgr.png"))
     finally:

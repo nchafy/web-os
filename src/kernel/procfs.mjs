@@ -65,8 +65,17 @@ const PID_FILES = {
  * which `PLAN.md` §5 specifies and which is the only choice that works: a window may be held on
  * several fds through `dup`, and an owner in another process names the winid and has no fd for it
  * at all. The fds that reach it are published as a field, so the mapping is still readable.
+ *
+ * THREE UNITS APPEAR HERE AND EACH IS LABELLED. `box:` is CSS px, the frame's own unit;
+ * `surface:` and `client:` are DEVICE px, the unit `win_surface` takes and `SURFACE_MAX_PX`
+ * bounds; `cells:` is cells. Two unlabelled integers in two units is the defect M16 is about, and
+ * `dpr:` is the factor between the first two.
+ *
+ * `mgr` IS THE WinMgr, FOR THE RATIO ALONE — it is a display fact and not a window's, so it cannot
+ * come off `win`, and this function closes over nothing. The caller resolves `win` through
+ * `winOf`, which returns null whenever `ctx.wins()` does, so `mgr` is non-null wherever this runs.
  */
-function winLines(win, slot) {
+function winLines(win, slot, mgr) {
   const fds = [];
   slot.fds.fds.forEach((d, i) => {
     if (d && d.win === win) fds.push(i);
@@ -80,6 +89,14 @@ function winLines(win, slot) {
     `children:\t${win.children.join(",")}`,
     `box:\t${win.box.x},${win.box.y},${win.box.w},${win.box.h}`,
     `cells:\t${win.cols}x${win.rows}`,
+    // M16. THE GRANTED SURFACE AND THE MEASURED CLIENT BOX, both DEVICE px, with the ratio that
+    // relates them to `box:` above. A process MUST be able to read back the geometry it was
+    // granted in the unit it was granted in, without waiting for an event — and `-` against
+    // `-1x-1` is the difference between a window that asked for no surface and one whose box has
+    // not been measured yet.
+    `surface:\t${win.surface ? `${win.surface.w}x${win.surface.h}` : "-"}`,
+    `client:\t${win.clientW}x${win.clientH}`,
+    `dpr:\t${mgr.dpr}`,
     `attached:\t${win.attached ? 1 : 0}`,
     `destroyed:\t${win.destroyed ? 1 : 0}`,
     `opens:\t${win.opens}`,
@@ -88,6 +105,10 @@ function winLines(win, slot) {
     // tell a working window from a wedged one.
     `pending:\t${win.events.length / WEV_BYTES}`,
     `dropped:\t${win.stats.dropped}`,
+    // M16. Client events REPLACED at the tail instead of appended. BESIDE `dropped:` because it is
+    // the overflow `dropped` cannot see: the replacement keeps the ring drained, so a full ring
+    // never happens and a broken replacement would move nothing here.
+    `coalesced:\t${win.stats.coalesced}`,
     `parked:\t${win.waitingReaders.length}`,
     `level:\t${win.level}`,
     // M9. Input a modal blocked, so a program whose keys stopped arriving can tell that from a
@@ -242,7 +263,7 @@ export function makeProcFS(ctx) {
         if (id === null) return null;
         const win = winOf(id, pid);
         if (!win) return null;
-        return { type: FILE, content: winLines(win, slot), volatile: true };
+        return { type: FILE, content: winLines(win, slot, ctx.wins()), volatile: true };
       }
       return null;
     }

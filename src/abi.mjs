@@ -458,7 +458,29 @@ const INTS = {
   //: own array. The kernel validates the index against the list it is holding, so a page cannot
   //: name a row that does not exist.
   WEV_ITEM: 12,
-  WEV_MAX: 12,
+  //: M16. THE CLIENT CONTENT BOX CHANGED, in DEVICE pixels — the unit `win_surface` takes and the
+  //: unit `SURFACE_MAX_PX` is sized in. `a` = width, `b` = height, `c` = the device-pixel ratio in
+  //: 16.16 fixed point. THE RATIO RIDES THE RECORD because a process has no other route to it:
+  //: the only dpr channel runs page -> kernel (src/wm/winhost.mjs:95 -> kernel.mjs:2033) and the
+  //: kernel kept only the square. A program's layout constants are CSS px; this is what converts
+  //: them.
+  //:
+  //: THE BOX IS THE PAGE'S MEASUREMENT of `bodyEl.clientWidth`/`clientHeight`, not a derivation
+  //: from WIN_CAP_H and WIN_INSET: `.window-body` carries a 1 px border-top and is not
+  //: border-box, so the model is a pixel taller than the box the canvas fills, and four proof
+  //: pages do not load that stylesheet at all.
+  //:
+  //: IT IS NOT `WEV_RESIZE`, and the two must not be merged. `WEV_RESIZE` carries CELLS
+  //: (src/kernel/wins.mjs:387) and `src/bin/term.mjs:277` feeds them to `winsizeSet` — a
+  //: reinterpretation would resize a terminal's grid to 640x440 columns. It also fires for changes
+  //: `WEV_RESIZE` suppresses: a resize that changed no cell count changed every pixel of a surface.
+  WEV_CLIENT: 13,
+  WEV_MAX: 13,
+
+  //: The scale of `WEV_CLIENT`'s `c`: one unit is 1/65536 of a ratio. `dprFixed` encodes with it
+  //: and `clientBoxAt` decodes with it, which are the kernel's side and a process's — so the
+  //: factor is written once and neither side can halve the other's dpr.
+  DPR_FIXED_ONE: 1 << 16,
 
   //: `mods` on a WEV_POINTER. A move with no button held is a hover, which is the zero case.
   WPTR_DOWN: 0x10,
@@ -902,7 +924,7 @@ export const {
   WEV_BYTES, WEV_TYPE, WEV_MODS, WEV_A, WEV_B, WEV_C,
   WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE,
-  WEV_STATE, WEV_ITEM,
+  WEV_STATE, WEV_ITEM, WEV_CLIENT, DPR_FIXED_ONE,
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
   WITEM_HEADER, WIT_ICON, WIT_FLAGS, WIT_LEN, WIT_RESERVED,
@@ -1422,6 +1444,45 @@ export function decodeWinEvent(dv, off) {
  */
 export function pointerAt(ev) {
   return { x: ev.a | 0, y: ev.b | 0, buttons: ev.c >>> 0 };
+}
+
+/**
+ * A CLIENT event's content box in DEVICE pixels, with the ratio that relates it to a program's own
+ * CSS-px layout constants. Device px is the unit `win_surface` takes and `SURFACE_MAX_PX` bounds,
+ * so what this returns may be handed to `win_surface` unscaled; a program's constants may not.
+ *
+ * NAMED `clientBoxAt` AND NOT `clientAt`, because `Surface.clientAt` already exists as the declared
+ * inverse of `pointAt` and converts a surface coordinate, and both get imported into one page.
+ *
+ * NO SIGN IS RESTORED, which is the one way this differs from `pointerAt`: a box is positive by the
+ * kernel's own `> 0` guard before it raises the event, and a ratio is positive by `dprFixed`, so
+ * there is no negative value for an unsigned read to turn into four billion (constraint 225).
+ */
+export function clientBoxAt(ev) {
+  return { w: ev.a >>> 0, h: ev.b >>> 0, dpr: (ev.c >>> 0) / DPR_FIXED_ONE };
+}
+
+/**
+ * A dpr as a CLIENT event's `c`. THE DECLARED INVERSE of `clientBoxAt`'s `dpr` term, beside it for
+ * the reason `packKeyBytes` sits beside `keyBytesOf`: the kernel encodes and a process decodes, and
+ * a factor written on both sides is a factor that can disagree.
+ *
+ * Fixed point rather than a float word, because every word of this record is a u32 and one word
+ * reinterpreted as an f32 would ask both sides to agree about a representation the rest of the
+ * record does not use. The cost is quantization: the ratio read back is within 1/131072 of the one
+ * encoded, which is 0.001 % at dpr 1 and below the sub-pixel threshold of anything downstream.
+ *
+ * IT THROWS RATHER THAN WRAPS. A ratio of 65537 wraps to 1, and a program told dpr 1 on a dpr-2
+ * display paints half-size into a correct surface — a wrong picture with no error anywhere. The
+ * caller is the page's own `devicePixelRatio`, not another process's bytes, so an unrepresentable
+ * value there is a defect in the page and not input to be refused politely.
+ */
+export function dprFixed(dpr) {
+  const v = Math.round(dpr * DPR_FIXED_ONE);
+  if (!Number.isFinite(v) || v <= 0 || v > 0xffffffff) {
+    throw new Error(`dprFixed: ${dpr} is not a ratio a 16.16 field can carry`);
+  }
+  return v >>> 0;
 }
 
 /** A KEY event's own bytes, out of the inline `(a, b)` pair. Empty for any other type, and for a
@@ -2066,11 +2127,78 @@ export function selfTest() {
   if (keyBytesOf({ ...eround, type: WEV_RESIZE }).length !== 0) {
     fail("a resize event yielded key bytes");
   }
+  // M16's CLIENT event, BOTH WAYS and at THREE ratios. dpr 1 and dpr 2 are the two the reference
+  // machines render at (Firefox at 1, Chrome at 2, constraint 264) and 1.5 is the fractional case
+  // a zoomed Chrome produces. The box is asserted UNCHANGED because it is device px and must reach
+  // `win_surface` unscaled, and the raw `c` is asserted NOT to be the ratio, which is what makes
+  // `clientBoxAt` load-bearing rather than decoration.
+  const cprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  for (const [w, h, dpr] of [[640, 440, 1], [1280, 880, 2], [852, 586, 1.5], [1, 1, 1]]) {
+    encodeWinEvent(cprobe, 0, { type: WEV_CLIENT, a: w, b: h, c: dprFixed(dpr) });
+    const box = clientBoxAt(decodeWinEvent(cprobe, 0));
+    if (box.w !== w || box.h !== h || box.dpr !== dpr) {
+      fail(`a ${w}x${h} client box at dpr ${dpr} round-trips as ${JSON.stringify(box)}`);
+    }
+  }
+  if (decodeWinEvent(cprobe, 0).c === 1) fail("`c` is the ratio itself; clientBoxAt is pointless");
+  // KNOWN-ANSWER VECTORS, which a round trip cannot replace: the scale cancels, so encoder and
+  // decoder agree at ANY factor and a 15.17 field would round-trip every ratio above exactly.
+  // These pin the encoding docs/ABI.md publishes, so a page or a kernel written to the document
+  // cannot be silently re-scaled under it.
+  if (dprFixed(1) !== 65536 || dprFixed(2) !== 131072 || dprFixed(1.5) !== 98304) {
+    fail(`the 16.16 scale moved: dpr 1 encodes as ${dprFixed(1)}`);
+  }
+  // A RATIO THAT IS NOT DYADIC, where the encoding is lossy and the claim is a BOUND. 1.1 is a
+  // Chrome at 110 % zoom on a dpr-1 display, and `1.1 * 65536` is 72089.6 — so an equality clause
+  // here would assert something false, and half a unit is what rounding can cost.
+  const QUANTUM = 1 / DPR_FIXED_ONE;
+  for (const dpr of [1.1, 1.2, 1 / 3, 3.1415926]) {
+    const back = clientBoxAt({ a: 0, b: 0, c: dprFixed(dpr) }).dpr;
+    if (Math.abs(back - dpr) > QUANTUM / 2) {
+      fail(`dpr ${dpr} survives its own inverse as ${back}`);
+    }
+    // Each input above is NON-DYADIC, so an exact round trip means the arithmetic is not the 16.16
+    // one claimed and the bound clause is passing vacuously.
+    if (back === dpr) fail(`dpr ${dpr} round-trips exactly; the scale is not 1/${DPR_FIXED_ONE}`);
+  }
+  // THE REFUSALS. A wrapped ratio is a half-size picture with no error anywhere, so the encoder
+  // must not produce one: 65537 is representable as a double and not in 16.16.
+  for (const bad of [0, -1, 65537, NaN, Infinity]) {
+    let threw = false;
+    try { dprFixed(bad); } catch { threw = true; }
+    if (!threw) fail(`dprFixed accepted ${bad}`);
+  }
   const evTypes = [WEV_KEY, WEV_RESIZE, WEV_CLOSE, WEV_FOCUS, WEV_DESTROYED, WEV_POINTER,
-    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WEV_STATE, WEV_ITEM];
+    WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WEV_STATE, WEV_ITEM, WEV_CLIENT];
   if (new Set(evTypes).size !== evTypes.length) fail("two window event types collide");
   if (evTypes.includes(0)) fail("0 is a window event type: a zeroed buffer would decode as one");
   if (Math.max(...evTypes) !== WEV_MAX) fail("WEV_MAX is not the largest event type");
+  // THE LIST ITSELF IS CHECKED AGAINST INTS, for the reason the signal table is checked both ways
+  // below: the hazard is an event type added to INTS and not to this list. The clause above sees
+  // that only while the omitted type is the LARGEST — add two and list the higher one, and a
+  // collision with the lower one becomes expressible again.
+  const NOT_EV_TYPES = new Set(["WEV_BYTES", "WEV_TYPE", "WEV_MODS", "WEV_A", "WEV_B", "WEV_C",
+    "WEV_MAX"]);
+  for (const key of Object.keys(INTS)) {
+    if (!key.startsWith("WEV_") || NOT_EV_TYPES.has(key)) continue;
+    if (!evTypes.includes(INTS[key])) fail(`${key} is an event type the collision list omits`);
+  }
+  // THE RING AND THE MODELLED COMPLEMENT PARTITION THE BORDER BOX, which checks `blurRingArea`
+  // from both ends: an error in the cap, the sides or the bottom term breaks the sum. All CSS px.
+  //
+  // WIDTH >= 2*WIN_INSET IS A PRECONDITION AND NOT A CHOICE OF INPUTS. The `sides` term does not
+  // depend on width, so for w < 2*WIN_INSET the ring is non-zero where the complement has already
+  // clamped to zero and the sum exceeds the box — w=0,h=100 gives 852 against 0. That is not a
+  // defect in the governor: `clampBox` floors a width at MIN_W = 220 (src/wm/window.mjs:40, :109),
+  // so no window reaches the degenerate band. Widening this clause to w = 0 asserts something
+  // false and fails the build.
+  for (const [w, h] of [[12, 0], [12, WIN_CAP_H], [12, 35], [12, 120], [220, 120],
+    [440, 138], [640, 440], [900, 138], [1280, 800], [2560, 1440], [13, 31], [220, 29]]) {
+    const complement = Math.max(0, w - 2 * WIN_INSET) * Math.max(0, h - WIN_CAP_H - WIN_INSET);
+    if (blurRingArea(w, h) + complement !== blurBoxArea(w, h)) {
+      fail(`the ring and its complement do not partition ${w}x${h}`);
+    }
+  }
   // M8's display-list op: contiguous, filling, and its colour slot unsigned on the way back.
   if (DL_OP + 2 !== DL_FLAGS || DL_FLAGS + 2 !== DL_A0 || DL_A0 + 4 !== DL_A1
     || DL_A1 + 4 !== DL_A2 || DL_A2 + 4 !== DL_A3 || DL_A3 + 4 !== DL_A4

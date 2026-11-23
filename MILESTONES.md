@@ -41,8 +41,10 @@ checks is a wish.
 | M13 | The geometry harness | 5 | 0.5 | ✅ done — **ACCEPT**, 38 expectations, 3 controls, 1 product defect found (the resize re-clamp) |
 | M14 | Snap, Superbar, jump lists, tray | 6 | 1 | ✅ done — **ACCEPT**, 51 expectations, 4 controls, and M12's own open item closed by a run |
 | M15 | The shell's own programs: coreutils, a text op, a readable Explorer, a task manager | — | 1 | ✅ done — **ACCEPT**, 4 reader-reported items, 38 prompt cases, a display-list TEXT op (293), and two second copies retired |
+| M15a | The registration debt, and the rule that stops it recurring | 0.5 | 0.25 | ✅ done — **ACCEPT**, `check_m15` at a real prompt (24 expectations), `audit()` rule 16 over this file's own status table, and `--negative milestone-unchecked` |
+| M16 | The client box IS the surface, in device pixels | 2.5 | 0.5 | ✅ done — **ACCEPT**, 42 expectations at **two device-pixel ratios**, 4 controls, the first driven resize grip in this project, and 3 measurement assumptions retired by a probe |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
-| | **Option A total** | **74.5** | **12.75** | **the window half is complete** |
+| | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
 | D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
 | D2 | Traps, timer, real preemption | 2 | | ⬜ D |
@@ -3150,6 +3152,192 @@ unknown ops, read out of the canvas in Firefox.
 **THE COREUTILS ARE NOT POSIX-COMPLETE.** `cp` has no `-p`, `sort` has no `-k`, `rm` has no `-i`,
 and there is no `find`, `ln`, `cut`, `tr`, `tee`, `basename`, `dirname`, `date` or `env`. The twelve
 here are the ones a reader hit in the first minute; the gap is a list and not a design problem.
+
+---
+
+## M15a — the registration debt, and the rule that stops it recurring · done · 0.25 days
+
+M15 shipped with **zero registered checks and no floor**. `grep -ci m15 scripts/check.py` was 0 and
+`scripts/check_floors.json` had no `m15` key, over about a thousand lines of `src/bin/` — and every
+row of the file-manager plan lands on top of those lines. Nothing in `audit()` demanded that a
+milestone HAVE a check, which is how it happened, so this row is the check and the rule in the same
+change. The rule is the part that matters: a registration without it does not prevent the next
+recurrence.
+
+### Rule 16 reads this file's own status table
+
+`audit()` now parses `MILESTONES.md`'s status table — `milestones_in_text`, a parser and not a list,
+because a list beside the document is the second copy the rule exists to catch — and requires that
+every milestone in it either be claimed by a registered check's `milestone=` or carry a written
+reason in `MILESTONE_EXEMPT`. It is read the way `no_invert_reason` already is: **a silent exemption
+is how a milestone disarms the gate.** Four reasons are recorded: M0a and M0b are addenda to M0's
+measurement, M2a's gate is `scripts/fsfuzz.py` and could not be a browser check without becoming
+the second filesystem implementation that purity rule forbids, M15a is the registry gate itself, and
+option D's nine rows have no code. The rule holds in **both** directions — an exemption for a row
+this file does not carry, or for a milestone that now has a check, is also refused, so a reason
+cannot outlive the thing it excuses.
+
+### The control is a committed fixture, not a source edit
+
+`audit(checks, milestones)` takes both as **arguments**, and that is the whole design.
+`--negative milestone-unchecked` runs it over `MILESTONE_FIXTURE_TABLE`, a committed markdown table
+carrying one row — `M99` — that no check claims, and the run must raise `RegistryError`. "Delete a
+registration and watch the rule fire" is a source edit nobody re-runs and a rule that certifies
+itself; this one is re-runnable and scored through the same `score()` as every other control. The
+fixture goes through the real parser, so the thing that reads the tracker is exercised too — a
+fixture handing `audit` a ready-made tuple would leave it unproven. It starts no browser: the
+subject is this file.
+
+### What `check_m15` asserts, and what it deliberately does not
+
+The twelve core utilities at a **real prompt** — `bench/m14-shell/coreutils.py`'s cases, typed as
+real keys into the terminal widget on `www/m14.html`'s live desktop and scored on what the shell
+printed, grouped one group per expectation so a failure names the PROGRAM. Every group carries its
+own negative half, which is that bench's rule: `mkdir` is checked by `ls` seeing the directory AND by
+`mkdir` on the same name answering `EEXIST`; `rm -r` by the tree going AND by `rmdir` having refused
+it first. Plus the hover flyout's grace period (constraint 295): a real pointer on a taskbar button,
+the panel it opens, and the crossing of the `TASKBAR_H + 6` px gap where the pointer is over neither
+element.
+
+**THE TEXT OP IS NOT ASSERTED HERE AND THAT IS DELIBERATE.** M15's `DL_TEXT` is a display list, and
+the registered reading of one is `check_m16`'s row clause, where the page captures the batch the
+kernel announced and decodes it with `textOfOps` — the first registered assertion over the text op
+in this project. A second reading here would be one fact with two renderers.
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-hover-grace` | 2 | 22 | `pointerleave` on the button closes the panel at once, so it closes in the gap — the reader's "unable to scroll up to focus on a specific process". The twelve coreutils must hold, which is what makes this control about the flyout |
+| `milestone-unchecked` | — | — | rule 16 over a fixture whose milestone list carries a row no check claims. No check runs; the refusal IS the result |
+
+### What is not done
+
+**THE HOVER CONTROL IS APPLIED BY THE CHECK, NOT BY THE PAGE.** `www/m14.html` is M14's file and
+carries no `no_hover_grace` switch, so `check_m15` installs the instant-close listener through the
+page's own published `M14.shell` handle — which is `bench/m14-shell/firefox-hover.py`'s control moved
+into the registered suite. It is re-runnable and it reports how many buttons it rewired, so a control
+that rewired nothing cannot read as a pass; what it is not is a switch the product owns. If
+`src/wm/taskbar.mjs` ever gains a `setShellControls({ noHoverGrace })`, this becomes a query
+parameter like every other and the check drops four lines.
+
+**`check_m15` IS THE SLOWEST CHECK IN THE SUITE.** Thirteen groups of commands at a real prompt, each
+waiting for the prompt to come back rather than for a timer. That is the price of asserting the
+thing M15 actually shipped; a faster version would be asserting something else.
+
+---
+
+## M16 — the client box IS the surface, in device pixels · done · 0.5 days
+
+The reader's bugs 2 and 4, and all three of bug 4's causes. A window's surface is now the client
+CONTENT box in **device pixels**, the ratio rides the `WEV_CLIENT` record because a process has no
+other route to it, and `/proc/<pid>/win/<winid>` publishes `surface:`, `client:` and `dpr:` so the
+geometry is readable in the unit it was granted in. **The figure is wall-clock for a session in
+which the ABI, the kernel, the page, the libos helper and the five programs were written in
+parallel**, so it is not comparable to the single-developer rows above; the estimate is.
+
+### The probe came first, and it answered three unretired assumptions
+
+`bench/m16-resize/probe.py`, before a line of the check was written. `PLAN.md` §1 is explicit that
+M16's risk is in the PROOF and not in the product, and all three of its assumptions were about the
+harness:
+
+| assumption | measured |
+| --- | --- |
+| a resize grip can be driven at all | **yes.** `Input.dispatchMouseEvent` reaches `#startResize`, the pointer capture on the grip did not refuse (`captureError` empty, both ratios), and the frame grew MID-GESTURE — which is what A2b's mid-drag report needs. Nothing in this project had ever driven a grip: `grep -rn grip scripts bench www` returned nothing |
+| the suite can be driven at a chosen device-pixel ratio | **yes**, through `Emulation.setDeviceMetricsOverride`, which survives the navigate. `devicePixelRatio` reads back as 1 and as 2, and a canvas's backing store and a frame's layout both follow |
+| CDP `mouseWheel` reaches a `wheel` listener on a canvas | **yes**, 3 of 3 delivered, `isTrusted` true. That is **M17's** A1 answered for free, which is why `PLAN.md` §5 put it in this probe |
+
+**AND IT RE-DERIVED THE PRD's TABLE AT BOTH RATIOS**, which that table was owed: `docs/PRD-SHELL.md`
+§1's figures were taken at dpr 1 on a dpr-2 machine. Measured over every surfaced window, the store
+a program now asks for is **2.00× its client box in CSS px at dpr 2 and 1.00× at dpr 1** — so the
+pre-M16 surface was half the size it needed in each axis on a dpr-2 display and exactly right on a
+dpr-1 one. That is why a table taken at dpr 1 could not show this defect at all, and it is the same
+shape as constraint 264's two previous instances.
+
+**The probe's first run reported the grip as NOT DRIVABLE, and it was wrong — about its own
+staging.** The terminal's window was sitting over the file manager's bottom-right corner, so the
+press landed on another frame; `document.elementFromPoint` at the grip's own centre is now part of
+the probe (`firefox-hover.py`'s `reachable`, applied to a grip) and the subject is raised first. A
+grip under another window is a grip a hand cannot use either, which is why that reading is kept
+rather than worked around.
+
+### Seven proofs, at four frame sizes, at two ratios
+
+`www/m16.html` is the desktop at its bare URL and the harness at `?proofs=1` (constraint 283). Nineteen
+real gestures per load, and the check loads it **once per device-pixel ratio** — no registered size
+clause in this project had ever run at more than one.
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the extent | every surfaced window's canvas fills its client content box to within **1 CSS px**, at four frame sizes including both extremes, and nothing is clipped |
+| 2 | the unit | `files`'s store CHANGED and equals the content box × dpr, and the kernel's `client:` agrees. Measured at dpr 2: 1233×505 CSS → 2466×1010 device, 208×84 → 416×168, 633×349 → 1266×698, 953×179 → 1906×358 |
+| 3 | the content | the row count the program DREW grew from **1 row at 84 CSS px tall to 20 at 505**, read back through `textOfOps`, with the remainder still stated (constraint 294) |
+| 4 | the pixels (R34) | `imgview`'s drawn extent differs at two client sizes — **480 px at scale 30 then 720 at scale 45**, 256 fill-rects either way — and every sampled block reads back as the colour its own op asked for |
+| 5 | `/proc`, mid-drag | `grep` over `/proc/1/win/1` finds `client:\t2462x1006` and `dpr:\t2` **while the button is still down**, and the pointer is then released OUTSIDE the frame — the case where `setPointerCapture` throws and the frame's own `pointerup` never runs (constraint 175) |
+| 6 | the browser's menu (R8) | a real right-click inside a surface is `defaultPrevented` and counted by the host; one on the bare page is NOT, which is what makes the first clause about this listener |
+| 7 | the selection (R10) | a press selects the row a reader pointed at, at five heights and five rows, read out of the band the program DREW and the pixel under it |
+
+### The three bugs are three clauses, and merging any two would hide one
+
+Equal geometry over a frozen backing store is bug 4, and only the row-count clause catches it. Equal
+geometry at the wrong ratio is bug 2, and only the device-pixel clause catches it. A canvas that is
+not its client area is the renderer's half, and only the extent clause catches it. The controls are
+scoped the same way, and every row below was **measured** by running it rather than argued:
+
+| control | red | intact | what it is about |
+| --- | --- | --- | --- |
+| `no-surface-fill` | 6 | 36 | the canvas loses its own CSS box, at both ratios. The unit, the row count, the pixel extent, `/proc`, the menu and the selection all hold — the surface still follows the frame, and what goes is the box it is presented in |
+| `frozen-surface` | 10 | 32 | `files` and `imgview` ignore `WEV_CLIENT` through their own `--no-resurface` flag: the pre-M16 programs exactly. The extent holds, because the fill is the renderer's |
+| `css-px-surface` | 2 | 40 | THE UNIT ERROR: one clause red at dpr 2 and the whole page green at dpr 1 |
+| `ev-b-pointer` | 3 | 39 | `taskmgr` reads the pointer's Y as a flag word again (the pre-`de8a68a` test). At dpr 2 four of the five presses have bit 4 clear and are dropped; at dpr 1 two of five are |
+
+### Two controls could not break the thing they were named for, and both were found by running them
+
+**`no-surface-fill` HELD the clause it is about.** A canvas is a REPLACED element: with no CSS box of
+its own it takes the container's cross size and its own aspect ratio gives the width — so when the
+backing store IS the client box, those two agree and a canvas with no `width` lands exactly on the
+client box anyway. `files` and `imgview` fill their client areas under that control. The page now
+stages `paint -w 900 -h 120`, whose store is both the wrong SHAPE (7.5 against a client area's ~1.9)
+and wider than its client area, and the control moves 1 of 4 windows by **1,142 CSS px** with
+`scrollWidth` 1,530 against a `clientWidth` of 388. Without that fixture window this control
+verified nothing, and `--prove-failure` could not have said so: an assertion over two copies of one
+number still inverts and still fires.
+
+**R10's five heights were one case run five times.** A row's surface y is `rowMid(i) * scale` and does
+not depend on the window's height at all, so the first version pressed row 3 at surface y 206 five
+times over. The ROW INDEX is what sweeps the bit the old code read: at dpr 2 the five presses land on
+98, 134, 170, 206 and 242, four with bit 4 clear and one with it set, and a clause asserts that the
+sweep contains both — five presses whose y all had the bit SET would have passed against the program
+`de8a68a` fixed.
+
+### What is not done
+
+**`report-on-release` IS NOT REGISTERED.** `PLAN.md` §2 names it as M16's fourth control — the
+release-only `win-geom` restored, so the mid-drag clause fails alone — and `src/wm/winhost.mjs`'s
+`setHostControls` has no switch for it. Adding one is three lines in a file this row did not own.
+The mid-drag clause is asserted and passes; what is missing is the world where it fails, so **proof
+5 rests on inversion alone** and that is weaker than every other clause here.
+
+**THE dpr AXIS IS EMULATED, NOT LAUNCHED.** `PLAN.md` §4.10 asks for
+`--force-device-scale-factor=1` and `=2`, which is a browser launch flag and would mean a second
+Chrome per ratio. `Emulation.setDeviceMetricsOverride` is in-process, is what `run_phase` already
+uses for the viewport, and is READ BACK: the first clause of each pass asserts the page rendered at
+the ratio the pass asked for, so an override that silently failed cannot report a dpr-2 figure under
+a dpr-2 label (constraint 264). The ratio is handed back to `VIEWPORT_SCALE` in a `finally`, because
+the page session is shared with every check after this one.
+
+**`www/m10.html` AND `bench/m10-data/shell.py` MAY NOW READ THE WRONG PIXEL.** Both compute
+`imgview`'s drawn scale as `floor(canvas.width / 16)` and use that x origin on BOTH axes, which is
+correct only while the surface is square — which is exactly what this row ends. With the page now
+posting a measured client box, `imgview` on `www/m10.html` re-surfaces to a non-square store and
+those readers sample `PAPER` where the logo's amber used to be. The fix is to import the `drawnBox`
+`src/bin/imgview.mjs` now exports; it was reported by the agent that wrote that export and is owed
+rather than done. **`check_m10` is where it will show.**
+
+**THE SUITE IS CHROME-DRIVEN AND THIS ROW HAS NOT BEEN OPENED IN FIREFOX.** That has cost this
+project four milestones (175, 206, M11's constant-offset blur band, M12's dpr-2 budget figure), and
+M16 is the most dpr-shaped row yet: Firefox renders at dpr 1 on the reference machine, which is the
+ratio at which the unit error is invisible. `www/m16.html` prints its own log and
+`scripts/bidi.py` can drive real trusted input, so the gate exists — it has not been run.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

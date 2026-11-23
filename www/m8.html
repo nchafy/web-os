@@ -22,12 +22,12 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 .terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
   background:#000; color:#ddd; font:inherit }
 .terminal:focus { outline:1px solid #6a8 }
-/* A SURFACE FILLS ITS CLIENT AREA and is SCALED to it: the canvas is sized in the device pixels
-   the process asked for, and a process knows only its own surface. `pixelated`, so a 4x4 proof
-   pattern scaled up reads as four squares rather than a blur — the check reads the pixels back
-   out of the canvas, but a person reads them off the screen. */
-.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
-  background:#0b0d11; image-rendering:pixelated }
+/* ONLY THE LOOK. A surface FILLS its client area and is SCALED to it, and since M16 that is
+   `src/wm/surface.mjs`'s own doing: the extent is the renderer's contract with the kernel, not a
+   page's choice. `pixelated` stays, and genuinely is a look — this page's 4x4 pattern scaled up
+   reads as four squares rather than a blur, and the check reads those pixels out of the canvas
+   while a person reads them off the screen. */
+.surface { background:#0b0d11; image-rendering:pixelated }
 .surface:focus { outline:1px solid #6a8 }
 </style>
 </head>

@@ -1,0 +1,452 @@
+{
+  "ok": true,
+  "verdict": {
+    "engine": "swiftshader",
+    "ratiosAsked": [
+      2.0,
+      1.0
+    ],
+    "ratiosApplied": [
+      2,
+      1
+    ],
+    "ratioEmulationWorks": true,
+    "gripDrivable": true,
+    "gripGrewMidGesture": true,
+    "captureErrors": [
+      "",
+      ""
+    ],
+    "storeFollowedTheClientBox": true,
+    "wheelDelivered": true,
+    "storePerClientCssPx": {
+      "2": [
+        2.0
+      ],
+      "1": [
+        1.0
+      ]
+    },
+    "M16": "A RESIZE GRIP IS DRIVABLE, the ratio is settable, and a program's backing store follows its client box in device px at dpr 2, dpr 1. The wheel IS delivered to a canvas listener, which is M17's answer."
+  },
+  "rows": [
+    {
+      "askedDpr": 2.0,
+      "ok": true,
+      "reportedDpr": 2,
+      "ratioApplied": true,
+      "before": [
+        {
+          "win": 1,
+          "title": "files \u2014 /usr/bin",
+          "store": {
+            "w": 896,
+            "h": 568
+          },
+          "client": {
+            "w": 448,
+            "h": 284
+          },
+          "css": {
+            "w": 448,
+            "h": 284
+          },
+          "scroll": {
+            "w": 448,
+            "h": 284
+          },
+          "box": {
+            "x": 20,
+            "y": 20,
+            "w": 460,
+            "h": 320
+          },
+          "grip": {
+            "x": 483,
+            "y": 501
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 258,
+            "y": 358
+          },
+          "ops": 45
+        },
+        {
+          "win": 2,
+          "title": "imgview \u2014 /usr/share/logo.rgba",
+          "store": {
+            "w": 616,
+            "h": 528
+          },
+          "client": {
+            "w": 308,
+            "h": 264
+          },
+          "css": {
+            "w": 308,
+            "h": 264
+          },
+          "scroll": {
+            "w": 308,
+            "h": 264
+          },
+          "box": {
+            "x": 500,
+            "y": 20,
+            "w": 320,
+            "h": 300
+          },
+          "grip": {
+            "x": 823,
+            "y": 481
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 668,
+            "y": 348
+          },
+          "ops": 257
+        }
+      ],
+      "grip": {
+        "at": {
+          "x": 483,
+          "y": 501
+        },
+        "to": {
+          "x": 663,
+          "y": 621
+        },
+        "gestureStarted": true,
+        "captureError": "",
+        "boxBefore": {
+          "x": 20,
+          "y": 20,
+          "w": 460,
+          "h": 320
+        },
+        "boxHeld": {
+          "x": 20,
+          "y": 20,
+          "w": 640,
+          "h": 440
+        },
+        "boxAfter": {
+          "x": 20,
+          "y": 20,
+          "w": 640,
+          "h": 440
+        },
+        "drivable": true,
+        "grewMidGesture": true,
+        "storeFollowed": true,
+        "geomFrames": 10,
+        "resurfaces": 14
+      },
+      "after": [
+        {
+          "win": 1,
+          "title": "files \u2014 /usr/bin",
+          "store": {
+            "w": 1256,
+            "h": 808
+          },
+          "client": {
+            "w": 628,
+            "h": 404
+          },
+          "css": {
+            "w": 628,
+            "h": 404
+          },
+          "scroll": {
+            "w": 628,
+            "h": 404
+          },
+          "box": {
+            "x": 20,
+            "y": 20,
+            "w": 640,
+            "h": 440
+          },
+          "grip": {
+            "x": 663,
+            "y": 621
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 348,
+            "y": 418
+          },
+          "ops": 65
+        },
+        {
+          "win": 2,
+          "title": "imgview \u2014 /usr/share/logo.rgba",
+          "store": {
+            "w": 616,
+            "h": 528
+          },
+          "client": {
+            "w": 308,
+            "h": 264
+          },
+          "css": {
+            "w": 308,
+            "h": 264
+          },
+          "scroll": {
+            "w": 308,
+            "h": 264
+          },
+          "box": {
+            "x": 500,
+            "y": 20,
+            "w": 320,
+            "h": 300
+          },
+          "grip": {
+            "x": 823,
+            "y": 481
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 668,
+            "y": 348
+          },
+          "ops": 257
+        }
+      ],
+      "wheel": {
+        "armed": 2,
+        "dispatched": 3,
+        "delivered": 3,
+        "last": {
+          "dx": 0,
+          "dy": 60,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": true
+        },
+        "at": {
+          "x": 348,
+          "y": 418
+        }
+      }
+    },
+    {
+      "askedDpr": 1.0,
+      "ok": true,
+      "reportedDpr": 1,
+      "ratioApplied": true,
+      "before": [
+        {
+          "win": 1,
+          "title": "files \u2014 /usr/bin",
+          "store": {
+            "w": 448,
+            "h": 284
+          },
+          "client": {
+            "w": 448,
+            "h": 284
+          },
+          "css": {
+            "w": 448,
+            "h": 284
+          },
+          "scroll": {
+            "w": 448,
+            "h": 284
+          },
+          "box": {
+            "x": 20,
+            "y": 20,
+            "w": 460,
+            "h": 320
+          },
+          "grip": {
+            "x": 483,
+            "y": 501
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 258,
+            "y": 358
+          },
+          "ops": 45
+        },
+        {
+          "win": 2,
+          "title": "imgview \u2014 /usr/share/logo.rgba",
+          "store": {
+            "w": 308,
+            "h": 264
+          },
+          "client": {
+            "w": 308,
+            "h": 264
+          },
+          "css": {
+            "w": 308,
+            "h": 264
+          },
+          "scroll": {
+            "w": 308,
+            "h": 264
+          },
+          "box": {
+            "x": 500,
+            "y": 20,
+            "w": 320,
+            "h": 300
+          },
+          "grip": {
+            "x": 823,
+            "y": 481
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 668,
+            "y": 348
+          },
+          "ops": 257
+        }
+      ],
+      "grip": {
+        "at": {
+          "x": 483,
+          "y": 501
+        },
+        "to": {
+          "x": 663,
+          "y": 621
+        },
+        "gestureStarted": true,
+        "captureError": "",
+        "boxBefore": {
+          "x": 20,
+          "y": 20,
+          "w": 460,
+          "h": 320
+        },
+        "boxHeld": {
+          "x": 20,
+          "y": 20,
+          "w": 640,
+          "h": 440
+        },
+        "boxAfter": {
+          "x": 20,
+          "y": 20,
+          "w": 640,
+          "h": 440
+        },
+        "drivable": true,
+        "grewMidGesture": true,
+        "storeFollowed": true,
+        "geomFrames": 10,
+        "resurfaces": 14
+      },
+      "after": [
+        {
+          "win": 1,
+          "title": "files \u2014 /usr/bin",
+          "store": {
+            "w": 628,
+            "h": 404
+          },
+          "client": {
+            "w": 628,
+            "h": 404
+          },
+          "css": {
+            "w": 628,
+            "h": 404
+          },
+          "scroll": {
+            "w": 628,
+            "h": 404
+          },
+          "box": {
+            "x": 20,
+            "y": 20,
+            "w": 640,
+            "h": 440
+          },
+          "grip": {
+            "x": 663,
+            "y": 621
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 348,
+            "y": 418
+          },
+          "ops": 65
+        },
+        {
+          "win": 2,
+          "title": "imgview \u2014 /usr/share/logo.rgba",
+          "store": {
+            "w": 308,
+            "h": 264
+          },
+          "client": {
+            "w": 308,
+            "h": 264
+          },
+          "css": {
+            "w": 308,
+            "h": 264
+          },
+          "scroll": {
+            "w": 308,
+            "h": 264
+          },
+          "box": {
+            "x": 500,
+            "y": 20,
+            "w": 320,
+            "h": 300
+          },
+          "grip": {
+            "x": 823,
+            "y": 481
+          },
+          "gripReachable": true,
+          "gripHit": "window-grip grip-se",
+          "canvasAt": {
+            "x": 668,
+            "y": 348
+          },
+          "ops": 257
+        }
+      ],
+      "wheel": {
+        "armed": 2,
+        "dispatched": 3,
+        "delivered": 3,
+        "last": {
+          "dx": 0,
+          "dy": 120,
+          "mode": 0,
+          "trusted": true,
+          "cancelable": true
+        },
+        "at": {
+          "x": 348,
+          "y": 418
+        }
+      }
+    }
+  ]
+}

@@ -24,11 +24,11 @@ import {
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
-  WEV_STATE, WEV_ITEM,
+  WEV_STATE, WEV_ITEM, WEV_CLIENT,
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
   WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED,
-  encodeWinEvent,
+  encodeWinEvent, decodeWinEvent, dprFixed,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
 
@@ -146,6 +146,13 @@ export const WIN_EVENT_BYTES = WIN_EVENT_CAP * WEV_BYTES;
 const DEFAULT_W = 560;
 const DEFAULT_H = 360;
 
+/** The largest display ratio the kernel will record. The bound exists to keep a reported ratio
+ *  inside the 16.16 field `WEV_CLIENT` carries it in, which is what makes `dprFixed` unable to
+ *  throw on the geometry path. 16 is eight times the reference display's 2 and above any
+ *  panel-times-zoom product this project has measured; a page reporting more has a defect, and
+ *  recording it would hand a program a scale factor nothing on screen uses. See `WinMgr.setDpr`. */
+const MAX_DPR = 16;
+
 export class Window {
   constructor(id, pid, spec) {
     this.id = id;
@@ -211,6 +218,24 @@ export class Window {
     this.cols = 0;
     this.rows = 0;
     /**
+     * M16. THE CLIENT CONTENT BOX THE PAGE MEASURED, in DEVICE pixels — the unit `win_surface`
+     * takes and the unit `SURFACE_MAX_PX` bounds. `-1` until a positive measurement arrives, so
+     * the first one raises an event: a program needs its box before its first paint, and A2c's
+     * `/proc` line is a pull route and not a substitute.
+     *
+     * MEASURED, NEVER MODELLED. `WIN_CAP_H` and `WIN_INSET` are the aero skin's, and
+     * `.window-body` carries a 1 px border-top outside the content box a canvas fills — and four
+     * proof pages load no stylesheet at all. A geometry derived from a measured rect survives a
+     * second engine; one derived from a constant does not (constraint 264).
+     */
+    this.clientW = -1;
+    this.clientH = -1;
+    /** The table this window is in, set by `WinMgr.create`, or null for one built outside a table —
+     *  which only a host probe does. Held for ONE fact, the display's ratio, and that fact is the
+     *  table's because it is the display's: a per-window copy is how two windows come to disagree
+     *  about one display. */
+    this.mgr = null;
+    /**
      * M8's SURFACE, which the KERNEL owns: `{w, h}` in device pixels, or null for a window that
      * has not asked for one. The pixels live in the page, the accounting lives here, and the
      * process holds neither — it sends a display list through the channel it already has
@@ -245,6 +270,10 @@ export class Window {
       batches: 0, ops: 0, refusedDraws: 0, refusedCells: 0,
       // M9: input events a modal blocked. See `WinMgr.feed`.
       suppressed: 0,
+      // M16: client events REPLACED at the tail rather than appended. `dropped` cannot see one —
+      // it moves only on a full ring, and a ring this replacement keeps drained never fills — so
+      // without this counter a control that broke the replacement would move no number anywhere.
+      coalesced: 0,
     };
   }
 
@@ -304,6 +333,68 @@ export class Window {
     if (this.unreadSince === 0) this.unreadSince = K.now();
     if (K.pollWake) K.pollWake();
     return true;
+  }
+
+  /**
+   * Remove the tail record and return its bytes, or null for a ring holding none.
+   *
+   * BYTE AT A TIME because `ByteRing` offers `popLast` and no record-wise tail accessor, and
+   * `src/fs/ring.mjs` is the ONE ring every kernel queue uses (constraint 112) — a tail-overwrite
+   * method there would be reachable by the pipe and the pty for this one caller's benefit, and the
+   * file is pure code `scripts/fsfuzz.py` drives without a browser.
+   *
+   * A WHOLE RECORD COMES OUT because a whole one went in: this queue's capacity is a whole number
+   * of records and every push and shift on it moves `WEV_BYTES`, which is the invariant `push`
+   * states.
+   */
+  #popTail() {
+    if (this.events.length < WEV_BYTES) return null;
+    const rec = new Uint8Array(WEV_BYTES);
+    for (let i = WEV_BYTES - 1; i >= 0; i -= 1) rec[i] = this.events.popLast();
+    return rec;
+  }
+
+  /**
+   * Queue a CLIENT event, REPLACING a tail one instead of appending.
+   *
+   * A STALE SIZE HAS NO HISTORY WORTH KEEPING, and the arithmetic forces the point. The page
+   * reports a geometry once per animation frame, so an appending client event is ~240 records in a
+   * two-second drag against a `WIN_EVENT_CAP` of 256 — and `push` drops the NEWEST on a full ring,
+   * so the record discarded would be the final size. Constraint 243 makes this argument against a
+   * `DRAG_OVER` and A5 makes it for hover.
+   *
+   * THE TAIL IS READ BACK, NOT REMEMBERED. A flag saying "the tail is a client record" is a second
+   * copy of the ring's own state, and the two desynchronise on the first path that pushes without
+   * updating it.
+   *
+   * THE STALE CLOCK IS NOT RESTARTED, which falls out of replacing a tail: `unreadSince` dates the
+   * oldest uncollected event, and a program that is not draining is not draining however many
+   * times the size it has not read gets revised.
+   */
+  pushClient(w, h) {
+    /* THE INVARIANT STATED, NOT A GUARD THAT FIRES — `push`'s `free === 0` test is written for the
+     * same reason. `push` refuses a destroyed window, so without this line a pop whose tail was a
+     * client record would delete it and count a replacement for a push that was refused: silent
+     * loss. It is unreachable today, because `destroy` queues the `WEV_DESTROYED` notice as the
+     * last record or hands it to a parked reader, and a parked reader means an empty ring — so the
+     * tail of a destroyed window's queue is never a client record. A scratch control that removed
+     * this line moved no clause, which is that argument measured. */
+    if (this.destroyed) return false;
+    const tail = this.#popTail();
+    if (tail) {
+      if (decodeWinEvent(new DataView(tail.buffer), 0).type === WEV_CLIENT) {
+        this.stats.coalesced += 1;
+      } else {
+        // The bytes go back where they came from: the pop freed exactly one record's room.
+        this.events.push(tail);
+      }
+    }
+    /* THE RATIO IS THE TABLE'S ONE FACT, read here rather than stored per window. A window outside
+     * a table has no display behind it, and 1 is the ratio under which its unscaled figures mean
+     * something — a host probe is the only thing that can build one. `dprFixed` cannot throw on
+     * either value, because `WinMgr.setDpr` refuses a ratio the 16.16 field cannot carry. */
+    const dpr = this.mgr ? this.mgr.dpr : 1;
+    return this.push({ type: WEV_CLIENT, a: w, b: h, c: dprFixed(dpr) });
   }
 
   /**
@@ -374,7 +465,11 @@ export class Window {
 
   /** What the page reports after it has clamped. The kernel RECORDS geometry; it never decides it.
    *  A changed cell count raises WEV_RESIZE, which is what a terminal needs for TIOCSWINSZ — the
-   *  pixel box is published in `/proc/<pid>/win/<winid>` for a reader that wants it. */
+   *  pixel box is published in `/proc/<pid>/win/<winid>` for a reader that wants it.
+   *
+   *  TWO UNITS ARRIVE IN ONE MESSAGE: `x`/`y`/`w`/`h` are the frame's CSS px, and
+   *  `clientW`/`clientH` are the measured content box in DEVICE px. Naming them is the point —
+   *  two unlabelled integers in two units is the defect M16 is about. */
   setBox(box) {
     this.box = { x: box.x | 0, y: box.y | 0, w: box.w | 0, h: box.h | 0 };
     const cols = box.cols | 0;
@@ -385,6 +480,25 @@ export class Window {
     // No event for a move, and none for a resize that did not change the cell grid: an event per
     // pointermove would exhaust the queue this window is budgeted.
     if (moved && (cols > 0 || rows > 0)) this.push({ type: WEV_RESIZE, a: cols, b: rows });
+    /* M16. AND THE CLIENT CONTENT BOX, in DEVICE pixels, which `WEV_RESIZE` cannot carry: that
+     * record is CELLS — `src/bin/term.mjs` feeds them to `winsizeSet` — and it is suppressed for a
+     * resize that changed no cell count, which is a resize that changed every pixel of a surface.
+     *
+     * ON A CHANGE ONLY, which is `moved`'s rule above and for its reason: the page reports once
+     * per animation frame during a drag.
+     *
+     * THE `> 0` GUARD IS NOT DEFENSIVE DRESSING. A frame measured inside a `display: none` subtree
+     * reports zero, and `win_surface` answers -EINVAL for a zero side — so a program told zero
+     * would be handed a refusal it cannot act on. A dropped measurement leaves `clientW` at -1, so
+     * the next positive one still raises.
+     */
+    const cw = box.clientW | 0;
+    const ch = box.clientH | 0;
+    if (cw > 0 && ch > 0 && (cw !== this.clientW || ch !== this.clientH)) {
+      this.clientW = cw;
+      this.clientH = ch;
+      this.pushClient(cw, ch);
+    }
     return 0;
   }
 
@@ -482,6 +596,10 @@ export class Window {
       ...this.box,
       cols: this.cols,
       rows: this.rows,
+      // M16. The measured content box in DEVICE px, beside the frame's box in CSS px and the cell
+      // count in cells. `-1` means no positive measurement has arrived.
+      clientW: this.clientW,
+      clientH: this.clientH,
       scope: this.scope,
       mode: this.mode,
       // M14. The two shell axes, the restore point, and how many rows this window published.
@@ -538,11 +656,18 @@ export class WinMgr {
      * press a modal refused never reached a program, so it cannot be the gesture a program claims.
      */
     this.pointer = { win: 0, down: false };
-    /** M12. The page's device-pixel ratio, SQUARED, because a blur cost is an area. Reported by
-     *  the page at boot — it is the side with the display — and 4 until it says otherwise, which
-     *  is dpr 2, the ratio every figure in `docs/CONSTRAINTS.md` was measured at. A kernel that
-     *  assumed 1 would under-read every budget by 4×. */
-    this.dprSq = 4;
+    /**
+     * M12, M16. THE PAGE'S DEVICE-PIXEL RATIO, and the kernel's one copy of it. Reported by the
+     * page — it is the side with the display — and 2 until it says otherwise, which is the ratio
+     * every figure in `docs/CONSTRAINTS.md` was measured at. A kernel that assumed 1 would
+     * under-read every blur budget by 4×.
+     *
+     * THE RATIO AND NOT ITS SQUARE IS WHAT IS STORED. M12 needed only the square, because a blur
+     * cost is an area; M16's client event carries the ratio itself to a process, which has no
+     * other route to it. Two independently assigned fields is how a governor comes to square a
+     * ratio nobody reported, so `dprSq` is derived and `setDpr` is the one writer.
+     */
+    this.dpr = 2;
     /** A lowered blur budget, for a bench boot only. 0 means the real one. `blurBudget()` takes
      *  the MINIMUM of this and `BLUR_OFF_AT`, so this hook can only ever tighten the governor —
      *  a hook that could loosen it would be a way to disable the thing it exists to exercise. */
@@ -572,7 +697,44 @@ export class WinMgr {
       droppedItems: 0,
       // Window events the PAGE tried to post that only the kernel may produce. See `feed`.
       forgedKernelEvents: 0,
+      // M16: device-pixel ratios refused. See `setDpr` — a refusal nobody can count is a display
+      // the kernel is wrong about with nothing saying so.
+      refusedDpr: 0,
     };
+  }
+
+  /**
+   * The ratio SQUARED, which is what a blur cost is: an area (constraint 49). DERIVED, never
+   * stored.
+   *
+   * THE SETTER IS ITS DECLARED INVERSE, and it exists for the two callers that predate `setDpr` —
+   * `src/kernel/kernel.mjs`'s `win-dpr` handler and `bench/m12-governor/probe.mjs`. A square is a
+   * LOSSY spelling of a ratio (`Math.sqrt(1.21)` is 1.0999999999999999), so a new caller MUST take
+   * `setDpr`. What the pair buys is that the square cannot be assigned apart from the ratio.
+   */
+  get dprSq() {
+    return this.dpr * this.dpr;
+  }
+
+  set dprSq(sq) {
+    this.setDpr(Math.sqrt(sq));
+  }
+
+  /**
+   * Record the display's ratio. True if it was taken.
+   *
+   * REFUSED RATHER THAN CLAMPED, AND COUNTED. A 0 makes every blur cost 0 and silently disarms the
+   * governor; a NaN does the same through every comparison it reaches. `MAX_DPR` keeps the value
+   * inside the 16.16 field `WEV_CLIENT` carries it in, which is what makes `dprFixed` unable to
+   * throw on the geometry path — a page's bad number must not fault the kernel.
+   */
+  setDpr(dpr) {
+    if (!Number.isFinite(dpr) || dpr <= 0 || dpr > MAX_DPR) {
+      this.stats.refusedDpr += 1;
+      return false;
+    }
+    this.dpr = dpr;
+    return true;
   }
 
 
@@ -1325,6 +1487,9 @@ export class WinMgr {
     const id = this.nextId;
     this.nextId += 1;
     const win = new Window(id, pid, spec);
+    // THE TABLE IT BELONGS TO, for one fact: the display's ratio, which a client event carries and
+    // no window owns a copy of. See `Window.pushClient`.
+    win.mgr = this;
     this.#cascade(win);
     this.byId.set(id, win);
     if (ownerId !== 0) this.get(ownerId).children.push(id);
@@ -1450,8 +1615,19 @@ export class WinMgr {
     /* M14. AND NEITHER OF THE TWO M14 ADDED, for the same reason and with its own counter. A
      * `WEV_STATE` the page posted would tell a program it had been minimized when the kernel
      * believes otherwise; a `WEV_ITEM` would name a row index nothing published. Both have a
-     * kernel route — `setState` and `activateItem` — which is where the validation lives. */
-    if (ev.type === WEV_STATE || ev.type === WEV_ITEM) {
+     * kernel route — `setState` and `activateItem` — which is where the validation lives.
+     *
+     * M16'S CLIENT EVENT JOINS THEM, and the general rule is the PRD's: every KERNEL-PRODUCED
+     * event belongs in this list. A page-posted `WEV_CLIENT` would tell a program its content box
+     * is a size no frame has, and the program would re-surface to it — charging the budget for a
+     * rectangle nobody renders. The kernel's route is `setBox`, from the box the page MEASURED,
+     * which is where the `> 0` guard lives.
+     *
+     * M17'S WHEEL MUST NOT JOIN THIS LIST. A wheel is a browser event and the page is its only
+     * honest source, so refusing one would refuse the thing itself. What the kernel owns there is
+     * `WWHEEL_COALESCED`: `feed` must MASK that bit out of a wheel record it accepts, or a page
+     * can tell a program that twenty notches arrived as one. */
+    if (ev.type === WEV_STATE || ev.type === WEV_ITEM || ev.type === WEV_CLIENT) {
       this.stats.forgedKernelEvents += 1;
       return false;
     }
@@ -1522,6 +1698,9 @@ export class WinMgr {
       live: this.live().length,
       rows: this.byId.size,
       nextId: this.nextId,
+      // M16. THE DISPLAY'S RATIO, which `dprSq` below is derived from. A page reads it back to
+      // assert the kernel took what it posted; a process reads it off a client event or `/proc`.
+      dpr: this.dpr,
       // M14. Which window is the desktop, and the show state of every live window — the two facts
       // a shell renders and a check reads, in the kernel's own words rather than the page's.
       desktop: desk ? desk.id : 0,

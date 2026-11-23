@@ -28,8 +28,9 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 .terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
   background:#000; color:#ddd; font:inherit }
 .terminal:focus { outline:1px solid #6a8 }
-.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
-  background:#0b0d11; image-rendering:pixelated }
+/* ONLY THE LOOK: the extent is `src/wm/surface.mjs`'s since M16, because a surface's CSS box is
+   its contract with the kernel rather than a page's choice. See `www/m8.html` for `pixelated`. */
+.surface { background:#0b0d11; image-rendering:pixelated }
 .surface:focus { outline:1px solid #6a8 }
 /* The drag image follows the pointer. `src/wm/winhost.mjs` sets its position and
    `pointer-events:none`; the look is the page's. */
@@ -74,6 +75,7 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
  * hold, because the clipboard has nothing to do with the drag.
  */
 import { FILES_METRICS } from '/src/bin/files.mjs'
+import { drawnBox } from '/src/bin/imgview.mjs'
 import {
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
   WEV_DROP, WEV_DRAG_ENTER, fmtBit, pixelColor,
@@ -239,12 +241,17 @@ async function pCopy (boot) {
       /* THE LOGO IS DRAWN SCALED AND CENTRED, so the pixel to read is derived from the bitmap's
        * own size rather than written as a number: 16x16 at scale 12 in a 200x200 surface puts the
        * corner pixel at (4,4) and the middle of the image at the middle of the surface. */
-      const w = ev.surface.w
-      const scale = Math.floor(w / 16)
-      const x0 = Math.floor((w - 16 * scale) / 2)
-      ev.corner = view.surface.pixel(x0 + 2, x0 + 2)
-      ev.edge = view.surface.pixel(x0 + scale + 2, x0 + 2)
-      ev.cornerAt = { x: x0 + 2, y: x0 + 2 }
+      /* THE DRAWN BOX IS `imgview`'s OWN, AND BOTH AXES MATTER NOW. This computed a square box
+       * from the WIDTH alone, which was true while every surface was square and stopped being
+       * true in M16: the surface is the client CONTENT box, and a caption's height comes off one
+       * axis only. A probe that centres by width samples paper and the clause reads as "the image
+       * did not draw". `drawnBox` is the function the program centres with, exported for this.
+       * Findings 2 of the M16 review. */
+      const extent = { w: ev.surface.w, h: ev.surface.h }
+      const box = drawnBox({ w: 16, h: 16 }, extent)
+      ev.corner = view.surface.pixel(box.x + 2, box.y + 2)
+      ev.edge = view.surface.pixel(box.x + box.scale + 2, box.y + 2)
+      ev.cornerAt = { x: box.x + 2, y: box.y + 2 }
       /* AND THE RECEIVER'S OWN ACCOUNT, which is the only place the FORMAT the bytes arrived under
        * is readable. Without it "the paste drew" is satisfied by a receiver drawing its own
        * REFUSAL — measured: under `?no_typed=1` the clause stayed green against five ops of pink
@@ -317,9 +324,57 @@ async function pDrag (boot) {
      * row shrank), which is that drift arriving, so the copy is gone: `FILES_METRICS.rowMid` is
      * the function `src/bin/files.mjs` lays its own rows out with. */
     const row = 1          // logo.rgba, second of the three
+    /* CSS PX TO SURFACE PX, MEASURED. `rowMid` is a CSS-px length and `clientAt` takes SURFACE
+     * pixels; before M16 the two coincided and this line was right by accident. It is not any
+     * more — the surface is the client box in DEVICE pixels — so at dpr 2 an unconverted 60 lands
+     * in row 0 and this proof dragged `logo.png` while asserting about `logo.rgba`. Measured and
+     * not assumed, per `FILES_METRICS`'s own docstring: a driver reads the scale off the canvas.
+     * Finding 1 of the M16 review, and the exact "WRONG FILE being dragged" case CLAUDE.md
+     * predicted for this file. */
+    const scale = files.surface.w / files.surface.extent().cssW
     const rowMid = FILES_METRICS.rowMid(row)
-    const from = files.surface.clientAt(120, rowMid)
-    const to = view.surface.clientAt(100, 100)
+    const from = files.surface.clientAt(FILES_METRICS.toSurface(120, scale),
+      FILES_METRICS.toSurface(rowMid, scale))
+
+    /* THE DROP POINT IS HIT-TESTED, AND THE TARGET IS MOVED CLEAR FIRST.
+     *
+     * A press on a file row RAISES `files`, so from that moment the source window is on top of
+     * anything it overlaps — and M16 widened it from about 260 CSS px to 438, because its surface
+     * is now the client box rather than a size it picked. The viewer sits 24 px down-right of it
+     * (`WinMgr.#cascade`), so the point this proof had always dropped on moved from outside the
+     * source's rectangle to inside it: the kernel reported `target: 1`, the drop landed back on
+     * `files`, and five clauses about the RECEIVER failed with nothing wrong in the product.
+     *
+     * The fixture overlapped by luck and the luck ran out. So the viewer is moved clear through
+     * the frame's own geometry route, and then `elementFromPoint` is asked whether the drop point
+     * is really the viewer's canvas — because what decides where a release lands is the hit test,
+     * not a rectangle this page computed. `dropUnder` travels in the evidence so a future drift
+     * says which element it found instead of failing five clauses downstream. */
+    // `surfaced()` returns the host ENTRY, so this IS the frame — no lookup needed.
+    const viewEntry = view
+    const srcBox = files.win.placed
+    viewEntry.win.box = {
+      ...viewEntry.win.placed,
+      x: Math.round(srcBox.x + srcBox.w + 24),
+      y: Math.round(srcBox.y),
+    }
+    viewEntry.win.apply()
+    viewEntry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+    // `until(() => false, ms)` is this page's wait idiom (see the settle at the end of pDrag);
+    // a predicate that is already true returns at once and would not let the layout settle.
+    await until(() => false, 60)
+
+    const to = view.surface.clientAt(Math.round(view.surface.w / 2),
+      Math.round(view.surface.h / 2))
+    ev.dropUnder = (() => {
+      const el = document.elementFromPoint(to.x, to.y)
+      if (!el) return 'nothing'
+      if (el === view.surface.el) return 'the viewer canvas'
+      const frame = el.closest ? el.closest('.window') : null
+      const h2 = frame ? frame.querySelector('h2') : null
+      return frame ? `window:${((h2 || {}).textContent || '').trim()}` : String(el.className || el.tagName)
+    })()
+    ev.dropOnViewer = ev.dropUnder === 'the viewer canvas'
     ev.rowMid = rowMid
 
     /* ---- BOTH EDGES OF THE DRAG THRESHOLD ---------------------------------------------------
@@ -370,11 +425,10 @@ async function pDrag (boot) {
     const drew = await until(() => view.surface.report().ops > ev.opsBefore + 2, 20000)
     ev.drewMs = Math.round(drew)
     ev.surface = view.surface.report()
-    const w = ev.surface.w
-    const scale = Math.floor(w / 16)
-    const x0 = Math.floor((w - 16 * scale) / 2)
-    ev.corner = view.surface.pixel(x0 + 2, x0 + 2)
-    ev.edge = view.surface.pixel(x0 + scale + 2, x0 + 2)
+    const extent = { w: ev.surface.w, h: ev.surface.h }
+    const box = drawnBox({ w: 16, h: 16 }, extent)
+    ev.corner = view.surface.pixel(box.x + 2, box.y + 2)
+    ev.edge = view.surface.pixel(box.x + box.scale + 2, box.y + 2)
     ev.hostDrag = { ...s.host.report().lastDrag ? s.host.report().lastDrag : {} }
     ev.hostStats = {
       drags: s.host.report().drags, dragAts: s.host.report().dragAts,

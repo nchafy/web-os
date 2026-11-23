@@ -1,0 +1,1041 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M16 — the client box IS the surface</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's, M12's and M13's pages do
+   it — and here it is load-bearing rather than decoration: `.window-body` is a flex row under that
+   skin and carries a 1 px `border-top`, which is the pixel the content box differs from the
+   bounding rect by (PRD §2). A page that did not install it would measure a different element. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect the page publishes — which is the thing this
+   milestone measures. */
+#log { margin:8px; white-space:pre-wrap; height:150px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+/* THE DESKTOP'S SIZE IS A MEASUREMENT HERE: every resize below is clamped into it, and the widest
+   of the four frame sizes IS this rectangle. */
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M16 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M16 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M16's page: THE CLIENT BOX IS THE SURFACE, IN DEVICE PIXELS.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * fixture windows and then block in `gestureAsker`, which looks exactly like a broken product —
+ * three reported defects came out of that being the other way round on `www/m14.html`.
+ *
+ *   PROOF 1  THE EXTENT. Every surfaced window's canvas fills its client CONTENT box, to within
+ *            1 CSS px, at FOUR frame sizes including both extremes — and nothing is clipped, which
+ *            is the half a `width: 100%` alone does not buy (`min-width: auto` on a flex item
+ *            resolves to the backing store's intrinsic width). One window's backing store is
+ *            DELIBERATELY a different shape from its client area, because a canvas is a replaced
+ *            element: with the aspect ratios equal, a missing CSS box is invisible at rest
+ *   PROOF 2  THE UNIT. `files`'s surface CHANGED and is the content box times the device-pixel
+ *            ratio — the unit `win_surface` takes. Separate from proof 1 and from proof 3 on
+ *            purpose: equal geometry over a frozen store is one bug and equal geometry at the
+ *            wrong ratio is another, and a clause satisfied by either would separate neither
+ *   PROOF 3  THE CONTENT. The row count the program DREW grew with the window, read back out of
+ *            the display list through `textOfOps` — the first registered reading of M15's text op
+ *   PROOF 4  THE PIXELS (R34). `imgview`'s drawn extent differs at two client sizes and its blocks
+ *            read back as the colours they asked for. A CSS-stretched canvas keeps the old extent
+ *   PROOF 5  `/proc`, MID-DRAG (A2b, A2c). The `client:` and `dpr:` lines name the measured box in
+ *            device px while the button is still down, and the pointer is then RELEASED OUTSIDE
+ *            the frame — the case where `setPointerCapture` throws and the release never reaches
+ *            the frame's own hook (constraint 175)
+ *   PROOF 6  THE BROWSER'S MENU (R8). A right-click inside a surface is refused; one on the bare
+ *            page is not, which is what makes the first a statement about this page's own listener
+ *   PROOF 7  THE SELECTION (R10). A press selects the row a reader pointed at, at five heights,
+ *            and at least one of those presses lands on a y whose `0x10` bit is CLEAR — the exact
+ *            input the pre-`de8a68a` `ev.b & WPTR_DOWN` test dropped
+ *
+ * EVERY GESTURE IS REAL INPUT and every number is read off a RENDERED rect, a REPLAYED display
+ * list or a CANVAS PIXEL. An inert frame and a working one are the same picture (constraint 40),
+ * and a surface that does not follow its frame draws the same shapes as one that does — just at
+ * the wrong size, which is why the extent is measured rather than photographed.
+ *
+ * THE DPR AXIS IS THE CHECK'S, NOT THIS PAGE'S. `scripts/check.py` loads this page once per
+ * device-pixel ratio and reads the same published proofs each time; the page measures whatever
+ * ratio it is given and reports it, so a run whose emulation silently failed is visible as a
+ * ratio that is not the one asked for rather than as a green pass (constraint 264).
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import { MIN_W, MIN_H } from '/src/wm/window.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import { DL_TEXT, DL_FILL_RECT, decodeDrawOps, textOfOps, pixelColor } from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import { TASKMGR_METRICS } from '/src/bin/taskmgr.mjs'
+import { drawnBox } from '/src/bin/imgview.mjs'
+import {
+  bootKernel, spawnProgram, resultOf, ask as askKernel, until, sleep, gestureAsker,
+} from '/www/pagekernel.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /** `Surface` appends its canvas with no CSS box of its own, so it renders at the backing
+   *  store's intrinsic size and stops being its client area. `src/wm/surface.mjs` owns it. */
+  noSurfaceFill: params.get('no_surface_fill') === '1',
+  /** `files` and `imgview` ignore `WEV_CLIENT` entirely: the pre-M16 programs exactly. Their own
+   *  declared `--no-resurface` flag, so the control is re-runnable rather than a source edit. */
+  frozenSurface: params.get('frozen_surface') === '1',
+  /** `files` asks for the client box in CSS pixels — today's behaviour, and THE UNIT ERROR. It is
+   *  a no-op at dpr 1 by construction, which is the pair that proves the suite can see a unit
+   *  error at all. */
+  cssPxSurface: params.get('css_px_surface') === '1',
+  /** `taskmgr` tests `ev.b & WPTR_DOWN` again — the y coordinate read as a flag word, which is
+   *  the defect `de8a68a` fixed and the one control here whose subject is committed code. */
+  evBPointer: params.get('ev_b_pointer') === '1',
+}
+globalThis.M16.config = CFG
+
+/* THE CONTROLS ARE INSTALLED BEFORE THE HOST EXISTS, and read back out of the module that owns
+ * them into `host.report().controls` — a control a check believed was on and was not is a green run
+ * over an unmodified world. The program-side controls travel as argv, below. */
+setSurfaceControls({ noFill: CFG.noSurfaceFill })
+// BOTH, THOUGH THIS PAGE HAS NO HOST CONTROL: `hostControls` is module state and M13's page sets
+// it, so a page that set one object and not the other would run under whatever the module was
+// left holding. Stating "none" is the fail-closed spelling.
+setHostControls({})
+
+const FILES = '/src/bin/files.mjs'
+const IMGVIEW = '/src/bin/imgview.mjs'
+const PAINT = '/src/bin/paint.mjs'
+const TASKMGR = '/src/bin/taskmgr.mjs'
+const TERM = '/src/bin/term.mjs'
+const GREP = '/src/bin/grep.mjs'
+
+/** The image `imgview` is pointed at: 16x16 RGBA, 8 + 16*16*4 = 1,032 bytes. Its SIZE is what
+ *  R34's arithmetic is about — a square source of side `n` has an extent of
+ *  `n * floor(min(w,h)/n)`, so the drawn extent moves only when the limiting client dimension
+ *  crosses a multiple of `n`. See `drawnBox` in `src/bin/imgview.mjs`. */
+const LOGO = '/usr/share/logo.rgba'
+const LOGO_SIDE = 16
+
+/**
+ * `paint`'s PINNED backing store, in device px, and the shape is the whole reason it is here.
+ *
+ * A canvas is a replaced element: with no CSS box of its own it takes the container's cross size
+ * and its OWN aspect ratio gives the width. When the store IS the client box those two agree — so
+ * a missing extent is invisible at rest, and `--negative no-surface-fill` held the very clause it
+ * is named for. Measured, in a throwaway harness, before this page was written.
+ *
+ * 900x120 is deliberately both the wrong SHAPE (7.5 against a client area's ~1.9) and WIDER than
+ * the client area, which is the second half: `min-width: auto` on a flex item resolves to the
+ * backing store's intrinsic width, so without the fill the client area CLIPS rather than scales,
+ * at either device-pixel ratio. A store narrower than its client box would clip at dpr 2 and not
+ * at dpr 1, and the control's declaration would have to be read twice.
+ */
+const PINNED_W = 900
+const PINNED_H = 120
+
+globalThis.M16.proofs = {
+  extent: null, units: null, rows: null, pixels: null, proc: null, menu: null, select: null,
+}
+
+const ask = gestureAsker(globalThis.M16)
+
+/** The host, once there is one. Module-level because every section asks it for a frame. */
+let HOST = null
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT: a `Surface` keeps counts and pixels, not ops, so the only way to read back WHAT a
+ *  program drew is to keep the batch the kernel announced. Registered before the host's own
+ *  listener and it mutates nothing — `src/kernel/wins.mjs` posts `ops.slice()`. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a section can wait for a REPAINT rather than sleep. */
+const BATCHES = new Map()
+
+/** WHAT THE BROWSER'S OWN CONTEXT MENU DID. Recorded at the document, which is downstream of the
+ *  canvas's own listener in the bubble phase, so `defaultPrevented` here is the answer to "did
+ *  something in front of me refuse it". */
+const MENU = { seen: 0, last: null }
+document.addEventListener('contextmenu', (e) => {
+  MENU.seen += 1
+  MENU.last = {
+    prevented: e.defaultPrevented === true,
+    x: Math.round(e.clientX), y: Math.round(e.clientY),
+    onSurface: Boolean(e.target && e.target.closest && e.target.closest('canvas.surface')),
+  }
+})
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M16.state = 'aborted'
+  globalThis.M16.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
+  out.className = 'bad'
+  say(globalThis.M16.why)
+} else {
+  main().catch((e) => {
+    globalThis.M16.state = 'error'
+    globalThis.M16.why = String((e && e.stack) || e)
+    say(globalThis.M16.why)
+  })
+}
+
+async function bootHost () {
+  const k = await bootKernel({ label: 'm16', bench: 1 }, globalThis.M16, say)
+  /* THE CAPTURE GOES ON FIRST. `kernelBoot` calls its listeners in order, so a listener added
+   * before the host's sees every batch the host is about to replay. */
+  k.on((m) => {
+    if (m.t !== 'win-draw') return
+    const id = m.win | 0
+    LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+    BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+  })
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  HOST = host
+  globalThis.M16.host = host
+  globalThis.M16.dpr = window.devicePixelRatio || 1
+  return { k, host }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window as the KERNEL holds it: the box in CSS px, the granted surface and the measured
+ *  client box in device px. */
+async function kernelWin (k, id) {
+  const st = await winState(k)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/** The desktop's rect as the clamp sees it. */
+function deskBox () {
+  const r = desktop.getBoundingClientRect()
+  return { x: r.left, y: r.top, w: Math.round(r.width), h: Math.round(r.height), rect: r }
+}
+
+const roundBox = (b) => ({ x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w),
+  h: Math.round(b.h) })
+
+/** Put a window at a known box, through `apply()` and the host's own report — M13's `place`. It is
+ *  this page staging its own fixture and not a gesture, so it goes through the same route a user's
+ *  arrow key does. */
+function place (entry, box) {
+  entry.win.box = { x: box.x | 0, y: box.y | 0, w: box.w | 0, h: box.h | 0 }
+  entry.win.apply()
+  entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
+  return { ...entry.win.placed }
+}
+
+/** The frame a program's window is, by the title it set. */
+function frameByTitle (host, what) {
+  for (const entry of host.frames.values()) {
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE: an entry with no surface is a frame whose canvas has not been
+ *  built, and reading an extent off it would throw. */
+async function surfaced (host, title, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title)
+    return Boolean(e && e.surface)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title)
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a grip is 10 CSS px of the frame's own corner
+ *  and a frame above it would take the press. The kernel owns the order (constraint 226), so this
+ *  asks rather than restacks. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/** One resize grip's centre, in client coordinates. MEASURED OFF THE GRIP, never modelled from the
+ *  box: the grips are positioned from `WIN_INSET` and a geometry derived from a constant does not
+ *  survive a second engine (constraint 264). */
+function gripAt (entry, name = 'se') {
+  const el = entry.win.el.querySelector(`[data-grip="${name}"]`)
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+}
+
+/**
+ * DRAG A REAL RESIZE GRIP, which nothing in this project had ever driven before M16.
+ *
+ * The gesture takes a pointer capture on the grip and then runs on `document` listeners
+ * (`src/wm/window.mjs`), and the capture MAY THROW (constraint 175) — so the gesture's own
+ * `captureError` is reported beside the result rather than assumed empty.
+ */
+async function dragGrip (k, entry, to, name) {
+  await raise(k, entry)
+  const from = gripAt(entry)
+  if (!from) throw new Error(`win ${entry.id} has no se grip to drag`)
+  const before = { ...entry.win.placed }
+  await ask({ kind: 'drag', name, from, to, steps: 10 })
+  // The host reports geometry on an animation frame, so the kernel is one frame behind the DOM.
+  await sleep(60)
+  return { from, to, before, after: roundBox(entry.win.placed),
+    captureError: (entry.win.resize && entry.win.resize.captureError) || '' }
+}
+
+/** A surfaced window's EXTENT, in CSS px, plus what the client area says about clipping. The
+ *  canvas knows both numbers — its parent IS the client area — so neither is restated here. */
+function extentOf (entry) {
+  const e = entry.surface.extent()
+  const body = entry.win.bodyEl
+  return {
+    win: entry.id,
+    title: entry.win.titleText,
+    cssW: Math.round(e.cssW * 100) / 100,
+    cssH: Math.round(e.cssH * 100) / 100,
+    clientW: e.clientW,
+    clientH: e.clientH,
+    dw: Math.round((e.cssW - e.clientW) * 100) / 100,
+    dh: Math.round((e.cssH - e.clientH) * 100) / 100,
+    scrollW: body.scrollWidth,
+    scrollH: body.scrollHeight,
+    store: { w: entry.surface.w, h: entry.surface.h },
+  }
+}
+
+/** THE TOLERANCE IS THE PAGE'S AND IT MUST NOT BE TIGHTENED. A `DOMRect`'s fields are doubles
+ *  (<https://drafts.fxtf.org/geometry/#dom-domrect>) and `clientWidth` is rounded to an integer
+ *  (<https://drafts.csswg.org/cssom-view/#dom-element-clientwidth>), so the two differ by up to a
+ *  pixel on any fractional layout — and this page is also opened in Firefox at dpr 1, where an
+ *  equality assertion would fail for a reason that is not a defect. */
+const EXTENT_SLACK_CSS_PX = 1
+
+const fills = (entry) => Math.abs(entry.dw) <= EXTENT_SLACK_CSS_PX
+  && Math.abs(entry.dh) <= EXTENT_SLACK_CSS_PX
+
+/** Every text run in one batch, read through the ABI's own codec. `textOfOps` is the declared
+ *  inverse of the `encodeTextRun` the program drew with, so this is the program's own strings and
+ *  not a second opinion about the encoding (constraint 293). */
+function textRuns (bytes) {
+  if (!bytes || !bytes.length) return []
+  const ops = decodeDrawOps(bytes, bytes.length)
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) {
+      // A HEADER WHOSE DATA IS MISSING IS NOT A STRING. The kernel refuses such a batch before it
+      // reaches a renderer (constraint 293); recorded here so a run that produced one is visible
+      // rather than counted as a row.
+      runs.push({ text: null, x: ops[i].a0, y: ops[i].a1, size: ops[i].a2 })
+      continue
+    }
+    runs.push({ text: got.text, x: ops[i].a0, y: ops[i].a1, size: ops[i].a2,
+      flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/** Every `DL_FILL_RECT` in one batch. */
+function fillRects (bytes) {
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length).filter((op) => op.op === DL_FILL_RECT)
+}
+
+/**
+ * HOW MANY ROWS `files` DREW, and their names.
+ *
+ * The name column is left-aligned at `NAME_X`, which `FILES_METRICS` publishes, converted with the
+ * `toSurface` the program itself draws with — one arithmetic, two readers. The header's own "Name"
+ * and the "+N more" overflow line sit at the same x and are named out rather than filtered by
+ * size: a size test would be a second reading of the same scale.
+ */
+function drawnRows (entry) {
+  const scale = entry.surface.w / entry.surface.extent().cssW
+  const nameX = FILES_METRICS.toSurface(FILES_METRICS.NAME_X, scale)
+  const runs = textRuns(LAST_BATCH.get(entry.id))
+  const names = runs
+    .filter((r) => typeof r.text === 'string' && Math.abs(r.x - nameX) <= 1)
+    .filter((r) => r.text !== 'Name' && !r.text.startsWith('+'))
+    .map((r) => r.text)
+  const overflow = runs.find((r) => typeof r.text === 'string' && r.text.startsWith('+'))
+  return { scale: Math.round(scale * 1000) / 1000, nameX, rows: names.length, names,
+    runs: runs.length, overflow: overflow ? overflow.text : '' }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOFS 1, 2 and 3: THE EXTENT, THE UNIT and THE CONTENT, at FOUR frame sizes.
+
+   One gesture sequence answers all three, and they are three proofs rather than one because the
+   defect had three independent causes. A layout is verified at its NARROW AND WIDE EXTREMES and
+   not at one, so two of the four sizes are the clamp's own: the SE grip dragged to the desktop's
+   far corner, and dragged back past the MIN_W/MIN_H floor.
+   -------------------------------------------------------------------------------------------- */
+async function proofGeometry (k, host, pids) {
+  const files = frameByTitle(host, 'files')
+  if (!files) throw new Error('no files window to resize')
+  const desk = deskBox()
+  place(files, { x: 20, y: 20, w: 460, h: 300 })
+  await sleep(80)
+
+  /* THE FOUR SIZES, AS POINTS TO DRAG THE SE GRIP TO. Both extremes are reachable from a window
+   * at the desktop's top-left: the far corner is clamped by `clampBox` and the near one by the
+   * per-edge floor in `#startResize`. */
+  const targets = [
+    { name: 'grow-to-the-desktop', to: { x: Math.round(desk.rect.right - 4),
+      y: Math.round(desk.rect.bottom - 4) } },
+    { name: 'shrink-past-the-floor', to: { x: Math.round(desk.rect.left + 20 + MIN_W - 90),
+      y: Math.round(desk.rect.top + 20 + MIN_H - 90) } },
+    { name: 'a-middling-size', to: { x: Math.round(desk.rect.left + 660),
+      y: Math.round(desk.rect.top + 400) } },
+    { name: 'wide-and-short', to: { x: Math.round(desk.rect.left + 980),
+      y: Math.round(desk.rect.top + 230) } },
+  ]
+
+  const dpr = window.devicePixelRatio || 1
+  const sizes = []
+  const extents = []
+  for (const target of targets) {
+    const had = BATCHES.get(files.id) || 0
+    const drag = await dragGrip(k, files, target.to, target.name)
+    /* WAIT FOR THE PROGRAM TO HAVE ACTED, not for a timer: the geometry report, the kernel's
+     * `WEV_CLIENT`, the program's `win_surface` and the page's canvas rebuild are four hops, and a
+     * sleep would read whichever of them had happened. The predicate is the clause's own subject,
+     * so a world where the program never re-surfaces TIMES OUT and reports the stale store rather
+     * than hanging. */
+    const want = Math.round(files.win.bodyEl.clientWidth * dpr)
+    const wantH = Math.round(files.win.bodyEl.clientHeight * dpr)
+    const agreedMs = await until(
+      () => files.surface && files.surface.w === want && files.surface.h === wantH
+        && (BATCHES.get(files.id) || 0) > had, 3000)
+    const row = await kernelWin(k, files.id)
+    const live = extentOf(files)
+    const drew = drawnRows(files)
+    sizes.push({
+      name: target.name,
+      drag: { from: drag.from, to: drag.to, before: drag.before, after: drag.after },
+      captureError: drag.captureError,
+      placed: drag.after,
+      // THE PAGE'S OWN MEASUREMENT, in both units. `clientWidth` is the CONTENT box: the bounding
+      // rect is the BORDER box and `.window-body` carries a 1 px `border-top` (PRD §2).
+      content: { cssW: live.clientW, cssH: live.clientH, devW: want, devH: wantH },
+      store: live.store,
+      kernel: row ? { client: { w: row.clientW, h: row.clientH },
+        surface: row.surface, box: { w: row.w, h: row.h } } : null,
+      agreedMs: Math.round(agreedMs),
+      rows: drew.rows,
+      names: drew.names.slice(0, 4),
+      overflow: drew.overflow,
+      runs: drew.runs,
+    })
+    // EVERY SURFACED WINDOW, AT THIS SIZE, and not only the one being dragged: the extent contract
+    // is the renderer's and holds for a frame nobody touched.
+    extents.push({
+      size: target.name,
+      windows: [...host.frames.values()].filter((e) => e.surface).map((e) => extentOf(e)),
+    })
+  }
+
+  /* ---- PROOF 1: THE EXTENT ---------------------------------------------------------------- */
+  const everyWindow = extents.flatMap((row) => row.windows.map((w) => ({ ...w, size: row.size })))
+  const notFilling = everyWindow.filter((w) => !fills(w))
+  const clipped = everyWindow.filter((w) => w.scrollW > w.clientW + 1 || w.scrollH > w.clientH + 1)
+  /* THE FIXTURE IS PART OF THE CLAUSE. `paint -w 160 -h 120` holds a store whose aspect ratio is
+   * NOT its client area's, which is what makes a missing CSS box visible: measured, with the
+   * aspect ratios equal a canvas with no width still lands exactly on the client box, so clause 1
+   * HELD under the very control it is named for. */
+  const pinned = everyWindow.filter((w) => w.store.w === PINNED_W && w.store.h === PINNED_H)
+  const mismatched = pinned.filter(
+    (w) => Math.abs((w.store.w / w.store.h) - (w.clientW / w.clientH)) > 0.05)
+  const extent = {
+    slackCssPx: EXTENT_SLACK_CSS_PX,
+    sizes: extents.map((row) => ({ size: row.size,
+      worst: row.windows.reduce((a, w) => (Math.abs(w.dw) + Math.abs(w.dh)
+        > Math.abs(a.dw) + Math.abs(a.dh) ? w : a), row.windows[0] || { dw: 0, dh: 0 }) })),
+    windows: everyWindow.length,
+    notFilling,
+    clipped,
+    pinnedStores: pinned.length,
+    aspectMismatched: mismatched.length,
+  }
+  extent.fillsEveryClientArea = everyWindow.length >= 4 && notFilling.length === 0
+  extent.nothingClipped = everyWindow.length >= 4 && clipped.length === 0
+  extent.hasAspectFixture = mismatched.length >= 1
+  extent.ok = extent.fillsEveryClientArea && extent.nothingClipped && extent.hasAspectFixture
+  globalThis.M16.proofs.extent = { ok: extent.ok, evidence: extent }
+  say((extent.ok ? 'ok  ' : 'BAD ') + 'extent: ' + everyWindow.length +
+    ' surfaced readings over 4 sizes, ' + notFilling.length + ' not filling, ' +
+    clipped.length + ' clipped, ' + mismatched.length + ' aspect-mismatched stores')
+
+  /* ---- PROOF 2: THE UNIT ------------------------------------------------------------------ */
+  const stores = sizes.map((s) => `${s.store.w}x${s.store.h}`)
+  const wrongUnit = sizes.filter(
+    (s) => s.store.w !== s.content.devW || s.store.h !== s.content.devH)
+  const units = {
+    dpr,
+    sizes: sizes.map((s) => ({ size: s.name, placed: s.placed, content: s.content,
+      store: s.store, kernel: s.kernel, agreedMs: s.agreedMs,
+      captureError: s.captureError })),
+    distinctStores: [...new Set(stores)].length,
+    wrongUnit,
+  }
+  /* THE GRIP IS ASSERTED TO HAVE DONE SOMETHING. Four drags that moved no frame would leave the
+   * store unchanged and every "it equals the content box" clause true — the comparison of a number
+   * against itself M13's `fixtureIsClamped` exists to stop. */
+  units.gripMovedTheFrame = sizes.every((s) => s.placed.w !== s.drag.before.w
+    || s.placed.h !== s.drag.before.h)
+  units.surfaceChanged = units.distinctStores >= 3
+  units.isTheContentBoxInDevicePx = wrongUnit.length === 0
+  // AND THE KERNEL'S RECORD AGREES, in the unit it publishes: `client:` is device px and is what
+  // `/proc` and a program's own `WEV_CLIENT` are both derived from.
+  units.kernelAgrees = sizes.every((s) => s.kernel && s.kernel.client
+    && s.kernel.client.w === s.content.devW && s.kernel.client.h === s.content.devH)
+  units.ok = units.gripMovedTheFrame && units.surfaceChanged
+    && units.isTheContentBoxInDevicePx && units.kernelAgrees
+  globalThis.M16.proofs.units = { ok: units.ok, evidence: units }
+  say((units.ok ? 'ok  ' : 'BAD ') + 'units: dpr ' + dpr + ', stores ' + stores.join(' ') +
+    ', content ' + sizes.map((s) => `${s.content.devW}x${s.content.devH}`).join(' ') +
+    (units.isTheContentBoxInDevicePx ? '' : ' — WRONG UNIT'))
+
+  /* ---- PROOF 3: THE CONTENT --------------------------------------------------------------- */
+  const tall = sizes.find((s) => s.name === 'grow-to-the-desktop')
+  const short = sizes.find((s) => s.name === 'shrink-past-the-floor')
+  const rows = {
+    perSize: sizes.map((s) => ({ size: s.name, clientH: s.content.cssH, rows: s.rows,
+      runs: s.runs, overflow: s.overflow, firstNames: s.names })),
+    tallRows: tall ? tall.rows : 0,
+    shortRows: short ? short.rows : 0,
+  }
+  // READ BACK THROUGH `textOfOps`, so this is the program's own strings. A row count derived from
+  // the window's height would be this page re-deriving the program's arithmetic.
+  rows.drewNames = Boolean(tall && tall.names.length > 0)
+  rows.grew = Boolean(tall && short && tall.rows > short.rows)
+  rows.statesItsOverflow = Boolean(short && short.overflow)
+  rows.ok = rows.grew && rows.drewNames && rows.statesItsOverflow
+  globalThis.M16.proofs.rows = { ok: rows.ok, evidence: rows }
+  say((rows.ok ? 'ok  ' : 'BAD ') + 'rows: ' + rows.shortRows + ' drawn at ' +
+    (short ? short.content.cssH : '?') + ' CSS px tall, ' + rows.tallRows + ' at ' +
+    (tall ? tall.content.cssH : '?') + '; overflow ' + JSON.stringify(rows.statesItsOverflow))
+  return { pids }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: THE PIXELS — R34, and the one clause a CSS stretch cannot satisfy.
+
+   `imgview` draws one `DL_FILL_RECT` per source pixel at an integer scale, centred. So the DRAWN
+   EXTENT is `n * floor(min(w,h)/n)` for a square source of side `n`, and it moves only when the
+   limiting client dimension crosses a multiple of `n` device px. A canvas that was merely stretched
+   keeps the extent it had.
+   -------------------------------------------------------------------------------------------- */
+async function proofPixels (k, host) {
+  const view = frameByTitle(host, 'imgview')
+  if (!view) throw new Error('no imgview window')
+  const dpr = window.devicePixelRatio || 1
+  const readings = []
+  /* TWO SIZES, A WHOLE SOURCE-PIXEL BLOCK APART AT LEAST. The step is `LOGO_SIDE / dpr` CSS px in
+   * the limiting axis for the extent to be able to move at all; this takes several times that, so
+   * a run that lands mid-band is not what the clause rests on. */
+  const steps = [0, 120]
+  place(view, { x: 500, y: 20, w: 320, h: 280 })
+  await sleep(80)
+  for (const step of steps) {
+    const had = BATCHES.get(view.id) || 0
+    if (step) {
+      const g = gripAt(view)
+      await dragGrip(k, view, { x: g.x + step, y: g.y + step }, `grow-imgview-${step}`)
+    } else {
+      await raise(k, view)
+    }
+    const want = Math.round(view.win.bodyEl.clientWidth * dpr)
+    const wantH = Math.round(view.win.bodyEl.clientHeight * dpr)
+    /* THE FIRST READING WAITS FOR THE STARTUP RE-SURFACE, not for a new batch: `imgview` opens at
+     * 200x200 device px and the page's first geometry report corrects it, so the store agreeing
+     * with the measured box IS the settled state. The second reading also waits for a repaint,
+     * because the extent it reads is the one the program drew after the drag. */
+    const settled = await until(
+      () => (view.surface && view.surface.w === want && view.surface.h === wantH
+        && (step ? (BATCHES.get(view.id) || 0) > had : true)), 3000)
+    const store = { w: view.surface.w, h: view.surface.h }
+    const rects = fillRects(LAST_BATCH.get(view.id))
+    const blocks = rects.filter((op) => op.a2 === rects[0]?.a2 && op.a3 === rects[0]?.a3)
+    const xs = rects.map((op) => op.a0)
+    const ys = rects.map((op) => op.a1)
+    const drew = rects.length
+      ? { x: Math.min(...xs), y: Math.min(...ys),
+        w: Math.max(...xs) + rects[0].a2 - Math.min(...xs),
+        h: Math.max(...ys) + rects[0].a3 - Math.min(...ys),
+        scale: rects[0].a2 }
+      : null
+    /* AND THE SAME ARITHMETIC, FROM THE PROGRAM'S OWN EXPORT. `drawnBox` is `imgview`'s and is
+     * imported rather than restated: three readers outside that process computed
+     * `floor(w / 16)` by hand and used the x origin on BOTH axes, which is correct only while the
+     * surface is square — exactly what this milestone ends. */
+    const model = drawnBox({ w: LOGO_SIDE, h: LOGO_SIDE }, store)
+    /* THE PIXELS, read back out of the canvas the browser painted. TWO SAMPLES ONE BLOCK APART,
+     * each compared against the colour the op at that block ASKED for: that is what separates a
+     * flat block from an interpolated edge, and `pixelColor` renders an asked-for colour into the
+     * shape `surface.pixel` returns (constraint 224). */
+    const sampleAt = (bx, by) => {
+      const x = model.x + bx * model.scale + Math.floor(model.scale / 2)
+      const y = model.y + by * model.scale + Math.floor(model.scale / 2)
+      const op = rects.find((o) => x >= o.a0 && x < o.a0 + o.a2 && y >= o.a1 && y < o.a1 + o.a3)
+      return { at: { x, y }, read: view.surface.pixel(x, y),
+        want: op ? pixelColor(op.a4) : null }
+    }
+    const samples = [sampleAt(2, 2), sampleAt(3, 2), sampleAt(2, 3)]
+    readings.push({
+      step,
+      content: { cssW: view.win.bodyEl.clientWidth, cssH: view.win.bodyEl.clientHeight,
+        devW: want, devH: wantH },
+      store,
+      settledMs: Math.round(settled),
+      rects: rects.length,
+      blocks: blocks.length,
+      drew,
+      model: { x: model.x, y: model.y, w: model.w, h: model.h, scale: model.scale },
+      samples,
+    })
+  }
+
+  const pixels = { source: { w: LOGO_SIDE, h: LOGO_SIDE, path: LOGO }, dpr, readings }
+  const [first, second] = readings
+  // ONE FILL-RECT PER SOURCE PIXEL AT EVERY SIZE: the op count is the source's and the BLOCK is
+  // what grows, which is the difference between re-rendering and scaling.
+  pixels.onePerSourcePixel = readings.every((r) => r.rects === LOGO_SIDE * LOGO_SIDE)
+  pixels.extentDiffers = Boolean(first && second && first.drew && second.drew
+    && second.drew.w !== first.drew.w)
+  pixels.matchesTheProgramsOwnArithmetic = readings.every(
+    (r) => r.drew && r.drew.scale === r.model.scale && r.drew.w === r.model.w
+      && r.drew.x === r.model.x && r.drew.y === r.model.y)
+  /* FLAT BLOCKS: every sample reads EXACTLY the colour its own op asked for, and the three samples
+   * are not all one colour — a single sample cannot tell a flat block from an interpolated one,
+   * and three identical ones would not either. */
+  const everySample = readings.flatMap((r) => r.samples)
+  pixels.flatBlocks = everySample.length > 0
+    && everySample.every((s) => s.want !== null && s.read === s.want)
+  pixels.blocksDiffer = readings.every(
+    (r) => new Set(r.samples.map((s) => s.want)).size >= 2)
+  pixels.ok = pixels.onePerSourcePixel && pixels.extentDiffers
+    && pixels.matchesTheProgramsOwnArithmetic && pixels.flatBlocks && pixels.blocksDiffer
+  globalThis.M16.proofs.pixels = { ok: pixels.ok, evidence: pixels }
+  say((pixels.ok ? 'ok  ' : 'BAD ') + 'pixels: extents ' +
+    readings.map((r) => (r.drew ? `${r.drew.w}@${r.drew.scale}` : 'none')).join(' -> ') +
+    ', ' + (first ? first.rects : 0) + ' fill-rects, flat ' + pixels.flatBlocks)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: `/proc`, MID-DRAG, AND A RELEASE OUTSIDE THE FRAME — A2b and A2c.
+
+   The release-only `win-geom` was a defect with two faces: `/proc` and the blur governor described
+   the PRE-DRAG rectangle for the whole gesture, and when `setPointerCapture` throws — Firefox
+   does, constraint 175 — the gesture continues on document listeners, so a release outside the
+   frame never reached the frame's own `pointerup` hook and the kernel kept the pre-drag box
+   PERMANENTLY. So the read happens while the button is still down, and the release lands outside.
+
+   IT IS READ THROUGH A PROCESS, on a real path, because that is the only reading of this a person
+   has. `grep`'s exit status is its answer and `matched` is the count: a FIXED string (constraint
+   138), built from what the page measured, so a line that merely EXISTS does not satisfy it.
+   -------------------------------------------------------------------------------------------- */
+async function proofProc (k, host, pids) {
+  const files = frameByTitle(host, 'files')
+  const desk = deskBox()
+  await raise(k, files)
+  place(files, { x: 20, y: 20, w: 460, h: 300 })
+  await sleep(80)
+  const dpr = window.devicePixelRatio || 1
+  const from = gripAt(files)
+  const outside = { x: Math.round(desk.rect.right - 6), y: Math.round(desk.rect.bottom - 6) }
+
+  await ask({ kind: 'press', name: 'press-the-grip', at: from })
+  await ask({ kind: 'move', name: 'drag-the-grip-outside-the-frame', at: outside })
+  await sleep(80)
+
+  const midW = Math.round(files.win.bodyEl.clientWidth * dpr)
+  const midH = Math.round(files.win.bodyEl.clientHeight * dpr)
+  const agreedMs = await until(async () => {
+    const row = await kernelWin(k, files.id)
+    return Boolean(row && row.clientW === midW && row.clientH === midH)
+  }, 4000)
+  const midRow = await kernelWin(k, files.id)
+  const st = await winState(k)
+  const kernelDpr = (st.wins || {}).dpr
+  /* STILL HELD: the frame's rect is now the dragged one and the pointer has not come up. A page
+   * that read this after the release would be asserting the thing the release-only report already
+   * got right.
+   *
+   * `width`/`height` AND NOT `w`/`h`: a `DOMRect` has no `w` field, so `roundBox` over one reads
+   * `null` — which is how the first run of this proof reported a drag that had plainly happened as
+   * "not underway". */
+  const r = files.win.el.getBoundingClientRect()
+  const heldRect = { x: Math.round(r.left), y: Math.round(r.top),
+    w: Math.round(r.width), h: Math.round(r.height) }
+
+  const path = `/proc/${pids.files}/win/${files.id}`
+  const clientLine = `client:\t${midW}x${midH}`
+  const dprLine = `dpr:\t${dpr}`
+  const greps = {}
+  for (const [name, pattern] of [['client', clientLine], ['dpr', dprLine]]) {
+    const row = await spawnProgram(k, GREP, ['grep', '-c', pattern, path])
+    greps[name] = await resultRow(k, row.pid)
+  }
+
+  await ask({ kind: 'release', name: 'release-outside-the-frame', at: outside })
+  await sleep(120)
+  const afterW = Math.round(files.win.bodyEl.clientWidth * dpr)
+  const afterH = Math.round(files.win.bodyEl.clientHeight * dpr)
+  const afterRow = await kernelWin(k, files.id)
+
+  const proc = {
+    path, pid: pids.files, win: files.id,
+    midDrag: { content: { devW: midW, devH: midH }, kernel: midRow
+      ? { client: { w: midRow.clientW, h: midRow.clientH }, box: { w: midRow.w, h: midRow.h } }
+      : null, heldRect, agreedMs: Math.round(agreedMs) },
+    afterRelease: { content: { devW: afterW, devH: afterH }, kernel: afterRow
+      ? { client: { w: afterRow.clientW, h: afterRow.clientH } } : null, at: outside },
+    pageDpr: dpr, kernelDpr,
+    greps: { client: { pattern: clientLine, exit: greps.client.exit,
+      matched: greps.client.matched },
+    dpr: { pattern: dprLine, exit: greps.dpr.exit, matched: greps.dpr.matched } },
+  }
+  // THE GESTURE HAS TO HAVE GROWN THE FRAME, or "the kernel knows mid-drag" is a claim about a
+  // window nobody resized.
+  proc.theDragWasUnderway = heldRect.w > 460
+  proc.namesTheClientBox = greps.client.exit === 0 && greps.client.matched === 1
+  proc.namesTheRatio = greps.dpr.exit === 0 && greps.dpr.matched === 1
+  proc.releaseOutsideKeptIt = Boolean(afterRow && afterRow.clientW === afterW
+    && afterRow.clientH === afterH)
+  proc.ok = proc.theDragWasUnderway && proc.namesTheClientBox && proc.namesTheRatio
+    && proc.releaseOutsideKeptIt
+  globalThis.M16.proofs.proc = { ok: proc.ok, evidence: proc }
+  say((proc.ok ? 'ok  ' : 'BAD ') + 'proc: mid-drag ' + path + ' names ' +
+    clientLine.replace('\t', ' ') + ' (' + greps.client.matched + ') and ' +
+    dprLine.replace('\t', ' ') + ' (' + greps.dpr.matched + '); released outside at ' +
+    outside.x + ',' + outside.y)
+}
+
+/** One program's result row, by pid. `resultOf` waits for the kernel's `results` message; a
+ *  stopped program raises no error, so a timeout carries state (constraint 122). */
+async function resultRow (k, pid) {
+  const row = await resultOf(k, pid, 20000)
+  return { exit: row.exit, matched: row.matched, why: row.why || '' }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 7: THE SELECTION, AT FIVE HEIGHTS — R10's registration.
+
+   `de8a68a` replaced `ev.b & WPTR_DOWN` with `ev.mods & WPTR_DOWN`. `ev.b` is the pointer's Y, so
+   the old test selected a row only where `y & 0x10` happened to be set — the failure is PERIODIC
+   IN Y, which is why one height would have passed by luck. The row the program drew as SELECTED is
+   read out of its own display list, and the fill is read back out of the canvas: a selection the
+   program recorded and did not paint is not a selection a reader has.
+   -------------------------------------------------------------------------------------------- */
+async function proofSelect (k, host) {
+  const mgr = frameByTitle(host, 'Task Manager')
+  if (!mgr) throw new Error('no taskmgr window')
+  const desk = deskBox()
+  await raise(k, mgr)
+  place(mgr, { x: 20, y: 20, w: 620, h: 520 })
+  await sleep(80)
+  const cases = []
+  /**
+   * FIVE HEIGHTS, BY FIVE REAL GRIP DRAGS — AND FIVE DIFFERENT ROWS, WHICH IS THE HALF THAT
+   * MATTERS. A row's surface y is `rowMid(i) * scale` and does not depend on the window's height
+   * at all, so five heights pressing one row is ONE case run five times: measured, the first
+   * version of this proof pressed row 3 at surface y 206 in all five and reported five readings of
+   * the same number.
+   *
+   * The bit the pre-`de8a68a` test read is bit 4 of that y, so the ROW INDEX is what sweeps it: at
+   * dpr 2 the five rows below land on 98, 134, 170, 206 and 242, four with the bit clear and one
+   * with it set. The height still varies, because it is what `maxRows` and the store are a
+   * function of — and the shrink stops above five rows, so no case can pass by having nothing to
+   * press. The dy values are CUMULATIVE: each drag starts from where the last one left the grip.
+   *
+   * ROW 3 GOES FIRST, and that is not arbitrary: the selection starts at row 0, so a world where
+   * the press is DROPPED must not have the first case agree by coincidence.
+   */
+  const heights = [0, -37, -91, -143, -20]
+  const order = [3, 0, 1, 2, 4]
+  for (const dy of heights) {
+    if (dy) {
+      const g = gripAt(mgr)
+      await dragGrip(k, mgr, { x: g.x, y: g.y + dy }, `taskmgr-height${dy}`)
+    } else {
+      await raise(k, mgr)
+    }
+    const dpr = window.devicePixelRatio || 1
+    const want = Math.round(mgr.win.bodyEl.clientWidth * dpr)
+    const wantH = Math.round(mgr.win.bodyEl.clientHeight * dpr)
+    await until(() => mgr.surface && mgr.surface.w === want && mgr.surface.h === wantH, 3000)
+    /* AND WAIT FOR THE PROGRAM TO HAVE DRAWN AT THAT SIZE, which is a different fact from the
+     * page having built the canvas.
+     *
+     * The wait above is satisfied by `WinHost`: the backing store exists at the new size. The
+     * PROGRAM has not necessarily read its `WEV_CLIENT` yet, so its own `maxRows` and row origins
+     * can still be the previous layout — and a press computed from the NEW geometry then lands on
+     * the OLD rows. Measured under `--negative css-px-surface`, which shifts every window through
+     * the cascade and so re-times this: one case of five pressed row 1 and the program selected
+     * row 0, with `rowMid(1) * scale = 134` and the program's own inverse mapping 134 to row 1.
+     * The press was right and the layout under it was stale.
+     *
+     * A repaint AT the new size is the acknowledgement, and it is the only one available: there is
+     * no channel on which a program says "I have resized". Counting a batch is what
+     * `BATCHES` already does for the clause below. */
+    const settled = BATCHES.get(mgr.id) || 0
+    await until(() => (BATCHES.get(mgr.id) || 0) > settled, 3000)
+    /* THE SCALE IS MEASURED off the canvas, which is what `FILES_METRICS`'s docstring prescribes
+     * for a driver and what `bench/m14-shell/taskmgr.py` restated as a constant. */
+    const scale = mgr.surface.w / mgr.surface.extent().cssW
+    const fits = TASKMGR_METRICS.maxRows(mgr.win.bodyEl.clientHeight)
+    const rowIndex = Math.max(0, Math.min(fits - 1, order[cases.length]))
+    const ySurface = Math.round(TASKMGR_METRICS.rowMid(rowIndex) * scale)
+    const xSurface = Math.round(mgr.surface.w / 2)
+    const at = mgr.surface.clientAt(xSurface, ySurface)
+    const had = BATCHES.get(mgr.id) || 0
+    await ask({ kind: 'click', name: `select-row-${rowIndex}-at-${wantH}`, at })
+    const repainted = await until(() => (BATCHES.get(mgr.id) || 0) > had, 3000)
+    const drew = selectedRow(mgr, scale)
+    cases.push({
+      height: mgr.win.bodyEl.clientHeight,
+      store: { w: mgr.surface.w, h: mgr.surface.h },
+      scale: Math.round(scale * 1000) / 1000,
+      fits,
+      pressed: rowIndex,
+      at,
+      surfaceY: ySurface,
+      // THE BIT THE OLD TEST READ, recorded per case so the fixture clause below is a reading and
+      // not a hope.
+      bit0x10: (ySurface & 0x10) !== 0,
+      selected: drew.index,
+      band: drew.band,
+      pixel: drew.pixel,
+      repaintedMs: Math.round(repainted),
+    })
+  }
+  const select = { cases, rows: cases.length,
+    bitClear: cases.filter((c) => !c.bit0x10).length,
+    bitSet: cases.filter((c) => c.bit0x10).length,
+    distinctRows: [...new Set(cases.map((c) => c.pressed))].length,
+    distinctHeights: [...new Set(cases.map((c) => c.height))].length }
+  select.everyPressSelectedItsRow = cases.length === 5
+    && cases.every((c) => c.selected === c.pressed)
+  /* THE INPUT THE DEFECT DROPPED, AND THE INPUT IT HAPPENED TO PASS. Five presses whose y all had
+   * the bit set would satisfy the clause above against the program `de8a68a` fixed — and five that
+   * all had it clear would not tell a dropped press from a program that never reads the pointer at
+   * all. So the sweep has to contain both. */
+  select.sweepsTheBit = select.bitClear >= 1 && select.bitSet >= 1
+    && select.distinctRows >= 4 && select.distinctHeights >= 4
+  select.thePaintShowsIt = cases.every((c) => c.pixel && c.pixel.read === c.pixel.want)
+  select.ok = select.everyPressSelectedItsRow && select.sweepsTheBit
+    && select.thePaintShowsIt
+  globalThis.M16.proofs.select = { ok: select.ok, evidence: select }
+  say((select.ok ? 'ok  ' : 'BAD ') + 'select: ' + cases.map(
+    (c) => `${c.height}px row ${c.pressed}->${c.selected}@y${c.surfaceY}${c.bit0x10 ? '' : '*'}`,
+  ).join(' ') + '  (* = bit 0x10 of the surface y is clear)')
+}
+
+/**
+ * WHICH ROW `taskmgr` DREW AS SELECTED, out of its own last batch, plus the pixel.
+ *
+ * The selection is a full-width band one row tall — the only fill rect that is both — so it is
+ * found by its SHAPE rather than by a colour this page would have to restate. The row index comes
+ * back through `TASKMGR_METRICS.rowTop`'s inverse, in CSS px, which is the program's own
+ * arithmetic.
+ */
+function selectedRow (entry, scale) {
+  const rects = fillRects(LAST_BATCH.get(entry.id))
+  const rowH = Math.round(TASKMGR_METRICS.ROW_H * scale)
+  const band = rects.find((op) => Math.abs(op.a3 - rowH) <= 1
+    && op.a2 > entry.surface.w * 0.5)
+  if (!band) return { index: -1, band: null, pixel: null }
+  const topCss = band.a1 / scale
+  const index = Math.round((topCss - TASKMGR_METRICS.HEAD_H) / TASKMGR_METRICS.ROW_H)
+  // AND THE PIXELS, inside the band and clear of its own outline, because a band the program sent
+  // and the page did not paint is not a selection a reader can see (constraint 40).
+  const x = Math.round(band.a0 + band.a2 / 2)
+  const y = Math.round(band.a1 + band.a3 / 2)
+  return {
+    index,
+    band: { x: band.a0, y: band.a1, w: band.a2, h: band.a3 },
+    pixel: { at: { x, y }, read: entry.surface.pixel(x, y), want: pixelColor(band.a4) },
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 6: THE BROWSER'S OWN MENU — R8.
+
+   A foreign menu drawn over the operating system is the clearest breach available, and
+   `#wirePointer` wired pointerdown/move/up/cancel/keydown/focus/blur and not this one. The menu a
+   PROCESS raises is M20's; this is only the host's being refused.
+
+   LAST OF THE SEVEN, deliberately: the second gesture is a right-click the page does NOT refuse,
+   which is the comparison that makes the first clause about this listener rather than about
+   headless Chrome never showing a menu.
+   -------------------------------------------------------------------------------------------- */
+async function proofMenu (k, host) {
+  const files = frameByTitle(host, 'files')
+  await raise(k, files)
+  place(files, { x: 20, y: 20, w: 460, h: 300 })
+  await sleep(80)
+  const inside = files.surface.clientAt(Math.round(files.surface.w / 2),
+    Math.round(files.surface.h / 2))
+  const before = host.report().contextmenus
+  await ask({ kind: 'rightclick', name: 'right-click-inside-the-surface', at: inside })
+  await sleep(80)
+  const onSurface = MENU.last ? { ...MENU.last } : null
+  const counted = host.report().contextmenus
+
+  const log = out.getBoundingClientRect()
+  const bare = { x: Math.round(log.left + 40), y: Math.round(log.top + 10) }
+  await ask({ kind: 'rightclick', name: 'right-click-on-the-bare-page', at: bare })
+  await sleep(80)
+  const offSurface = MENU.last ? { ...MENU.last } : null
+
+  const menu = {
+    inside, bare, onSurface, offSurface,
+    contextmenus: { before, after: counted, final: host.report().contextmenus },
+    seen: MENU.seen,
+  }
+  menu.refusedOnTheSurface = Boolean(onSurface && onSurface.onSurface
+    && onSurface.prevented === true)
+  menu.countedByTheHost = counted === before + 1
+  /* AND NOT REFUSED ELSEWHERE, which is what makes the clause above a statement about the
+   * listener: a browser that never fires `contextmenu` at all, or a page that cancelled every one
+   * of them, would satisfy the first clause and fail this one. */
+  menu.notRefusedOffIt = Boolean(offSurface && offSurface.onSurface === false
+    && offSurface.prevented === false)
+  menu.ok = menu.refusedOnTheSurface && menu.countedByTheHost && menu.notRefusedOffIt
+  globalThis.M16.proofs.menu = { ok: menu.ok, evidence: menu }
+  say((menu.ok ? 'ok  ' : 'BAD ') + 'menu: on the surface prevented ' +
+    (onSurface ? onSurface.prevented : 'no event') + ', on the page ' +
+    (offSurface ? offSurface.prevented : 'no event') + ', host counted ' +
+    (counted - before))
+}
+
+/* ---- staging ------------------------------------------------------------------------------- */
+
+/** The four surfaced programs this page needs, with the control flags that belong to each. */
+async function stage (k, host) {
+  const filesArgv = ['files', '/usr/bin']
+  if (CFG.frozenSurface) filesArgv.push('--no-resurface')
+  if (CFG.cssPxSurface) filesArgv.push('--css-px-surface')
+  const imgArgv = ['imgview', '-f', LOGO]
+  if (CFG.frozenSurface) imgArgv.push('--no-resurface')
+  const mgrArgv = ['taskmgr']
+  if (CFG.evBPointer) mgrArgv.push('--ev-b-pointer')
+
+  const pids = {}
+  pids.files = (await spawnProgram(k, FILES, filesArgv)).pid
+  pids.imgview = (await spawnProgram(k, IMGVIEW, imgArgv)).pid
+  // PINNED, AND THAT IS THE POINT: a program that asked for a resolution asked for a resolution,
+  // so its store does not follow the frame. It is this page's aspect-ratio fixture.
+  pids.paint = (await spawnProgram(k, PAINT, ['paint', '-w', String(PINNED_W),
+    '-h', String(PINNED_H)])).pid
+  pids.taskmgr = (await spawnProgram(k, TASKMGR, mgrArgv)).pid
+
+  for (const title of ['files', 'imgview', 'paint', 'Task Manager']) {
+    if (!await surfaced(host, title)) throw new Error(`${title} never surfaced`)
+  }
+  // Out of each other's way, so a grip press lands on the frame it was measured off.
+  place(frameByTitle(host, 'files'), { x: 20, y: 20, w: 460, h: 300 })
+  place(frameByTitle(host, 'imgview'), { x: 500, y: 20, w: 320, h: 280 })
+  place(frameByTitle(host, 'paint'), { x: 840, y: 20, w: 400, h: 240 })
+  place(frameByTitle(host, 'Task Manager'), { x: 500, y: 310, w: 620, h: 230 })
+  await sleep(150)
+  globalThis.M16.pids = pids
+  return pids
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+async function live () {
+  const { k, host } = await bootHost()
+  await spawnProgram(k, FILES, ['files', '/usr/bin'])
+  await spawnProgram(k, IMGVIEW, ['imgview', '-f', LOGO])
+  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
+  await until(() => host.frames.size >= 3, 15000)
+  /* OUT OF EACH OTHER'S WAY, AND `Terminal` IS ITS TITLE AND NOT `term`. The first version of this
+   * matched `term`, found nothing, and left the terminal where the kernel's cascade had put it —
+   * on top of the file manager's bottom-right corner, which is exactly where a reader reaches for
+   * a resize grip. `bench/m16-resize/probe.py` reported the grip as undrivable for that reason and
+   * nothing else, which is what the probe is for. */
+  for (const [title, box] of [
+    ['files', { x: 20, y: 20, w: 460, h: 320 }],
+    ['imgview', { x: 500, y: 20, w: 320, h: 300 }],
+    ['Terminal', { x: 20, y: 360, w: 800, h: 180 }],
+  ]) {
+    const entry = frameByTitle(host, title)
+    if (entry) place(entry, box)
+  }
+  const term = frameByTitle(host, 'Terminal')
+  if (term && term.term) term.term.focus()
+  say('')
+  say('A LIVE DESKTOP, and M16 is the row that made a window\'s CONTENTS follow its frame.')
+  say('  drag any window\'s corner or edge: the file list shows MORE FILES when it is taller,')
+  say('  and the image is re-rendered at the new size rather than stretched')
+  say('  the surface is the client box in DEVICE pixels, so the text is the size it says it is')
+  say('  type `taskmgr &` or `paint &` at the prompt for two more surfaced programs')
+  say('  `cat /proc/<pid>/win/<winid>` prints box: (CSS px), surface: and client: (device px)')
+  say('  and dpr:, which is the factor between them')
+  globalThis.M16.phase = 'live'
+  globalThis.M16.livePid = row.pid
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M16.state = 'done'
+    globalThis.M16.verdict = 'live'
+    await live()
+    return
+  }
+
+  const which = CFG.noSurfaceFill
+    ? 'CONTROL: no_surface_fill (the canvas has no CSS box of its own).'
+    : CFG.frozenSurface
+      ? 'CONTROL: frozen_surface (`files` and `imgview` ignore WEV_CLIENT).'
+      : CFG.cssPxSurface
+        ? 'CONTROL: css_px_surface (`files` asks for the client box in CSS px — the unit error).'
+        : CFG.evBPointer
+          ? 'CONTROL: ev_b_pointer (`taskmgr` reads the pointer\'s Y as a flag word again).'
+          : ''
+  say('M16 — the client box IS the surface, in device pixels. ' + which)
+  say('dpr ' + (window.devicePixelRatio || 1) + '. Every gesture below is REAL input and every')
+  say('number is read off a rendered rect, a replayed display list or a canvas pixel.')
+
+  const { k, host } = await bootHost()
+  globalThis.M16.kernelIsolated = true
+  globalThis.M16.controlsInForce = host.report().controls
+  const pids = await stage(k, host)
+
+  await proofGeometry(k, host, pids)
+  await proofPixels(k, host)
+  await proofProc(k, host, pids)
+  await proofSelect(k, host)
+  await proofMenu(k, host)
+
+  const proofs = globalThis.M16.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M16.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M16.verdict)
+  globalThis.M16.state = 'done'
+  globalThis.M16.phase = 'rendered'
+}
+</script>
+</body>
+</html>

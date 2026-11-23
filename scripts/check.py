@@ -30,6 +30,10 @@ mode is impossible.
 | an in-page table that did not run                   | boot's row-name set asserted before any row value  | 1   |
 | console errors nobody looked at                     | per-check drain of all three CDP error events      | 1   |
 | a check written and never registered                | registry.audit rules 1, 2 and 7                    | 3   |
+| a MILESTONE shipped with no check at all (M15 did)  | audit rule 16, over MILESTONES.md's own status      | 3   |
+|                                                     |   table; the exemption needs a written reason       |     |
+| that rule certifying itself on a source edit        | audit takes its registry and milestone list as     | 4   |
+|                                                     |   arguments; --negative milestone-unchecked        |     |
 | a check nothing can invert                          | INVERT is mandatory; the opt-out needs a reason    | 3   |
 | invert_query used to point the inversion phase at   | audit rule 15: every key must already be in the    | 3   |
 |   a different page, flag or mode                    |   check's own document                             |     |
@@ -78,6 +82,7 @@ import http.server
 import itertools
 import json
 import pathlib
+import re
 import shutil
 import signal
 import sys
@@ -727,6 +732,33 @@ class Control:
     #: M14's fifth: a dropped desktop icon keeps the raw pixel the pointer left it on instead
     #: of taking a cell, which is what the icon view did before it aligned to the grid.
     NO_ICON_GRID = "no-icon-grid"
+    #: M15a. The taskbar's thumbnail flyout loses its grace period, so `pointerleave` on the
+    #: button closes the panel at once — and the panel sits `TASKBAR_H + 6` px above the bar, so
+    #: it closes in the gap the pointer has to cross. Constraint 295's defect, which a reader
+    #: reported as "unable to scroll up to focus on a specific process".
+    NO_HOVER_GRACE = "no-hover-grace"
+    #: M15a. NOT A WORLD AT ALL: a registry control. `audit()` takes its registry and its
+    #: milestone list as arguments, so this runs the new rule over a COMMITTED FIXTURE whose
+    #: milestone table carries a row no check claims, and the run must raise RegistryError. A rule
+    #: that cannot be shown to refuse is a rule nobody has seen work — and "delete a registration
+    #: and watch the rule fire" is a source edit nobody re-runs, which certifies itself.
+    MILESTONE_UNCHECKED = "milestone-unchecked"
+    #: M16's first. `Surface` appends its canvas with no CSS box of its own, so it renders at the
+    #: backing store's intrinsic size and stops being its client area. The extent contract (D40),
+    #: removed.
+    NO_SURFACE_FILL = "no-surface-fill"
+    #: M16's second. `files` and `imgview` ignore `WEV_CLIENT` through their own declared
+    #: `--no-resurface` flag: the pre-M16 programs exactly, with a backing store frozen at
+    #: whatever the window opened at and CSS-stretched over the frame afterwards.
+    CSS_PX_SURFACE = "css-px-surface"
+    #: M16's third, and THE UNIT CONTROL. `files` passes its CSS-px constants to `win_surface`
+    #: unscaled — today's behaviour — which is a no-op at dpr 1 and a half-size surface at dpr 2.
+    FROZEN_SURFACE = "frozen-surface"
+    #: M16's fourth: `taskmgr` tests `ev.b & WPTR_DOWN` again, which is the pointer's Y read as a
+    #: flag word. The one control here whose subject is a defect ALREADY FIXED (`de8a68a`), which
+    #: is what makes it a negative control rather than a source mutation — it puts committed code
+    #: back into the state a reader hit.
+    EV_B_POINTER = "ev-b-pointer"
     ONCE = "once"
 
 
@@ -777,6 +809,12 @@ CONTROL_RUNS = {
     Control.NO_GROUP: ("no-group",),
     Control.NO_ITEMS: ("no-items",),
     Control.NO_ICON_GRID: ("no-icon-grid",),
+    Control.NO_HOVER_GRACE: ("no-hover-grace",),
+    Control.MILESTONE_UNCHECKED: ("milestone-unchecked",),
+    Control.NO_SURFACE_FILL: ("no-surface-fill",),
+    Control.FROZEN_SURFACE: ("frozen-surface",),
+    Control.CSS_PX_SURFACE: ("css-px-surface",),
+    Control.EV_B_POINTER: ("ev-b-pointer",),
 }
 
 
@@ -1011,12 +1049,100 @@ def _expect_problems(run: str, name: str, expect: "Expect",
     return out
 
 
-def audit() -> None:
+#: The tracker, read as data. `MILESTONES.md`'s status table is the one list of what this project
+#: claims to have shipped, so it is also the one list a registry can be audited against.
+MILESTONES_DOC = REPO / "MILESTONES.md"
+
+#: A milestone id as the status table spells it: `M0`, `M4b`, `M15a`, `D0`. Deliberately strict —
+#: the table also carries rows whose first cell is `—`, blank, or a total, and a loose pattern
+#: would audit the registry against "Option A total".
+_MILESTONE_ID = re.compile(r"^(?:M|D)\d+[a-z]?$")
+
+
+def milestones_in_text(text: str) -> Tuple[str, ...]:
+    """Every milestone id in a markdown table's first column, lowercased, in document order.
+
+    A PARSER AND NOT A LIST, because a list beside the document is the second copy this rule
+    exists to catch: M15 shipped with no registered check precisely because the only record of
+    what exists is prose nothing reads.
+    """
+    out: List[str] = []
+    for line in text.splitlines():
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if not cells or not _MILESTONE_ID.match(cells[0]):
+            continue
+        name = cells[0].lower()
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def milestones_in(path: pathlib.Path) -> Tuple[str, ...]:
+    try:
+        return milestones_in_text(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise RegistryError(
+            "%s cannot be read, so there is no list of what this project claims to have shipped "
+            "to audit the registry against: %s" % (_relative(path), error))
+
+
+#: A milestone with no registered check, and WHY that is honest. Audited: rule 16 accepts a
+#: milestone that is claimed by a check or named here, and nothing else — so the only way to ship
+#: an unchecked milestone is to write down the reason, which is what `no_invert_reason` already
+#: does for an uninvertible check.
+MILESTONE_EXEMPT: Dict[str, str] = {
+    "m0a": "an addendum to M0's measurement rather than product behaviour: the same contention "
+           "sweep with a real OPFS call in the mix. The figure is "
+           "bench/syscall-contention/probe.py's and the registered check over M0's page is "
+           "`syscall`, which asserts the channel the addendum re-measured.",
+    "m0b": "the same: it MOVED the OPFS handles to a second kernel-side worker and re-ran M0's "
+           "sweep. What a check can assert about it is the syscall channel's latency, which "
+           "`syscall` does, and the filesystem reaching OPFS at all, which `m2` does.",
+    "m15a": "THE REGISTRY GATE ITSELF, and it ships no product behaviour: what it added is "
+            "`check_m15`, rule 16 above and `--negative milestone-unchecked`. Its subject is this "
+            "file, so a page-driven check could not be about it — the control that scores it is "
+            "the one that runs `audit()` over a fixture and requires a refusal.",
+    "m2a": "its gate is scripts/fsfuzz.py, which runs 10,000 torn journals in plain node in about "
+           "three seconds BECAUSE nothing in src/fs/ touches OPFS, a SAB or a Worker (CLAUDE.md). "
+           "A browser-driven check cannot reach that, and making one would be the second "
+           "implementation that purity rule exists to forbid.",
+}
+#: Option D. A milestone with no code owes no check, and saying so once is better than nine
+#: near-identical entries above.
+for _d in range(9):
+    MILESTONE_EXEMPT["d%d" % _d] = (
+        "option D is not started (docs/LEARNING-MODE.md, PLAN.md §6). A milestone with no code "
+        "owes no check; the row exists so the schedule is comparable.")
+
+#: THE FIXTURE `--negative milestone-unchecked` RUNS RULE 16 OVER, committed as data rather than
+#: as a file: two rows this registry really does claim, and one it does not. It goes through
+#: `milestones_in_text`, so the control exercises the PARSER as well as the rule — a fixture that
+#: handed `audit` a ready-made tuple would leave the thing that reads the tracker unproven.
+MILESTONE_FIXTURE_TABLE = """
+| | Milestone | Est | Actual | Status |
+|---|---|---|---|---|
+| M13 | The geometry harness | 5 | 0.5 | done |
+| M14 | Snap, Superbar, jump lists, tray | 6 | 1 | done |
+| M99 | A milestone no check in this registry claims | 1 | 1 | done |
+"""
+
+
+def audit(checks: Optional[Tuple[Check, ...]] = None,
+          milestones: Optional[Tuple[str, ...]] = None) -> None:
     """Raised at import. Rules 1, 2 and 7 are the holes the predecessor had: nothing there
     asserted that a new `def check_*` reached the registry, so an unregistered check never ran
-    and the run printed "all checks passed"."""
+    and the run printed "all checks passed".
+
+    THE REGISTRY AND THE MILESTONE LIST ARE ARGUMENTS, and that is rule 16's whole design: a rule
+    whose inputs are module globals can only be shown to refuse by editing the module, which is a
+    control nobody re-runs and which certifies itself. `--negative milestone-unchecked` calls this
+    with `MILESTONE_FIXTURE_TABLE`'s list and requires a RegistryError.
+    """
     problems: List[str] = []
-    checks = tuple(_REGISTRY)
+    checks = tuple(_REGISTRY) if checks is None else tuple(checks)
+    milestones = milestones_in(MILESTONES_DOC) if milestones is None else tuple(milestones)
     recorded = floors()
 
     # 1. Nothing in this file imports scripts/checks/, so a check written there would never run
@@ -1194,6 +1320,34 @@ def audit() -> None:
         problems.append(
             "%s records a floor for %r, which is not a registered check. A check was renamed or "
             "deleted and its floor was left behind" % (_relative(FLOORS), name))
+
+    # 16. EVERY MILESTONE THE TRACKER CLAIMS HAS A CHECK, OR A WRITTEN REASON. M15 shipped with
+    #     zero registered checks and no floor — `grep -ci m15 scripts/check.py` was 0 — and
+    #     nothing here could say so, which is how 1,000 lines of src/bin/ came to have no
+    #     registered assertion over them at all. The exemption carries a reason and is read the
+    #     way `no_invert_reason` is: a silent exemption is how a milestone disarms the gate.
+    claimed = {candidate.milestone.lower() for candidate in checks}
+    for milestone in milestones:
+        if milestone in claimed or milestone in MILESTONE_EXEMPT:
+            continue
+        problems.append(
+            "%s's status table claims %s and no registered check declares milestone=%r, nor does "
+            "MILESTONE_EXEMPT give a reason. A milestone with no failing-capable check is not "
+            "done, however much of it is written (CLAUDE.md §Scope)"
+            % (_relative(MILESTONES_DOC), milestone.upper(), milestone))
+    # And the other way, so an exemption cannot outlive the row it excuses or the check that
+    # retired it: a reason for a milestone that now HAS a check is a stale claim about the gate.
+    for milestone in sorted(MILESTONE_EXEMPT):
+        if milestone in claimed:
+            problems.append(
+                "MILESTONE_EXEMPT excuses %s from having a check and %s declares it, so the "
+                "reason recorded there is false" % (milestone.upper(), ", ".join(
+                    sorted(c.name for c in checks if c.milestone.lower() == milestone))))
+        elif milestone not in milestones:
+            problems.append(
+                "MILESTONE_EXEMPT excuses %s and %s's status table does not carry it. The "
+                "exemption describes nothing and would pre-forgive a milestone named that later"
+                % (milestone.upper(), _relative(MILESTONES_DOC)))
 
     if problems:
         raise RegistryError(
@@ -4651,6 +4805,378 @@ _NO_WINCH_FAILS = (
     "verdict is ok",
 )
 
+
+# ======================================================================================
+# M15a — the registration debt, and the rule that stops it recurring
+#
+# M15 shipped with zero registered checks and no floor. What is assertable from the page M15
+# shipped into is its TWELVE CORE UTILITIES at a real prompt and the hover flyout's grace period
+# (constraint 295); the text op's own registered reading is `check_m16`'s row clause, because that
+# is where a display list is captured and decoded.
+# ======================================================================================
+
+#: THE PROMPT, AND WHAT THE SHELL PRINTED. `bench/m14-shell/coreutils.py`'s cases, grouped one
+#: group per expectation label so a failure names the PROGRAM rather than a line number — and
+#: every group carries its own negative half, which is that bench's own rule: `mkdir` is checked by
+#: `ls` seeing the directory AND by `mkdir` on the same name failing by errno name.
+#:
+#: (label, [(command, [must appear], [must not appear]), ..]).
+M15_CASES = (
+    ("mkdir makes a directory, and refuses the one that is there", (
+        ("mkdir /tmp/one", [], ["not found", "mkdir:"]),
+        ("ls /tmp", ["one"], []),
+        ("mkdir /tmp/one", ["EEXIST"], []),
+        ("mkdir /tmp/a/b/c", ["use -p"], []),
+        ("mkdir -p /tmp/a/b/c", [], ["mkdir:"]),
+    )),
+    ("ls lists what was made", (
+        ("ls /tmp/a/b", ["c"], []),
+    )),
+    ("touch makes a file that is a file", (
+        ("touch /tmp/one/hello.txt", [], ["touch:"]),
+        ("ls /tmp/one", ["hello.txt"], []),
+    )),
+    ("stat tells a file from a directory", (
+        ("stat /tmp/one/hello.txt", ["regular file", "Size: 0"], []),
+        ("stat /tmp/one", ["directory"], []),
+    )),
+    ("echo writes through a redirection and cat reads it back", (
+        ("echo hello > /tmp/one/hello.txt", [], ["sh:"]),
+        ("cat /tmp/one/hello.txt", ["hello"], []),
+    )),
+    ("wc counts the line that was written", (
+        ("wc -l /tmp/one/hello.txt", ["1"], []),
+    )),
+    ("cp copies the bytes", (
+        ("cp /tmp/one/hello.txt /tmp/one/copy.txt", [], ["cp:"]),
+        ("cat /tmp/one/copy.txt", ["hello"], []),
+    )),
+    ("mv moves it, and the old name is gone by errno", (
+        ("mv /tmp/one/copy.txt /tmp/one/moved.txt", [], ["mv:"]),
+        ("ls /tmp/one", ["moved.txt"], ["copy.txt"]),
+        ("cat /tmp/one/copy.txt", ["ENOENT"], []),
+    )),
+    ("rmdir refuses a full directory and rm needs -r", (
+        ("rmdir /tmp/one", ["not empty"], []),
+        ("rm /tmp/one", ["use -r"], []),
+    )),
+    ("rm -r takes the tree, and -f is quiet only about absence", (
+        ("rm -r /tmp/one", [], ["rm:"]),
+        ("ls /tmp", [], ["one"]),
+        ("rm /tmp/nothing-here", ["ENOENT"], []),
+        ("rm -f /tmp/nothing-here", [], ["rm:"]),
+    )),
+    ("cd moves the cwd and pwd follows it across a spawn", (
+        ("cd /usr/bin", [], ["sh:"]),
+        ("pwd", ["/usr/bin"], []),
+        ("cd /", [], ["sh:"]),
+        ("pwd", ["/"], []),
+    )),
+    ("sort, uniq and wc over a real pipeline", (
+        ("echo b > /tmp/s.txt", [], []),
+        ("echo a >> /tmp/s.txt", [], []),
+        ("echo b >> /tmp/s.txt", [], []),
+        ("sort /tmp/s.txt", ["a"], []),
+        ("sort /tmp/s.txt | uniq -c", ["2 b", "1 a"], []),
+        ("sort -u /tmp/s.txt | wc -l", ["2"], []),
+    )),
+    ("df reports the filesystem, and /dev/null is the one row that takes a write", (
+        ("df -h", ["Filesystem", "Use%"], []),
+        ("echo hi > /dev/null", [], ["EROFS", "sh:"]),
+        ("echo $?", ["0"], []),
+        ("echo x > /dev/trace", ["EROFS"], []),
+    )),
+)
+
+M15_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the desktop process published rows and the shell drew a prompt",
+) + tuple(label for label, _ in M15_CASES) + (
+    # PROOF 2. Constraint 295: the flyout and its button are ONE hover target with a gap between
+    # them, and the pointer has to cross pixels over neither element.
+    "two windows of one program are one taskbar group",
+    "hovering it opens a thumbnail panel",
+    "the panel survives the pointer crossing the gap to it",
+    "and the thumbnail is what the hit test finds at its own centre",
+    "the hover-grace world is the one the run asked for",
+    "document COOP",
+    "document COEP",
+    "served m14.html",
+)
+
+M15_DOCUMENT = "/www/m14.html"
+
+#: THE LIVE DESKTOP'S READINESS, and not `state`: `www/m14.html` sets `state = 'done'` BEFORE it
+#: starts building the live desktop, so a predicate over that reads a page with no shell on it.
+#: `phase === 'live'` is set last, and the two terminal states are accepted so the no-isolation
+#: phase does not wait out its own timeout.
+M15_READY = ("(() => { const M = globalThis.M14 || {}; "
+             "return (M.state === 'aborted' || M.state === 'error' "
+             "|| (M.phase === 'live' && M.shell && document.querySelector('.terminal'))) "
+             "? 1 : 0 })()")
+
+#: What the shell has, for a reader of a failure and for the clause that asserts the prompt is a
+#: prompt rather than a picture of one.
+READ_M15 = """(() => {
+  const M = globalThis.M14 || {}
+  const shell = M.shell
+  const view = M.view
+  const term = document.querySelector('.terminal')
+  const r = term ? term.getBoundingClientRect() : null
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    errors: (M.errors || []).map(String),
+    icons: view ? view.report().icons : 0,
+    buttons: shell ? shell.report().buttons : 0,
+    terminal: r ? { x: Math.round(r.left + 30), y: Math.round(r.top + 20) } : null,
+    screen: term ? String(term.textContent || '') : '',
+  }
+})()"""
+
+M15_SHAPE = {
+    "state": str, "why": str, "phase": str, "isolated": bool, "kernelIsolated": bool,
+    "errors": list, "icons": int, "buttons": int,
+    "terminal": (dict, type(None)), "screen": str,
+}
+
+#: The taskbar's buttons, and the panel with WHAT THE HIT TEST FINDS at each thumbnail's centre.
+#: A panel present in the DOM but covered is a panel a hand cannot use —
+#: `bench/m14-shell/firefox-hover.py`'s own reading, in the registered suite.
+M15_BUTTONS = """(() => [...document.querySelectorAll('[data-task-btn]')].map((b) => {
+  const r = b.getBoundingClientRect()
+  return { key: b.dataset.taskBtn, wins: String(b.dataset.wins || '').split(',').length,
+           cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) }
+}))()"""
+
+M15_PANEL = """(() => {
+  const p = document.querySelector('.shell-popup')
+  if (!p || p.hidden) return { open: false, kind: '', thumbs: [] }
+  return {
+    open: true,
+    kind: String(p.dataset.popup || ''),
+    thumbs: [...p.querySelectorAll('[data-thumb-win]')].map((c) => {
+      const r = c.getBoundingClientRect()
+      const cx = Math.round(r.left + r.width / 2), cy = Math.round(r.top + r.height / 2)
+      const el = document.elementFromPoint(cx, cy)
+      return { win: Number(c.dataset.thumbWin), cx, cy,
+               reachable: Boolean(el && el.closest && el.closest('[data-thumb-win]') === c) }
+    }),
+  }
+})()"""
+
+#: THE CONTROL, AND IT IS APPLIED THROUGH THE PAGE'S OWN PUBLISHED HANDLE. `www/m14.html` is M14's
+#: file and carries no `no_hover_grace` switch, so the alternative was editing it — and a control
+#: that is a source edit is one nobody re-runs. This is `bench/m14-shell/firefox-hover.py`'s own
+#: control, moved into the registered suite: a `pointerleave` that closes the panel at once, which
+#: is what the Superbar did before constraint 295.
+#:
+#: AFTER THE SPAWN AND NOT BEFORE: `Taskbar.sync` REBUILDS the button band when a window appears,
+#: so a listener attached earlier is on an element that no longer exists. The first version of that
+#: bench's control did exactly that and broke nothing, and the gate said so rather than passing.
+#: It returns how many buttons it rewired, which the check asserts — a control that rewired
+#: nothing must not read as a pass.
+M15_ARM_NO_GRACE = """(() => {
+  const shell = globalThis.M14 && globalThis.M14.shell
+  if (!shell) return 0
+  let n = 0
+  for (const btn of document.querySelectorAll('[data-task-btn]')) {
+    btn.addEventListener('pointerleave', () => shell.closePopup())
+    n += 1
+  }
+  return n
+})()"""
+
+#: What NO GRACE PERIOD must break: the crossing, and the clause that reads the thumbnail at its
+#: own centre afterwards — because there is no panel left to read. The TWELVE CORE UTILITIES MUST
+#: HOLD, which is what makes this control about the flyout: it rewires one listener on the taskbar
+#: and touches nothing a program does.
+_NO_HOVER_GRACE_FAILS = (
+    "the panel survives the pointer crossing the gap to it",
+    "and the thumbnail is what the hit test finds at its own centre",
+)
+
+
+# ======================================================================================
+# M16 — the client box IS the surface, in device pixels
+#
+# THE CLAUSES ARE PER DEVICE-PIXEL RATIO, because the defect is ratio-shaped: at dpr 1 a CSS-px box
+# handed to `win_surface` is numerically right, so the unit error is invisible. The check loads the
+# page once per ratio through `Emulation.setDeviceMetricsOverride` and records the same clauses
+# against each, which is what lets `--negative css-px-surface` be declared as the pair it is —
+# RED at dpr 2 and GREEN at dpr 1. M11 and M12 each cost a milestone to a figure taken at one
+# ratio (constraint 264).
+# ======================================================================================
+
+#: dpr 2 first, because that is the ratio every constraint in this project was measured at and the
+#: one `run_phase` has already set when the body starts.
+M16_RATIOS = (2.0, 1.0)
+
+#: The clauses that are a statement about a ratio. Recorded once per ratio, prefixed.
+_M16_PER_RATIO = (
+    "the page rendered at the ratio the run asked for",
+    "a real resize grip was driven and the frame moved",
+    "the canvas fills its client content box at four frame sizes",
+    "and nothing is clipped",
+    "and one backing store is a different shape from its client area",
+    "the surface changed size at four frame sizes",
+    "and it is the content box in DEVICE pixels",
+    "and the kernel's record agrees in the unit it publishes",
+    "the row count the program drew GREW, read back through textOfOps",
+    "and the overflow is stated rather than grown",
+    "imgview's drawn extent differs at two client sizes",
+    "and its blocks read back as the colours they asked for",
+    "the page's own verdict is ok",
+)
+
+
+def _m16_label(dpr: float, name: str) -> str:
+    """One per-ratio label. ONE SPELLING, because the inventory, the body and four controls'
+    declarations all name these and a second format string is how they come to disagree."""
+    return "dpr %g: %s" % (dpr, name)
+
+
+def _m16(dpr: float, *names: str) -> Tuple[str, ...]:
+    unknown = [name for name in names if name not in _M16_PER_RATIO]
+    if unknown:
+        # Raised rather than returned: a control naming a clause that is not in the per-ratio set
+        # would be scored against a label the body never records, and audit rule 14 would report
+        # it as unscorable without saying which side was wrong.
+        raise RegistryError("not an M16 per-ratio clause: %s" % ", ".join(unknown))
+    return tuple(_m16_label(dpr, name) for name in names)
+
+
+M16_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "the page was really driven at both ratios",
+    "the controls the page reports are the ones asked for",
+) + tuple(_m16_label(dpr, name) for dpr in M16_RATIOS for name in _M16_PER_RATIO) + (
+    # A2c and A2b: the new `/proc` lines, read MID-DRAG through a real process on a real path, and
+    # the release landing outside the frame — the case where `setPointerCapture` throws and the
+    # frame's own `pointerup` hook never runs (constraint 175).
+    "mid-drag, /proc names the measured client box in device pixels",
+    "and the ratio the page reported",
+    "and a release outside the frame leaves the kernel's record correct",
+    # R8.
+    "a right-click inside a surface is refused, and counted",
+    "and one on the bare page is not",
+    # R10's registration.
+    "a press selects the row a reader pointed at, at five heights",
+    "and those five presses sweep the 0x10 bit of the pointer's y",
+    "and the selection the program drew is in the pixels",
+    "document COOP",
+    "document COEP",
+    "served m16.html",
+)
+
+M16_DOCUMENT = "/www/m16.html?proofs=1"
+
+M16_READY = ("(() => { const M = globalThis.M16 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M16 = """(() => {
+  const M = globalThis.M16 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    extent: one(P.extent),
+    units: one(P.units),
+    rows: one(P.rows),
+    pixels: one(P.pixels),
+    proc: one(P.proc),
+    menu: one(P.menu),
+    select: one(P.select),
+  }
+})()"""
+
+M16_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list,
+    "extent": (dict, type(None)),
+    "units": (dict, type(None)),
+    "rows": (dict, type(None)),
+    "pixels": (dict, type(None)),
+    "proc": (dict, type(None)),
+    "menu": (dict, type(None)),
+    "select": (dict, type(None)),
+}
+
+#: What A CANVAS WITH NO CSS BOX OF ITS OWN must break, MEASURED at both ratios rather than argued:
+#: the extent and the clipping, and nothing else.
+#:
+#: IT BITES ON THE PINNED WINDOW AND ON NO OTHER, which is the finding this control's declaration
+#: rests on: a canvas is a replaced element, so when the backing store IS the client box a canvas
+#: with no width still lands exactly on it — `files` and `imgview` fill their client areas under
+#: this control, and `paint -w 900 -h 120` does not. Measured: 1 of 4 windows off by 1,142 CSS px,
+#: `scrollWidth` 1,530 against a `clientWidth` of 388. Without that fixture window this control
+#: HELD the clause it is named for.
+_NO_SURFACE_FILL_FAILS = tuple(
+    label for dpr in M16_RATIOS for label in _m16(
+        dpr,
+        "the canvas fills its client content box at four frame sizes",
+        "and nothing is clipped",
+        "the page's own verdict is ok",
+    ))
+
+#: What A PROGRAM THAT IGNORES `WEV_CLIENT` must break: the store stops following the frame, the
+#: list stops gaining rows, and the image stops being re-rendered. The EXTENT holds, because the
+#: fill is the renderer's — which is the whole reason these are two controls.
+#:
+#: `the row count ... GREW` CARRIES THE NAMES CLAUSE WITH IT, and the reason is worth reading: the
+#: row count is read at the name column's x, converted with the scale the CLIENT AREA measures. A
+#: frozen store is not at that scale, so the column is not where a reader of the client area looks
+#: — the names are not found at all. That is the defect in the small, and it is why this clause is
+#: declared failing rather than held.
+_FROZEN_SURFACE_FAILS = tuple(
+    label for dpr in M16_RATIOS for label in _m16(
+        dpr,
+        "the surface changed size at four frame sizes",
+        "and it is the content box in DEVICE pixels",
+        "the row count the program drew GREW, read back through textOfOps",
+        "imgview's drawn extent differs at two client sizes",
+        "the page's own verdict is ok",
+    ))
+
+#: THE UNIT CONTROL, AND THE PAIR IS THE POINT. `files` passes its CSS-px constants to
+#: `win_surface` unscaled — today's behaviour — so at dpr 2 the surface is half the content box and
+#: at dpr 1 it is exactly the content box. ONE clause goes red at dpr 2 and the whole page is green
+#: at dpr 1: measured, and that pair is the only evidence that this suite can see a unit error at
+#: all. Every other clause holds at both ratios, including the row count — the program still
+#: refits to the measured height, it just draws into the wrong-sized store.
+_CSS_PX_SURFACE_FAILS = _m16(
+    2.0,
+    "and it is the content box in DEVICE pixels",
+    "the page's own verdict is ok",
+)
+
+#: What READING THE POINTER'S Y AS A FLAG WORD must break: the selection, at the four of five
+#: heights whose y has bit 4 clear. The SWEEP clause holds — it is a statement about the inputs the
+#: check chose, and a control that moved it would be hiding which presses the defect drops.
+_EV_B_POINTER_FAILS = (
+    "a press selects the row a reader pointed at, at five heights",
+) + tuple(_m16_label(dpr, "the page's own verdict is ok") for dpr in M16_RATIOS)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -4727,6 +5253,20 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "clock over a convincing wallpaper is a picture of a desktop that no process is "
                 "behind. UNMEASURABLE rather than FAIL, because a FAIL would claim a window was "
                 "snapped and landed wrongly.",
+        ), "m16": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and no program ever asks for a surface — so "
+                "there is no client box to measure and nothing to re-surface. A canvas could "
+                "still be drawn by the page, which is why `www/m16.html` refuses before it builds "
+                "a host. UNMEASURABLE rather than FAIL, because a FAIL would claim a program "
+                "re-surfaced and got the unit wrong.",
+        ), "m15": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots and "
+                "there is no shell, no pty and no prompt to type at — and `www/m14.html` aborts "
+                "before it builds one. UNMEASURABLE rather than FAIL, because a FAIL would claim "
+                "`mkdir` was run and misbehaved, and nothing ran at all.",
         ), "m13": Expect(
             UNMEASURABLE,
             why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
@@ -5894,6 +6434,160 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "read from bench/syscall-contention/bars.json, and must break nothing else",
             failed=_STALL_FAILS,
             held=_STALL_HOLDS,
+        )},
+    ),
+    "no-hover-grace": NegativeControl(
+        name="no-hover-grace",
+        why="no_hover_grace=1: the taskbar's thumbnail flyout loses its grace period, so "
+            "`pointerleave` on the button closes the panel at once. Constraint 295's own defect.\n"
+            "HOW IT IS APPLIED, because it is the only control here that is not a switch the page "
+            "reads: `www/m14.html` is M14's file and carries no such switch, so `check_m15` "
+            "installs the listener through the page's own published `M14.shell` handle — which is "
+            "`bench/m14-shell/firefox-hover.py`'s control moved into the registered suite. AFTER "
+            "THE SPAWN AND NOT BEFORE: `Taskbar.sync` rebuilds the button band when a window "
+            "appears, so a listener attached earlier is on an element that no longer exists, and "
+            "the check asserts how many buttons were rewired.\n"
+            "WHAT MUST BREAK: the crossing, and the thumbnail read at its own centre afterwards — "
+            "there is no panel left to read. The panel sits `TASKBAR_H + 6` px above the bar, so "
+            "the pointer crosses pixels over NEITHER element.\n"
+            "WHAT MUST HOLD: the twelve core utilities, every one of them, which is what makes "
+            "this control about the flyout. It rewires one listener on the shell and touches "
+            "nothing a program does.\n"
+            "WHAT IT IS ABOUT: a reader reported being 'unable to scroll up to focus on a "
+            "specific process'. There was nothing to scroll — the panel was being taken away "
+            "mid-gesture.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_hover_grace", "1"),),
+        expects={"m15": Expect(
+            Outcome.FAIL,
+            why="the panel must close in the gap the pointer has to cross, and the coreutils must "
+                "be untouched",
+            failed=_NO_HOVER_GRACE_FAILS,
+            held=held_rest(M15_LABELS, _NO_HOVER_GRACE_FAILS),
+        )},
+    ),
+    "milestone-unchecked": NegativeControl(
+        name="milestone-unchecked",
+        why="NOT A WORLD: a registry control, and the only one here that starts no browser. "
+            "`audit()` takes its registry and its milestone list as ARGUMENTS, so this runs rule "
+            "16 over `MILESTONE_FIXTURE_TABLE` — a committed markdown table carrying one row no "
+            "check in this registry claims — and the run MUST raise RegistryError.\n"
+            "WHY NOT 'DELETE A REGISTRATION AND WATCH IT FIRE': that is a source edit nobody "
+            "re-runs, and a rule that certifies itself is a rule nobody has seen work. The "
+            "fixture goes through `milestones_in_text`, so the PARSER that reads the tracker is "
+            "exercised too — a fixture handing `audit` a ready-made tuple would leave it "
+            "unproven.\n"
+            "WHAT IT IS ABOUT: M15 shipped with zero registered checks and no floor, over 1,000 "
+            "lines of src/bin/, and nothing in this file could say so.",
+        serve_kwargs={},
+        fixture=None,
+        expects={"m15": Expect(
+            gate_reason("milestone-unchecked"),
+            why="rule 16 must refuse a milestone list carrying a row no check claims, before any "
+                "phase starts. No check runs and no expectation is recorded.",
+        )},
+    ),
+    "no-surface-fill": NegativeControl(
+        name="no-surface-fill",
+        why="no_surface_fill=1: `Surface` appends its canvas with no CSS box of its own, so it "
+            "renders at the backing store's intrinsic size (the `setSurfaceControls` hook in "
+            "src/wm/surface.mjs). The extent contract — proposed D40 — removed.\n"
+            "WHAT MUST BREAK: the extent and the clipping, at BOTH ratios, and nothing else.\n"
+            "WHERE IT BITES, because the declaration rests on this: a canvas is a REPLACED "
+            "element, so when the backing store IS the client box a canvas with no width still "
+            "lands exactly on it — `files` and `imgview` fill their client areas even under this "
+            "control. `paint -w 900 -h 120` does not, and that window is on the page precisely so "
+            "this control has something to break: measured, 1 of 4 windows off by 1,142 CSS px "
+            "with `scrollWidth` 1,530 against a `clientWidth` of 388. WITHOUT THAT FIXTURE THIS "
+            "CONTROL HELD THE CLAUSE IT IS NAMED FOR.\n"
+            "WHAT MUST HOLD: the unit, the row count, the pixel extent, `/proc`, the menu and the "
+            "selection. The surface still follows the frame — what goes is the CSS box it is "
+            "presented in, which is the renderer's half and not the program's.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_surface_fill", "1"),),
+        expects={"m16": Expect(
+            Outcome.FAIL,
+            why="a canvas must stop being its client area while every program keeps re-surfacing",
+            failed=_NO_SURFACE_FILL_FAILS,
+            held=held_rest(M16_LABELS, _NO_SURFACE_FILL_FAILS),
+        )},
+    ),
+    "frozen-surface": NegativeControl(
+        name="frozen-surface",
+        why="frozen_surface=1: `files` and `imgview` are spawned with their own declared "
+            "`--no-resurface` flag, so they drain a `WEV_CLIENT` and ignore it. The pre-M16 "
+            "programs exactly — a backing store frozen at whatever the window opened at, "
+            "CSS-stretched over the frame for ever afterwards.\n"
+            "WHAT MUST BREAK: the store stops following the frame, the list stops gaining rows, "
+            "and the image stops being re-rendered. THE ROW-COUNT CLAUSE CARRIES ITS NAMES WITH "
+            "IT: the count is read at the name column's x, converted with the scale the CLIENT "
+            "AREA measures, and a frozen store is not at that scale — so the column is not where "
+            "a reader of the client area looks and the names are not found at all, which is the "
+            "defect in the small.\n"
+            "WHAT MUST HOLD: the extent, because the fill is the RENDERER's — that split is why "
+            "these are two controls and not one. `/proc` holds too: the kernel measures the client "
+            "box whatever a program does with it.\n"
+            "WHAT IT IS ABOUT: this is the reader's bug 4, as a world. A file manager made taller "
+            "showed more background; an image made bigger got blurrier.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("frozen_surface", "1"),),
+        expects={"m16": Expect(
+            Outcome.FAIL,
+            why="a program that ignores the client box must draw into a store that never changes",
+            failed=_FROZEN_SURFACE_FAILS,
+            held=held_rest(M16_LABELS, _FROZEN_SURFACE_FAILS),
+        )},
+    ),
+    "css-px-surface": NegativeControl(
+        name="css-px-surface",
+        why="css_px_surface=1: `files` passes its CSS-px layout constants to `win_surface` "
+            "unscaled, through its own declared flag. TODAY'S BEHAVIOUR, and the reader's bug 2.\n"
+            "WHAT MUST BREAK, AND WHERE: ONE clause, at dpr 2 only — the surface is half the "
+            "content box, so the text is half the size it says it is. At dpr 1 the page is GREEN, "
+            "because a CSS pixel IS a device pixel there and the unit error is numerically "
+            "invisible.\n"
+            "THAT PAIR IS THE WHOLE POINT. It is the only evidence that this suite can see a unit "
+            "error at all, and it is why `check_m16` loads its page once per ratio: every "
+            "registered size clause in this project before M16 ran at one ratio, and M11 and M12 "
+            "each cost a milestone to exactly that (constraint 264).\n"
+            "WHAT MUST HOLD: everything else at both ratios, the ROW COUNT INCLUDED — the program "
+            "still refits to the measured height, it just draws into a store half the size.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("css_px_surface", "1"),),
+        expects={"m16": Expect(
+            Outcome.FAIL,
+            why="the unit error must be red at dpr 2 and invisible at dpr 1",
+            failed=_CSS_PX_SURFACE_FAILS,
+            held=held_rest(M16_LABELS, _CSS_PX_SURFACE_FAILS),
+        )},
+    ),
+    "ev-b-pointer": NegativeControl(
+        name="ev-b-pointer",
+        why="ev_b_pointer=1: `taskmgr` is spawned with its own declared `--ev-b-pointer` flag, "
+            "which restores `if (!(ev.b & WPTR_DOWN))`. `ev.b` is the pointer's Y and `WPTR_DOWN` "
+            "is 0x10, so a press selects a row only where bit 4 of the y happens to be set.\n"
+            "THE ONE CONTROL HERE WHOSE SUBJECT IS ALREADY FIXED, which is what makes it a "
+            "negative control rather than a source mutation: `de8a68a` corrected the test, and "
+            "this puts committed code back into the state a reader hit.\n"
+            "WHAT MUST BREAK: the selection. Measured at dpr 2, four of the five presses land on "
+            "a y with the bit CLEAR and are dropped; at dpr 1 two of five are. Either way the "
+            "clause goes red — and the failure is PERIODIC IN Y, which is why the proof drives "
+            "five rows and not one: a single press would have passed by luck.\n"
+            "WHAT MUST HOLD: everything else, and THE SWEEP CLAUSE ABOVE ALL — that one is a "
+            "statement about the inputs the check chose, and a control that moved it would be "
+            "hiding which presses the defect drops rather than demonstrating them.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("ev_b_pointer", "1"),),
+        expects={"m16": Expect(
+            Outcome.FAIL,
+            why="a press on a row whose y has bit 4 clear must select nothing",
+            failed=_EV_B_POINTER_FAILS,
+            held=held_rest(M16_LABELS, _EV_B_POINTER_FAILS),
         )},
     ),
 }
@@ -8171,6 +8865,62 @@ def gate_no_isolation(run: PhaseRun, report: Report) -> int:
     return 0
 
 
+def gate_milestone_unchecked(control: NegativeControl, selected: Tuple[str, ...]) -> int:
+    """M15a's control, and the only one that starts no browser: run `audit()`'s rule 16 over a
+    committed fixture whose milestone list carries a row no check claims.
+
+    It goes through `score()` like every other control, so the declared outcome is read from
+    CONTROLS rather than asserted here — and it runs before `phases()`, because a registry that
+    refuses is the thing being demonstrated and there is nothing for a server or a page to do.
+    """
+    scored = {name: expect for name, expect in control.expects.items() if name in selected}
+    if not scored:
+        print("--negative %s: --only deselected every check this control scores, so the run is "
+              "not evidence about the control." % control.name)
+        return 4
+    fixture = milestones_in_text(MILESTONE_FIXTURE_TABLE)
+    unclaimed = [m for m in fixture
+                 if m not in {c.milestone.lower() for c in registered()}
+                 and m not in MILESTONE_EXEMPT]
+    if not unclaimed:
+        # THE FIXTURE ITSELF IS CHECKED FIRST: a fixture whose rows are all claimed would make
+        # the rule look like it refused nothing, which is the control failing to apply rather
+        # than the rule failing to fire.
+        print("  gate: the fixture's milestone list (%s) contains no row this registry leaves "
+              "unclaimed, so rule 16 has nothing to refuse and this run is not evidence about "
+              "it." % ", ".join(fixture))
+        return 4
+    try:
+        audit(checks=registered(), milestones=fixture)
+    except RegistryError as error:
+        refused = [line for line in str(error).splitlines() if "status table claims" in line]
+        if not refused:
+            print("  gate: audit() refused the fixture for a reason that is not rule 16:\n%s"
+                  % error)
+            return 4
+        print("  gate: rule 16 refused the fixture, naming %s:%s"
+              % (", ".join(m.upper() for m in unclaimed), "".join("\n    " + line.strip()
+                                                                  for line in refused)))
+        problems: List[str] = []
+        for name, expect in sorted(scored.items()):
+            problems.extend("negative control %r ran and %s" % (control.name, line)
+                            for line in score(expect, name, None,
+                                              gate_reason(control.name)))
+        if problems:
+            for line in problems:
+                print("  gate: " + line)
+            return 4
+        print("--negative %s: %s came out %s as required, over a committed fixture rather than a "
+              "source edit." % (control.name, ", ".join(sorted(scored)),
+                                gate_reason(control.name)))
+        return 0
+    print("  gate: audit() ACCEPTED a milestone list carrying %s, which no registered check "
+          "claims. Rule 16 cannot refuse, so nothing stops the next milestone shipping with no "
+          "check at all — which is what M15 did." % ", ".join(m.upper() for m in unclaimed))
+    print("--negative %s: the rule has not been shown capable of refusing." % control.name)
+    return 4
+
+
 def gate_negative(control: NegativeControl, run: Optional[PhaseRun], report: Report,
                   gated: str, selected: Tuple[str, ...]) -> int:
     results = run.results if run else []
@@ -8357,6 +9107,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not selected:
         print("check.py: the selection is empty, so nothing would be measured.", file=sys.stderr)
         return 2
+
+    # A REGISTRY CONTROL, BEFORE ANY SERVER OR BROWSER. Rule 16's subject is `audit()` itself, so
+    # there is no world to build and nothing for a page to do; `gate_milestone_unchecked` scores
+    # it through the same `score()` every other control goes through.
+    if args.negative == Control.MILESTONE_UNCHECKED:
+        print("check.py  %s  (no browser: this control's subject is the registry)"
+              % datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+        return gate_milestone_unchecked(CONTROLS[args.negative],
+                                        tuple(c.name for c in selected))
 
     out = pathlib.Path(args.out) if args.out else pathlib.Path(
         "/tmp/webos-check") / datetime.datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
@@ -11926,6 +12685,481 @@ def check_m14(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m14.html", env.served_matches_disk(env.document),
                     "the m14.html served does not match www/m14.html on disk")
+
+
+#: The terminal widget's own text, which is what a reader sees. One expression, used by every
+#: command below, so "what the shell printed" has one definition.
+M15_SCREEN = "(document.querySelector('.terminal') || {}).textContent || ''"
+
+#: A command's output is read until THE PROMPT COMES BACK, not for a fixed time: a command that
+#: takes longer than a guess would have its output read as the next command's. `bench/m14-shell/
+#: coreutils.py`'s own condition, and the `len(out) > len(cmd)` half matters — the echoed command
+#: is already on screen before anything has run.
+_M15_PROMPT = re.compile(r"\$ $|\$\s*$")
+
+
+def _m15_type(env: Env, cmd: str, timeout: float = 25.0) -> str:
+    """Type one command at the real prompt and return what the shell printed for it."""
+    before = len(env.page.evaluate(M15_SCREEN) or "")
+    env.page.type_keys(cmd + "\n")
+    deadline = time.monotonic() + timeout
+    out = ""
+    while True:
+        screen = env.page.evaluate(M15_SCREEN) or ""
+        out = screen[before:]
+        if _M15_PROMPT.search(out) and len(out.strip()) > len(cmd):
+            return out
+        if time.monotonic() >= deadline:
+            # NAMED, never silently returned as empty: "the prompt never came back" and "the
+            # command printed nothing" are different facts about this shell.
+            return out + "\n[no prompt within %.0fs]" % timeout
+        time.sleep(0.12)
+
+
+@check(
+    name="m15",
+    milestone="m15",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_HOVER_GRACE,
+              Control.MILESTONE_UNCHECKED),
+    labels=M15_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M15_DOCUMENT,
+    ready_expr=M15_READY,
+    ready_what="globalThis.M14 reaching phase 'live' with a shell and a terminal on the page, or "
+               "aborting (www/m14.html at its bare URL — the LIVE desktop, not ?proofs=1)",
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M14 && globalThis.M14.state",
+    refusal_want="aborted",
+    note="THE REGISTRATION DEBT. M15 shipped with zero registered checks and no floor — "
+         "`grep -ci m15 scripts/check.py` was 0 and `scripts/check_floors.json` had no m15 key — "
+         "over about a thousand lines of `src/bin/`. `audit()` had no rule demanding that a "
+         "milestone HAVE a check, which is how that happened, and rule 16 is that rule.\n"
+         "WHAT IS ASSERTED HERE is what is assertable from the page M15 shipped into: the twelve "
+         "core utilities at a REAL prompt, typed as real keys into the terminal widget and scored "
+         "on what the shell printed, and the hover flyout's grace period (constraint 295). The "
+         "cases are `bench/m14-shell/coreutils.py`'s, grouped one group per expectation so a "
+         "failure names the program; every group carries its own negative half, which is that "
+         "bench's rule — `mkdir` is checked by `ls` seeing the directory AND by `mkdir` on the "
+         "same name failing by errno name.\n"
+         "THE TEXT OP IS NOT ASSERTED HERE AND THAT IS DELIBERATE. M15's `DL_TEXT` is a display "
+         "list, and the registered reading of one is `check_m16`'s row clause, where a page "
+         "captures the batch the kernel announced and decodes it with `textOfOps`. A second "
+         "reading here would be the same fact with two renderers.\n"
+         "negative controls: --negative no-hover-grace closes the panel the instant the pointer "
+         "leaves the button, which is the defect constraint 295 records — the flyout clauses must "
+         "fail and the coreutils must hold. --negative milestone-unchecked runs `audit()`'s rule "
+         "16 over a committed fixture table and must raise RegistryError before any phase starts. "
+         "--negative no-isolation must come out BROKEN: no SAB, no kernel, no shell, no prompt.",
+)
+def check_m15(env: Env) -> None:
+    got = env.read(READ_M15, M15_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable("www/m14.html reported state 'error': %s. Nothing below was measured."
+                         % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m14.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no shell runs and there is no prompt to type at."
+            % (got["why"] or "no reason given"))
+    if got["phase"] != "live" or not got["terminal"]:
+        env.unmeasurable("www/m14.html never reached its live desktop (phase=%r, terminal=%r)"
+                         % (got["phase"], got["terminal"]))
+    # THE PROMPT ARRIVES AFTER THE PAGE SAYS `live`. `live()` spawns `term` and prints its own
+    # help, and the SHELL's first prompt crosses a pty afterwards — measured: the terminal's text
+    # carried no `$` at the first read and carried one a moment later. Polled rather than settled
+    # on, because a shell that never prompts is a product failure and must come out FAIL here
+    # rather than BROKEN.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if "$" in (env.page.evaluate(M15_SCREEN) or ""):
+            break
+        time.sleep(0.2)
+    got = env.read(READ_M15, M15_SHAPE)
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    # THE DESKTOP IS A PROCESS'S AND THE PROMPT IS A SHELL'S, which is constraint 40 in the small:
+    # the icons are rows `src/bin/desktop.mjs` published from the filesystem, the shell has a
+    # button for the terminal, and a `$` arrived on the terminal before anything was typed into it.
+    env.expect_that("the desktop process published rows and the shell drew a prompt",
+                    got["icons"] > 0 and got["buttons"] >= 1 and "$" in got["screen"],
+                    {"icons": got["icons"], "buttons": got["buttons"],
+                     "screenTail": got["screen"][-120:], "errors": got["errors"][:3]})
+
+    # ---- THE TWELVE CORE UTILITIES, AT A REAL PROMPT ----------------------------------------
+    # A REAL CLICK FIRST: the terminal widget reads keystrokes, and a widget that does not have
+    # the focus is a widget nothing is typed into.
+    at = got["terminal"]
+    _perform_gesture(env.page, {"kind": "click", "at": at}, held=False)
+    time.sleep(0.3)
+    for label, cases in M15_CASES:
+        missing: List[str] = []
+        for cmd, musts, musnts in cases:
+            out = _m15_type(env, cmd)
+            for needle in musts:
+                if needle not in out:
+                    missing.append("%r did not print %r (got %r)"
+                                   % (cmd, needle, " ".join(out.split())[:160]))
+            for needle in musnts:
+                if needle in out:
+                    missing.append("%r printed %r and should not have (got %r)"
+                                   % (cmd, needle, " ".join(out.split())[:160]))
+        env.expect_that(label, not missing, "; ".join(missing[:3]))
+
+    # ---- THE HOVER FLYOUT, AND THE GAP IT HAS TO SURVIVE (constraint 295) -------------------
+    before_wins = env.page.evaluate("document.querySelectorAll('.window').length")
+    _m15_type(env, "winopen -n 2 -c 600000 &")
+    env.settle("document.querySelectorAll('.window').length >= %d" % (before_wins + 2),
+               timeout=20.0, what="two more windows from `winopen -n 2`")
+    # The band is rebuilt when a window appears, so the buttons are read AFTER the spawn — and so
+    # is the control armed, for the same reason (constraint 295's own second half).
+    buttons = env.page.evaluate(M15_BUTTONS) or []
+    group = max(buttons, key=lambda b: b["wins"]) if buttons else None
+    env.expect_that("two windows of one program are one taskbar group",
+                    bool(group) and group["wins"] >= 2, {"buttons": buttons})
+    # THE WORLD, READ BACK. `--negative no-hover-grace` is applied through the page's own
+    # published shell handle, so the run has to say how many buttons it really rewired: a control
+    # that rewired nothing would otherwise read as a pass.
+    asked = "no_hover_grace=1" in env.document
+    armed = env.page.evaluate(M15_ARM_NO_GRACE) if asked else 0
+    env.expect_that("the hover-grace world is the one the run asked for",
+                    (armed >= 1) if asked else (armed == 0),
+                    {"askedFor": asked, "buttonsRewired": armed, "document": env.document})
+
+    panel = {"open": False, "kind": "", "thumbs": []}
+    if group:
+        _perform_gesture(env.page, {"kind": "hover", "at": {"x": group["cx"], "y": group["cy"]}},
+                         held=False)
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            panel = env.page.evaluate(M15_PANEL) or panel
+            if panel["open"] and panel["kind"] == "thumbs" and panel["thumbs"]:
+                break
+            time.sleep(0.2)
+    env.expect_that("hovering it opens a thumbnail panel",
+                    panel["open"] and panel["kind"] == "thumbs" and len(panel["thumbs"]) >= 2,
+                    {"panel": panel})
+
+    after = {"open": False, "kind": "", "thumbs": []}
+    want = panel["thumbs"][-1] if panel["thumbs"] else None
+    if group and want:
+        # THROUGH THE GAP: the panel sits `TASKBAR_H + 6` px above the bar, so this point is over
+        # NEITHER element. `pointerleave` on the button fires here, and before constraint 295 that
+        # closed the panel every time.
+        gap_y = (group["cy"] + want["cy"]) // 2
+        _perform_gesture(env.page, {"kind": "move", "at": {"x": group["cx"], "y": gap_y}},
+                         held=False)
+        time.sleep(0.3)
+        _perform_gesture(env.page, {"kind": "move", "at": {"x": want["cx"], "y": want["cy"]}},
+                         held=False)
+        time.sleep(0.5)
+        after = env.page.evaluate(M15_PANEL) or after
+    env.expect_that("the panel survives the pointer crossing the gap to it",
+                    after["open"] and after["kind"] == "thumbs",
+                    {"before": panel, "after": after, "crossedTo": want})
+    mine = next((t for t in after["thumbs"] if want and t["win"] == want["win"]), None)
+    # A PANEL IN THE DOM AND A PANEL A HAND CAN USE ARE DIFFERENT CLAIMS: the hit test at the
+    # thumbnail's own centre is the second one.
+    env.expect_that("and the thumbnail is what the hit test finds at its own centre",
+                    bool(mine) and mine["reachable"] is True,
+                    {"thumb": mine, "after": after})
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m14.html", env.served_matches_disk(env.document),
+                    "the m14.html served does not match www/m14.html on disk")
+
+
+def _m16_blame(got: Dict[str, Any]) -> str:
+    """The kernel's own complaints, appended to a reason that cannot name them itself.
+
+    A PAGE THAT CANNOT MEASURE NAMES THE WAIT; THE KERNEL NAMES THE CAUSE, and the two are
+    different sentences. `spawnProgram` (www/pagekernel.mjs) reports a missing `ready` as the kinds
+    the kernel had posted — so a process that FAULTED during its own init reads as "timed out
+    waiting for ready" for the NEXT thing, while the faulting process's stack sits in
+    `globalThis.M16.faults` where `READ_M16` already collects it. One such BROKEN run cost a full
+    diagnosis session for exactly that reason: a swallowed failure is a defect (CLAUDE.md, harness
+    honesty), and this is the swallow.
+
+    SHOWN CAPABLE OF FIRING, and the staging is one line: `if (typeof document === "undefined")
+    throw new Error("...")` at the top of src/bin/taskmgr.mjs faults pid 4 during its own init and
+    nothing else. The GATE is load-bearing — www/m16.html imports that module for
+    `TASKMGR_METRICS`, so an unconditional throw breaks the PAGE and never reaches a process.
+    """
+    parts = []
+    if got.get("faults"):
+        parts.append("kernel faults: %s" % "; ".join(str(f) for f in got["faults"]))
+    if got.get("errors"):
+        parts.append("kernel errors: %s" % "; ".join(str(e) for e in got["errors"]))
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _m16_pass(env: Env, dpr: float, *, reload_first: bool) -> Tuple[int, Dict[str, Any]]:
+    """Load `www/m16.html` at one device-pixel ratio, drive every gesture it asks for, and read
+    its proofs back.
+
+    THE RATIO IS SET THROUGH `Emulation.setDeviceMetricsOverride`, which is the same call
+    `run_phase` makes for the viewport, and it survives the navigate. `PLAN.md` §4.10 asks for
+    `--force-device-scale-factor`; that is a browser launch flag and would need a second Chrome
+    per ratio. The emulation is in-process and READ BACK — `bench/m16-resize/probe.py` measured
+    `devicePixelRatio`, a canvas's backing store and a frame's layout all following it at 1 and 2,
+    and the first clause below asserts the page rendered at the ratio this pass asked for, so a
+    run whose override silently failed cannot report a dpr-2 figure under a dpr-2 label.
+    """
+    if reload_first:
+        env.page.emulate_device(width=VIEWPORT_WIDTH, height=VIEWPORT_HEIGHT,
+                                scale_factor=dpr, mobile=False)
+        env.reload()
+    performed = drive_gestures(env, "M16", timeout=280.0)
+    got = env.read(READ_M16, M16_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m16.html reported state 'error' at dpr %g before producing proofs: %s. Nothing "
+            "below was measured.%s" % (dpr, got["why"] or "no reason given", _m16_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m16.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed and no surface is ever asked "
+            "for.%s" % (got["why"] or "no reason given", _m16_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m16.html never reached a terminal state at dpr %g (state=%r)%s"
+                         % (dpr, got["state"], _m16_blame(got)))
+    return performed, got
+
+
+def _m16_record(env: Env, dpr: float, got: Dict[str, Any]) -> None:
+    """The thirteen clauses that are a statement about ONE ratio."""
+    def ev(name):
+        return (got[name] or {}).get("evidence") or {}
+
+    def label(name):
+        return _m16_label(dpr, name)
+
+    extent, units, rows, pixels = ev("extent"), ev("units"), ev("rows"), ev("pixels")
+    # THE RATIO ITSELF, FIRST. Every clause below is a figure about a machine, and a figure
+    # labelled with a ratio it was not taken at is what cost M11 and M12 a milestone each
+    # (constraint 264).
+    env.expect_that(label("the page rendered at the ratio the run asked for"),
+                    abs(float(got["dpr"]) - dpr) < 1e-6,
+                    {"asked": dpr, "devicePixelRatio": got["dpr"],
+                     "viewportScale": VIEWPORT_SCALE})
+    # AND THE GRIP DID SOMETHING. Four drags that moved no frame would leave every "the store is
+    # the content box" clause comparing a number against itself.
+    sizes = units.get("sizes") or []
+    env.expect_that(label("a real resize grip was driven and the frame moved"),
+                    units.get("gripMovedTheFrame") is True and len(sizes) == 4
+                    and not [s for s in sizes if s.get("captureError")],
+                    {"sizes": [{"size": s.get("size"), "placed": s.get("placed"),
+                                "captureError": s.get("captureError")} for s in sizes]})
+
+    # ---- PROOF 1: THE EXTENT ----------------------------------------------------------------
+    env.expect_that(label("the canvas fills its client content box at four frame sizes"),
+                    extent.get("fillsEveryClientArea") is True,
+                    {"readings": extent.get("windows"), "slackCssPx": extent.get("slackCssPx"),
+                     "notFilling": (extent.get("notFilling") or [])[:3],
+                     "perSize": extent.get("sizes")})
+    env.expect_that(label("and nothing is clipped"),
+                    extent.get("nothingClipped") is True,
+                    {"clipped": (extent.get("clipped") or [])[:3]})
+    # THE FIXTURE IS PART OF THE PROOF: with the backing store equal to the client box, a canvas
+    # with no CSS box of its own still lands exactly on it, so the clause above HELD under
+    # `--negative no-surface-fill` until a window whose store is a different shape was staged.
+    env.expect_that(label("and one backing store is a different shape from its client area"),
+                    extent.get("hasAspectFixture") is True,
+                    {"pinnedStores": extent.get("pinnedStores"),
+                     "aspectMismatched": extent.get("aspectMismatched")})
+
+    # ---- PROOF 2: THE UNIT ------------------------------------------------------------------
+    env.expect_that(label("the surface changed size at four frame sizes"),
+                    units.get("surfaceChanged") is True,
+                    {"distinctStores": units.get("distinctStores"),
+                     "stores": [s.get("store") for s in sizes]})
+    # SEPARATE FROM THE CLAUSE ABOVE, and that is the whole of why there are two: equal geometry
+    # over a frozen store is one bug and equal geometry at the wrong ratio is another.
+    env.expect_that(label("and it is the content box in DEVICE pixels"),
+                    units.get("isTheContentBoxInDevicePx") is True,
+                    {"wrongUnit": (units.get("wrongUnit") or [])[:2],
+                     "sizes": [{"content": s.get("content"), "store": s.get("store")}
+                               for s in sizes]})
+    env.expect_that(label("and the kernel's record agrees in the unit it publishes"),
+                    units.get("kernelAgrees") is True,
+                    {"kernel": [s.get("kernel") for s in sizes]})
+
+    # ---- PROOF 3: THE CONTENT ---------------------------------------------------------------
+    env.expect_that(label("the row count the program drew GREW, read back through textOfOps"),
+                    rows.get("grew") is True and rows.get("drewNames") is True,
+                    {"perSize": rows.get("perSize"), "short": rows.get("shortRows"),
+                     "tall": rows.get("tallRows")})
+    env.expect_that(label("and the overflow is stated rather than grown"),
+                    rows.get("statesItsOverflow") is True,
+                    {"perSize": [{"size": p.get("size"), "overflow": p.get("overflow")}
+                                 for p in (rows.get("perSize") or [])]})
+
+    # ---- PROOF 4: THE PIXELS (R34) ----------------------------------------------------------
+    readings = pixels.get("readings") or []
+    env.expect_that(label("imgview's drawn extent differs at two client sizes"),
+                    pixels.get("extentDiffers") is True
+                    and pixels.get("onePerSourcePixel") is True
+                    and pixels.get("matchesTheProgramsOwnArithmetic") is True,
+                    {"readings": [{"content": r.get("content"), "store": r.get("store"),
+                                   "drew": r.get("drew"), "model": r.get("model"),
+                                   "rects": r.get("rects")} for r in readings]})
+    env.expect_that(label("and its blocks read back as the colours they asked for"),
+                    pixels.get("flatBlocks") is True and pixels.get("blocksDiffer") is True,
+                    {"samples": [r.get("samples") for r in readings]})
+
+    env.expect(label("the page's own verdict is ok"), got["verdict"], "ok")
+
+
+@check(
+    name="m16",
+    milestone="m16",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SURFACE_FILL,
+              Control.FROZEN_SURFACE, Control.CSS_PX_SURFACE, Control.EV_B_POINTER),
+    labels=M16_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M16_DOCUMENT,
+    ready_expr=M16_READY,
+    ready_what="globalThis.M16 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m16.html?proofs=1)",
+    ready_timeout=300.0,
+    refusal_expr="globalThis.M16 && globalThis.M16.state",
+    refusal_want="aborted",
+    note="THE CLIENT BOX IS THE SURFACE, IN DEVICE PIXELS — and this is the first thing in this "
+         "project ever to drive a real RESIZE GRIP. `grep -rn grip scripts bench www` returned "
+         "nothing before M16: a grip takes a pointer capture on the grip element and then runs "
+         "the gesture on `document` listeners, and `setPointerCapture` MAY THROW for a pointerId "
+         "no live pointer owns (constraint 175). `bench/m16-resize/probe.py` is the half-day probe "
+         "that answered it before any of this was written — the grip IS drivable over "
+         "`Input.dispatchMouseEvent`, the frame grows MID-GESTURE, and no capture refused.\n"
+         "EVERY GEOMETRY CLAUSE RUNS TWICE, AT dpr 2 AND AT dpr 1, which no registered size clause "
+         "in this project had ever done. The defect is ratio-shaped: at dpr 1 a CSS-px box handed "
+         "to `win_surface` is numerically right, so the unit error is INVISIBLE there. M11 and "
+         "M12 each cost a milestone to a figure taken at one ratio (constraint 264), and "
+         "`--negative css-px-surface` is the pair that proves this suite can see a unit error at "
+         "all: RED at dpr 2, GREEN at dpr 1.\n"
+         "THREE BUGS, THREE CLAUSES, AND THEY ARE NOT MERGED. Equal geometry over a frozen "
+         "backing store is bug 4 and only the row-count clause catches it; equal geometry at the "
+         "wrong ratio is bug 2 and only the device-pixel clause catches it; a canvas that is not "
+         "its client area is the renderer's half and only the extent clause catches it.\n"
+         "negative controls: --negative no-surface-fill takes away the canvas's own CSS box — and "
+         "it bites only because one window's backing store is DELIBERATELY a different shape from "
+         "its client area, since a canvas is a replaced element and otherwise lands on the client "
+         "box anyway. --negative frozen-surface makes `files` and `imgview` ignore `WEV_CLIENT` "
+         "through their own flag. --negative css-px-surface is the unit error. --negative "
+         "ev-b-pointer restores `taskmgr`'s `ev.b & WPTR_DOWN`, which is the pointer's Y read as a "
+         "flag word — the one control here whose subject is a defect already fixed by `de8a68a`. "
+         "--negative no-isolation must come out BROKEN: no SAB, no kernel, no surface.",
+)
+def check_m16(env: Env) -> None:
+    # dpr 2 IS THE FIRST PASS AND IT DOES NOT RELOAD: `run_phase` has already set the viewport at
+    # VIEWPORT_SCALE and `run_one` has already loaded the page. The first clause of the pass
+    # asserts the page really rendered at this ratio, so M16_RATIOS[0] disagreeing with
+    # VIEWPORT_SCALE fails the run rather than mislabelling it.
+    passes: Dict[float, Dict[str, Any]] = {}
+    try:
+        for index, dpr in enumerate(M16_RATIOS):
+            performed, got = _m16_pass(env, dpr, reload_first=index > 0)
+            passes[dpr] = {"performed": performed, **got}
+    finally:
+        # HANDED BACK WHATEVER HAPPENED, because the page session is shared with every check after
+        # this one and a dpr-1 viewport would silently re-measure them on another machine.
+        env.page.emulate_device(width=VIEWPORT_WIDTH, height=VIEWPORT_HEIGHT,
+                                scale_factor=VIEWPORT_SCALE, mobile=False)
+
+    head = passes[M16_RATIOS[0]]
+    env.expect("page isolated", head["isolated"], True)
+    env.expect("kernel isolated", head["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error",
+                    not [e for p in passes.values() for e in p["errors"]],
+                    {"errors": [e for p in passes.values() for e in p["errors"]][:4]})
+    # THE DRIVING ITSELF IS ASSERTED, AT BOTH RATIOS. A page that finished without asking for a
+    # gesture would have measured a desktop nobody touched and still produced numbers.
+    env.expect_that("the page was really driven at both ratios",
+                    all(p["performed"] >= 15 and p["gestures"] == p["performed"]
+                        for p in passes.values()),
+                    {str(dpr): {"performed": p["performed"], "pageLogged": p["gestures"]}
+                     for dpr, p in passes.items()})
+    # AND THE WORLD IS THE ONE ASKED FOR, read back out of the module that owns the switch rather
+    # than out of the page's own query parsing: a control a run believed was on and was not is a
+    # green run over an unmodified world. The program-side flags travel as argv and are reported
+    # by the page's own config.
+    cfg = head["cfg"] or {}
+    live = head["controls"] or {}
+    env.expect_that("the controls the page reports are the ones asked for",
+                    bool(live) and live.get("noFill") is bool(cfg.get("noSurfaceFill"))
+                    and bool(cfg.get("frozenSurface")) == ("frozen_surface=1" in env.document)
+                    and bool(cfg.get("cssPxSurface")) == ("css_px_surface=1" in env.document)
+                    and bool(cfg.get("evBPointer")) == ("ev_b_pointer=1" in env.document),
+                    {"asked": cfg, "inForce": live, "document": env.document})
+
+    for dpr in M16_RATIOS:
+        _m16_record(env, dpr, passes[dpr])
+
+    # ---- PROOF 5: `/proc`, MID-DRAG (A2b, A2c) ----------------------------------------------
+    # READ OFF THE dpr-2 PASS, because these three are not statements about a ratio: the lines
+    # exist or they do not, and the ratio they name is asserted as part of the second clause.
+    proc = (head["proc"] or {}).get("evidence") or {}
+    env.expect_that("mid-drag, /proc names the measured client box in device pixels",
+                    proc.get("namesTheClientBox") is True
+                    and proc.get("theDragWasUnderway") is True,
+                    {"path": proc.get("path"), "midDrag": proc.get("midDrag"),
+                     "grep": (proc.get("greps") or {}).get("client")})
+    env.expect_that("and the ratio the page reported",
+                    proc.get("namesTheRatio") is True,
+                    {"pageDpr": proc.get("pageDpr"), "kernelDpr": proc.get("kernelDpr"),
+                     "grep": (proc.get("greps") or {}).get("dpr")})
+    # THE FIREFOX-CAPTURE CASE (constraint 175): the pointer comes up OUTSIDE the frame, so a
+    # release-only report would never reach the frame's own `pointerup` hook and the kernel would
+    # keep the pre-drag box permanently.
+    env.expect_that("and a release outside the frame leaves the kernel's record correct",
+                    proc.get("releaseOutsideKeptIt") is True,
+                    {"afterRelease": proc.get("afterRelease")})
+
+    # ---- PROOF 6: THE BROWSER'S MENU (R8) ---------------------------------------------------
+    menu = (head["menu"] or {}).get("evidence") or {}
+    env.expect_that("a right-click inside a surface is refused, and counted",
+                    menu.get("refusedOnTheSurface") is True
+                    and menu.get("countedByTheHost") is True,
+                    {"onSurface": menu.get("onSurface"),
+                     "contextmenus": menu.get("contextmenus")})
+    # THE COMPARISON THAT MAKES THE CLAUSE ABOVE ABOUT THIS LISTENER: a browser that never fires
+    # `contextmenu`, or a page that cancelled every one, would satisfy it and fail this.
+    env.expect_that("and one on the bare page is not",
+                    menu.get("notRefusedOffIt") is True,
+                    {"offSurface": menu.get("offSurface"), "seen": menu.get("seen")})
+
+    # ---- PROOF 7: THE SELECTION (R10's registration) ----------------------------------------
+    select = (head["select"] or {}).get("evidence") or {}
+    env.expect_that("a press selects the row a reader pointed at, at five heights",
+                    select.get("everyPressSelectedItsRow") is True,
+                    {"cases": [{"height": c.get("height"), "pressed": c.get("pressed"),
+                                "selected": c.get("selected"), "surfaceY": c.get("surfaceY"),
+                                "bit0x10": c.get("bit0x10")}
+                               for c in (select.get("cases") or [])]})
+    # THE INPUT THE DEFECT DROPPED, AND THE INPUT IT HAPPENED TO PASS. Five presses whose y all
+    # had bit 4 set would satisfy the clause above against the program `de8a68a` fixed.
+    env.expect_that("and those five presses sweep the 0x10 bit of the pointer's y",
+                    select.get("sweepsTheBit") is True,
+                    {"bitClear": select.get("bitClear"), "bitSet": select.get("bitSet"),
+                     "distinctRows": select.get("distinctRows"),
+                     "distinctHeights": select.get("distinctHeights")})
+    env.expect_that("and the selection the program drew is in the pixels",
+                    select.get("thePaintShowsIt") is True,
+                    {"pixels": [c.get("pixel") for c in (select.get("cases") or [])]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION: nothing here is read out of the PNG, because a surface
+    # that does not follow its frame draws the same shapes as one that does (constraint 40).
+    env.shoot("m16-surfaces")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m16.html", env.served_matches_disk(env.document),
+                    "the m16.html served does not match www/m16.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

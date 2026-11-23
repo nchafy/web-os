@@ -25,12 +25,13 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
 .terminal { flex:1 1 auto; margin:0; padding:4px; overflow:auto; white-space:pre-wrap;
   background:#000; color:#ddd; font:inherit }
 .terminal:focus { outline:1px solid #6a8 }
-/* A SURFACE FILLS ITS CLIENT AREA and is scaled to it: the canvas is sized in the DEVICE pixels
-   the process asked for, and a process knows only its own surface. `image-rendering:pixelated`
-   so a 4x4 proof pattern scaled up is four squares and not a blur — a check reads the pixels back
-   out of the canvas, but a reader reads them off the screen. */
-.surface { flex:1 1 auto; min-width:0; min-height:0; width:100%; height:100%;
-  background:#0b0d11; image-rendering:pixelated }
+/* ONLY THE LOOK. A surface FILLS its client area and is scaled to it, and since M16 that is
+   `src/wm/surface.mjs`'s own doing — the extent is the renderer's contract with the kernel, not a
+   page's choice, and this rule was one of four identical copies on four pages while the shipped
+   skin had none. `image-rendering:pixelated` stays, and genuinely is a look: a 4x4 proof pattern
+   scaled up reads as four squares rather than a blur, which matters because a check reads the
+   pixels out of the canvas and a reader reads them off the screen. */
+.surface { background:#0b0d11; image-rendering:pixelated }
 .surface:focus { outline:1px solid #6a8 }
 /* The window table. A list of what the kernel thinks exists, beside the frames themselves — so a
    frame with nothing behind it is visible as a row that is not there. */

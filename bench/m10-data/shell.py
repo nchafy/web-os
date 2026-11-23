@@ -247,17 +247,17 @@ def main(argv=None) -> int:
             d = json.loads(dst)
             # SURFACE PIXELS TO CLIENT PIXELS, through the canvas's own rectangle — the same
             # arithmetic `Surface.clientAt` does inside the page.
-            # THE SURFACE'S OWN WIDTH, from the program's metrics: a hard-coded 240 here would
-            # scale every coordinate wrongly the moment the program's surface changed size, which
-            # is what M15 did to it.
-            metrics = json.loads(page.evaluate(
-                """(async () => {
-                  const m = await import('/src/bin/files.mjs')
-                  return JSON.stringify({ w: m.FILES_METRICS.SURFACE_W })
-                })()""", await_promise=True))
-            scale = s["width"] / metrics["w"]
-            start = {"x": int(s["left"] + 120 * scale),
-                     "y": int(s["top"] + row_mid(page, args.row) * scale)}
+            # NO SCALE AT ALL, AND M16 IS WHY.
+            #
+            # This computed `liveCssWidth / FILES_METRICS.SURFACE_W` — a ratio of the canvas's
+            # live CSS width to the program's OPENING width, which `src/bin/files.mjs` says
+            # nothing reads afterwards. Since M16 the canvas's CSS box IS the client area, so a
+            # CSS-px row midpoint maps to a page offset with a factor of ONE; the old ratio was
+            # right only at the opening size and drifted with every resize. `--row 2`'s refusal
+            # control depends on hitting the right row, so the drift arrives as the wrong file.
+            # Finding 5 of the M16 review.
+            start = {"x": int(s["left"] + 120),
+                     "y": int(s["top"] + row_mid(page, args.row))}
             end = {"x": int(d["left"] + d["width"] / 2), "y": int(d["top"] + d["height"] / 2)}
             print("drag     %s -> %s" % (json.dumps(start), json.dumps(end)))
 

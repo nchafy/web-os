@@ -10,6 +10,7 @@ import {
   E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName,
   DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
   WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
+  WEV_CLIENT, clientBoxAt, pointerAt,
 } from "../abi.mjs";
 
 const ENC = new TextEncoder();
@@ -320,4 +321,129 @@ export function iconForPath(path, { isDir = false, isProgram = false } = {}) {
   if (Object.prototype.hasOwnProperty.call(ICON_BY_EXT, ext)) return ICON_BY_EXT[ext];
   if (isProgram) return WICON_PROGRAM;
   return WICON_GENERIC;
+}
+
+/* ---- M16: a surfaced program's answer to WEV_CLIENT -----------------------------------------
+ *
+ * THREE FUNCTIONS AND ONE FACTOR. `lastClientEvent` collapses a drained batch, `resurface` asks
+ * the kernel for the new backing store, and `cssPointAt` converts an input coordinate back. The
+ * third is not an afterthought: fixing the OUTPUT side alone lands a press two rows off at dpr 2,
+ * because `pointerAt` returns SURFACE pixels while a program's row heights are CSS pixels. Both
+ * directions are the same unit error, so both live here.
+ *
+ * NO NEW CAPABILITY. `resurface` calls `env.win.surface`, which every windowed program already
+ * holds; the other two are pure. This file runs inside a process (CLAUDE.md: the trust boundary in
+ * file form), so a helper that reached for anything the kernel did not hand the caller would be
+ * the breach.
+ */
+
+/**
+ * The LAST `WEV_CLIENT` in a drained batch, or `null` — the one a caller should act on.
+ *
+ * ONE RE-SURFACE PER BATCH, NOT PER EVENT, and this is what makes that reachable. The kernel
+ * replaces a TAIL client record rather than appending (`WinMgr.pushClient`), so a batch holds one
+ * client event only while nothing else arrived between two reports; a resize that moves the
+ * pointer interleaves `WEV_POINTER` records and the replacement no longer applies. A caller that
+ * re-surfaced per event would then destroy and rebuild a canvas (`src/wm/winhost.mjs` `#surface`)
+ * once per intermediate size and throw every one but the last away.
+ *
+ * The idiom, so five programs write the same three lines:
+ *
+ *     const client = env.std.lastClientEvent(evs);
+ *     for (const ev of evs) {
+ *       if (ev.type === WEV_CLIENT) { if (ev !== client) continue; ...resurface... }
+ *
+ * Identity and not an index, because `for (const ev of evs)` is what all five callers already
+ * write and a record is the only handle that loop has.
+ */
+export function lastClientEvent(evs) {
+  if (!Array.isArray(evs)) return null;
+  for (let i = evs.length - 1; i >= 0; i -= 1) {
+    if (evs[i] && evs[i].type === WEV_CLIENT) return evs[i];
+  }
+  return null;
+}
+
+/**
+ * Re-ask for a surface at the client box a `WEV_CLIENT` reported, and return what the caller needs
+ * to lay out. FIVE PROGRAMS NEED EXACTLY THIS — `files`, `editor`, `imgview`, `paint`, `taskmgr` —
+ * so a second copy is how two of them come to disagree about whether a repaint is owed.
+ *
+ * TAKES THE EVENT AND THE WINDOW'S FD, AND NONE OF THE CALLER'S LAYOUT CONSTANTS. A program's
+ * `ROW_H` is its own business and this function must not acquire an opinion about it; what it owns
+ * is the unit boundary, which is the one thing all five share.
+ *
+ * RETURNS, on success (`ok: true`):
+ *   `w`, `h`      the granted backing store, in DEVICE pixels — the unit `win_surface` takes and
+ *                 `SURFACE_MAX_PX` bounds. The event's own `a`/`b`, passed through UNSCALED.
+ *   `wCss`, `hCss` the same box in CSS pixels, which is the unit a caller's layout constants are
+ *                 in. Derived here and not at five call sites, because `got.w / got.dpr` written
+ *                 five times is five chances to write `*`.
+ *   `dpr`         the device-pixel ratio, and ALSO this surface's scale. See below.
+ *
+ * ONE FACTOR SUFFICES, AND ONLY BECAUSE THIS FUNCTION CREATES THE COINCIDENCE. A surface pixel is
+ * the process's own unit and a device pixel is the display's; they are equal only when the surface
+ * IS the full client content box (PRD §2), and a surface smaller than its box is CSS-stretched to
+ * it on purpose (`src/wm/surface.mjs`). This asks for exactly the box in device pixels, so
+ * afterwards surface px = CSS px x dpr and `dpr` converts both directions. A program that wants a
+ * backing store of some other size MUST NOT use these helpers: its scale is not the dpr and
+ * `cssPointAt` would be wrong for it.
+ *
+ * AN UNCHANGED BOX NEVER ARRIVES HERE, so there is no early return for one. The kernel raises
+ * `WEV_CLIENT` only when the measured box actually moved (`WinMgr.setBox`'s
+ * `cw !== this.clientW` guard), and this file holds no state to compare against — every function
+ * here holds nothing, which is constraint 15's seam. A caller that re-surfaces at the size it
+ * already has pays a canvas rebuild for no pixels, and `lastClientEvent` is how it avoids that.
+ *
+ * A REFUSAL IS PERMANENT AND MUST BE SURFACED, NOT RETRIED. `-ENOMEM` is the surface budget, which
+ * is a ceiling and not a transient (`WinMgr.surface`), and `-EINVAL` is a box no window may have;
+ * a program that retried either would retry for ever. The kernel leaves the previous surface in
+ * place on a refusal, so the caller's EXISTING layout and scale are still correct — it MUST keep
+ * them and report, and MUST NOT lay out from a failed return. The derived CSS fields are zero
+ * there for that reason: a layout built from them is wrong at a glance rather than subtly.
+ *
+ * THE CEILING IS NOT PRE-CHECKED HERE. `SURFACE_MAX_PX` is the kernel's to enforce and a copy of
+ * the test inside a process is a second definition of a policy, which is worse than a round trip.
+ *
+ * THE POSITIVE-BOX GUARD IS THE PROGRAM'S OWN and does not rest on the kernel keeping its. A
+ * zero-sized box is unactionable — `win_surface` answers `-EINVAL` for it — so a program told one
+ * has nothing to do but say so, and the only route by which a box reaches here is a record the
+ * page's `win-event` route can also carry. A library that trusted the far side for a number it
+ * then spends a syscall on is the shape M6 removed.
+ */
+export function resurface(env, fd, ev) {
+  const want = clientBoxAt(ev);
+  if (!(want.w > 0) || !(want.h > 0) || !(want.dpr > 0)) {
+    return { ok: false, errno: E.EINVAL, ...want, wCss: 0, hCss: 0 };
+  }
+  const rc = env.win.surface(fd, want.w, want.h);
+  if (rc < 0) return { ok: false, errno: -rc, ...want, wCss: 0, hCss: 0 };
+  // NOT ROUNDED. A 441-device-px box at dpr 2 is 220.5 CSS px, and rounding it here while
+  // `cssPointAt` divides exactly would put the layout and the hit test on different grids — the
+  // defect this pair exists to remove, reintroduced half a pixel at a time.
+  return { ok: true, errno: 0, ...want, wCss: want.w / want.dpr, hCss: want.h / want.dpr };
+}
+
+/**
+ * A `WEV_POINTER`'s coordinates in CSS pixels: the unit a program's layout constants are in.
+ *
+ * `scale` is the `dpr` a successful `resurface` returned, and the paragraph there says why one
+ * factor is enough. Composed with `pointerAt` rather than left to the caller because the sign
+ * extension and the division are both required and a program doing one without the other gets a
+ * drag that leaves the surface as four billion CSS pixels.
+ *
+ * NOT FLOORED. A row test is a range test, so a fractional y resolves correctly, and flooring
+ * would move the boundary by half a row at dpr 2 relative to the unfloored layout above.
+ *
+ * A NON-POSITIVE SCALE THROWS, for `dprFixed`'s reason rather than against it. `scale` is a number
+ * the CALLER holds — 1 until its first `WEV_CLIENT` arrives, the `dpr` of the last SUCCESSFUL
+ * `resurface` after that — and never a field read off this event, so a bad one is a program that
+ * laid out from a failed return and not hostile input. Substituting 1 would answer a hit test in
+ * the wrong unit with no error anywhere, which is the defect, and dividing by 0 would answer
+ * `Infinity`, which a range test rejects everywhere and reads as a press that hit nothing.
+ */
+export function cssPointAt(ev, scale) {
+  if (!(scale > 0)) throw new Error(`cssPointAt: ${scale} is not a surface scale`);
+  const at = pointerAt(ev);
+  return { x: at.x / scale, y: at.y / scale, buttons: at.buttons };
 }

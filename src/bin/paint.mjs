@@ -8,16 +8,30 @@
 // and sends a display list back. A process holds only integers (constraint 15), and a transferred
 // `OffscreenCanvas` could not reach it anyway (constraint 219, `docs/DECISIONS.md` D31).
 //
+// M16: THE SURFACE NOW FOLLOWS THE FRAME, and that is the opposite of what this file used to say.
+// The branch at `WEV_RESIZE` below carries the old sentence and the reason it stopped being true.
+// A program learns its client content box in DEVICE pixels, with the ratio beside it, so it can
+// ask for a backing store that IS the box — and `paint` is the hard case, because it holds a
+// drawing and a re-surface destroys the canvas it was drawn on. What happens to the drawing is
+// decided and argued at THE PAPER below.
+//
 //   paint              a window you can draw in; q quits, c clears, 1-6 pick a colour
 //   paint -t           draw the TEST PATTERN and exit, which is what M8's own proof asserts on
-//   paint -w 480 -h 320  a surface of that many device pixels
+//   paint -w 480 -h 320  PIN the surface at that many device pixels, so it does NOT follow the
+//                      frame. The page stretches it, which is the standing counter-example that a
+//                      surface pixel is not a device pixel (`src/wm/surface.mjs`, PRD §2).
+//   paint -R           re-surface WITHOUT replaying the drawing — a shipped negative control and
+//                      nothing else, like `files --no-resurface` and `scripts/serve.py
+//                      --no-isolation`: the control a suite can re-run instead of a source
+//                      mutation nobody re-runs. Inert under `-w`/`-h`: a pinned surface is never
+//                      re-asked, so there is no replay to suppress.
 //
 // The loop is the same shape as every other program here: one `poll`, one `read`, act, repeat.
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
-  WEV_KEY, WEV_POINTER, WEV_RESIZE, WEV_CLOSE, WEV_DESTROYED, WEV_FOCUS,
-  WPTR_DOWN, WPTR_UP, WPTR_MOVE, pointerAt,
+  WEV_KEY, WEV_POINTER, WEV_RESIZE, WEV_CLIENT, WEV_CLOSE, WEV_DESTROYED, WEV_FOCUS,
+  WPTR_DOWN, WPTR_UP, WPTR_MOVE, clientBoxAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE,
   keyBytesOf,
 } from "/src/abi.mjs";
@@ -27,10 +41,30 @@ const NAME = "paint";
 const POLL_MS = 200;
 const CEILING_MS = 120000;
 
-/** The default surface, in device pixels. Smaller than the window it sits in, which the CSS scales
- *  — so a reader can see that a surface's size is the PROCESS's choice and not the frame's. */
+/** The startup surface, in DEVICE pixels, asked for before any client box is known. It lives one
+ *  animation frame in the default mode — the host reports a geometry at window creation
+ *  (`src/wm/winhost.mjs`) — and for the whole run under `-w`/`-h`, where it is the process's own
+ *  choice of resolution and the page stretches it to the frame. */
 const DEFAULT_W = 320;
 const DEFAULT_H = 200;
+
+/** A dot's side and a stroke's width, in PAPER pixels (see THE PAPER). Multiplied by the scale on
+ *  the way into the display list, so a stroke is the same thickness to the eye at either ratio;
+ *  a constant in surface pixels would be a 1-CSS-px hair at dpr 2. */
+const DOT_PX = 3;
+const LINE_PX = 2;
+
+/** The most marks the journal holds. Past it the OLDEST are dropped — see WHAT A READER LOSES.
+ *  A cap and not a measurement: it bounds what one process keeps and what one replay sends, which
+ *  is ten `win_draw` syscalls at `DL_MAX_OPS` 2,048. `c` empties the journal, so a session that
+ *  clears never reaches it. */
+const MARKS_MAX = 20000;
+/** Dropped in one slice rather than one per sample: `Array.prototype.shift` moves every remaining
+ *  element, so evicting per mark is `MARKS_MAX` moves at every sample once the journal is full. */
+const MARKS_EVICT = MARKS_MAX >> 3;
+
+const MARK_DOT = 1;
+const MARK_LINE = 2;
 
 /** `0xRRGGBBAA`. The six a key picks, and the background. Named here because a program's palette
  *  is the program's business; `cssColor` in `src/abi.mjs` is the one thing that turns one of these
@@ -64,6 +98,66 @@ export function testPattern() {
   ];
 }
 
+/* ---- THE PAPER -------------------------------------------------------------------------------
+ *
+ * THE DRAWING IS KEPT 1:1 AND A BIGGER WINDOW REVEALS MORE PAPER. It is not scaled, and it is not
+ * forgotten.
+ *
+ * The constraint that forces a decision: a re-surface DESTROYS the canvas and builds a new one
+ * (`src/wm/winhost.mjs`), and no syscall reads a surface back — a process holds only integers
+ * (constraint 15), and `win_draw` is write-only. So a drawing survives a resize only if the
+ * process can REPLAY it. Every stroke is therefore kept here as a mark, and the live path and the
+ * replay path both go through `opsForMark`, because a resize that redrew the picture differently
+ * from how it was drawn is a resize that changed the picture.
+ *
+ * A MARK IS IN PAPER PIXELS, and `scale` is surface pixels per paper pixel. In the default mode a
+ * paper pixel IS a CSS pixel and `scale` is the dpr, which holds because `std.resurface` asks for
+ * exactly the client content box in device pixels — the coincidence its own docstring states.
+ * Under `-w`/`-h` the scale stays 1 and a paper pixel is a surface pixel, which is why the pinned
+ * mode emits byte-identical ops to the pre-M16 program.
+ *
+ * WHY NOT SCALE THE DRAWING. A scale is a resample, and a resample at every resize destroys
+ * information continuously: a 1-paper-px hair shrunk by a third is gone and no later growth brings
+ * it back, where clipping loses nothing. It would also need a factor nobody asked for — two
+ * factors, since the box moves in both axes independently, so a freehand line either shears or
+ * stops reaching the pointer it was drawn under.
+ *
+ * WHY NOT CLIP AND FORGET. That is the `-R` world, and it is the one defect a reader reports as
+ * "the resize ate my drawing".
+ *
+ * WHAT A READER LOSES, stated plainly. A stroke outside the new box is not drawn — the paper is
+ * larger than the window and there is no scrolling until M17's wheel, so the only way back to it
+ * is to grow the window again. That works, because a mark is independent of the box. What does
+ * NOT come back is a drawing past `MARKS_MAX` marks: its oldest marks are evicted and the next
+ * re-surface is where the loss becomes visible, which is why it is counted in `forgotten` and said
+ * once rather than discovered.
+ *
+ * THE CHEAPEST CHECK THAT CATCHES THIS REGRESSING. One real drag, one driven grip resize wider,
+ * then two pixel reads: the stroke's own midpoint, at `paper * dpr` in the NEW backing store, must
+ * still be ink, and a point inside the revealed room must be paper. Two reads separate all three
+ * answers: a scaled drawing moves the midpoint off its own ink AND puts ink in the revealed room,
+ * and a forgotten one leaves paper at the midpoint. `paint -R` is the negative control and must
+ * fail the first read alone.
+ */
+
+/** One mark as one display-list op. ONE RENDERER for the live stroke and the replay, so a resize
+ *  cannot redraw the picture differently from the way it was drawn. `encodeDrawOp` truncates a
+ *  fractional argument toward zero, so the rounding is done here where it can be seen. */
+function opsForMark(m, scale) {
+  const at = (v) => Math.round(v * scale);
+  if (m.kind === MARK_DOT) {
+    const side = Math.max(1, Math.round(DOT_PX * scale));
+    return {
+      op: DL_FILL_RECT, a0: at(m.x) - (side >> 1), a1: at(m.y) - (side >> 1),
+      a2: side, a3: side, a4: m.ink,
+    };
+  }
+  return {
+    op: DL_LINE, a0: at(m.x), a1: at(m.y), a2: at(m.x2), a3: at(m.y2), a4: m.ink,
+    a5: Math.max(1, Math.round(LINE_PX * scale)),
+  };
+}
+
 function unInterrupted(call) {
   const first = call();
   if (first !== -EINTR) return first;
@@ -72,7 +166,7 @@ function unInterrupted(call) {
 
 export function run(env) {
   const argv = (env.argv || []).map(String);
-  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "w:h:t");
+  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "w:h:tR");
   if (bad) return env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE);
   const w = flags.w === undefined ? DEFAULT_W : env.std.wholeNumber(flags.w);
   const h = flags.h === undefined ? DEFAULT_H : env.std.wholeNumber(flags.h);
@@ -81,15 +175,32 @@ export function run(env) {
       env.std.EXIT_USAGE);
   }
   const patternOnly = flags.t === true;
+  /** ASKING FOR A SIZE PINS IT. One knob, and omitting it is the off switch (CLAUDE.md): a program
+   *  that named its own resolution asked for a resolution, so following the frame would overwrite
+   *  the thing it asked for. `www/m8.html` spawns `-w 160 -h 120` and `-t -w 96 -h 64`, and both
+   *  assert on a stretched surface. */
+  const pinned = flags.w !== undefined || flags.h !== undefined;
+  const noReplay = flags.R === true;
   const t0 = performance.now();
+  /** Surface pixels per paper pixel. 1 until a client box arrives, and 1 for ever when pinned. */
+  let scale = 1;
+  /** Whether `scale` is the real one. A pinned surface's scale is 1 by construction and is known
+   *  from the start; a following one is only known once a client box has been granted. */
+  let known = pinned;
+  /** The journal, in paper pixels. See THE PAPER. */
+  const marks = [];
   const account = {
-    program: NAME, win: 0, fd: 0, surface: { w, h },
+    program: NAME, win: 0, fd: 0, surface: { w, h }, pinned, scale,
     ops: 0, batches: 0, strokes: 0, keys: 0, pointers: 0, clears: 0, resizes: 0, focus: 0,
+    clients: 0, replays: 0, refusals: 0, marks: 0, forgotten: 0, earlyMarks: 0,
+    client: null, refused: "",
     why: "",
   };
 
   const made = env.win.create({
-    title: `${NAME} ${w}x${h}`, w: 520, h: 360,
+    // THE TITLE NAMES THE SURFACE ONLY WHEN THE SURFACE IS FIXED. A following surface is whatever
+    // the frame last measured, so a size in the caption would be stale by the first drag.
+    title: pinned ? `${NAME} ${w}x${h}` : NAME, w: 520, h: 360,
     // CLEAR OF THE DESKTOP'S ICON COLUMN: see `WIN_ORIGIN_X` in src/libos/std.mjs.
     x: env.std.WIN_ORIGIN_X, y: env.std.WIN_ORIGIN_Y,
   });
@@ -119,11 +230,50 @@ export function run(env) {
     return 0;
   };
 
-  const pattern = draw(testPattern());
-  if (pattern < 0) {
+  /** Replay the journal onto a fresh surface. `win_draw` splits a list longer than `DL_MAX_OPS`
+   *  into one syscall per batch (`src/libos/syscall.mjs`), so the whole drawing goes in one call
+   *  and the clear leads it — the new canvas starts transparent, not paper. */
+  const replay = () => {
+    const ops = [{ op: DL_CLEAR, a0: PAPER }];
+    for (const m of marks) ops.push(opsForMark(m, scale));
+    account.replays += 1;
+    return draw(ops);
+  };
+
+  /** Journal a mark and return it, evicting the oldest when the journal is full. See WHAT A READER
+   *  LOSES. The mark is returned so the live op and the journal entry cannot drift: one call site
+   *  produces both. */
+  const remember = (m) => {
+    marks.push(m);
+    // COUNTED SEPARATELY, because the scale is not known until the page's first geometry report
+    // and a mark made before it is in the startup store's pixels rather than CSS pixels. The
+    // window is one animation frame wide — the host reports at window creation — so the figure is
+    // normally 0, and a non-zero one is what a reader should be shown rather than a shifted
+    // stroke with no explanation.
+    if (!known) account.earlyMarks += 1;
+    account.marks = marks.length;
+    if (marks.length > MARKS_MAX) {
+      marks.splice(0, MARKS_EVICT);
+      account.forgotten += MARKS_EVICT;
+      account.marks = marks.length;
+      if (account.forgotten === MARKS_EVICT) {
+        env.std.say(env,
+          `${NAME}: past ${MARKS_MAX} marks; the oldest will not survive a resize\n`);
+      }
+    }
+    return m;
+  };
+
+  // THE PATTERN IS `-t`'s ALONE NOW. It is in surface pixels at fixed coordinates and it is not a
+  // mark, so it cannot be replayed — the first re-surface would erase it, and a drawing this
+  // program cannot replay is a drawing it must not put on screen. An interactive run therefore
+  // starts on blank paper. `www/m8.html`'s two pixel probes are unaffected: both read paper
+  // (80,40) and (4, h-4), which the pattern never covered.
+  const first = draw(patternOnly ? testPattern() : [{ op: DL_CLEAR, a0: PAPER }]);
+  if (first < 0) {
     env.win.destroy(made.fd);
     return {
-      exit: 4, ...account, why: `win_draw: ${env.std.errnoName(pattern)}`, errno: -pattern,
+      exit: 4, ...account, why: `win_draw: ${env.std.errnoName(first)}`, errno: -first,
     };
   }
   if (patternOnly) {
@@ -135,7 +285,8 @@ export function run(env) {
     return { exit: 0, ...account };
   }
 
-  env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, surface ${w}x${h}\n`);
+  env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, surface ${w}x${h}`
+    + `${pinned ? " (pinned)" : ", following the frame"}\n`);
   env.std.say(env, "drag in the window to draw. 1-6 pick a colour, c clears, q quits.\n");
 
   let ink = INK[1];
@@ -169,6 +320,10 @@ export function run(env) {
     // ONE BATCH PER WAKE, not one per event: a drag arrives as several moves in one read, and a
     // syscall each would be the per-op round trip the display list exists to avoid.
     const ops = [];
+    // ONE RE-SURFACE PER DRAINED BATCH. The kernel replaces a tail client record, so a batch holds
+    // two only when something arrived between two reports — and each one destroys and rebuilds a
+    // canvas, so acting on the intermediate size costs a rebuild for pixels nobody sees.
+    const client = env.std.lastClientEvent(evs);
     for (const ev of evs) {
       if (ev.type === WEV_FOCUS) {
         // COUNTED, because a surfaced window stopped emitting these and nothing noticed: the
@@ -178,17 +333,21 @@ export function run(env) {
       }
       if (ev.type === WEV_POINTER) {
         account.pointers += 1;
-        // `pointerAt` AND NOT `{x: ev.a}`: the record's fields are u32 and a drag that leaves the
-        // surface delivers negative coordinates, which read back as four billion.
-        const at = pointerAt(ev);
+        // `cssPointAt` AND NOT `{x: ev.a}`: the record's fields are u32 and a drag that leaves the
+        // surface delivers negative coordinates, which read back as four billion. The DIVISION is
+        // the other half of the same unit error — a `WEV_POINTER` carries SURFACE pixels
+        // (constraint 223) and a mark is in paper pixels — and at `scale` 1 it is `pointerAt`
+        // exactly, which is why the pinned mode's ops are unchanged.
+        const at = env.std.cssPointAt(ev, scale);
         if (ev.mods & WPTR_DOWN) {
           last = at;
-          // A DOT ON THE DOWN, so a click without a drag still marks the surface. A program that
+          // A DOT ON THE DOWN, so a click without a drag still marks the paper. A program that
           // only drew lines would look broken to anyone who clicked once.
-          ops.push({ op: DL_FILL_RECT, a0: at.x - 1, a1: at.y - 1, a2: 3, a3: 3, a4: ink });
+          ops.push(opsForMark(remember({ kind: MARK_DOT, x: at.x, y: at.y, ink }), scale));
         } else if (ev.mods & WPTR_MOVE) {
           if (last) {
-            ops.push({ op: DL_LINE, a0: last.x, a1: last.y, a2: at.x, a3: at.y, a4: ink, a5: 2 });
+            ops.push(opsForMark(
+              remember({ kind: MARK_LINE, x: last.x, y: last.y, x2: at.x, y2: at.y, ink }), scale));
             account.strokes += 1;
           }
           last = at;
@@ -204,6 +363,11 @@ export function run(env) {
         const ch = String.fromCharCode(bytes[0]);
         if (ch === "q") { account.why = "q"; break; }
         if (ch === "c") {
+          // A CLEAR EMPTIES THE JOURNAL TOO. Anything else would bring the drawing back at the
+          // next resize, which is a clear that did not clear — and it is what bounds the journal
+          // for a session that clears.
+          marks.length = 0;
+          account.marks = 0;
           ops.push({ op: DL_CLEAR, a0: PAPER });
           account.clears += 1;
           continue;
@@ -212,10 +376,65 @@ export function run(env) {
         if (Number.isInteger(pick) && pick >= 1 && pick <= INK.length) ink = INK[pick - 1];
         continue;
       }
+      if (ev.type === WEV_CLIENT) {
+        account.clients += 1;
+        // RECORDED EVEN WHEN NOTHING IS DONE WITH IT, and `clientBoxAt` is the only route to it on
+        // the pinned path, where `std.resurface` is never called. A reader of a pinned run can
+        // then see the box the surface is being stretched to.
+        account.client = clientBoxAt(ev);
+        // A PINNED SURFACE IS THE PROCESS'S OWN CHOICE OF RESOLUTION, so the box is news and not
+        // an instruction. The stretch is what `src/wm/surface.mjs` documents and what
+        // `www/m8.html`'s 4x4 pattern asserts through.
+        if (pinned) continue;
+        if (ev !== client) continue;
+        const got = env.std.resurface(env, made.fd, ev);
+        if (!got.ok) {
+          // THE DRAWING OUTLIVES A REFUSAL. The kernel leaves the previous surface in place
+          // (`WinMgr.surface` mutates nothing until all three gates pass), so the existing scale
+          // and every mark are still correct and the program keeps running at the size it has —
+          // exiting here would destroy a reader's drawing because a window grew past a budget.
+          // The refusal is permanent and MUST NOT be retried, so nothing is scheduled: the next
+          // SMALLER box will raise its own event.
+          account.refusals += 1;
+          // `got.errno` is POSITIVE where every other errno in this file is negative;
+          // `errnoName` takes either sign.
+          account.refused = env.std.errnoName(got.errno);
+          if (account.refusals === 1) {
+            env.std.say(env, `${NAME}: win_surface: ${account.refused}`
+              + `; keeping the ${account.surface.w}x${account.surface.h} surface\n`);
+          }
+          continue;
+        }
+        scale = got.dpr;
+        known = true;
+        account.scale = scale;
+        account.surface = { w: got.w, h: got.h };
+        // THE PENDING BATCH IS SUPERSEDED: every op in it is either a mark the replay carries or a
+        // clear its own leading clear covers, and all of them were built at the OLD scale — so
+        // drawing it after the replay would stamp the same stroke twice, in two places. Under `-R`
+        // the bare clear is the point: see WHY NOT CLIP AND FORGET.
+        ops.length = 0;
+        const sent = noReplay ? draw([{ op: DL_CLEAR, a0: PAPER }]) : replay();
+        if (sent < 0) {
+          account.why = `win_draw: ${env.std.errnoName(sent)}`;
+          break;
+        }
+        continue;
+      }
       if (ev.type === WEV_RESIZE) {
-        // THE SURFACE DOES NOT FOLLOW THE FRAME, and that is deliberate: a surface is the
-        // process's own choice of resolution and the page scales it to the client area. A program
-        // that wants to match its frame asks for a new surface, which is what this counts.
+        // CELLS, NOT PIXELS, so a canvas program has nothing to do with this: `WEV_RESIZE` carries
+        // a terminal's columns and rows, and the kernel suppresses it for any resize that changed
+        // no cell count — which includes resizes that changed every pixel of a surface. The pixel
+        // box arrives as `WEV_CLIENT`, above.
+        //
+        // THIS BRANCH USED TO READ "THE SURFACE DOES NOT FOLLOW THE FRAME, and that is
+        // deliberate". It was true, and M16 ended it. A process could not learn its client box:
+        // the one dpr channel ran page to kernel, the kernel kept only the square, and no event
+        // carried the box — so a program's only honest option was to name its own resolution and
+        // let CSS stretch it. `WEV_CLIENT` carries the box in device pixels with the ratio beside
+        // it, so a surface can BE the client area and the stretch is what a reader sees DURING a
+        // drag rather than for ever after it. The old sentence survives as `-w`/`-h`, which is
+        // still the honest answer for a program that wants its own resolution.
         account.resizes += 1;
         continue;
       }
@@ -235,6 +454,8 @@ export function run(env) {
   const destroyed = env.win.destroy(made.fd);
   account.destroyed = Array.isArray(destroyed) ? destroyed : [];
   account.ms = performance.now() - t0;
-  env.std.say(env, `${NAME}: ${account.why}. ${account.ops} ops in ${account.batches} batches\n`);
+  env.std.say(env, `${NAME}: ${account.why}. ${account.ops} ops in ${account.batches} batches`
+    + `, ${account.marks} marks over ${account.replays} replays`
+    + `${account.forgotten ? `, ${account.forgotten} forgotten` : ""}\n`);
   return { exit: 0, ...account };
 }

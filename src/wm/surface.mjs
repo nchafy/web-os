@@ -29,6 +29,32 @@ const MONO_FAMILY = 'ui-monospace, Menlo, Consolas, monospace';
 /** The pointer flags M8 sends, kept here so the host and this file agree on one spelling. */
 export { WPTR_DOWN, WPTR_UP, WPTR_MOVE } from "../abi.mjs";
 
+/**
+ * M16's FIRST NEGATIVE CONTROL. The canvas is appended with no CSS box of its own, so it renders
+ * at its intrinsic size — the backing store's — and stops being its client area.
+ *
+ * WHAT IT IS ABOUT: the extent contract below. With it on, a program that re-surfaces to the box
+ * the kernel reported still draws into a canvas of the wrong size, so the geometry clause fails
+ * while the re-surface, the row count and the pixel extent all hold. A control satisfied by any
+ * of M16's four causes would verify none of them.
+ *
+ * MODULE-LEVEL, which is `src/wm/window.mjs`'s shape for `geometryControls` and its reason: the
+ * headline path reads a plain boolean, and nothing here is reachable from a process.
+ */
+let surfaceControls = { noFill: false };
+
+export function setSurfaceControls(opts = {}) {
+  surfaceControls = { noFill: opts.noFill === true };
+  return { ...surfaceControls };
+}
+
+/** What is in force, read back out of the module that owns it rather than out of a page's own
+ *  query parsing. A control a check believed was on and was not is a green run over an
+ *  unmodified world. */
+export function surfaceControlsInForce() {
+  return { ...surfaceControls };
+}
+
 export class Surface {
   /** `spec.into` is the window's client area. The canvas is sized in DEVICE pixels — the size the
    *  process asked for — and scaled to fill the client area by CSS, so a process that asks for a
@@ -52,6 +78,25 @@ export class Surface {
     canvas.tabIndex = 0;
     canvas.setAttribute("role", "img");
     canvas.setAttribute("aria-label", spec.label || "Window surface");
+    /* THE CANVAS FILLS ITS CLIENT AREA, AND THIS IS NOT A SKIN CHOICE. The kernel accounts the
+     * area it granted (`docs/DECISIONS.md` D31) and the governor accounts the ring around it
+     * (constraint 49), so a canvas whose CSS box is not its client area makes both accounts
+     * describe a rectangle nobody renders. Set INLINE rather than in a stylesheet because five
+     * hosts render a surface — `src/wm/aero.mjs` and four unskinned proof pages — and a fact with
+     * five renderers has none. Recorded as proposed D40, because `src/wm/window.mjs`'s standing
+     * rule is that the frame names nothing about how it looks: an extent is not a look.
+     *
+     * BOTH AXES, AND THE HORIZONTAL ONE IS A DIFFERENT MECHANISM. `.window-body` is a flex row, so
+     * a canvas in it is a flex item whose `min-width: auto` resolves to its INTRINSIC width — the
+     * backing store's. Without `minWidth: 0` the item refuses to shrink below it and the client
+     * area clips the right-hand side instead of scaling it, which a `width: 100%` alone cannot
+     * fix. `flex` and `minHeight` are the vertical half of the same statement. */
+    if (!surfaceControls.noFill) {
+      Object.assign(canvas.style, {
+        display: "block", flex: "1 1 auto", minWidth: "0", minHeight: "0",
+        width: "100%", height: "100%",
+      });
+    }
     spec.into.append(canvas);
     this.el = canvas;
     // `alpha: false` is NOT used: a surface a process has not cleared should show as transparent
@@ -185,6 +230,34 @@ export class Surface {
     };
   }
 
+  /**
+   * THE CANVAS'S CSS BOX, AND THE CLIENT AREA IT IS MEANT TO FILL. Both in CSS px, both measured.
+   *
+   * Two readings of one fact on purpose, which is `WinHost.report`'s rule for the blocked set: the
+   * constructor DECLARES that the canvas fills its client area, and a declaration that is in force
+   * and one that is overridden look the same in the source. This is the reading that answers it.
+   *
+   * `clientWidth`/`clientHeight` and not the parent's own rect: the rect is the BORDER box and
+   * `.aero-desktop .window-body` carries a `border-top: 1px solid` (`src/wm/aero.mjs`), so the
+   * rect is a pixel taller than the box the canvas fills.
+   *
+   * THE TOLERANCE IS THE CHECK'S AND NOT THIS METHOD'S. A `DOMRect`'s fields are doubles
+   * (<https://drafts.fxtf.org/geometry/#dom-domrect>) and `clientWidth` is rounded to an integer
+   * (<https://drafts.csswg.org/cssom-view/#dom-element-clientwidth>), so the two differ by up to a
+   * pixel on any fractional layout. An exact-equality assertion over them fails where nothing is
+   * wrong, and would fail in Firefox at dpr 1 (constraint 264).
+   */
+  extent() {
+    const r = this.el.getBoundingClientRect();
+    const into = this.el.parentElement;
+    return {
+      cssW: r.width,
+      cssH: r.height,
+      clientW: into ? into.clientWidth : 0,
+      clientH: into ? into.clientHeight : 0,
+    };
+  }
+
   destroy() {
     this.el.remove();
   }
@@ -192,6 +265,7 @@ export class Surface {
   report() {
     return {
       w: this.w, h: this.h, ops: this.ops, batches: this.batches, unknown: this.unknown,
+      extent: this.extent(),
     };
   }
 }
