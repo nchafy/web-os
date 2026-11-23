@@ -2854,3 +2854,72 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     and `--prove-failure` parks a window on the icon column to show it can fail — in that world
     every double-click reports opening nothing, which is the reader's own report reproduced on
     demand.
+293. **A DISPLAY LIST NEEDS A TEXT OP, AND A TEXT RUN IS A HEADER PLUS CONTINUATION RECORDS.**
+    "A display list has no text op" was stated in `CLAUDE.md` for four milestones and used in two
+    arguments — why the taskbar is page-side (D39) and why a process cannot draw a desktop. Both
+    still hold: a shell needs hover, menus and a rubber band, none of which is a drawing op. What
+    did not hold is the consequence a reader hit. `src/bin/files.mjs` could draw a row and not what
+    the row WAS, so the file manager was columns of amber and blue stripes and the reply was "the
+    file system view is not correct". A GUI whose windows cannot render a string cannot have a list
+    in it, and a task manager was unwritable for the same reason.
+    **A RECORD IS 32 BYTES AND A STRING IS NOT**, so the three candidates were a string table
+    appended to the batch (changes the call's payload shape, which the kernel counts in records), a
+    kernel-side intern table (new calls, new state, a lifetime to get wrong), and CONTINUATION
+    RECORDS. The last is purely additive: the batch stays a whole number of fixed-size ops, the
+    kernel still counts records without interpreting them, and `DL_MAX_OPS` already bounds a call
+    at 2,048 records — one header plus 24 bytes of UTF-8 each. `encodeTextRun` and `textOfOps` in
+    `src/abi.mjs` are declared inverses and the selfTest asserts the round trip, including the two
+    cases the arithmetic gets wrong first: a run that exactly fills its last record, and a
+    multi-byte character, whose UTF-8 length is not its string length.
+    **A HEADER WHOSE DATA IS MISSING IS REFUSED WHOLE**, by the kernel, before anything is drawn:
+    half a filename reads as a filename and nothing downstream could tell it from the real one. It
+    is the only interpretation the kernel does of a display list, and it is validation and not
+    rendering — `src/wm/surface.mjs` is still the one renderer, and it uses the same codec so the
+    two are not forming separate opinions about the encoding.
+294. **A LIST VIEW WITH NO WHEEL EVENT MUST STATE ITS OVERFLOW, NOT GROW.** `/usr/bin` is 32
+    entries, which at a 22 px row is a 736 px surface — a window taller than the work area with its
+    last rows under the taskbar. The window ABI delivers `WPTR_DOWN`, `WPTR_UP` and `WPTR_MOVE` and
+    no wheel, so a scrollbar would be a control the program cannot receive input for: the
+    live-looking-button defect M11 already recorded. So the surface is capped at `MAX_ROWS` and the
+    remainder is SAID — "+8 more — run `ls /usr/bin` to see them all" — because eight files that do
+    not appear to exist is worse than eight files named as absent.
+    **AND A TYPE COLUMN MUST CARRY INFORMATION.** The first legible version printed `fmt?0` on
+    every row of `/usr/bin`, which is `fmtName(0)` for a file whose extension nothing maps — that
+    is every program in the system. One `lstat` per row buys the execute bit, which is what `ls -l`
+    already costs, and the column reads DIR, a format name, PROG, or a dash in that order of
+    specificity. The format is shown where there is one because the format is what decides whether
+    the row can be DRAGGED, so what a reader sees is what governs the gesture.
+295. **A HOVER FLYOUT AND ITS BUTTON ARE ONE HOVER TARGET, WITH A GAP BETWEEN THEM.** The taskbar's
+    thumbnail panel sits `TASKBAR_H + 6` px above the bar, so moving the pointer from a button up to
+    a thumbnail crosses pixels over NEITHER element — and `pointerleave` on the button closed the
+    panel at once, so it closed in that gap every time. Reported as "unable to scroll up to focus
+    on a specific process": there was nothing to scroll, the panel was being taken away mid-gesture.
+    The close is SCHEDULED (`HOVER_CLOSE_MS`) and entering either the button or the panel cancels
+    it, which is what Windows 7 does with the same flyout. `bench/m14-shell/firefox-hover.py` does
+    the gesture and `--prove-failure` restores the instant close — in that world the panel is
+    reported GONE after the crossing, which is the reader's report reproduced on demand.
+    **AND THE CONTROL HAD TO BE ARMED AFTER THE SPAWN**: `Taskbar.sync` rebuilds the button band
+    when a window appears, so listeners attached before it are on elements that no longer exist.
+    The first version of that control broke nothing, and the gate said so rather than passing.
+296. **`/dev/null` TAKES A WRITE, AND IT IS THE ONLY ROW OF A GENERATED MOUNT THAT MAY.**
+    `cmd > /dev/null` is the most-used redirection a shell has and it answered EROFS: `/dev` is a
+    `SynthFS` with `mutErrno: "EROFS"`, so every row refused a write-open. Found while writing a
+    task-manager gate that needed a deliberately busy process — `yes > /dev/null &` failed at the
+    open, so there was no busy process and the column under test had nothing in it.
+    **IT REUSES `makeSink`, WHICH IS NOT THE MECHANISM M7 DELETED.** That was `/dev/console`: a name
+    that opened to a KERNEL OBJECT, with a lifetime and a window behind it, and it went because
+    `win_create` replaced its only caller (constraint 211). A sink has no object, no lifetime and no
+    capability — it is a counter and an FNV checksum — so the exception is "this one name accepts
+    bytes and forgets them", which is the whole semantics of the device. The checksum is why it is
+    not a no-op: a sink that ignored its buffer would be visible as one.
+    **THREE LAYERS HAD TO AGREE AND THE FIRST TWO ATTEMPTS MISSED ONE EACH.** `openDecision`
+    refuses `wantW`; a shell's `>` also passes `O_CREAT`, which the first fix did not excuse; and
+    `calls.mjs` refuses a write to a read-only MOUNT *before* consulting the filesystem at all,
+    which the second fix did not reach. The rule stays at the mount — it is a property of the mount
+    — and the exception is the filesystem's to declare, through `SynthFS.isSink`, because "which of
+    my rows is a sink" is not something that call site can know.
+    **THE EXCEPTION IS EXACTLY ONE ROW, AND THAT IS ASSERTED**: `echo x > /dev/trace` still answers
+    EROFS in `bench/m14-shell/coreutils.py`, which is what makes this a declared sink rather than a
+    mount that quietly stopped being read-only. And `truncate("/dev/null")` now REACHES a guard in
+    `calls.mjs` that was unreachable and said so — it refuses, correctly, because the lines below it
+    hand the decision to the blob store and a synthetic decision has no blob.

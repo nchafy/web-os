@@ -14,6 +14,7 @@ import {
   SIGPIPE, SIGABRT, SIGQUIT, SIGILL, SIGSEGV,
   SIG_DFL, SIG_IGN, SIG_HANDLE, F_PIPE_R, F_PIPE_W, MAX_INLINE, SPAWN_DUP2,
   ENOEXEC, SYS_NAME, decodeSpawnRequest, STAT_EXITED, STAT_KILLED, ABI_FINGERPRINT, packI64,
+  SYS_read, SYS_write, SYS_pread, SYS_pwrite,
 } from "../abi.mjs";
 import { ProcTable, RUNNING, ZOMBIE, SPAWNING } from "./table.mjs";
 import {
@@ -239,6 +240,18 @@ function finish(p, r) {
     answeredDuringCall += 1;
     return;
   }
+  /* THE I/O COUNTERS, HERE AND NOT IN THE HANDLERS. A `read` answers with the number of bytes it
+   * moved, so the return value IS the measurement — and this is the one funnel every answered call
+   * passes through, which is the same argument the `pollWakeAll` below is hooked here for: a new
+   * read-shaped call cannot forget to account itself.
+   *
+   * A NEGATIVE RETURN IS AN ERRNO AND NOT A COUNT, so only a non-negative one is added; an
+   * `EAGAIN` would otherwise subtract eleven bytes from a process's total. */
+  if (r >= 0 && p.inflight) {
+    const nr = p.inflight.nr;
+    if (nr === SYS_read || nr === SYS_pread) p.readBytes += r;
+    else if (nr === SYS_write || nr === SYS_pwrite) p.writeBytes += r;
+  }
   if (r < 0) reply(p, r, -1);
   else reply(p, r, p.r1 | 0, ST_RETURN, p.rlen | 0);
 }
@@ -379,7 +392,10 @@ function onSyscall(p, posted) {
   p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
-  kServiceMs += now() - tIn;
+  const spent = now() - tIn;
+  kServiceMs += spent;
+  // PER PROCESS AS WELL AS GLOBALLY: the same measurement, attributed. See `Slot.serviceMs`.
+  p.serviceMs += spent;
   kCalls += 1;
 }
 
@@ -410,7 +426,10 @@ function onSyscallNoDepth(p, posted) {
   p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
-  kServiceMs += now() - tIn;
+  const spent = now() - tIn;
+  kServiceMs += spent;
+  // PER PROCESS AS WELL AS GLOBALLY: the same measurement, attributed. See `Slot.serviceMs`.
+  p.serviceMs += spent;
   kCalls += 1;
 }
 
@@ -438,7 +457,10 @@ function onSyscallNoSigpend(p, posted) {
   p.r1 = 0;
   const r = h(p);
   if (r !== PENDING) finish(p, r);
-  kServiceMs += now() - tIn;
+  const spent = now() - tIn;
+  kServiceMs += spent;
+  // PER PROCESS AS WELL AS GLOBALLY: the same measurement, attributed. See `Slot.serviceMs`.
+  p.serviceMs += spent;
   kCalls += 1;
 }
 

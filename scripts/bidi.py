@@ -162,7 +162,7 @@ class Firefox:
         self.call("browsingContext.navigate",
                   {"context": self.ctx, "url": url, "wait": wait})
 
-    def evaluate(self, expression: str):
+    def evaluate(self, expression: str, *, raw: bool = False):
         """Evaluate in the page. A JSON string comes back parsed, which is how the pages report.
 
         THE EXPRESSION SHOULD RETURN A STRING for anything structured. BiDi serialises an object
@@ -177,9 +177,17 @@ class Firefox:
         value = out.get("result") or {}
         if value.get("type") == "string":
             text = value.get("value", "")
-            if text[:1] in "{[" or text in ("null", "true", "false"):
+            if raw:
+                return text
+            # AUTO-PARSING GUESSES, SO IT MUST NOT CRASH WHEN IT GUESSES WRONG. It used to parse
+            # anything beginning with `{` or `[`, which a terminal's own screen text can - reading
+            # a pty back through this raised JSONDecodeError on page content that was never meant
+            # to be JSON. A failed parse is the string, and a caller that knows it wants text
+            # passes `raw=True`.
+            try:
                 return json.loads(text)
-            return text
+            except (ValueError, TypeError):
+                return text
         return value.get("value")
 
     # ---- real input ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ checks is a wish.
 | M12 | The blur governor | 3 | 0.5 | ✅ done — **ACCEPT**, 27 expectations, 3 controls, 32 host checks, 1 real-prompt run, 11 critic findings fixed, and a prerequisite sweep that found the specified gate cannot fire |
 | M13 | The geometry harness | 5 | 0.5 | ✅ done — **ACCEPT**, 38 expectations, 3 controls, 1 product defect found (the resize re-clamp) |
 | M14 | Snap, Superbar, jump lists, tray | 6 | 1 | ✅ done — **ACCEPT**, 51 expectations, 4 controls, and M12's own open item closed by a run |
+| M15 | The shell's own programs: coreutils, a text op, a readable Explorer, a task manager | — | 1 | ✅ done — **ACCEPT**, 4 reader-reported items, 38 prompt cases, a display-list TEXT op (293), and two second copies retired |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **74.5** | **12.75** | **the window half is complete** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -3012,6 +3013,126 @@ question rather than fixed in either direction. It is also the machinery the cri
 was about (the restore point that outlived the return it paid for), so moving when the point is
 taken needs its own proof and its own control, not a nudge. Nothing reported it; it was found while
 checking why a harness printed a box that disagreed with its own state.
+
+## M15 — the shell's own programs · done · 1 day
+
+**WHAT ASKED FOR IT.** Four things, from someone using the desktop rather than reading the plan:
+more core Linux in the terminal, a file system view that is "not correct", a task manager, and
+"when hovering over an app on the task bar, I am unable to go scroll up to focus on a specific
+process". None of the four is in `PLAN.md`; all four are what a working desktop makes askable.
+
+### The hover flyout was taking itself away mid-gesture
+
+There is nothing to scroll. The thumbnail panel sits `TASKBAR_H + 6` px above the bar, and
+`pointerleave` on the button closed it AT ONCE — so the pixels between the button and the panel are
+over neither element, and the panel closed in that gap every time the pointer crossed it. The close
+is scheduled now and entering either half cancels it, which is what Windows 7 does with the same
+flyout. **Constraint 295.**
+
+`bench/m14-shell/firefox-hover.py` performs the crossing and then clicks a thumbnail, asserting the
+window it names came to the front. `--prove-failure` restores the instant close and reports the
+panel GONE after the crossing — the report reproduced on demand. **And the control had to be armed
+AFTER the spawn**: `Taskbar.sync` rebuilds the button band when a window appears, so the first
+version attached listeners to elements that no longer existed and broke nothing. The gate said so
+rather than passing, which is the second time in two days that a control's own declaration was the
+thing that was wrong.
+
+### `mkdir: command not found`
+
+Twelve programs: `mkdir -p`, `rmdir`, `rm -rf`, `cp -r`, `mv`, `touch`, `pwd`, `stat`, `df`,
+`tail`, `sort`, `uniq`. Every one is a program over the path group `src/abi.mjs` has had since M3 —
+`mkdir`, `rmdir`, `unlink`, `rename`, `link`, `stat`, `chmod`, `truncate`, `statfs` — so **nothing
+below the ABI changed to add them**. What was missing was the programs and their rows in
+`USR_ENTRIES`.
+
+TWO OF THEM CANNOT DO WHAT THEIR NAME PROMISES, and say so in their own files rather than pretending:
+`touch` cannot set a timestamp, because this ABI has no `utimes`, and `pwd` reads `/proc/<pid>/cwd`
+because there is no `getcwd` — which makes it a check on whether the cwd crossed `spawn` as well as
+a convenience.
+
+`bench/m14-shell/coreutils.py` runs **38 cases at a real prompt**, through a pty and a real shell,
+and every case carries its own negative half: `mkdir` is checked by `ls` seeing the directory AND by
+`mkdir` on the same name failing; `rm -r` by the tree going AND by `rmdir` having refused it first.
+Three of the 38 failed on the first run and all three were the TEST's expectations — this system
+prints the errno by name (`EEXIST`, `ENOENT`) where the assertions wanted prose, which is both this
+project's convention and the more precise claim.
+
+### "The file system view is not correct" — it was coloured stripes
+
+`src/bin/files.mjs` drew a 22 px rectangle per entry, coloured by format, with no name on it. That
+was not a styling choice: **the display list had no text op**, so a file manager could draw a row
+and not what the row WAS. A GUI whose windows cannot render a string cannot have a list in it, and
+a task manager was unwritable for the same reason — which is why one ask unblocked the other.
+
+`DL_TEXT` plus `DL_TEXT_DATA` is the answer and it is additive: a header declares the run and
+continuation records carry its bytes, 24 per record, so the batch is still a whole number of
+fixed-size ops and the kernel still counts records without interpreting them. **Constraint 293.**
+The three candidates and why this one: a string table appended to the batch changes the call's
+payload shape, which the kernel counts in records; a kernel-side intern table is new calls, new
+state and a lifetime to get wrong.
+
+**CLAUDE.md SAID "A DISPLAY LIST HAS NO TEXT OP" FOR FOUR MILESTONES, and the argument it was
+load-bearing in survives.** D39 says the shell is page-side because a process could not draw one; a
+shell needs hover, a menu that outlives a button press, and a rubber band, and none of those is a
+drawing op. What the text op bought is a process that can draw a LIST.
+
+Then the file manager showed two more defects the moment it was legible, both visible in one
+screenshot: every row's type read `fmt?0` — `fmtName(0)`, which is every program in `/usr/bin` —
+and 32 rows made a 736 px surface, a window taller than the work area with its last rows under the
+taskbar and **no wheel event to scroll with**. The type column reads DIR / a format name / PROG /
+a dash now, at one `lstat` per row, and the height is capped with the remainder stated:
+"+8 more — run `ls /usr/bin` to see them all". **Constraint 294.**
+
+### A task manager with no CPU column, and why that is the honest version
+
+Windows 7's has one. **This system has no scheduler**: a process is a Worker, the browser decides
+when it runs, and nothing here is told how long it ran for. A "% CPU" column would be a number
+invented in `src/bin/taskmgr.mjs`, and a plausible invented number is worse than an absent one —
+the same argument M11 used for drawing a caption button DISABLED rather than live.
+
+So the columns are what the kernel measures, under names that say what they are. `Slot.serviceMs`
+is the time the KERNEL spent servicing a process's syscalls, attributed at the three dispatch sites
+from the clock `kServiceMs` already used globally; `readBytes` and `writeBytes` are counted in
+`finish`, which is the one funnel every answered call passes through — so a new read-shaped call
+cannot forget to account itself, and a negative return is an errno rather than a count. All three
+are published in `/proc/<pid>/status`, and the window carries the caveat on its own face: "KRNLms
+is kernel time servicing syscalls, not CPU".
+
+IT IS A USERLAND CLIENT OF `/proc` WITH NO PRIVILEGE — the same files `ps` reads. That is the point
+of it being a program: a task manager needing a capability would be evidence the boundary leaks.
+
+### Two second copies retired, and one retired by arriving
+
+`src/bin/files.mjs`'s row geometry was restated in `www/m10.html` and `bench/m10-data/shell.py`,
+and CLAUDE.md listed both with the consequence spelled out — "a drift there arrives as the WRONG
+FILE being dragged, which the run prints". **This milestone moved the rows**, which is that drift
+arriving, so both read `FILES_METRICS` now. The bench script's stated excuse was that it is outside
+the process and cannot import the module; that was true of the PROCESS and false of the page it
+drives.
+
+### What is not done
+
+**THERE IS NO PER-PROCESS MEMORY FIGURE**, and the task manager has no column pretending otherwise.
+`performance.measureUserAgentSpecificMemory` is per-AGENT, so it reports one number for every
+Worker together — attributed to whichever process asked, which is worse than nothing. The surface
+area the kernel accounts (`SURFACE_BUDGET_PX`) is the one memory-shaped figure it genuinely owns.
+
+**NO LIST IN THIS SYSTEM SCROLLS.** `files` and `taskmgr` both cap and state their overflow because
+`WPTR_DOWN`/`UP`/`MOVE` is the whole pointer vocabulary — there is no wheel record in `WEV_*`. That
+is an ABI gap and the honest fix is a wheel event, not a scrollbar drawn in a program that cannot
+receive input for it.
+
+**THE KERNEL'S REFUSAL OF A MALFORMED TEXT RUN IS WIRED BUT NOT DRIVEN.** `textOfOps` returning
+null for a lone header and for a truncated run is asserted in `src/abi.mjs`'s selfTest, and
+`win_draw` uses that same function to answer -EINVAL — so the DECISION is checked and the three
+lines of WIRING are not. Driving it needs a process that sends a deliberately malformed batch, and
+no program here has a reason to; the honest shape is a bench program whose whole job is to send
+one, which is owed rather than done. The renderer's half IS measured: 66 text runs drawn with 0
+unknown ops, read out of the canvas in Firefox.
+
+**THE COREUTILS ARE NOT POSIX-COMPLETE.** `cp` has no `-p`, `sort` has no `-k`, `rm` has no `-i`,
+and there is no `find`, `ln`, `cut`, `tr`, `tee`, `basename`, `dirname`, `date` or `env`. The twelve
+here are the ones a reader hit in the first minute; the gap is a list and not a design problem.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

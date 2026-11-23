@@ -73,6 +73,7 @@ body { background:#101216; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospac
  * CONTROL ?no_drop=1 — a drop is never delivered. Proof 2 must fail entirely and PROOF 1 must
  * hold, because the clipboard has nothing to do with the drag.
  */
+import { FILES_METRICS } from '/src/bin/files.mjs'
 import {
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
   WEV_DROP, WEV_DRAG_ENTER, fmtBit, pixelColor,
@@ -310,11 +311,13 @@ async function pDrag (boot) {
      * program uses: sorted by name, `logo.png` `logo.rgba` `readme.txt`. The row index is published
      * and the check asserts the bytes that arrive, so a wrong guess here fails loudly rather than
      * passing against the wrong file. */
-    const ROW_H = 22
-    const ROW_GAP = 4
-    const PAD = 6
+    /* THE GEOMETRY IS THE PROGRAM'S, IMPORTED. It was restated here — `ROW_H = 22`, `ROW_GAP = 4`
+     * and a `rowMid` of its own — and CLAUDE.md listed it as a known second copy whose drift
+     * "arrives as the WRONG FILE being dragged". M15 moved the rows (a header appeared and the
+     * row shrank), which is that drift arriving, so the copy is gone: `FILES_METRICS.rowMid` is
+     * the function `src/bin/files.mjs` lays its own rows out with. */
     const row = 1          // logo.rgba, second of the three
-    const rowMid = PAD + row * (ROW_H + ROW_GAP) + ROW_H / 2
+    const rowMid = FILES_METRICS.rowMid(row)
     const from = files.surface.clientAt(120, rowMid)
     const to = view.surface.clientAt(100, 100)
     ev.rowMid = rowMid

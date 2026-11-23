@@ -64,18 +64,27 @@ SURFACE_AT = """(() => {
   return JSON.stringify({left: r.left, top: r.top, width: r.width, height: r.height})
 })()"""
 
-#: `src/bin/files.mjs`'s own row geometry, in SURFACE pixels. Restated here because this script is
-#: outside the process and cannot import it; the row INDEX is what is passed in, and the program's
-#: own printed listing is read back to say which file that was — so a drift in these numbers shows
-#: up as the wrong file arriving rather than as a silent miss.
-ROW_H = 22
-ROW_GAP = 4
-PAD = 6
-SURFACE_W = 240
+#: `src/bin/files.mjs`'s OWN row geometry, ASKED FOR RATHER THAN RESTATED.
+#:
+#: This file used to carry `ROW_H = 22` and a `row_mid` of its own, with a note saying it could not
+#: import the program because it is outside the process. That was true of the PROCESS and false of
+#: the page: this script drives a browser, and a browser can import an ES module. M15 moved the
+#: rows — a header appeared and the row shrank by 2 px — which is exactly the drift CLAUDE.md said
+#: would "arrive as the WRONG FILE being dragged", so the copy is gone.
+#:
+#: `FILES_METRICS.rowMid` is the function the program lays its own rows out with.
+ROW_MID_JS = """(async () => {
+  const m = await import('/src/bin/files.mjs')
+  return JSON.stringify({ mid: m.FILES_METRICS.rowMid(%d),
+                          w: m.FILES_METRICS.SURFACE_W })
+})()"""
 
 
-def row_mid(row: int) -> float:
-    return PAD + row * (ROW_H + ROW_GAP) + ROW_H / 2
+def row_mid(page, row: int) -> float:
+    """The program's own middle-of-row-`row`, read out of the program's own module."""
+    raw = page.evaluate(ROW_MID_JS % row, await_promise=True)
+    got = json.loads(raw) if isinstance(raw, str) else raw
+    return float(got["mid"])
 
 
 def main(argv=None) -> int:
@@ -238,9 +247,17 @@ def main(argv=None) -> int:
             d = json.loads(dst)
             # SURFACE PIXELS TO CLIENT PIXELS, through the canvas's own rectangle — the same
             # arithmetic `Surface.clientAt` does inside the page.
-            scale = s["width"] / SURFACE_W
+            # THE SURFACE'S OWN WIDTH, from the program's metrics: a hard-coded 240 here would
+            # scale every coordinate wrongly the moment the program's surface changed size, which
+            # is what M15 did to it.
+            metrics = json.loads(page.evaluate(
+                """(async () => {
+                  const m = await import('/src/bin/files.mjs')
+                  return JSON.stringify({ w: m.FILES_METRICS.SURFACE_W })
+                })()""", await_promise=True))
+            scale = s["width"] / metrics["w"]
             start = {"x": int(s["left"] + 120 * scale),
-                     "y": int(s["top"] + row_mid(args.row) * scale)}
+                     "y": int(s["top"] + row_mid(page, args.row) * scale)}
             end = {"x": int(d["left"] + d["width"] / 2), "y": int(d["top"] + d["height"] / 2)}
             print("drag     %s -> %s" % (json.dumps(start), json.dumps(end)))
 

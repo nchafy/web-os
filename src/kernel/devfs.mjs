@@ -68,5 +68,8 @@ export function makeDevFS(ctx) {
 
   // `/dev/console` was here until M7 and is not a name on this filesystem any more: a window is
   // created by `win_create`, not opened by path (constraint 211).
-  return new SynthFS({ name: "dev", lookup, list, mutErrno: "EROFS" });
+  /* `null` IS THE ONE WRITABLE ROW. `cmd > /dev/null` is the most-used redirection a shell
+   * has and it answered EROFS, so `yes > /dev/null` failed at the open. See the `sinks`
+   * note in src/kernel/synth.mjs for why this is not the mechanism M7 deleted. */
+  return new SynthFS({ name: "dev", lookup, list, mutErrno: "EROFS", sinks: ["null"] });
 }

@@ -55,18 +55,26 @@ function contentLength(content) {
  * "/", so a generator cannot depend on where it was mounted.
  */
 export class SynthFS {
-  /** `mutErrno` is the code every mutation is refused with. */
-  constructor({ name, lookup, list, mutErrno = "EROFS" }) {
+  /** `mutErrno` is the code every mutation is refused with.
+   *
+   *  `sinks` is the set of relative names that may be opened for WRITING, and it exists for one
+   *  row: `/dev/null`. The bytes go nowhere — the description is `makeSink`, with no object and no
+   *  lifetime behind it — which is why this is not the character-device mechanism M7 deleted
+   *  (constraint 211) coming back. Default empty, so every other generated mount is unchanged. */
+  constructor({ name, lookup, list, mutErrno = "EROFS", sinks = [] }) {
     this.name = name;
     this.dev = 0;
     this.#lookup = lookup;
     this.#list = list;
     this.#mutErrno = mutErrno;
+    this.#sinks = new Set(sinks);
   }
 
   #lookup;
   #list;
   #mutErrno;
+
+  #sinks;
 
   setDev(dev) {
     this.dev = dev | 0;
@@ -173,7 +181,15 @@ export class SynthFS {
     // kernel object rather than to bytes, writable on a read-only mount — and it was the only row
     // this mechanism ever had. A window is created by `win_create` now, so the mechanism had no
     // caller and went with its row (constraint 211).
-    if (opts.create || opts.wantW) throw new FsError(this.#mutErrno, rel);
+    /* A SINK ROW TAKES A WRITE-OPEN, and nothing else about it changes: it is still looked up,
+     * still refuses `create`, and still answers `stat` out of its node. `calls.mjs` turns this
+     * flag into an `F_SINK` description. */
+    const isSink = this.isSink(rel);
+    /* `O_CREAT` IS ALLOWED ON A SINK ROW, and missing that was the whole of the first attempt at
+     * this: a shell's `>` opens with O_WRONLY|O_CREAT|O_TRUNC, so `echo hi > /dev/null` still
+     * answered EROFS with only `wantW` excused. The row EXISTS, so creating it is satisfied by
+     * finding it, and truncating something that keeps no bytes is a no-op. */
+    if (!isSink && (opts.create || opts.wantW)) throw new FsError(this.#mutErrno, rel);
     const n = this.#need(rel);
     if (n.type === DIR && !opts.dirOk) throw new FsError("EISDIR", rel);
     if (opts.dirOk && n.type !== DIR) throw new FsError("ENOTDIR", rel);
@@ -184,6 +200,7 @@ export class SynthFS {
     const info = this.#info(rel, n);
     return {
       synth: true,
+      sink: isSink,
       rel,
       type: n.type,
       ino: info.ino,
@@ -191,6 +208,19 @@ export class SynthFS {
       bytes: n.type === DIR ? new Uint8Array(0) : this.bytesAt(rel),
       info,
     };
+  }
+
+  /**
+   * Whether this relative path is a SINK row: one that accepts a write-open and forgets the bytes.
+   *
+   * THE MOUNT-LEVEL CHECK HAS TO ASK. `src/kernel/calls.mjs` refuses a write to a read-only mount
+   * BEFORE it consults the filesystem — correctly, because that is a property of the mount — so a
+   * filesystem with one writable row has to be able to say so, or the row is unreachable. That is
+   * exactly what happened to the first two attempts at `/dev/null`: both were correct inside this
+   * file and both still answered EROFS, because nothing had got this far.
+   */
+  isSink(rel) {
+    return this.#sinks.has(relParts(rel).join("/"));
   }
 
   /** Every mutation, refused in one place with one errno. */

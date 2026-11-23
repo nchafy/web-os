@@ -40,6 +40,21 @@ class Slot {
     this.calls = 0;
     this.replies = 0;
     this.errors = 0;
+    /* WHAT A TASK MANAGER CAN HONESTLY SHOW, and it is not a CPU percentage.
+     *
+     * There is no scheduler here: a process is a Worker and the browser decides when it runs, so
+     * "% CPU" is a number this kernel does not have and would have to invent. What it DOES have is
+     * the time it spent servicing this process's syscalls — measured at dispatch, the same clock
+     * `kServiceMs` already accumulated globally — and the bytes that crossed `read` and `write`.
+     * Those are real, attributable, and what `src/bin/taskmgr.mjs` shows under names that say what
+     * they are: KRNLms and the two byte counts, never "CPU%".
+     *
+     * `serviceMs` is kernel time and NOT this process's own compute: a process spinning in a tight
+     * JS loop makes no syscalls and so accrues none of it. The task manager says so on its face,
+     * because a number whose meaning a reader guesses at is worse than one they are told. */
+    this.serviceMs = 0;
+    this.readBytes = 0;
+    this.writeBytes = 0;
 
     // The exit reason, written once at teardown; waitpid packs it into r1. Two fields and not one
     // int, so a clean exit of 0 stays distinguishable from a kill.

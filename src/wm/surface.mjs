@@ -13,8 +13,18 @@
 // revoked, which M12's blur governor needs.
 
 import {
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, decodeDrawOps, cssColor,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER,
+  decodeDrawOps, cssColor, textOfOps,
 } from "../abi.mjs";
+
+/* THE TWO FAMILIES A DISPLAY LIST CAN ASK FOR, and the only typography in this file. A process
+   names a FAMILY and not a font: it cannot measure one, has no access to what is installed, and a
+   surface that honoured an arbitrary family would let a program's text reflow under it. These
+   match `src/wm/aero.mjs`'s stacks so a surfaced window's text and the chrome around it are the
+   same typeface. */
+const UI_FAMILY = '"Segoe UI", system-ui, -apple-system, sans-serif';
+const MONO_FAMILY = 'ui-monospace, Menlo, Consolas, monospace';
 
 /** The pointer flags M8 sends, kept here so the host and this file agree on one spelling. */
 export { WPTR_DOWN, WPTR_UP, WPTR_MOVE } from "../abi.mjs";
@@ -31,6 +41,8 @@ export class Surface {
     /** Ops this renderer did not know. COUNTED AND NOT IGNORED: a page that silently dropped an
      *  op a newer process sent would make a version mismatch look like a drawing bug. */
     this.unknown = 0;
+    /** How many text RUNS were drawn, which a check reads back. */
+    this.text = 0;
     const canvas = document.createElement("canvas");
     canvas.className = "surface";
     canvas.width = this.w;
@@ -61,7 +73,10 @@ export class Surface {
      * garbage (`CLAUDE.md`, harness honesty). */
     const ops = decodeDrawOps(bytes, bytes.length);
     this.batches += 1;
-    for (const op of ops) {
+    /* INDEXED, because a text run is a header plus continuation records and the header has to
+     * skip past its own data (`textOfOps` says how many). A `for..of` could not. */
+    for (let i = 0; i < ops.length; i += 1) {
+      const op = ops[i];
       this.ops += 1;
       switch (op.op) {
         case DL_CLEAR:
@@ -89,6 +104,40 @@ export class Surface {
           this.g.moveTo(op.a0 + 0.5, op.a1 + 0.5);
           this.g.lineTo(op.a2 + 0.5, op.a3 + 0.5);
           this.g.stroke();
+          break;
+        case DL_TEXT: {
+          /* THE ONE PLACE A STRING BECOMES PIXELS. `textOfOps` is the declared inverse of the
+           * program's `encodeTextRun`, and it returns null for a run whose data records are
+           * missing — in which case NOTHING is drawn and the batch is counted as unknown, because
+           * half a filename reads as a filename. The kernel refuses such a batch before it gets
+           * here (constraint 293); this is the second line of that same argument. */
+          const got = textOfOps(ops, i);
+          if (!got) {
+            this.unknown += 1;
+            break;
+          }
+          const size = Math.max(1, op.a2 | 0);
+          const weight = op.flags & DLT_BOLD ? "bold " : "";
+          const family = op.flags & DLT_MONO ? MONO_FAMILY : UI_FAMILY;
+          this.g.font = `${weight}${size}px ${family}`;
+          this.g.fillStyle = cssColor(op.a4);
+          // TOP-LEFT AND NOT A BASELINE. A list row's y is the top of the row — that is what a
+          // program computing `row * ROW_H` has — and asking it to know a font's ascent would put
+          // the one piece of typography a process cannot measure into every caller.
+          this.g.textBaseline = "top";
+          this.g.textAlign = op.flags & DLT_RIGHT ? "right"
+            : op.flags & DLT_CENTER ? "center" : "left";
+          this.g.fillText(got.text, op.a0, op.a1);
+          this.text += 1;
+          // SKIP THE DATA RECORDS. They are part of this op, not ops of their own, so the loop
+          // must not fall through to the `default` below and count each as unknown.
+          i += got.records - 1;
+          break;
+        }
+        case DL_TEXT_DATA:
+          /* REACHED ONLY WHEN A DATA RECORD HAD NO HEADER, because a well-formed run is skipped
+           * past above. That is a malformed batch, and it is counted rather than drawn. */
+          this.unknown += 1;
           break;
         default:
           this.unknown += 1;

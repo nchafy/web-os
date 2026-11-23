@@ -55,7 +55,7 @@ const BIN_DIR = "/usr/bin";
  * rather than a row that silently does nothing.
  */
 const OPENS_OWN_WINDOW = new Set([
-  "term", "winopen", "files", "imgview", "paint", "editor", NAME,
+  "term", "winopen", "files", "imgview", "paint", "editor", "taskmgr", NAME,
 ]);
 
 /** Programs the menu does not list. ONE ENTRY AND A REASON: a second `desktop` is refused by the

@@ -30,6 +30,16 @@ const PID_FILES = {
     `fds:\t${countFds(slot)}`,
     `calls:\t${slot.calls}`,
     `replies:\t${slot.replies}`,
+    /* WHAT A TASK MANAGER READS, and why these three and not a CPU percentage. There is no
+     * scheduler here — a process is a Worker and the browser decides when it runs — so the kernel
+     * publishes the time IT spent on this process's calls, and the bytes that crossed `read` and
+     * `write`. Real, attributable, and named for what they are (`Slot.serviceMs`).
+     *
+     * ROUNDED TO 3 DECIMALS: `performance.now()` is sub-microsecond and a status file with
+     * seventeen significant figures in it is a file nobody can read. */
+    `kernelms:\t${slot.serviceMs.toFixed(3)}`,
+    `readbytes:\t${slot.readBytes}`,
+    `writebytes:\t${slot.writeBytes}`,
     // THE CALL THIS PROCESS IS PARKED IN, or -1. `state` is `running` for everything that is not a
     // zombie, so without this "blocked in `read`" is indistinguishable from "has not exited".
     // `calls` minus `replies` gives the DEPTH; this gives the IDENTITY.

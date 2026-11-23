@@ -209,6 +209,8 @@ row below rather than restate it.
 | The largest inline payload | `MAX_INLINE` in `src/abi.mjs`. Program read buffers are sized from it, never from 65536 |
 | The trace render limit | `TRACE_RENDER_LIMIT` in `src/kernel/devfs.mjs`. `/dev/trace` and the page's `trace-read` are one renderer, so they are one limit |
 | A window's event queue and its record | `WIN_EVENT_CAP` and `WEV_*` + `encodeWinEvent`/`decodeWinEvent`/`keyBytesOf`/`packKeyBytes` in `src/abi.mjs`. The kernel writes the record and the libos reads it, which is the two sides |
+| A text run in a display list | `DL_TEXT` + `DL_TEXT_DATA`, `DLT_*` and `encodeTextRun`/`textOfOps`/`textOpCount` in `src/abi.mjs`. A header plus continuation records, because a record is 32 bytes and a string is not; the two functions are declared inverses and the selfTest asserts the round trip. The kernel validates a run with the SAME codec the renderer draws it with (constraint 293) |
+| `src/bin/files.mjs`'s row geometry | `FILES_METRICS` in that file, exported. `rowMid` is what a driver outside the process reads — `www/m10.html` and `bench/m10-data/shell.py` both restated it until M15 moved the rows and the drift arrived exactly as CLAUDE.md predicted (the wrong file dragged) |
 | A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
 | What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
 | The surface budget | `SURFACE_BUDGET_PX` and `SURFACE_MAX_PX` in `src/abi.mjs`; the accounting is `WinMgr.surface`/`releaseSurface` in `src/kernel/wins.mjs` and nowhere else |
@@ -247,12 +249,14 @@ row below rather than restate it.
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
 `src/fs/vfs.mjs` and `src/bin/ls.mjs`; the `crossOriginIsolated` abort gate and `out`/`say` are
 pasted into nine `www/*.html` pages; `class Serving` and `chrome_full_version` are duplicated
-between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; `src/bin/files.mjs`'s row
-geometry is restated in `bench/m10-data/shell.py`, which is outside the process and cannot import
-it — a drift there arrives as the WRONG FILE being dragged, which the run prints; and four files hand-roll
+between `bench/fs-core/probe.py` and `bench/syscall-contention/probe.py`; and four files hand-roll
 the CDP connect sequence that `scripts/cdp.py` already provides. **One row left this list in M14**:
 `src/bin/clip.mjs`'s own open-slurp-close loop became `std.readFileBytes` when `imgview -f` needed
-the same three lines.
+the same three lines. **TWO MORE LEFT IT IN M15, and the second one left by arriving**:
+`src/bin/files.mjs`'s row geometry was restated in `www/m10.html` and `bench/m10-data/shell.py`
+with a note saying a drift "arrives as the WRONG FILE being dragged" — then M15 moved the rows, so
+both read `FILES_METRICS` now. The bench script's excuse was that it is outside the process and
+cannot import the module; that was true of the PROCESS and false of the page it drives.
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 
 ## Architecture rules
@@ -280,8 +284,11 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
   needed: the page already holds every window's frame — `win-create` built it, `win-stack` ordered
   it — and a shell reading facts the page was already told adds no capability to anything. A
   taskbar as a *process* would still need that second endpoint, and a process could not draw one
-  anyway: the display list has no text op and no image op, and a `WEV_POINTER` arrives only while a
-  button is down. **What keeps the division honest is that the shell's CONTENTS are a process's**:
+  anyway: the display list had no text op and no image op, and a `WEV_POINTER` arrives only while a
+  button is down. **M15 ADDED A TEXT OP (constraint 293) and the conclusion is unchanged**: a shell
+  needs hover, a menu that outlives a button press, and a rubber band, and none of those is a
+  drawing op. What the text op bought is a process that can draw a LIST — `files` and `taskmgr` —
+  which is what the missing op had actually been costing. **What keeps the division honest is that the shell's CONTENTS are a process's**:
   `src/bin/desktop.mjs` reads the filesystem and publishes rows through `win_items`, and
   `scripts/check.py --negative no-items` is the run that tells that apart from a page drawing a
   hard-coded menu. (constraints 275, 223)
@@ -520,6 +527,9 @@ scripts/check_pages.py --prove-failure  # ...and it MUST report the redeclaratio
 scripts/bidi.py                     # FIREFOX WITH REAL TRUSTED INPUT, over WebDriver BiDi
 python3 bench/m14-shell/firefox-drive.py  # CAN A READER OPEN ANYTHING? the launchers, in Firefox
 python3 bench/m14-shell/firefox-drive.py --prove-failure  # ...and the world where they cannot
+python3 bench/m14-shell/firefox-hover.py  # CAN THE POINTER REACH A THUMBNAIL? the flyout, crossed
+python3 bench/m14-shell/firefox-hover.py --prove-failure  # ...with no grace period, it cannot
+python3 bench/m14-shell/coreutils.py      # mkdir, rm -r, cp, mv, sort, uniq at a REAL prompt
 python3 bench/coep-tiles/probe.py   # the worked example: a real harness with a negative control
 ```
 

@@ -596,7 +596,41 @@ const INTS = {
   DL_FILL_RECT: 2,      // a0..a3 = x, y, w, h; a4 = rgba
   DL_STROKE_RECT: 3,    // a0..a3 = x, y, w, h; a4 = rgba; a5 = line width
   DL_LINE: 4,           // a0..a3 = x0, y0, x1, y1; a4 = rgba; a5 = line width
-  DL_MAX: 4,
+
+  /*
+   * TEXT, AND WHY IT IS TWO OPS.
+   *
+   * CLAUDE.md said for four milestones that "a display list has no text op", and that sentence was
+   * load-bearing in two arguments: why the taskbar is page-side (D39) and why a process cannot draw
+   * a desktop. Both still hold — a shell needs hover, menus and a rubber band, none of which is a
+   * drawing op. What did NOT hold is the consequence a reader hit: `files` could draw a row and not
+   * its NAME, so the file manager was columns of coloured bars, and a task manager was unwritable.
+   * A GUI whose windows cannot render a string cannot have a list in it.
+   *
+   * A RECORD IS 32 BYTES AND A STRING IS NOT. The three ways out were a string table appended to
+   * the batch (changes the call's payload shape, and the kernel counts records), a kernel-side
+   * intern table (new calls, new kernel state, a lifetime to get wrong), or CONTINUATION RECORDS.
+   * The last one is additive: the batch is still a whole number of fixed-size ops, the kernel still
+   * counts records without interpreting them, and `DL_MAX_OPS` already bounds how much text a
+   * single call can carry (2,048 records — one header plus 24 bytes of UTF-8 each).
+   *
+   * `DL_TEXT` declares the run and `DL_TEXT_DATA` carries its bytes, in a0..a5 as six little-endian
+   * u32 words — 24 bytes per record, `ceil(len / 24)` of them, immediately after the header. A
+   * header whose data records are missing or short is REFUSED by the kernel rather than drawn
+   * partially (constraint 293): half a filename is a filename, and a reader cannot tell it from the
+   * real one.
+   */
+  DL_TEXT: 5,           // a0,a1 = x,y (TOP-left); a2 = px size; a3 = byte length; a4 = rgba
+  DL_TEXT_DATA: 6,      // a0..a5 = 24 bytes of UTF-8, little-endian words
+  DL_MAX: 6,
+
+  //: `DL_TEXT`'s flags. A FAMILY AND AN ALIGNMENT, which is everything a list needs and nothing
+  //: more: a column of numbers has to be right-aligned to be comparable, and a monospace run is
+  //: how a size or a pid lines up at all. Bold is the one weight a caption or a header needs.
+  DLT_BOLD: 1,
+  DLT_MONO: 2,
+  DLT_RIGHT: 4,
+  DLT_CENTER: 8,
 
   /** How many ops one `win_draw` may carry. Derived from MAX_INLINE and the record size at the
    *  bottom of this file, never written as a number twice. */
@@ -889,7 +923,8 @@ export const {
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_MAX,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_MAX,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER,
   SURFACE_BUDGET_PX, SURFACE_MAX_PX,
   WIN_CAP_H, WIN_INSET, BLUR_OFF_AT, BLUR_ON_AT,
 } = INTS;
@@ -1565,6 +1600,82 @@ export function decodeDrawOps(bytes, length = bytes.length) {
   return out;
 }
 
+/** How many bytes of text one `DL_TEXT_DATA` record carries: the six argument words. Derived, so
+ *  a change to the record's shape moves the writer and the reader together. */
+export const DL_TEXT_BYTES_PER_OP = 24;
+
+/** How many records a run of `len` bytes needs, header included. The caller sizes a batch with
+ *  this rather than guessing, and the kernel validates against it. */
+export function textOpCount(len) {
+  return 1 + Math.ceil((len | 0) / DL_TEXT_BYTES_PER_OP);
+}
+
+/**
+ * ONE TEXT RUN, AS THE RECORDS IT IS MADE OF. The encoder every program uses, so no program packs
+ * continuation bytes by hand — and the one place the packing is written, which is what lets
+ * `textOfOps` below be its declared inverse.
+ *
+ * Returns an array of op objects for `encodeDrawOp`. The byte length is the UTF-8 length and not
+ * the string's, because a two-byte character in a filename would otherwise make the header
+ * disagree with its own data.
+ */
+export function encodeTextRun(text, { x, y, size, rgba, flags = 0 }) {
+  const bytes = new TextEncoder().encode(String(text));
+  const out = [{
+    op: DL_TEXT, flags: flags & 0xffff,
+    a0: x | 0, a1: y | 0, a2: size | 0, a3: bytes.length, a4: rgba | 0, a5: 0,
+  }];
+  for (let at = 0; at < bytes.length; at += DL_TEXT_BYTES_PER_OP) {
+    const chunk = bytes.subarray(at, at + DL_TEXT_BYTES_PER_OP);
+    const words = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < chunk.length; i += 1) {
+      // LITTLE-ENDIAN WORDS, matching how `encodeDrawOp` writes every other argument. A reader
+      // that assumed the other order would render the bytes of each word reversed, which is
+      // legible enough to be missed.
+      words[i >> 2] |= chunk[i] << ((i & 3) * 8);
+    }
+    out.push({
+      op: DL_TEXT_DATA, flags: 0,
+      a0: words[0] | 0, a1: words[1] | 0, a2: words[2] | 0,
+      a3: words[3] | 0, a4: words[4] | 0, a5: words[5] | 0,
+    });
+  }
+  return out;
+}
+
+/**
+ * The declared INVERSE of `encodeTextRun`: the string a `DL_TEXT` header at `index` carries, read
+ * out of the records that follow it.
+ *
+ * Returns `{ text, records }` — `records` counts the header and its data, so a renderer can skip
+ * past them — or `null` when the data is missing or short. NULL AND NOT A PARTIAL STRING: half a
+ * filename is a filename, and nothing downstream could tell it from the real one. The kernel
+ * refuses such a batch (constraint 293); this returns null so a renderer that somehow sees one
+ * draws nothing rather than a lie.
+ */
+export function textOfOps(ops, index) {
+  const head = ops[index];
+  if (!head || head.op !== DL_TEXT) return null;
+  const len = head.a3 | 0;
+  if (len < 0) return null;
+  const need = Math.ceil(len / DL_TEXT_BYTES_PER_OP);
+  // The data records are at index+1..index+need, so the last must be inside the array.
+  if (index + need >= ops.length) return null;
+  const bytes = new Uint8Array(len);
+  let wrote = 0;
+  for (let i = 1; i <= need; i += 1) {
+    const rec = ops[index + i];
+    if (!rec || rec.op !== DL_TEXT_DATA) return null;
+    const words = [rec.a0, rec.a1, rec.a2, rec.a3, rec.a4, rec.a5];
+    for (let b = 0; b < DL_TEXT_BYTES_PER_OP && wrote < len; b += 1) {
+      bytes[wrote] = (words[b >> 2] >>> ((b & 3) * 8)) & 0xff;
+      wrote += 1;
+    }
+  }
+  if (wrote !== len) return null;
+  return { text: new TextDecoder().decode(bytes), records: 1 + need };
+}
+
 /* M10's format table, as the three functions every side needs. THE OFFER IS A BITMASK and the bit
    for a format is computed HERE: the kernel builds a mask from a process's request, the event record
    carries it to a target, and the target tests it — three readers of one packing (constraint 240). */
@@ -1989,11 +2100,48 @@ export function selfTest() {
   if (pixelColor(0x0b0d11ff) === cssColor(0x0b0d11ff)) {
     fail("pixelColor and cssColor agree, so one of them is wrong about alpha");
   }
-  const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE];
+  const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA];
   if (new Set(dlOps).size !== dlOps.length) fail("two display-list ops collide");
   if (dlOps.includes(0)) fail("0 is a display-list op: a zeroed buffer would decode as one");
   if (Math.max(...dlOps) !== DL_MAX) fail("DL_MAX is not the largest op");
   if (DL_MAX_OPS < 1024) fail(`a batch holds only ${DL_MAX_OPS} ops`);
+  const dlt = [DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER];
+  if (new Set(dlt).size !== dlt.length) fail("two text flags collide");
+  for (const b of dlt) {
+    if (b === 0 || (b & (b - 1)) !== 0) fail(`text flag ${b} is not a single bit`);
+  }
+
+  /* THE TEXT RUN, THROUGH THE RECORDS AND BACK. `textOfOps` is declared the inverse of
+   * `encodeTextRun`, so the round trip is asserted here rather than trusted — including the two
+   * cases the arithmetic gets wrong first: a run that exactly fills its last record, and a
+   * multi-byte character, whose UTF-8 length is not its string length. */
+  for (const sample of ["", "a", "hello.txt", "x".repeat(DL_TEXT_BYTES_PER_OP),
+                        "x".repeat(DL_TEXT_BYTES_PER_OP + 1), "naïve — ünïcødé ✓",
+                        "y".repeat(200)]) {
+    const run = encodeTextRun(sample, { x: 3, y: 4, size: 11, rgba: 0x102030ff, flags: DLT_MONO });
+    const bytes = new TextEncoder().encode(sample);
+    if (run.length !== textOpCount(bytes.length)) {
+      fail(`encodeTextRun made ${run.length} records for ${bytes.length} bytes, `
+        + `textOpCount says ${textOpCount(bytes.length)}`);
+    }
+    // THROUGH THE WIRE AND NOT THE OBJECTS: the records are encoded and decoded the way a real
+    // batch is, or this would assert over a structure that never crossed the boundary.
+    const buf = new Uint8Array(run.length * DLOP_BYTES);
+    const bdv = new DataView(buf.buffer);
+    run.forEach((op, i) => encodeDrawOp(bdv, i * DLOP_BYTES, op));
+    const back = decodeDrawOps(buf, buf.length);
+    const got = textOfOps(back, 0);
+    if (!got) fail(`textOfOps refused a run it encoded: ${JSON.stringify(sample)}`);
+    else if (got.text !== sample) fail(`text round trip gave ${JSON.stringify(got.text)}`);
+    else if (got.records !== run.length) fail(`textOfOps counted ${got.records} records`);
+    if (back[0].a2 !== 11 || back[0].flags !== DLT_MONO) fail("a text header lost its own fields");
+  }
+  // A HEADER WITH ITS DATA MISSING IS REFUSED, which is what makes the kernel's refusal
+  // (constraint 293) a statement about this codec and not a separate opinion.
+  const lone = [{ op: DL_TEXT, flags: 0, a0: 0, a1: 0, a2: 10, a3: 9, a4: 0, a5: 0 }];
+  if (textOfOps(lone, 0) !== null) fail("textOfOps accepted a header with no data records");
+  const short = encodeTextRun("hello.txt", { x: 0, y: 0, size: 10, rgba: 0 }).slice(0, 1);
+  if (textOfOps(short, 0) !== null) fail("textOfOps accepted a truncated run");
   const wptr = [WPTR_DOWN, WPTR_UP, WPTR_MOVE];
   if (new Set(wptr).size !== 3) fail("two pointer flags collide");
   for (const b of wptr) {

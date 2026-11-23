@@ -17,13 +17,13 @@ import {
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
-  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS,
+  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, decodeDrawOps, textOfOps,
   WMODAL_MAX, WMODE_MAX, decodeWinItems,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
   unpackI64, packI64,
 } from "../abi.mjs";
-import { KIND_OPS } from "./files.mjs";
+import { KIND_OPS, makeSink } from "./files.mjs";
 import { Pipe } from "./pipe.mjs";
 import { Pty } from "./pty.mjs";
 import { errnoOfFsError } from "./store.mjs";
@@ -288,7 +288,12 @@ HANDLERS.open = (p, k) => {
   const wantR = access === O_RDONLY || access === O_RDWR;
   const at = resolveMount(p, k, path);
   if (typeof at === "number") return at;
-  if (((flags & O_CREAT) || wantW) && mountReadOnly(k, at.mount)) return -EROFS;
+  /* A READ-ONLY MOUNT REFUSES A WRITE, WITH ONE DECLARED EXCEPTION THE FILESYSTEM NAMES. `/dev`
+   * is read-only and `/dev/null` has to take a write anyway; the rule stays here and the exception
+   * is the filesystem's to declare, because "which of my rows is a sink" is not something this
+   * call site can know. See `SynthFS.isSink`. */
+  const sinkRow = typeof at.mount.fs.isSink === "function" && at.mount.fs.isSink(at.rel);
+  if (((flags & O_CREAT) || wantW) && !sinkRow && mountReadOnly(k, at.mount)) return -EROFS;
   let decision;
   try {
     decision = at.mount.fs.openDecision(credOf(p), at.rel, {
@@ -327,6 +332,24 @@ HANDLERS.open = (p, k) => {
     // O_APPEND IS NOT A SEEK AT OPEN: the offset is resolved per write from `d.flags`. Setting
     // `d.pos` to the size here makes two `>>` descriptions share an end offset and both overwrite.
     return p.fds.add(d);
+  }
+  /* `/dev/null` OPENED FOR WRITING IS A SINK, and it is the one generated file that may be.
+   *
+   * `> /dev/null` is the most-used redirection in a shell and it did not work: `/dev` is a
+   * generated mount with `mutErrno: "EROFS"`, so `openDecision` refuses `wantW` on every row of
+   * it — which meant `yes > /dev/null` failed at the open and `yes` exited. Found while writing a
+   * task-manager gate that needed a deliberately busy process.
+   *
+   * IT REUSES `makeSink` RATHER THAN REVIVING WHAT M7 DELETED. That was `/dev/console`: a name
+   * that opened to a KERNEL OBJECT, with a lifetime and a window behind it, and it went because
+   * `win_create` replaced its only caller (constraint 211). A sink has no object, no lifetime and
+   * no capability — it is a counter and a checksum — so the exception here is "this one name
+   * accepts bytes and forgets them", which is the whole semantics of the device.
+   *
+   * THE CHECKSUM IS WHY IT IS NOT A NO-OP: `F_SINK` hashes what it is given, so a sink that
+   * ignored its buffer would be visible as one (`src/kernel/files.mjs`). */
+  if (decision.synth && decision.sink && (flags & O_ACCMODE) !== O_RDONLY) {
+    return p.fds.add(makeSink());
   }
   if (decision.synth) {
     const d = {
@@ -674,8 +697,11 @@ HANDLERS.truncate = (p, k) => {
   } catch (error) {
     return errnoOfFsError(error);
   }
-  // A generated filesystem cannot reach here — `openDecision` with wantW throws on all of them —
-  // but the lines below hand the decision to the blob store, and a synthetic decision has no blob.
+  /* A GENERATED FILESYSTEM REACHES HERE FOR EXACTLY ONE ROW NOW. `openDecision` with `wantW` used
+   * to throw on all of them, which made this guard unreachable and said so; `/dev/null` is a sink
+   * and takes a write-open, so `truncate("/dev/null")` arrives here and is refused — correctly,
+   * because the lines below hand the decision to the blob store and a synthetic decision has no
+   * blob. The guard was right before it was reachable. */
   if (decision.synth) return -EROFS;
   // A path truncate is an open, a truncate and a close, so the COW rule has one implementation.
   k.later(p, async () => {
@@ -1063,7 +1089,31 @@ HANDLERS.win_draw = (p, k) => {
   // region last held, and a long one would silently drop the tail — the same rule the window event
   // read applies in the other direction.
   if (length !== nops * DLOP_BYTES) return -EINVAL;
-  return k.wins.draw(d.win, p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+  const region = p.bytes.subarray(DATA_OFF, DATA_OFF + length);
+  /* A TEXT RUN MUST BE WHOLE, and this is the one place that can say so before anything is drawn.
+   *
+   * `DL_TEXT` declares a byte length and `DL_TEXT_DATA` records carry it; a header whose data is
+   * missing or short would reach the page as HALF A STRING, and half a filename reads as a
+   * filename — there is nothing downstream that could tell it from the real one. So the batch is
+   * refused whole rather than drawn partially (constraint 293). `textOfOps` is the same codec the
+   * renderer uses, so the kernel is not forming a second opinion about the encoding.
+   *
+   * It is the only interpretation the kernel does of a display list, and it is validation rather
+   * than rendering: `src/wm/surface.mjs` is still the one renderer. */
+  const decoded = decodeDrawOps(region, region.length);
+  for (let i = 0; i < decoded.length; i += 1) {
+    const op = decoded[i].op;
+    if (op === DL_TEXT) {
+      const got = textOfOps(decoded, i);
+      if (!got) return -EINVAL;
+      i += got.records - 1;
+      continue;
+    }
+    // A DATA RECORD WITH NO HEADER is the same defect seen from the other end: a well-formed run
+    // is skipped past above, so reaching one here means the header is missing.
+    if (op === DL_TEXT_DATA) return -EINVAL;
+  }
+  return k.wins.draw(d.win, region);
 };
 
 /**

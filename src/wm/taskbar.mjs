@@ -47,6 +47,21 @@ import { TASKBAR_H, THUMB_W, THUMB_H } from "./aero.mjs";
 const HOVER_MS = 120;
 
 /**
+ * HOW LONG A THUMBNAIL PANEL SURVIVES THE POINTER LEAVING THE BUTTON.
+ *
+ * It used to be zero — `pointerleave` on the button closed the panel at once — and that made the
+ * panel UNREACHABLE: it sits `TASKBAR_H + 6` px above the bar, so moving the pointer up from the
+ * button to a thumbnail crosses a gap where the pointer is over neither, and the panel closed in
+ * that gap every time. Reported as "I am unable to scroll up to focus on a specific process",
+ * which is exactly what it looks like from the outside.
+ *
+ * Windows 7 gives the same flyout a grace period and so does this: the close is scheduled rather
+ * than done, and entering either the button or the panel cancels it. 400 ms is long enough to
+ * cross 6 px with a hand and short enough that a panel does not linger over the desktop.
+ */
+const HOVER_CLOSE_MS = 400;
+
+/**
  * M14's THIRD NEGATIVE CONTROL: the bar draws one button per WINDOW instead of one per program.
  *
  * That is the pre-Windows-7 taskbar, and it is the plausible implementation — every window is a
@@ -96,6 +111,8 @@ export class Taskbar {
      *  is a menu and two open menus is a state a user cannot get out of by clicking elsewhere. */
     this.open = null;
     this.hoverTimer = 0;
+    /** A SCHEDULED close, so the button and its panel are one hover target. HOVER_CLOSE_MS. */
+    this.closeTimer = 0;
     this.peeking = false;
     this.stats = {
       syncs: 0, buttonClicks: 0, raises: 0, minimizes: 0, restores: 0,
@@ -179,6 +196,11 @@ export class Taskbar {
     this.popup.dataset.popup = "0";
     this.popup.hidden = true;
     this.into.append(this.popup);
+
+    /* THE PANEL IS PART OF ITS OWN HOVER TARGET. Without these two the grace period above would
+     * only delay the problem: the panel would close 400 ms after the pointer reached it. */
+    this.popup.addEventListener("pointerenter", () => this.#holdHover());
+    this.popup.addEventListener("pointerleave", () => this.#hoverOut());
 
     /* A CLICK ANYWHERE ELSE CLOSES THE MENU, and Escape does too. On the DESKTOP and not the
      * document: this shell may be one of several on a page, and a listener on the document would
@@ -383,6 +405,11 @@ export class Taskbar {
   /* ---- the popups ---------------------------------------------------------------------------- */
 
   closePopup() {
+    // BOTH TIMERS GO WITH IT. A pending open would re-create the panel after it was closed, and a
+    // pending close would fire against whatever is open next.
+    clearTimeout(this.hoverTimer);
+    clearTimeout(this.closeTimer);
+    this.closeTimer = 0;
     this.popup.hidden = true;
     this.popup.textContent = "";
     this.popup.dataset.popup = "0";
@@ -530,7 +557,7 @@ export class Taskbar {
       strip.append(cell);
     }
     this.popup.append(strip);
-    this.open = { kind: "thumbs", win: group.wins[0].id };
+    this.open = { kind: "thumbs", win: group.wins[0].id, group: group.key };
     // NO SELECTOR BUILT FROM A PROGRAM'S OWN STRING: see the click handler in `sync`.
     this.#placeAbove(anchor || this.#buttonFor(group) || this.el);
     return group.wins.length;
@@ -592,8 +619,19 @@ export class Taskbar {
     return canvas.dataset.thumb;
   }
 
+  /** Cancel a scheduled close. The pointer is on the button or on the panel, which are one
+   *  hover target even though they are two elements with a gap between them. */
+  #holdHover() {
+    clearTimeout(this.closeTimer);
+    this.closeTimer = 0;
+  }
+
   #hoverIn(group, btn) {
     clearTimeout(this.hoverTimer);
+    this.#holdHover();
+    // ALREADY SHOWING THIS GROUP: hold it rather than tear it down and build it again, which
+    // would flicker and reset the pointer's target mid-gesture.
+    if (this.open && this.open.kind === "thumbs" && this.open.group === group.key) return;
     this.hoverTimer = setTimeout(() => {
       // A HOVER MUST NOT STEAL AN OPEN MENU. A jump list the user opened on purpose outranks a
       // preview they got by moving the pointer.
@@ -604,8 +642,13 @@ export class Taskbar {
 
   #hoverOut() {
     clearTimeout(this.hoverTimer);
-    // The thumbnails close with the pointer; a jump list does not, because it was asked for.
-    if (this.open && this.open.kind === "thumbs") this.closePopup();
+    // SCHEDULED, NOT IMMEDIATE: see `HOVER_CLOSE_MS`. A jump list is never closed this way,
+    // because it was asked for rather than hovered into existence.
+    clearTimeout(this.closeTimer);
+    this.closeTimer = setTimeout(() => {
+      this.closeTimer = 0;
+      if (this.open && this.open.kind === "thumbs") this.closePopup();
+    }, HOVER_CLOSE_MS);
   }
 
   /**

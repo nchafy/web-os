@@ -45,6 +45,31 @@ export const USR_ENTRIES = Object.freeze([
   Object.freeze({ name: "bin/kill", path: "src/bin/kill.mjs" }),
   Object.freeze({ name: "bin/ps", path: "src/bin/ps.mjs" }),
   Object.freeze({ name: "bin/true", path: "src/bin/true.mjs" }),
+  /* THE CORE UTILITIES, added when a reader found `mkdir: command not found` at a prompt on a
+   * desktop that could already drag a window to a screen edge. Every one of them is a program over
+   * the path group `src/abi.mjs` has had since M3 — `mkdir`, `rmdir`, `unlink`, `rename`, `link`,
+   * `stat`, `chmod`, `truncate`, `statfs` — so nothing below the ABI changed to add them.
+   *
+   * WHAT IS NOT HERE AND WHY: `touch` cannot set a timestamp (there is no `utimes` call), and
+   * `pwd` reads `/proc/<pid>/cwd` because there is no `getcwd`. Both say so in their own files
+   * rather than pretending. */
+  Object.freeze({ name: "bin/mkdir", path: "src/bin/mkdir.mjs" }),
+  Object.freeze({ name: "bin/rmdir", path: "src/bin/rmdir.mjs" }),
+  Object.freeze({ name: "bin/rm", path: "src/bin/rm.mjs" }),
+  Object.freeze({ name: "bin/cp", path: "src/bin/cp.mjs" }),
+  Object.freeze({ name: "bin/mv", path: "src/bin/mv.mjs" }),
+  Object.freeze({ name: "bin/touch", path: "src/bin/touch.mjs" }),
+  Object.freeze({ name: "bin/pwd", path: "src/bin/pwd.mjs" }),
+  Object.freeze({ name: "bin/stat", path: "src/bin/stat.mjs" }),
+  Object.freeze({ name: "bin/df", path: "src/bin/df.mjs" }),
+  Object.freeze({ name: "bin/tail", path: "src/bin/tail.mjs" }),
+  Object.freeze({ name: "bin/sort", path: "src/bin/sort.mjs" }),
+  Object.freeze({ name: "bin/uniq", path: "src/bin/uniq.mjs" }),
+  /* M15: EVERY PROCESS, WHAT IT IS DOING, AND WHAT IT HAS COST. A userland client of `/proc`
+   * with no privilege — the same files `ps` reads — which is the point of it being a program: a
+   * task manager that needed a capability would be evidence the boundary leaks. It has no CPU
+   * column and says why on its own face (there is no scheduler here). */
+  Object.freeze({ name: "bin/taskmgr", path: "src/bin/taskmgr.mjs" }),
   // `yes` is the system's only endless source, so it is what makes `yes | head -1` expressible.
   Object.freeze({ name: "bin/yes", path: "src/bin/yes.mjs" }),
   Object.freeze({ name: "bin/term", path: "src/bin/term.mjs" }),
