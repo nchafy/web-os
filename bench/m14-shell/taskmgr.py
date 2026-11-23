@@ -43,6 +43,27 @@ TERM_AT = """JSON.stringify((() => {
 
 SCREEN = "(document.querySelector('.terminal') || {}).textContent || ''"
 
+#: WHICH ROW THE TASK MANAGER HAS SELECTED, read out of the PIXELS it drew — the selected row is
+#: filled with `SELECT_FILL` (0x2d4a6b) and no other row is, so the first row whose band carries
+#: that colour is the selection. Reading the program's own state would need a channel it does not
+#: have; reading what it DREW is the thing a user can see (constraint 40).
+SEL = """JSON.stringify((() => {
+  const host = globalThis.M14 && globalThis.M14.host
+  if (!host) return null
+  for (const e of host.frames.values()) {
+    const t = ((e.win.el.querySelector('h2')||{}).textContent||'').trim()
+    if (t !== 'Task Manager' || !e.surface || !e.surface.el) continue
+    const g = e.surface.el.getContext('2d')
+    for (let i = 0; i < 20; i += 1) {
+      const y = 40 + i * 18 + 9
+      const d = g.getImageData(12, y, 1, 1).data
+      if (d[0] === 0x2d && d[1] === 0x4a && d[2] === 0x6b) return i
+    }
+    return -1
+  }
+  return null
+})())"""
+
 #: The terminal's TASKBAR BUTTON, which is how a reader raises a buried window.
 RAISE_TERM = """JSON.stringify((() => {
   for (const b of document.querySelectorAll('[data-task-btn]')) {
@@ -222,6 +243,44 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 bad.append("could not find `yes` in ps output, so the kill was not exercised")
 
+            # ---- 6. A CLICK ON A ROW MOVES THE SELECTION, AT SEVERAL HEIGHTS ----
+            #
+            # THE BUG THIS EXISTS FOR: the pointer branch read `ev.b & WPTR_DOWN`, and `ev.b` is
+            # the Y COORDINATE (`pointerAt` is `{x: ev.a, y: ev.b, buttons: ev.c}`,
+            # src/abi.mjs:1424). Testing bit 0x10 of a y value selects a row only when the pointer
+            # lands in an alternating 16-pixel band — so a check that clicked ONE row would pass or
+            # fail by luck. Several heights is the whole point: the failure is periodic in y.
+            rows = ff.evaluate(SURFACE)
+            if rows and rows.get("surface"):
+                box = rows["client"]
+                moved, tried = [], []
+                for i in (0, 1, 2, 3, 4):
+                    # Row i's centre in CLIENT pixels, through the canvas's own scale: the surface
+                    # is 560 wide and the element is not, so a surface y must be converted.
+                    at = ff.evaluate("""JSON.stringify((() => {
+                      const host = globalThis.M14 && globalThis.M14.host
+                      for (const e of host.frames.values()) {
+                        const t = ((e.win.el.querySelector('h2')||{}).textContent||'').trim()
+                        if (t !== 'Task Manager' || !e.surface) continue
+                        const p = e.surface.clientAt(120, %d + %d * 18 + 9)
+                        return p ? { x: Math.round(p.x), y: Math.round(p.y) } : null
+                      }
+                      return null
+                    })())""" % (40, i))
+                    if not isinstance(at, dict):
+                        continue
+                    before = ff.evaluate(SEL)
+                    ff.click(at["x"], at["y"])
+                    time.sleep(0.5)
+                    after = ff.evaluate(SEL)
+                    tried.append((i, at["y"], before, after))
+                    if after != before or after == i:
+                        moved.append(i)
+                print("row clicks: %s" % tried)
+                print("rows whose click took effect: %s of %d" % (len(moved), len(tried)))
+                if tried and len(moved) < len(tried):
+                    bad.append("a click selected the row at only %d of %d heights tried: %s"
+                               % (len(moved), len(tried), tried))
             ff.screenshot(HERE / "taskmgr.png")
             print("shot     %s" % (HERE / "taskmgr.png"))
     finally:

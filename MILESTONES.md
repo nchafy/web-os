@@ -3016,6 +3016,23 @@ checking why a harness printed a box that disagreed with its own state.
 
 ## M15 — the shell's own programs · done · 1 day
 
+### One bug the M16 audit found in this milestone's own code
+
+**`taskmgr` TESTED THE POINTER FLAG AGAINST THE Y COORDINATE.** `src/bin/taskmgr.mjs` read
+`ev.b & WPTR_DOWN`, and `ev.b` is the pointer's y — `pointerAt` is `{x: ev.a, y: ev.b,
+buttons: ev.c}` (`src/abi.mjs:1424`). DOWN/UP/MOVE travel in `mods` (`src/abi.mjs:418`, 463), which
+`src/bin/files.mjs:443` and `src/bin/paint.mjs:184` both get right; this was the one copy that did
+not. The effect was periodic in y: bit 0x10 of the row's own centre, so clicking a row worked in
+alternating 16-pixel bands and the rows between them were dead.
+
+**IT SHIPPED BECAUSE THE GATE CLICKED NO ROW.** `bench/m14-shell/taskmgr.py` asserted the table was
+drawn, that the rows were `/proc`'s, and that kernel time rose — and never pressed one. It now
+clicks five rows and asserts the selection followed, read out of the PIXELS the program drew
+(the selected band's fill colour) rather than out of a state channel it does not have. Five
+heights and not one, because the failure was periodic: at the old code the y values 49, 85 and 121
+pass and 67 and 103 do not, so a one-row check passed or failed by luck.
+
+
 **WHAT ASKED FOR IT.** Four things, from someone using the desktop rather than reading the plan:
 more core Linux in the terminal, a file system view that is "not correct", a task manager, and
 "when hovering over an app on the task bar, I am unable to go scroll up to focus on a specific

@@ -331,7 +331,14 @@ export function run(env) {
           paint();
         }
       } else if (ev.type === WEV_POINTER) {
-        if (!(ev.b & WPTR_DOWN)) continue;
+        /* `mods` AND NOT `b`. This read `ev.b & WPTR_DOWN`, and `ev.b` is the pointer's Y
+         * COORDINATE — `pointerAt` is `{x: ev.a, y: ev.b, buttons: ev.c}` (src/abi.mjs:1424) — so
+         * it tested bit 0x10 of a y value and selected a row only when the pointer happened to
+         * land in an alternating 16-pixel band. `src/bin/files.mjs:443` and
+         * `src/bin/paint.mjs:184` both have it right; this was the one copy that did not, and the
+         * audit found it. DOWN/UP/MOVE travel in `mods` beside the keyboard modifiers
+         * (src/abi.mjs:418, 463). */
+        if (!(ev.mods & WPTR_DOWN)) continue;
         const at = pointerAt(ev);
         const hit = rowAt(at.y);
         if (hit >= 0) { selected = hit; paint(); }
