@@ -718,7 +718,9 @@ async function spawnBatch(m) {
       why: starvedWhy(ready, want, m.parkMs || 10000) });
     return;
   }
-  awaitReady(already + m.count, m.readyTimeoutMs || 10000);
+  // THIS BATCH'S PIDS, so another batch's child cannot answer for them. `already` is still read
+  // above for `cfg.spawnThenPark`, whose control is about the cumulative counter itself.
+  awaitReady(pids, m.readyTimeoutMs || 10000);
 }
 
 function onProcessMessage(slot, m) {
@@ -2133,22 +2135,66 @@ function starvedWhy(ready, want, timeoutMs) {
 
 /** Phase 2's completion, polled on the kernel's own event loop. Its timeout is reported under its
  *  own name and never folded into latency. */
-function awaitReady(count, timeoutMs) {
+/**
+ * Wait until THIS BATCH'S OWN PROCESSES are running, and report.
+ *
+ * IT WAITS ON PIDS AND NOT ON A COUNTER, which is the whole point. `G_READY` is one cumulative
+ * word incremented by ANY process reaching `ready` — including a child created by `SYS_spawn`,
+ * which no batch asked for. So `already + count` is satisfiable by somebody else's child:
+ *
+ *   stage `term`, which spawns `sh` by syscall; then stage `files`. `files`'s batch samples
+ *   `already`, `sh` readies, the counter hits the target, and the kernel reports a batch ready
+ *   whose own worker is still inside `init` — where `program` is null. The page posts `go` and the
+ *   worker faults with `TypeError: Cannot read properties of null (reading 'run')`
+ *   (`src/libos/process.mjs:244`).
+ *
+ * THE REPORTED FAULT IS UNREPRODUCED, AND THAT IS STATED HERE RATHER THAN LEFT OUT. The sequence
+ * above was reported while `www/shell.mjs` was extracted — staging `['term', 'files']` said to
+ * fault, `['files', 'taskmgr', 'term']` not to — and `bench/kernel-ready/probe.py` could not
+ * reproduce it. Four orders including that one, against a kernel whose wait was deliberately
+ * restored to the cumulative counter (verified faithful by diffing the control's output), all came
+ * up clean with no fault and every pid still in the table.
+ *
+ * SO THIS CHANGE RESTS ON THE ARGUMENT AND NOT ON A MEASUREMENT: a batch must wait on its own
+ * processes, because a counter shared with every other process cannot distinguish "mine came up"
+ * from "one more came up", and only the pids can. The absolute-vs-relative half was already fixed
+ * (see `spawnBatch`'s `already`); whose readiness it is was not. That is a correctness argument
+ * about the accounting, which stands whether or not the original fault was what it looked like.
+ *
+ * `bench/kernel-ready/probe.py` is the regression gate for what IS assertable: that no spawn order
+ * leaves a pid the kernel reported ready absent from its own process table.
+ *
+ * `G_READY` stays: it is still the cumulative figure `cfg.spawnThenPark`'s control starves and the
+ * one `starvedWhy` explains. It is simply not the batch's own answer.
+ */
+function awaitReady(pids, timeoutMs) {
+  // A pid the cap refused is negative and never readies; `spawnBatch` returns before calling this
+  // when anything was refused, so this filter is a guard and not the policy (constraint 17).
+  const mine = (pids || []).filter((pid) => pid > 0);
+  const want = mine.length;
   const t0 = now();
+  const upNow = () => {
+    let up = 0;
+    for (const pid of mine) {
+      const slot = table.get(pid);
+      if (slot && slot.state === RUNNING) up += 1;
+    }
+    return up;
+  };
   const check = () => {
-    const ready = Atomics.load(g, G_READY);
-    if (ready >= count) {
-      post({ t: "ready", ready, want: count, starved: false, ms: now() - t0 });
+    const ready = upNow();
+    if (ready >= want) {
+      post({ t: "ready", ready, want, starved: false, ms: now() - t0 });
       return;
     }
     if (now() - t0 > timeoutMs) {
       post({
         t: "ready",
         ready,
-        want: count,
+        want,
         starved: true,
         ms: now() - t0,
-        why: starvedWhy(ready, count, timeoutMs),
+        why: starvedWhy(ready, want, timeoutMs),
       });
       return;
     }

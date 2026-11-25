@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>kernel ready-accounting fixture</title>
+<style>
+  html, body { margin: 0; background: #1b1b1b; color: #e8e8e8;
+               font: 13px/1.5 ui-monospace, monospace; }
+  #log { margin: 16px; white-space: pre-wrap; }
+  #log.bad { color: #ff8a80; }
+  #desk { position: relative; width: 900px; height: 420px; margin: 0 16px 16px; overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="log">booting</div>
+<!-- A DESKTOP ELEMENT IS REQUIRED because a window needs somewhere to be. Nothing here renders a
+     taskbar or icons: the subject is the kernel's readiness accounting, and a shell on top of it
+     would only add ways for this page to fail for an unrelated reason. -->
+<div id="desk"></div>
+<script>
+  globalThis.READY = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    spawns: [], faults: [], errors: [], notes: [], why: '', verdict: '',
+  }
+</script>
+<script type="module">
+/* WHAT THIS FIXTURE IS FOR.
+ *
+ * `spawnBatch` waited on `G_READY`, one cumulative word incremented by ANY process reaching
+ * `ready` — including a child created by `SYS_spawn`, which no batch asked for. So a batch could be
+ * reported ready on somebody else's child's increment, and the page would then post `go` to a
+ * worker still inside `init`, where `program` is null:
+ * `TypeError: Cannot read properties of null (reading 'run')` (`src/libos/process.mjs:244`).
+ *
+ * `term` is the program that makes it reachable, because it spawns `sh` by syscall. So staging
+ * `term` and then anything else is the world, and this page stages exactly that on demand.
+ *
+ * IT SPAWNS IN THE ORDER THE DRIVER ASKS FOR, with no reordering and no guard. `www/shell.mjs`
+ * REFUSES the bad order — correctly, since a silent reorder would hide the defect — so the
+ * product's own staging cannot test the thing it protects against. This fixture is that world
+ * without the guard, which is why it lives in `bench/` and not in `www/`.
+ */
+/* `bootShell` AND NOT A HAND-WIRED HOST. It is the one definition of building a `WinHost` and
+ * attaching it to a kernel (`www/shell.mjs`), and this page's first draft got that wiring wrong —
+ * `new WinHost({ into, k })` instead of `{ into, post }` — which the probe reported as
+ * `this.post is not a function`. A second copy of the wiring is how a fixture comes to test a
+ * world the product is not in.
+ *
+ * `stageDesktop` is deliberately NOT imported: it is the thing that refuses the bad order, and
+ * this page exists to drive that order. `bootShell` carries no such policy. */
+import { bootShell } from '/www/shell.mjs'
+import { spawnProgram, ask } from '/www/pagekernel.mjs'
+
+const log = document.getElementById('log')
+const report = globalThis.READY
+const lines = []
+const say = (s) => { lines.push(String(s)); log.textContent = lines.join('\n') }
+
+/** The programs this page knows, BY NAME. Not a path from the query string: a page that fetched
+ *  whatever module a URL named would be a page that runs what a caller tells it to. */
+const PROGRAMS = {
+  term: { url: '/src/bin/term.mjs', argv: (ms) => ['term', '--ceiling', String(ms)] },
+  files: { url: '/src/bin/files.mjs', argv: () => ['files', '/usr/share'] },
+  taskmgr: { url: '/src/bin/taskmgr.mjs', argv: () => ['taskmgr'] },
+  /* `desktop` IS IN THE TABLE BECAUSE THE MEASURED WORLD STARTS WITH IT. `stageDesktop` always
+   * spawns it first, and the fault was found there — a fixture whose orders omitted it was
+   * reproducing a sequence nobody runs, which is why the first `--prove-failure` came out clean
+   * against a kernel the control had correctly made defective. */
+  desktop: { url: '/src/bin/desktop.mjs', argv: (ms) => ['desktop', '-c', String(ms)] },
+}
+
+const CEILING_MS = 600000
+/** Milliseconds between one spawn and the next. 0 by default: see the note at the spawn loop —
+ *  a gap HIDES the defect rather than exposing it. `?gap=250` is how that was measured. */
+const GAP_MS = Math.max(0, Number(new URLSearchParams(location.search).get('gap') || 0))
+
+async function main () {
+  if (!report.isolated || typeof SharedArrayBuffer !== 'function') {
+    report.state = 'aborted'
+    report.why = 'crossOriginIsolated === ' + self.crossOriginIsolated
+      + '; SharedArrayBuffer is undefined. No kernel, no processes, nothing to measure.'
+    log.className = 'bad'
+    log.textContent = report.why
+    return
+  }
+
+  const params = new URLSearchParams(location.search)
+  const asked = (params.get('order') || 'term,files').split(',').map((s) => s.trim())
+  const unknown = asked.filter((n) => !Object.prototype.hasOwnProperty.call(PROGRAMS, n))
+  if (unknown.length) {
+    report.state = 'error'
+    report.why = 'unknown program name(s): ' + unknown.join(' ')
+    log.className = 'bad'
+    log.textContent = report.why
+    return
+  }
+  report.order = asked
+  say('order: ' + asked.join(' -> '))
+
+  /* THE REPORT IS HANDED TO THE TRANSPORT, which is how a fault reaches this page at all:
+   * `www/pagekernel.mjs:79` pushes every `fault` message into `report.faults`. A page that
+   * collected only its own assertions would see this defect as a window that never appeared. */
+  // NO TASKBAR: the subject is the kernel's readiness accounting, and a shell on top of it would
+  // only add ways for this page to fail for an unrelated reason.
+  const { k } = await bootShell({
+    into: document.getElementById('desk'), report, say, label: 'kernel-ready', taskbar: false,
+  })
+  report.kernelIsolated = true
+
+  for (const name of asked) {
+    const spec = PROGRAMS[name]
+    const row = await spawnProgram(k, spec.url, spec.argv(CEILING_MS))
+    report.spawns.push({ name, pid: row.pid })
+    say(name + ': pid ' + row.pid)
+    /* THE GAP IS A PARAMETER, AND SHORTER IS WHAT MAKES THE RACE REACHABLE — the opposite of what
+     * this page first claimed. `term`'s child `sh` readies a few milliseconds after `term` does.
+     * Wait 250 ms and that increment has already landed, so the next batch's `already` sample
+     * INCLUDES it and the cumulative target is correct: the defect cannot occur, and a control
+     * that restores the counter reports everything clean. Spawn immediately and the increment
+     * lands AFTER the sample, which is the window the whole defect lives in.
+     *
+     * Measured: at 250 ms the counter kernel came out clean on all three orders and
+     * `--prove-failure` could not fire. */
+    if (GAP_MS > 0) await new Promise((r) => setTimeout(r, GAP_MS))
+  }
+
+  /* EVERY SPAWNED PID MUST STILL BE RUNNING. That is the fact a cumulative counter could be
+   * satisfied without: a faulted process is gone from the table, so a pid that readied on
+   * somebody else's increment shows up here as missing rather than as a number that looks fine. */
+  const state = await ask(k, 'm4-state', 8000).catch((e) => ({ why: String(e) }))
+  // `m4-state` replies with `procs` at the TOP level (`src/kernel/kernel.mjs:1874`), built from
+  // `table.live` — so a faulted process is absent rather than present with a dead state.
+  const live = (state && Array.isArray(state.procs))
+    ? state.procs.map((p) => p.pid)
+    : null
+  report.livePids = live
+  report.missing = live
+    ? report.spawns.filter((s) => !live.includes(s.pid)).map((s) => s.name + ':' + s.pid)
+    : null
+  say('live pids: ' + (live ? live.join(' ') : 'unavailable'))
+  if (report.missing && report.missing.length) say('MISSING: ' + report.missing.join(' '))
+
+  /* LATE FAULTS LAND AFTER THE LOOP, so this page must wait before judging itself. `go` is posted
+   * the moment the kernel says `ready`, and a worker that was not ready faults a few milliseconds
+   * later — after the spawn loop has already returned. Judging immediately reported `ok` beside
+   * four faults, which `bench/kernel-ready/probe.py` then had to catch on its own. */
+  await new Promise((r) => setTimeout(r, 600))
+
+  const bad = []
+  if (report.faults.length) bad.push(report.faults.length + ' fault(s)')
+  if (report.missing && report.missing.length) bad.push('missing ' + report.missing.join(' '))
+  if (report.missing === null) bad.push('the process table was unreadable, so nothing is proven')
+  report.state = 'done'
+  report.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  if (bad.length) log.className = 'bad'
+  say('verdict: ' + report.verdict)
+  for (const f of report.faults) say('  fault pid=' + f.pid + ' ' + String(f.why).slice(0, 200))
+}
+
+main().catch((e) => {
+  report.state = 'error'
+  report.why = String((e && e.stack) || e)
+  report.errors.push(String(e))
+  log.className = 'bad'
+  say('ERROR ' + report.why)
+})
+</script>
+</body>
+</html>
