@@ -501,12 +501,27 @@ const INTS = {
   WPTR_DOWN: 0x10,
   WPTR_UP: 0x20,
   WPTR_MOVE: 0x40,
+  /** M18. HOW MANY CLICKS THIS PRESS IS, on the DOWN record, from the browser's `event.detail`.
+   *
+   *  THE COUNT IS THE BROWSER'S AND NOT A TIMER'S. A double-click is a platform gesture with a
+   *  platform threshold — the reader has configured one and the page is told the answer — so a
+   *  program that timed two presses itself would disagree with every other application on their
+   *  machine. `detail` is 1, 2, 3 for the three presses of a triple-click.
+   *
+   *  ON THE DOWN RECORD ONLY, because that is where `detail` is meaningful: the UP of a
+   *  double-click carries its own `detail` and a program reading both would open a row twice. */
+  WPTR_CLICK2: 0x80,
+  WPTR_CLICK3: 0x100,
 
   //: Modifier bits on WEV_KEY, in `mods`. The widget translates Ctrl into a C0 byte, so these are
   //: for a reader that wants to know what was held, never for deriving the byte.
   WMOD_SHIFT: 0x1,
   WMOD_CTRL: 0x2,
   WMOD_ALT: 0x4,
+  //: M18. The fourth modifier, and the bit M17's wheel flags were pushed off 0x8 to reserve. Named
+  //: META and not CMD or WIN because `KeyboardEvent.metaKey` is what the page reads, and the key it
+  //: names differs by platform while the bit does not.
+  WMOD_META: 0x8,
 
   /** `mods` on a WEV_WHEEL.
    *
@@ -525,6 +540,53 @@ const INTS = {
    *  kernel is the only thing that may claim it coalesced. */
   WWHEEL_PAGE: 0x400,
   WWHEEL_COALESCED: 0x800,
+
+  /* M18. A KEY THAT IS NOT BYTES, carried on a `WEV_KEY` whose byte length `a` is 0 and whose
+   * keysym is in `c`.
+   *
+   * `a == 0` IS THE DISCRIMINATOR, and it was measured before it was chosen. The hazard is a
+   * reader that treats an empty byte array as a printable key, so every `keyBytesOf` caller in
+   * `src/bin/` was read: `files`, `winopen`, `imgview` and `paint` all guard on
+   * `bytes.length === 1` or `!== 1`, and `taskmgr` decodes to a string and compares it against
+   * letters — where an empty array decodes to `""` and matches nothing. No caller treats an empty
+   * array as printable, so the discriminator is free. Had one done so, the plan's fallback was a
+   * `mods` bit instead, which is why the measurement came first.
+   *
+   * DENSE AND FROM 1, because 0 is what `c` holds on a key that IS bytes, and a zeroed record
+   * must not decode as a keysym. `keysymOf` returns 0 for anything that is not one.
+   *
+   * THE ARROWS ARE IN THE TABLE EVEN THOUGH THE FRAME EATS THEM TODAY. `src/wm/window.mjs` binds
+   * arrow keys to move and snap the window, so a process never sees one (`src/bin/taskmgr.mjs`
+   * says so where it declines to advertise them). That is a routing decision in the window
+   * manager, not an absence in the ABI, and M18's own proof drives a Down arrow into a focused
+   * list — so the keysym has to exist for the routing to be changeable at all. */
+  WKEY_LEFT: 1,
+  WKEY_RIGHT: 2,
+  WKEY_UP: 3,
+  WKEY_DOWN: 4,
+  WKEY_HOME: 5,
+  WKEY_END: 6,
+  WKEY_PAGE_UP: 7,
+  WKEY_PAGE_DOWN: 8,
+  WKEY_DELETE: 9,
+  WKEY_INSERT: 10,
+  //: The context-menu key. It is a KEY and not a gesture, so a menu raised from it is raised at the
+  //: selection rather than at a pointer — which is why M20's `win_menu` takes coordinates from the
+  //: caller and does not read the pointer itself.
+  WKEY_MENU: 11,
+  WKEY_F1: 12,
+  WKEY_F2: 13,
+  WKEY_F3: 14,
+  WKEY_F4: 15,
+  WKEY_F5: 16,
+  WKEY_F6: 17,
+  WKEY_F7: 18,
+  WKEY_F8: 19,
+  WKEY_F9: 20,
+  WKEY_F10: 21,
+  WKEY_F11: 22,
+  WKEY_F12: 23,
+  WKEY_MAX: 23,
 
   /** How many events one window queues before it drops them, counted and published in
    *  `/proc/<pid>/win/<winid>`. The per-fd bound constraint 42 requires — see src/kernel/wins.mjs.
@@ -998,12 +1060,16 @@ export const {
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_WHERE_MAX,
   DOBJ_F_APPEND, DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE,
   DOBJ_MAX_BYTES, DOBJ_BUDGET_BYTES, DOBJ_CAP, DRAG_IDLE_MS,
-  WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
+  WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, WMOD_META,
+  WKEY_LEFT, WKEY_RIGHT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END,
+  WKEY_PAGE_UP, WKEY_PAGE_DOWN, WKEY_DELETE, WKEY_INSERT, WKEY_MENU,
+  WKEY_F1, WKEY_F2, WKEY_F3, WKEY_F4, WKEY_F5, WKEY_F6,
+  WKEY_F7, WKEY_F8, WKEY_F9, WKEY_F10, WKEY_F11, WKEY_F12, WKEY_MAX,
   WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
   WIN_F_NONE, WIN_CAP,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
-  WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE,
+  WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_MAX,
@@ -1591,6 +1657,27 @@ export function keyBytesOf(ev) {
   const out = new Uint8Array(n);
   for (let i = 0; i < n; i += 1) out[i] = (ev.b >>> (8 * i)) & 0xff;
   return out;
+}
+
+/**
+ * A KEY event's KEYSYM, or 0 when the key is bytes. M18.
+ *
+ * `a == 0` is the discriminator and this is the one place it is read, for the reason `keyBytesOf`
+ * is the one place the bytes are unpacked: a program that tested it itself would get it wrong once
+ * and silently. The two are exhaustive and disjoint by construction — a `WEV_KEY` either carries
+ * 1..4 bytes or carries a keysym — so `keyBytesOf(ev).length === 0 && keysymOf(ev) === 0` means a
+ * corrupt record rather than a third kind of key.
+ *
+ * IT VALIDATES THE RANGE rather than returning whatever `c` held. A keysym past `WKEY_MAX` is a
+ * record this build does not understand, and 0 ("not a keysym") is the honest answer: a program
+ * switching on it falls through to its default instead of acting on a number it cannot name.
+ * `packKeyBytes` has no counterpart here because a keysym needs no packing — it is one field.
+ */
+export function keysymOf(ev) {
+  if (ev.type !== WEV_KEY) return 0;
+  if ((ev.a | 0) !== 0) return 0;
+  const sym = ev.c >>> 0;
+  return sym >= 1 && sym <= WKEY_MAX ? sym : 0;
 }
 
 /** The inline `(a, b)` pair for up to 4 UTF-8 bytes. The INVERSE of keyBytesOf, declared beside it
@@ -2224,6 +2311,42 @@ export function selfTest() {
   if (keyBytesOf({ ...eround, type: WEV_RESIZE }).length !== 0) {
     fail("a resize event yielded key bytes");
   }
+
+  /* M18's KEYSYM TABLE, and the one property that makes `a == 0` safe to discriminate on: bytes
+   * and keysyms are DISJOINT and EXHAUSTIVE over a `WEV_KEY`. Asserted both ways round, because a
+   * record that answered to both would make every reader's `if` order matter. */
+  const keysyms = Object.keys(INTS)
+    .filter((k) => k.startsWith("WKEY_") && k !== "WKEY_MAX")
+    .map((k) => [k, INTS[k]]);
+  if (keysyms.length !== 23) fail(`the keysym table has ${keysyms.length} rows, expected 23`);
+  const symVals = keysyms.map(([, v]) => v);
+  if (new Set(symVals).size !== symVals.length) fail("two keysyms collide");
+  if (symVals.includes(0)) fail("0 is a keysym: a zeroed record would decode as one");
+  if (Math.max(...symVals) !== WKEY_MAX) fail("WKEY_MAX is not the largest keysym");
+  // DENSE, so a reader may switch on it and a table may be indexed by it.
+  for (let i = 1; i <= WKEY_MAX; i += 1) {
+    if (!symVals.includes(i)) fail(`the keysym table has a hole at ${i}`);
+  }
+  const kprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  for (const [name, sym] of keysyms) {
+    encodeWinEvent(kprobe, 0, { type: WEV_KEY, mods: WMOD_CTRL, a: 0, b: 0, c: sym });
+    const ev = decodeWinEvent(kprobe, 0);
+    if (keysymOf(ev) !== sym) fail(`keysymOf lost ${name}`);
+    if (keyBytesOf(ev).length !== 0) fail(`${name} also yielded key bytes`);
+  }
+  // A key that IS bytes is NOT a keysym, which is the other half of the discriminator.
+  const bprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  const keyPacked = packKeyBytes(new TextEncoder().encode("a"));
+  encodeWinEvent(bprobe, 0, { type: WEV_KEY, mods: 0, ...keyPacked, c: WKEY_DOWN });
+  const bev = decodeWinEvent(bprobe, 0);
+  if (keysymOf(bev) !== 0) fail("a key carrying bytes was also read as a keysym");
+  if (keyBytesOf(bev).length !== 1) fail("a key carrying bytes lost them");
+  // AND A SYM THIS BUILD CANNOT NAME READS AS 0, rather than as a number a program would act on.
+  encodeWinEvent(kprobe, 0, { type: WEV_KEY, mods: 0, a: 0, b: 0, c: WKEY_MAX + 1 });
+  if (keysymOf(decodeWinEvent(kprobe, 0)) !== 0) fail("an out-of-range keysym was accepted");
+  if (keysymOf({ type: WEV_POINTER, a: 0, b: 0, c: WKEY_UP }) !== 0) {
+    fail("a pointer event yielded a keysym");
+  }
   // M16's CLIENT event, BOTH WAYS and at THREE ratios. dpr 1 and dpr 2 are the two the reference
   // machines render at (Firefox at 1, Chrome at 2, constraint 264) and 1.5 is the fractional case
   // a zoomed Chrome produces. The box is asserted UNCHANGED because it is device px and must reach
@@ -2436,6 +2559,25 @@ export function selfTest() {
       if (modsBits[i][1] === modsBits[j][1]) {
         fail(`${modsBits[i][0]} and ${modsBits[j][0]} are the same bit in one mods namespace`);
       }
+    }
+  }
+  /* AND EVERY ONE OF THEM IS ACTUALLY EXPORTED. A bit added to `INTS` and not to the destructuring
+   * at the bottom of the table is `undefined` at every import site — the kernel ORs it in and
+   * reads `NaN`, or a program tests `mods & undefined` and gets 0, with nothing thrown anywhere.
+   *
+   * THIS IS NOT HYPOTHETICAL: M18's three bits were added to `INTS`, the clause above passed
+   * because it reads `INTS` directly, and `WPTR_CLICK2` imported as `undefined` until this clause
+   * existed. The map is hand-maintained for the reason `NOT_EV_TYPES` above it is — a module
+   * cannot enumerate its own bindings — so the cost of a new bit is naming it twice, and the
+   * benefit is that forgetting the second place fails the build instead of the feature. */
+  const MODS_EXPORTED = {
+    WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3,
+    WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, WMOD_META,
+    WWHEEL_PAGE, WWHEEL_COALESCED,
+  };
+  for (const [name, bit] of modsBits) {
+    if (MODS_EXPORTED[name] !== bit) {
+      fail(`${name} is in INTS but is not destructured for export, so it imports as undefined`);
     }
   }
   if (SURFACE_MAX_PX > SURFACE_BUDGET_PX) fail("one surface may exceed the whole budget");

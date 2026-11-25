@@ -72,14 +72,6 @@ const POLL_MS = 250;
  *  the minute a demonstration program takes. `-c` overrides it. */
 const CEILING_MS = 3600000;
 
-/** Programs that open a FILE when they are given one. Everything else is launched bare. */
-const OPENS_FILES = Object.freeze({
-  png: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
-  rgba: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
-  txt: { prog: "editor", argv: (path) => ["editor", path] },
-  md: { prog: "editor", argv: (path) => ["editor", path] },
-});
-
 /**
  * A LABEL THE ABI CAN CARRY: at most `WITEM_LABEL_MAX` bytes, cut on a character boundary.
  *
@@ -96,12 +88,6 @@ function label(name) {
   let cut = [...text];
   while (cut.length > 1 && bytes(`${cut.join("")}…`) > WITEM_LABEL_MAX) cut.pop();
   return `${cut.join("")}…`;
-}
-
-function extOf(path) {
-  const name = String(path).split("/").pop() || "";
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
 }
 
 function unInterrupted(call) {
@@ -220,7 +206,10 @@ export function run(env) {
         if (entry.name === "." || entry.name === "..") continue;
         const path = `${DESK_DIR}/${entry.name}`;
         const isDir = entry.type === DT_DIR;
-        const open = OPENS_FILES[extOf(entry.name)];
+        // THE ASSOCIATION IS USERLAND'S AND IT HAS ONE DEFINITION, in `src/libos/std.mjs` beside
+        // `FORMAT_BY_EXT` and `iconForPath`. It lived here while the desktop was its only reader;
+        // M18 gives `files` an activation verb, and a second reader is what moved it.
+        const open = env.std.openerForPath(entry.name);
         rows.push({
           icon: env.std.iconForPath(path, { isDir }),
           flags: WITEM_DESKTOP | (isDir ? WITEM_CONTAINER : 0),

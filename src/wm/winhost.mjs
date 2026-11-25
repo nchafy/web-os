@@ -30,8 +30,12 @@ import { iconMarkup, iconForProgram } from "./icons.mjs";
 // set of rows the shell draws. See `#role`.
 import { IconView } from "./desktop.mjs";
 import {
-  WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT,
-  WPTR_DOWN, WPTR_UP, WPTR_MOVE, packKeyBytes,
+  WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, WMOD_META,
+  WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, packKeyBytes,
+  WKEY_LEFT, WKEY_RIGHT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END,
+  WKEY_PAGE_UP, WKEY_PAGE_DOWN, WKEY_DELETE, WKEY_INSERT, WKEY_MENU,
+  WKEY_F1, WKEY_F2, WKEY_F3, WKEY_F4, WKEY_F5, WKEY_F6,
+  WKEY_F7, WKEY_F8, WKEY_F9, WKEY_F10, WKEY_F11, WKEY_F12,
   WEV_WHEEL, WWHEEL_PAGE, packWheelPoint,
   WMODAL_SYSTEM, WMODE_BLOCKING,
   WST_NORMAL, WST_MIN, WROLE_NORMAL, WROLE_DESKTOP,
@@ -46,7 +50,60 @@ function modifierBits(event) {
   if (event.shiftKey) mods |= WMOD_SHIFT;
   if (event.ctrlKey) mods |= WMOD_CTRL;
   if (event.altKey) mods |= WMOD_ALT;
+  // M18. The fourth modifier. `metaKey` is Command on a Mac and the Windows key elsewhere; the BIT
+  // is one thing and which physical key sets it is the platform's business (src/abi.mjs).
+  if (event.metaKey) mods |= WMOD_META;
   return mods;
+}
+
+/**
+ * `KeyboardEvent.key` -> a `WKEY_*` keysym. M18.
+ *
+ * WHY A TABLE AND NOT A SWITCH: adding the next key is adding a row. `event.key` is the right
+ * source rather than `code` or the long-deprecated `keyCode`, because it is the key's MEANING on
+ * the reader's own layout — `code` is a physical position and would make an AZERTY keyboard send
+ * the wrong keysym.
+ *
+ * IT IS CONSULTED ONLY WHEN `bytesForKey` RETURNED NOTHING, which is what keeps the two disjoint
+ * at the source as well as in the record (`src/abi.mjs`'s `keysymOf`/`keyBytesOf`). Enter, Tab and
+ * Backspace are deliberately ABSENT: `bytesForKey` already turns them into bytes (10, 9, 127) and a
+ * row here would take them away from every program that reads them as bytes today — which is also
+ * why M18's proof does not rest on Enter. `src/wm/terminal.mjs` is the one place that mapping
+ * lives.
+ */
+const KEYSYM_BY_KEY = new Map([
+  ["ArrowLeft", WKEY_LEFT], ["ArrowRight", WKEY_RIGHT],
+  ["ArrowUp", WKEY_UP], ["ArrowDown", WKEY_DOWN],
+  ["Home", WKEY_HOME], ["End", WKEY_END],
+  ["PageUp", WKEY_PAGE_UP], ["PageDown", WKEY_PAGE_DOWN],
+  ["Delete", WKEY_DELETE], ["Insert", WKEY_INSERT],
+  // `ContextMenu` is the spelling in the UI Events key values table; Firefox has historically also
+  // produced `Apps`, so both map to the one keysym rather than one engine losing the key.
+  ["ContextMenu", WKEY_MENU], ["Apps", WKEY_MENU],
+  ["F1", WKEY_F1], ["F2", WKEY_F2], ["F3", WKEY_F3], ["F4", WKEY_F4],
+  ["F5", WKEY_F5], ["F6", WKEY_F6], ["F7", WKEY_F7], ["F8", WKEY_F8],
+  ["F9", WKEY_F9], ["F10", WKEY_F10], ["F11", WKEY_F11], ["F12", WKEY_F12],
+]);
+
+/** The keysym a browser key event carries, or 0. Exported so a check can assert the mapping
+ *  without dispatching a key, and so `selfTest`-style coverage has one table to read. */
+export function keysymForKey(event) {
+  if (!event || typeof event.key !== "string") return 0;
+  return KEYSYM_BY_KEY.get(event.key) || 0;
+}
+
+/** M18. The click count on a DOWN record, from the browser's own `detail`.
+ *
+ *  THE COUNT IS THE PLATFORM'S. A double-click has a threshold the reader configured, and a program
+ *  that timed two presses itself would disagree with every other application on their machine.
+ *  `detail` is 1, 2, 3 across the presses of a triple-click, and anything past 3 is still a third
+ *  click as far as this ABI goes — there is no `WPTR_CLICK4` and a quadruple-click is not a gesture
+ *  Windows 7 has. */
+function clickBits(event) {
+  const n = event && typeof event.detail === "number" ? event.detail : 0;
+  if (n >= 3) return WPTR_CLICK3;
+  if (n === 2) return WPTR_CLICK2;
+  return 0;
 }
 
 /** How far apart the two probe points of `#wheel`'s scale reading are, in CSS px.
@@ -536,11 +593,23 @@ export class WinHost {
     return entry;
   }
 
-  #keys(id, bytes, event) {
+  /** One key press into one window. `sym` is M18's keysym and is used only when there are no
+   *  bytes — the two are disjoint at the source as well as in the record. */
+  #keys(id, bytes, event, sym = 0) {
     const entry = this.get(id);
     if (!entry) return;
     this.stats.keys += 1;
     const mods = modifierBits(event);
+    /* A KEYSYM RECORD IS `a = 0` WITH THE SYM IN `c`, which is what `keysymOf` reads and what makes
+     * `keyBytesOf` answer empty for it. Counted apart from the byte keys, because "the arrows
+     * arrived" and "the keyboard works" are different claims and a check asserting the first should
+     * not be satisfiable by the second. */
+    if (!bytes && sym) {
+      this.stats.keysyms = (this.stats.keysyms | 0) + 1;
+      this.post({ t: "win-in", win: id, evs: [{ type: WEV_KEY, mods, a: 0, b: 0, c: sym }] });
+      return;
+    }
+    if (!bytes) return;
     // ONE RECORD PER KEY, with its UTF-8 bytes inline: a key that needed a second read to collect
     // its payload would be a second readiness edge for one press.
     this.post({ t: "win-in", win: id, evs: [{ type: WEV_KEY, mods, ...packKeyBytes(bytes) }] });
@@ -679,7 +748,10 @@ export class WinHost {
         this.stats.unknown += 1;
       }
       el.focus();
-      send(WPTR_DOWN, e);
+      /* M18. THE CLICK COUNT RIDES THE DOWN RECORD, and only the DOWN. `event.detail` is
+       * meaningful on both halves of a double-click, so a program reading it on the UP as well
+       * would open a row twice for one gesture. `clickBits` is the one place it is read. */
+      send(WPTR_DOWN | clickBits(e), e);
     });
     el.addEventListener("pointermove", (e) => {
       if (!e.buttons) return;
@@ -707,14 +779,26 @@ export class WinHost {
     // A surface takes the keyboard too, through the same path a terminal's keys take.
     el.addEventListener("keydown", (e) => {
       const bytes = bytesForKey(e);
-      if (!bytes) return;
+      /* M18. A KEY THAT IS NOT BYTES IS NOW A KEYSYM, instead of being dropped here.
+       *
+       * `if (!bytes) return` was the one line that made every arrow, Home, End, Page and function
+       * key unreachable to a process: `bytesForKey` answers null for them, and nothing downstream
+       * ever heard the press. A list that cannot be walked with the arrow keys was the visible
+       * cost, and `src/bin/taskmgr.mjs` had a comment declining to advertise arrows because it
+       * could not receive them.
+       *
+       * `preventDefault` IS CALLED FOR A KEYSYM TOO, and it has to be: an unprevented Page Down or
+       * F5 is the BROWSER's, and a reader walking a file list with Page Down would scroll the host
+       * document or reload the page out from under the desktop. */
+      const sym = bytes ? 0 : keysymForKey(e);
+      if (!bytes && !sym) return;
       e.preventDefault();
       /* COUNTED HERE, because the widget that counts them is gone. A synthesised `KeyboardEvent`
        * exercises this handler and nothing in front of it, and `isTrusted` is the only way to tell
        * the two apart — which is what M4a's whole lesson rests on. Without this a surfaced window
        * could satisfy a "real keystroke" clause with a key the page dispatched to itself. */
       if (e.isTrusted) this.retired.trusted += 1; else this.retired.synthetic += 1;
-      this.#keys(entry.id, bytes, e);
+      this.#keys(entry.id, bytes, e, sym);
     });
     /* AND FOCUS, WHICH A SURFACE STOPPED EMITTING. The focus and blur listeners were the TERMINAL
      * widget's, and `#surface` removes it — so a surfaced window never reported another focus

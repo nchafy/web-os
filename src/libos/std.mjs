@@ -283,15 +283,58 @@ export const FORMAT_BY_EXT = Object.freeze({
   rgba: DOBJ_BITMAP,
 });
 
+/**
+ * A PATH'S EXTENSION, lowercased, or "" — and the ONE place that split is written.
+ *
+ * It existed four times: inside `formatForPath`, inside `iconForPath`, and as `extOf` in
+ * `src/bin/desktop.mjs`, each spelling the same four lines. Every table that keys off an extension
+ * now asks this, so a rule about leading dots or a trailing one is decided once.
+ *
+ * A LEADING DOT IS NOT AN EXTENSION, which is what `dot > 0` means: `.profile` is a name, not a
+ * file of type `profile`. A trailing dot yields "" for the same reason.
+ */
+export function extOf(path) {
+  const name = String(path).split("/").pop() || "";
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
 /** The format a path's bytes are, or 0 for one no rule covers. 0 and not a guess: a program that
  *  offered TEXT for an unknown extension would put arbitrary bytes under a format a receiver will
  *  decode as UTF-8. */
 export function formatForPath(path) {
-  const name = String(path).split("/").pop() || "";
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0) return 0;
-  const ext = name.slice(dot + 1).toLowerCase();
+  const ext = extOf(path);
   return Object.prototype.hasOwnProperty.call(FORMAT_BY_EXT, ext) ? FORMAT_BY_EXT[ext] : 0;
+}
+
+/**
+ * M18. WHICH PROGRAM OPENS A FILE, and with what argv. The third table keyed by extension, beside
+ * `FORMAT_BY_EXT` and `ICON_BY_EXT`, and userland's for the same reason: the kernel knows nothing
+ * about names and the shell draws rows it was published.
+ *
+ * IT MOVED HERE FROM `src/bin/desktop.mjs`, where it was `OPENS_FILES` and the desktop was its only
+ * reader. M18 gives `files` an activation verb — a double-click or Enter on a row — so the
+ * association has a second reader, and the second caller is what justifies the move. A copy in
+ * `files` is how a `.rgba` comes to open in one program from the desktop and another from the file
+ * list.
+ *
+ * THE ARGV IS PART OF THE ASSOCIATION, not a caller's business: `imgview` wants `-f PATH` and
+ * `editor` wants a bare path, and a caller that guessed would launch a program that reads its
+ * operand as something else.
+ */
+export const OPENS_FILES = Object.freeze({
+  png: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  rgba: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  txt: { prog: "editor", argv: (path) => ["editor", path] },
+  md: { prog: "editor", argv: (path) => ["editor", path] },
+});
+
+/** The opener for a path, or null when no rule covers it. NULL AND NOT A DEFAULT: a file this
+ *  system has no program for must be refused by name, because launching an arbitrary program on
+ *  unknown bytes is how a reader is shown a binary as text. */
+export function openerForPath(path) {
+  const ext = extOf(path);
+  return Object.prototype.hasOwnProperty.call(OPENS_FILES, ext) ? OPENS_FILES[ext] : null;
 }
 
 /**
@@ -315,9 +358,7 @@ export const ICON_BY_EXT = Object.freeze({
  *  which is what a reader should see for a file nothing recognises. */
 export function iconForPath(path, { isDir = false, isProgram = false } = {}) {
   if (isDir) return WICON_FOLDER;
-  const name = String(path).split("/").pop() || "";
-  const dot = name.lastIndexOf(".");
-  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+  const ext = extOf(path);
   if (Object.prototype.hasOwnProperty.call(ICON_BY_EXT, ext)) return ICON_BY_EXT[ext];
   if (isProgram) return WICON_PROGRAM;
   return WICON_GENERIC;
