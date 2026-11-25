@@ -2989,3 +2989,86 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     stands as the permission it was measured for and NOT as a general claim: a driver that bursts
     must assert what the page ROUTED, which `thePageRoutedEveryNotch` does, or it credits the
     compositor's merge to the kernel's governor.
+
+299. **A `WEV_KEY` IS EITHER BYTES OR A KEYSYM, AND `a == 0` IS THE DISCRIMINATOR — CHOSEN AFTER
+    READING EVERY READER, NOT BEFORE.** A key the browser gives no text for — an arrow, Home, End,
+    a Page key, a function key — was dropped at `if (!bytes) return` in `src/wm/winhost.mjs`, so no
+    process in this system could receive one and `src/bin/taskmgr.mjs` carried a comment declining
+    to advertise keys it could not get. A keysym rides the record `a = 0`, `c = WKEY_*`, dense from
+    1 so that a zeroed record cannot decode as one, and `keysymOf` in `src/abi.mjs` is the one
+    place the discriminator is read.
+    **THE HAZARD WAS A READER THAT TREATS AN EMPTY BYTE ARRAY AS PRINTABLE**, because `keyBytesOf`
+    answers `[]` for a length outside 1..4 and a program that did not know the table would act on
+    it. `grep -rn keyBytesOf src/bin/` is the measurement `docs/PLAN-SHELL.md` §M18 scheduled, and
+    it was run first: **eight call sites across seven programs**, and every one guards —
+    `imgview` and `paint` on `bytes.length !== 1`, `winopen` on `bytes.length === 1`, `term` and
+    `editor` on `bytes.length === 0`, `files` on `bytes.length === 1`, and `taskmgr` decodes to a
+    string and compares it against letters, where `[]` decodes to `""` and matches nothing. The
+    eighth, `winopen`'s `describe`, spreads the array into a display string and renders `''`. No
+    caller reads an empty array as a key, so the discriminator is free; had one done so the
+    fallback was a `mods` bit, which is why the grep came before the ABI.
+    **ENTER, TAB AND BACKSPACE ARE BYTES AND MUST STAY BYTES.** `bytesForKey` already spells them
+    10, 9 and 127 (`src/wm/terminal.mjs`), every program that reads them reads bytes, and a keysym
+    row for any of them would take the key away from all of them. So the two spaces are disjoint by
+    construction rather than by convention, asserted BOTH WAYS in `selfTest` — a keysym record
+    yields no bytes and a byte record yields no keysym — and a keysym past `WKEY_MAX` reads as 0
+    rather than as a number a program would switch on.
+    **WHICH IS ALSO WHY ENTER CANNOT BE THE CLAUSE THAT PROVES ANY OF THIS.** Enter reaches a
+    process on an unmodified tree, so an Enter assertion is green with the keysym table absent.
+    The assertable pair is an arrow MOVING a cursor and Enter then opening the row the arrow
+    reached — it fails by naming the wrong file, which is the only shape that cannot pass without
+    the keysym. `www/m18.html` proof 2, and `docs/PLAN-SHELL.md` §M18 says it in those words.
+
+300. **A CLICK COUNT IS THE PLATFORM'S, AND IT RIDES THE EVENT THAT CARRIES IT — `mousedown`, NEVER
+    `pointerdown`.** A double-click has a threshold the reader configured, so a program that timed
+    two presses itself would disagree with every other application on their machine; the browser
+    publishes the answer as `event.detail`, and `WPTR_CLICK2`/`WPTR_CLICK3` carry it on the DOWN
+    record only — `detail` is meaningful on the UP as well, and a program reading both would open
+    a row twice for one gesture.
+    **BUT A POINTER EVENT DOES NOT CARRY IT.** Measured by `bench/m18-keys/clickcount.py`, which
+    takes a pointer capture exactly as `WinHost.#wirePointer` takes one and prints `detail` per
+    event kind for both presses of a driven double-click:
+
+    | event | Firefox 156 | Chrome |
+    | --- | --- | --- |
+    | `pointerdown` | `[0, 0]` | `[0, 0]` |
+    | `mousedown` | `[1, 2]` | `[1, 2]` |
+    | `mouseup` | `[1, 2]` | `[1, 2]` |
+    | `click` | `[1, 2]` | `[1, 2]` |
+    | `dblclick` | `[2]` | `[2]` |
+
+    **THE MEASUREMENT IS THE EVIDENCE AND THE EXPLANATION IS SECONDARY**: both engines agree, so
+    this is not an engine quirk to work around, it is where the count lives. The explanation — that
+    a pointer event's `detail` is specified as 0 rather than as a click count — is read off
+    [Pointer Events Level 3](https://www.w3.org/TR/pointerevents3/) and was not re-derived here;
+    the table above was, and it is what the rule rests on.
+    **A DOWN RECORD BUILT FROM `pointerdown.detail` THEREFORE CARRIES NO COUNT AT ALL, IN ANY
+    ENGINE, FOR ANY DRIVER OR BY HAND.** `src/wm/winhost.mjs:754` does exactly that, and the cost
+    is measured rather than argued: `scripts/check.py --only m18` is **15 of 38 expectations red**
+    with `presses: 7` and `dblclicks: 0` in the program's own account, and two of M18's three
+    negative controls **refuse to score** — `no-handler-table` and `keysym-as-byte` name 7 and 9
+    clauses they claim hold and cannot, because the world they were declared against is the one
+    where a double-click arrives. `bench/m18-keys/firefox-keys.py` reports the same thing in the
+    second engine, and `www/m18.html`'s own `diagnose` names the file and the line rather than
+    leaving fifteen evidence blocks for a reader to reconcile.
+    **THE FIX IS A LISTENER AND NOT AN ALGORITHM**: keep `pointerdown` for `setPointerCapture` and
+    `el.focus()`, and read the bits off a `mousedown` listener on the same element. `send` reads
+    only `clientX/clientY/buttons/modifiers`, all present on a MouseEvent, and `pointerdown` fires
+    before `mousedown`, so the DOWN-then-UP record order is unchanged.
+
+301. **A PAGE'S ENTRY POINT MUST SIT BELOW EVERY DECLARATION IT READS, AND THE HARNESS PATH IS NOT
+    THE PRODUCT PATH.** `www/m17.html` called `main()` about 800 lines above the `const
+    LIVE_PROGRAMS` its live branch hands to `stageDesktop`. `main()` runs synchronously and reaches
+    `live()` before its first `await`, so the bare URL threw `Cannot access 'LIVE_PROGRAMS' before
+    initialization` in BOTH engines — a blank desktop at the URL a reader opens, with the whole
+    registered suite green.
+    **WHY GREEN: the suite loads `?proofs=1`**, and that branch does not touch the binding until
+    the module has finished evaluating. So the opt-in harness exercised the one path that could not
+    hit the dead zone, which is constraint 283 read from the other side — the page at the obvious
+    URL is the product, and a product whose only coverage is the harness path has none.
+    `bench/m17-wheel/firefox-scroll.py` found it by being the first gate to load that URL.
+    **BELOW EVERY DECLARATION IS THE ONLY POSITION IN WHICH AN ENTRY POINT CANNOT BE IN A DEAD
+    ZONE**, so it is the position it keeps, and `scripts/check_pages.py` cannot find this one:
+    `node --check` parses and does not execute (constraint 288), and a TDZ error is a runtime
+    error. What catches it is a gate that loads the bare URL — which is what
+    `bench/shell-landing/firefox-landing.py` and `bench/m18-keys/firefox-keys.py` both do.

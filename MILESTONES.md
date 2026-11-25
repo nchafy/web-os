@@ -18,7 +18,7 @@ checks is a wish.
 | | Milestone | Est | Actual | Status |
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
-| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **54 named negative controls over 22 checks and 819 expectations**; the spine checks landed per milestone |
+| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **58 named negative controls over 23 checks and 857 expectations**; the spine checks landed per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
@@ -45,6 +45,7 @@ checks is a wish.
 | M16 | The client box IS the surface, in device pixels | 2.5 | 0.5 | ✅ done — **ACCEPT**, 42 expectations at **two device-pixel ratios**, 4 controls, the first driven resize grip in this project, and 3 measurement assumptions retired by a probe |
 | M17 | The wheel, the clip, and a list that scrolls | 2 | — | ✅ done — **ACCEPT**, 35 expectations over 3 driven proofs, **the first REAL WHEEL this suite has dispatched**, 57 clauses under node, 2 controls wired and 2 registered UNMEASURABLE with an address, constraint 294 amended and 298 qualified by the proof itself |
 | M17a | **A consolidation, not a feature**: one landing desktop, one staging definition | — | 0.5 | ✅ done — the bare URL is the product, `www/shell.mjs` is the only copy of the staging, 17 expectations DERIVED from `/usr/bin` and the mount table, `--negative launcher-stale`, and a Firefox gate with real trusted input |
+| M18 | Keys that are not bytes, and a row that opens | 2.5 | — | **PARTIAL — code landed, proof RED and deliberately so** — 38 expectations over 3 driven proofs, 23 green, **15 red on one listener**: `clickBits` reads `event.detail` on a `pointerdown`, whose `detail` is 0 in BOTH engines, so `WPTR_CLICK2` reaches no program (constraint 300). The keysym half is green end to end; `--negative one-click-opens` scores 8 red / 30 intact, the other two controls REFUSE and name the clauses they cannot hold; a Firefox gate with real trusted keys and a `--prove-failure` half |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -3597,6 +3598,196 @@ is the harness being honest rather than a defect. A full-suite run is what settl
 
 **M17'S FIREFOX DEBT IS NOT PAID BY THIS ROW.** `www/m17.html` has still not been opened in a second
 engine; `firefox-landing.py` drives the landing page, which stages no `files` wheel proof.
+
+---
+
+## M18 — keys that are not bytes, and a row that opens · code landed, proof RED
+
+R4, R5, R6, R9, A3 and A4. A `WEV_KEY` may now carry a KEYSYM instead of bytes, a DOWN record may
+carry a click count, and `files` has navigation and an activation verb — so a row opens and a list
+can be walked with the keyboard. **No new syscall**: three additions to records that already exist.
+**R5, R6, R9 and A3 are closed; R4 and A4 are closed in the KEYBOARD half only**, because R4 asks
+for "double-click, **or** Enter on the focused row" and the double-click cannot arrive — which is
+what the status table's **PARTIAL** is about and what the next paragraph names.
+`docs/ABI.md` §Keys that are not bytes carries the shape and `docs/CONSTRAINTS.md` 299-301 the three
+things it established. The wall-clock figure is not recorded for M17's reason: this row was written
+as parallel slices in one session, so a single-developer number invented for the column would be
+worse than the dash.
+
+**IT IS NOT ✅ AND THE REASON IS ONE LINE OF A FILE NO M18 SLICE OWNED.** `scripts/check.py --only
+m18` reports **38 expectations, 15 red**, and the cause is measured rather than argued — see §The
+proof found a defect below. Everything the ABI, the program and the driver owed is landed and green;
+the gesture that carries half the clauses cannot arrive.
+
+### The measurement came first, and it is why the ABI has the shape it has
+
+`docs/PLAN-SHELL.md` §M18 scheduled one measurement before any code: `a == 0` is the discriminator
+between a key that is bytes and a key that is a keysym, and the hazard is a program that treats
+`keyBytesOf`'s empty array as a printable key. `grep -rn keyBytesOf src/bin/` was run first.
+
+| | measured |
+| --- | --- |
+| how many readers | **eight call sites across seven programs** — `files`, `term`, `editor`, `imgview`, `paint`, `taskmgr` and `winopen` (twice) |
+| how many would misread an empty array | **none.** `imgview` and `paint` guard `length !== 1`; `winopen` and `files` on `length === 1`; `term` and `editor` on `length === 0`; `taskmgr` decodes to a string and compares against letters, where `[]` decodes to `""` and matches nothing; `winopen`'s `describe` spreads it into a display string and renders `''` |
+
+So the discriminator was free and the plan's `mods`-bit fallback was never needed. Constraint 299
+records it, including the half that is a DESIGN rule rather than a measurement: Enter, Tab and
+Backspace stay BYTES, because `bytesForKey` already spells them 10, 9 and 127 and a keysym row for
+any of them would take the key away from every program reading them today.
+
+**WHICH IS ALSO WHY ENTER IS NOT THIS ROW'S A3 CLAUSE**, and the plan said so in advance. Enter
+reaches a process on a tree where the keysym table does not exist, so an Enter assertion is green
+with M18 unimplemented. The assertable pair is a driven **Down arrow moving the cursor off the row
+the pointer last touched**, and Enter then opening **the row the arrow reached** — with the arrow
+dropped, Enter re-opens the pointer's row and the clause fails by NAMING THE WRONG FILE. The
+`notTheOther` grep over `/proc/<pid>/cmdline` is the reading that does it.
+
+### Three driven proofs, 27 clauses, 38 expectations
+
+`www/m18.html` is the desktop at its bare URL and the harness at `?proofs=1` (constraint 283), and
+it asks for exactly **eleven gestures** — a click, two double-clicks, a header click, Down, Enter, a
+header click, Alt+Left, a double-click, Backspace, Backspace. `check_m18` records **one expectation
+per clause**, because the three controls name three overlapping subsets and a check recording "proof
+1 passed" could not tell any of them apart.
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | the activation verb | a fixture tree `/tmp/m18` built by ordinary programs, listed without scrolling. A single click SELECTS and opens nothing — and its pair, that the click LANDED on the row it hit, because "it opened nothing" alone is satisfied by a window receiving no input. A double-click on the directory row re-lists the SAME window, the title names the child, and the cursor and selection reset. A double-click on a file row puts a new pid in `/proc` running the program the association names, ON THAT FILE — the program and the operand are separate greps, since a grep for `editor` alone passes for the right program opened on the wrong file |
+| 2 | the cursor, which is A3 | the keyboard is aimed at the list; a header click clears the selection WITHOUT moving the cursor; a driven Down arrow moves the cursor and selects and scrolls nothing; Enter then spawns a pid whose cmdline names the ARROW's row and NOT the pointer's. Every key `isTrusted`, and exactly two of them reached the process as keysyms |
+| 3 | Back, over two different mechanisms | Alt+Left is a KEYSYM with `WMOD_ALT` riding the record; Backspace is a BYTE, because Windows 7 binds Backspace to Back and has no Up button. Both return the window to the parent, a third Back at the bottom is REFUSED BY NAME and counted, and the program's `backs`/`relists`/`history`/`activations` are asserted as arithmetic rather than as "it refused" |
+
+### The proof found a defect, in a file no M18 slice owned, and reported RED rather than green
+
+**`WPTR_CLICK2` NEVER ARRIVES, IN EITHER ENGINE, FOR ANY DRIVER OR BY HAND.** `src/wm/winhost.mjs`
+builds the DOWN record inside a `pointerdown` listener and reads the click count from that event's
+`detail` (`src/wm/winhost.mjs:754`), where a pointer event carries no click count
+([Pointer Events Level 3](https://www.w3.org/TR/pointerevents3/); constraint 300 records which half
+of that was measured here and which was read).
+`bench/m18-keys/clickcount.py` takes a pointer capture exactly as `#wirePointer` takes one and
+prints `detail` per event kind for both presses of a driven double-click:
+
+| event | Firefox 156 | Chrome |
+| --- | --- | --- |
+| `pointerdown` | `[0, 0]` | `[0, 0]` |
+| `mousedown` | `[1, 2]` | `[1, 2]` |
+| `mouseup` | `[1, 2]` | `[1, 2]` |
+| `click` | `[1, 2]` | `[1, 2]` |
+| `dblclick` | `[2]` | `[2]` |
+
+So the count exists and the record cannot reach it. The cost, measured:
+
+- `scripts/check.py --only m18` → **`[FAIL] m18 38 expectations 13.98s`**, 15 red. `files`' own exit
+  account reads `presses: 7, dblclicks: 0, relists: 0, backs: 0, activations: 1`.
+- `bench/m18-keys/firefox-keys.py` → **4 ok, 1 BAD**, the BAD naming the file, the line and the
+  measurement. It falls back to Enter so the three clauses behind the double-click still run.
+- Two of the three negative controls **REFUSE TO SCORE** rather than report a number, because they
+  are declared against the world the fix produces: `--negative no-handler-table` reports **7
+  expectation(s) about the control itself unmet** and `--negative keysym-as-byte` **9**, each naming
+  the clauses it claims to hold and cannot. That is `Expect(held=..)` doing its job.
+
+**THE KEYSYM HALF IS GREEN END TO END**, which is what makes the red half a located defect rather
+than a milestone that does not work: the driven Down arrow moves the cursor, `keysyms: 2` reaches
+the process, every key is trusted, Enter spawns, Backspace goes back, the refusal is named and
+counted, and a single click selects without opening. 23 of 38 pass.
+
+**THE FIX IS A LISTENER AND NOT AN ALGORITHM**, verified in both engines: keep `pointerdown` for
+`setPointerCapture` and `el.focus()`, and send `send(WPTR_DOWN | clickBits(e), e)` from a
+`mousedown` listener on the same element. `send` reads only `clientX/clientY/buttons/modifiers`, all
+present on a MouseEvent, and `pointerdown` fires before `mousedown`, so the DOWN-then-UP record
+order is unchanged. Over a patched copy of the tree all 38 pass and all three controls score.
+
+### Three controls, all three SERVED BYTES, and that is a property of the worlds
+
+| control | world | state |
+| --- | --- | --- |
+| `one-click-opens` | `clickBits` pinned at a count of 2, so every DOWN record carries `WPTR_CLICK2` and a single click activates. Measured `dblclicks: 9, activations: 8`, six spawned editors against the correct run's 3, 4 and 2 | **wired**, `repo_fixture`. Scores **8 red / 30 intact**, verbatim from the run: `m18 came out fail as required, with 8 red and 30 intact`. The plan names ONE of the eight, `and it opened nothing`, and its PAIR holds |
+| `no-handler-table` | `OPENS_FILES` emptied, so no extension has a program and `files` refuses BY THE ROW'S OWN NAME into `account.refusals` | **wired**, `repo_fixture`. Declared at **9 red / 29 intact**; REFUSES on the landed tree, naming 7 held clauses it cannot have |
+| `keysym-as-byte` | the host's one call into `#keys` packs the keysym into the BYTE field. The plan's third world, in its words | **wired**, `repo_fixture`. Declared at **8 red / 30 intact**; REFUSES on the landed tree, naming 9. The half that must HOLD is the plan's own: every BYTE key — Enter, Backspace, the named refusal, the click counts |
+
+**NONE OF THE THREE IS A QUERY PARAMETER, AND THE PAGE HAS A CLAUSE SAYING SO.** Each world lives in
+a file `www/m18.html` does not own — `clickBits` and the `keydown` listener in `src/wm/winhost.mjs`,
+`OPENS_FILES` in `src/libos/std.mjs` — so all three are `repo_fixture` patches, the hook
+`launcher-stale` introduced. `the page takes no control parameter` is a registered expectation,
+because a flag nobody consumes is a GREEN RUN OVER AN UNMODIFIED WORLD and `www/m17.html` measured
+exactly that twice. Each fixture's needle is verified to occur **exactly once** before it is applied,
+so a slice editing those files gets a loud gate failure rather than a silent no-op.
+
+### The driver owed two things, and both were ADDED rather than worked around in the page
+
+| | what was missing | how it failed |
+| --- | --- | --- |
+| `scripts/check.py` | `_perform_gesture`'s `key` branch dropped `modifiers`, which every MOUSE branch already read | Alt+Left arrives as a BARE Left, which `src/bin/files.mjs` ignores on purpose — so the clause goes red rather than passing on a gesture nobody made |
+| `scripts/cdp.py` | no `Backspace` row in `KEYS`; `press` had only `shift` | `CDPError: no virtual key code recorded for 'Backspace'` — it raises rather than pressing nothing |
+
+`Session.press(key, *, shift=False, modifiers=0)` now takes Chrome's own bitmask (Alt 1, Ctrl 2,
+Meta 4, Shift 8), and the `Backspace` row carries **no inserted text** deliberately, so
+`_event_type_for_key` sends `rawKeyDown` and `bytesForKey` makes byte 127 off `event.key` alone. No
+Home/End/Page rows were added: nothing drives them, and a row for a case that does not exist is the
+parameter `CLAUDE.md` forbids.
+
+### Firefox was driven with real keys, and `scripts/bidi.py` can press one now
+
+`bench/m18-keys/firefox-keys.py` is the second-engine gate, and it exists because driving Chrome
+only has cost this project five milestones. Run on the landing desktop at **dpr 1**:
+
+```
+ok   a single click on 'note.txt' opened nothing and selected it (cursor 'note.txt')
+ok   Backspace went back to 'files — /tmp/m18ff', rows ['sub', 'note.txt']
+ok   a real Down arrow moved the cursor 'inner.txt' -> 'other.txt'
+ok   Enter opened the row the ARROW reached: ['editor — /tmp/m18ff/sub/other.txt', 'editor — tools']
+BAD  [relist] a DOUBLE click on the `sub` row did not re-list the window
+```
+
+`--prove-failure` substitutes `j` for the Down arrow and reports `the proof succeeded: 'j' in place
+of the Down arrow fired 2 of the arrow, enter clause(s), and one-click, back stayed green` — so the
+gate has been seen to fail, and to fail on the clauses it is about and not on its neighbours.
+
+**`scripts/bidi.py` GAINED A KEYBOARD**: `KEYS` (18 named keys → the WebDriver private-use code
+points), `Firefox.keys(actions)` and `Firefox.press(name, *, alt, ctrl, shift, meta, times)`.
+`python3 scripts/bidi.py` asserts the `key` each of the 14 non-modifier rows delivers, that each is
+`isTrusted`, and that `alt=True` arrives as `altKey` — verified by running it, because a wrong code
+point is a working press of a DIFFERENT key with no error anywhere. `type_keys` is unchanged in
+behaviour and now delegates to `keys()`.
+
+### What is not done
+
+**ONE LISTENER MOVE, AND THE ROW IS ✅.** `src/wm/winhost.mjs:754`, `pointerdown` → `mousedown` for
+the DOWN record's click bits. Until it lands: 15 red of 38, two controls refusing, one BAD clause in
+Firefox, and `bench/m18-keys/firefox-keys.py` carries `"relist"` OUT of its `KEPT_TAGS` with the
+reason written at the declaration — **putting it back is the edit that run owes** when the fix
+lands.
+
+**THREE OF PROOF 3'S GREEN CLAUSES ARE VACUOUS IN THIS WORLD, AND THAT IS WORTH KNOWING BEFORE THE
+FIX IS READ AS A NO-OP.** `altLeftWentBack`, `backspaceWentBack` and `theWindowSurvivedTheRefusal`
+each assert that the row set after a Back equals the ROOT's, and the window never left the root — so
+they are satisfied by a Back that was refused. Their pair, `theDirectoryWasEnteredAgain`, is the
+clause that goes red, which is the same two-clause discipline the single-click pair uses. The
+control that turns `altLeftWentBack` on its own is `keysym-as-byte`, and it can only be scored on
+the fixed tree.
+
+**TWO LANDED COMMENTS OVERSTATE WHO EATS AN ARROW.** `src/abi.mjs`'s keysym block and
+`src/bin/taskmgr.mjs:578` both say a process never sees an arrow because `src/wm/window.mjs` binds
+it to move and snap the window. That binding is on the **title bar** —
+`src/wm/window.mjs:286`, `bar.addEventListener("keydown", …)` — so a window whose SURFACE has focus
+does receive arrows, which is exactly what both this row's proofs measure. The comments are a later
+slice's to amend; the ABI is unaffected.
+
+**`editor` AND `taskmgr` DID NOT INHERIT ARROW KEYS, ONLY THE DELIVERY OF THEM.** `grep -rn
+keysymOf src/bin/` names `src/bin/files.mjs` and nothing else, so no other program reacts to one
+yet. `docs/PLAN-SHELL.md` §M18 predicted otherwise and now carries the correction.
+
+**IT RUNS AT ONE RATIO**, `VIEWPORT_SCALE` 2.0, with the ratio asserted as a clause of its own —
+every row and ring reading on the page is a CSS-px box converted by a scale measured off the canvas,
+and a figure labelled with a ratio it was not taken at is what cost M11 and M12 a milestone each
+(constraint 264). Firefox covers dpr 1, but by its own five clauses and not by the registered suite.
+
+**NO `controls.py` AND NO `probe.mjs` BESIDE THIS ROW'S BENCH.** `bench/m18-keys/` carries the
+second-engine gate and the click-count measurement; the keysym codec's own coverage is
+`src/abi.mjs`'s `selfTest`, which asserts the table's density, both directions of the disjointness
+and the out-of-range case at module load.
+
+**`README.md` STILL SAYS 298 CONSTRAINTS.** `CLAUDE.md` is updated in all three places it carries
+the count; `README.md:59` is outside this slice's files and is owed 301.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

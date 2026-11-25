@@ -815,6 +815,17 @@ class Control:
     #: parameter (`www/index.html` calls `applyControls({})`) and a page that could be put into a
     #: broken world by its own URL would be a page with a proof mode (constraint 283).
     LAUNCHER_STALE = "launcher-stale"
+    #: M18's first. `clickBits` in src/wm/winhost.mjs answers a count of 2 for EVERY down record,
+    #: so a single click activates a row. A SERVED-BYTES control, like the two below: all three
+    #: worlds live in files www/m18.html does not own, and that page parses no control parameter.
+    ONE_CLICK_OPENS = "one-click-opens"
+    #: M18's second. `OPENS_FILES` in src/libos/std.mjs is emptied, so no extension has a program
+    #: and `files` refuses every activation BY THE ROW'S OWN NAME.
+    NO_HANDLER_TABLE = "no-handler-table"
+    #: M18's third. The surface's `keydown` listener packs the keysym into the BYTE field, which is
+    #: the world before `WKEY_*` existed as a separate channel: the arrows reach a program as bytes
+    #: no program binds, and every real byte key still works.
+    KEYSYM_AS_BYTE = "keysym-as-byte"
     ONCE = "once"
 
 
@@ -876,6 +887,9 @@ CONTROL_RUNS = {
     Control.UNCLAMPED_SCROLL: ("unclamped-scroll",),
     Control.NO_WHEEL_COALESCE: ("no-wheel-coalesce",),
     Control.LAUNCHER_STALE: ("launcher-stale",),
+    Control.ONE_CLICK_OPENS: ("one-click-opens",),
+    Control.NO_HANDLER_TABLE: ("no-handler-table",),
+    Control.KEYSYM_AS_BYTE: ("keysym-as-byte",),
 }
 
 
@@ -2279,8 +2293,12 @@ def _perform_gesture(page, want: Dict[str, Any], *, held: bool) -> bool:
                 time.sleep(gap)
         return held
     if kind == "key":
+        # THE MODIFIERS GO THROUGH, and this branch dropped them until M18. Every MOUSE gesture
+        # above already read `modifiers`; a key did not, and `cdp.Page.press` had only `shift`. A
+        # dropped Alt turns Alt+Left into a bare Left, which `src/bin/files.mjs` ignores by
+        # design — so the world the page asked for silently became a different one.
         for _ in range(max(1, int(want.get("times") or 1))):
-            page.press(str(want["key"]), shift=bool(want.get("shift")))
+            page.press(str(want["key"]), shift=bool(want.get("shift")), modifiers=modifiers)
         return held
     if kind == "type":
         page.type_keys(str(want.get("text") or ""))
@@ -5541,6 +5559,270 @@ LANDING_LABELS = (
     "served index.html",
 )
 
+# ======================================================================================
+# M18 — keys that are not bytes, and a row that opens
+#
+# Every clause is one boolean www/m18.html publishes, paired here with the label this check
+# records and the evidence keys a failure prints. M17's table discipline, for M17's reason: a
+# label spelled in a control's declaration and a boolean spelled in the page are the two sides of
+# one fact, and only a table stops them drifting.
+#
+# THE THREE CONTROLS ARRIVE AS SERVED BYTES AND NOT AS A QUERY PARAMETER, which is the one
+# structural difference between this check and M17's. Each of the three worlds lives in a file the
+# page does not own — `clickBits` and the `keydown` listener in src/wm/winhost.mjs, `OPENS_FILES`
+# in src/libos/std.mjs — and www/m18.html deliberately parses no control parameter, because a flag
+# nobody consumes is a GREEN RUN OVER AN UNMODIFIED WORLD (www/m17.html measured that twice). So
+# all three are `repo_fixture` patches, the hook `launcher-stale` introduced, and `the page takes
+# no control parameter` is the clause that keeps the design honest.
+# ======================================================================================
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the activation verb.
+_M18_OPEN = (
+    # THE FIXTURE CLAUSES FIRST: every reading below is vacuous without the tree this page built,
+    # and without a listing that does not scroll the cursor's ring is located at the wrong offset.
+    ("the tree the proofs navigate is the fixture",
+     "theTreeIsTheFixture", ("rootRows", "childRows")),
+    ("and neither listing scrolls", "theListDoesNotScroll", ("account",)),
+    # A SINGLE CLICK LANDED, AND THEN DID NO MORE THAN SELECT. Two clauses, because "it opened
+    # nothing" alone is satisfied by a window receiving no input at all.
+    ("a single click put the selection and the cursor on the row it hit",
+     "theClickLanded", ("click",)),
+    ("and it opened nothing", "aSingleClickOnlySelects", ("click", "rootRows", "titles")),
+    ("a double-click on the directory re-listed the same window",
+     "theDirectoryReListed", ("rootRows", "childRows")),
+    ("and the title names the child", "theTitleNamesTheChild", ("titles",)),
+    ("and the re-list reset the cursor and the selection",
+     "theReListResetTheCursor", ("childRows",)),
+    ("a double-click on a file row put a new pid in /proc",
+     "aFileRowSpawnedANewPid", ("spawnedByPointer", "account")),
+    # THE PROGRAM AND THE OPERAND, SEPARATELY: a grep that matched `editor` alone would pass for a
+    # program opened on the wrong file.
+    ("and that pid runs the program the association names, on that file",
+     "theNewPidRunsTheOpener", ("grep",)),
+    ("and the program's own record names the same spawn",
+     "theAccountNamesTheSameSpawn", ("account", "spawnedByPointer")),
+    ("the double-clicks reached the process as click counts",
+     "theDoubleClicksWereCounted", ("account",)),
+)
+
+#: Proof 2, and `docs/PLAN-SHELL.md` §M18 is explicit that ENTER IS NOT THE A3 CLAUSE: `bytesForKey`
+#: already returns byte 10 for Enter, so an Enter clause passes with A3 unimplemented. The pair is
+#: what cannot — the cursor leaving the row the pointer touched, and Enter opening where it went.
+_M18_CURSOR = (
+    ("the keyboard was aimed at the list", "theKeyboardWasAimedAtTheList", ("before",)),
+    ("and the header click cleared the selection without moving the cursor",
+     "theHeaderClickKeptTheCursor", ("before",)),
+    ("a driven Down arrow moved the cursor", "theArrowMovedTheCursor", ("before", "after")),
+    ("and it selected nothing and scrolled nothing",
+     "theArrowSelectedNothing", ("after", "names")),
+    ("Enter put a new pid in /proc", "enterSpawnedANewPid", ("spawnedByEnter",)),
+    # THE `notTheOther` GREP IS AS LOAD-BEARING AS THE MATCHING ONE: a dropped arrow leaves the
+    # cursor on row 0, and this is the reading that names the wrong file rather than merely
+    # reporting that something opened.
+    ("and it opened the row the ARROW reached, not the row the pointer touched",
+     "enterOpenedTheCursorsRow", ("grep",)),
+    ("and the program's own record names the cursor's row",
+     "theAccountNamesTheCursorsRow", ("account", "spawnedByEnter")),
+    ("every key was trusted input", "theKeysWereTrusted", ("keys",)),
+    ("and two of them reached the process as keysyms",
+     "theProcessSawTwoKeysyms", ("keys", "account")),
+)
+
+#: Proof 3. The two routes are not one mechanism, which is the whole reason both are driven:
+#: Alt+Left is a KEYSYM with a modifier riding the record and Backspace is a BYTE.
+_M18_BACK = (
+    ("Alt+Left went back, as a keysym with a modifier", "altLeftWentBack", ("byAlt",)),
+    ("and the directory was entered again", "theDirectoryWasEnteredAgain", ("down",)),
+    ("Backspace went back, as a byte", "backspaceWentBack", ("byByte",)),
+    ("a third Back at the bottom changed nothing",
+     "theWindowSurvivedTheRefusal", ("refused", "byByte")),
+    # ASSERT THE REFUSAL'S OWN WORDS, not "it refused": a Back that did nothing because the key was
+    # dropped and a Back that was refused at the bottom of the stack look identical on screen.
+    ("and it was refused BY NAME, and counted", "theRefusalWasNamed", ("account",)),
+    ("the program's back, re-list and history counts add up",
+     "theCountsAddUp", ("account",)),
+    ("and so do its activations", "theActivationsAddUp", ("account",)),
+)
+
+#: proof name -> its clause table. Read by the body and by the label inventory, so a clause added
+#: to one reaches the other.
+_M18_PROOFS = (("open", _M18_OPEN), ("cursor", _M18_CURSOR), ("back", _M18_BACK))
+
+M18_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the page takes no control parameter",
+) + tuple(label for _, table in _M18_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m18.html",
+)
+
+M18_DOCUMENT = "/www/m18.html?proofs=1"
+
+M18_READY = ("(() => { const M = globalThis.M18 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M18 = """(() => {
+  const M = globalThis.M18 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    /* THE PAGE'S OWN DIAGNOSES, carried into this check's failure output. `diagnose` in
+     * www/m18.html names the ONE fact that explains four red clauses at once, with the address —
+     * a finding without an address is one a reader has to rediscover. */
+    notes: (M.notes || []).map(String),
+    tree: M.tree || {},
+    open: one(P.open),
+    cursor: one(P.cursor),
+    back: one(P.back),
+  }
+})()"""
+
+M18_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list, "tree": dict,
+    "open": (dict, type(None)),
+    "cursor": (dict, type(None)),
+    "back": (dict, type(None)),
+}
+
+#: How many gestures www/m18.html asks for: a click, a double-click, a double-click, a header
+#: click, Down, Enter, a header click, Alt+Left, a double-click, Backspace, Backspace. ELEVEN, and
+#: asserted rather than counted loosely, because a page that finished without asking for one would
+#: have measured a list nobody touched and still produced row names.
+M18_GESTURES = 11
+
+#: `src/wm/winhost.mjs`'s `clickBits`, verbatim, and the same line with the count pinned at 2. The
+#: FIRST LINE OF THE FUNCTION and not its listener, deliberately: the needle then holds whichever
+#: event the DOWN record's bits are read off, so the fixture does not quietly stop patching
+#: anything the day that listener moves — and it has to move, because `bench/m18-keys/clickcount.py`
+#: measures `pointerdown.detail` at 0 in both engines and `mousedown.detail` at 1 then 2.
+_CLICK_BITS = 'const n = event && typeof event.detail === "number" ? event.detail : 0;'
+_CLICK_BITS_ALWAYS = "const n = 2;"
+
+#: `src/libos/std.mjs`'s `OPENS_FILES`, verbatim, and the same table with nothing in it.
+_OPENS_FILES = """export const OPENS_FILES = Object.freeze({
+  png: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  rgba: { prog: "imgview", argv: (path) => ["imgview", "-f", path] },
+  txt: { prog: "editor", argv: (path) => ["editor", path] },
+  md: { prog: "editor", argv: (path) => ["editor", path] },
+});"""
+_OPENS_FILES_EMPTY = "export const OPENS_FILES = Object.freeze({});"
+
+#: `src/wm/winhost.mjs`'s one call into `#keys` from the surface's `keydown` listener, and the same
+#: call with the keysym packed as a BYTE instead. The world `docs/PLAN-SHELL.md` §M18 asks for in
+#: as many words: "the page sends a keysym as a byte".
+_KEYSYM_CALL = "this.#keys(entry.id, bytes, e, sym);"
+_KEYSYM_AS_BYTE = "this.#keys(entry.id, bytes || (sym ? [sym] : null), e, 0);"
+
+
+#: What A CLICK COUNT OF 2 ON EVERY DOWN RECORD must break. EIGHT, MEASURED, and the cascade is
+#: the honest reading of the world rather than a check coupled too tightly: a double-click is four
+#: mouse events, so every DOWN carrying `WPTR_CLICK2` turns the page's eleven gestures into
+#: `dblclicks: 9, activations: 8` and SIX spawned editors against the correct run's 3, 4 and 2.
+#: Everything past the first clause is a consequence of those extra activations — the re-list is
+#: immediately followed by one, so the cursor it reset is set again; the file double-click opens
+#: twice, so two pids appear where the clause names one.
+#:
+#: `docs/PLAN-SHELL.md` §M18 names ONE of these, `and it opened nothing`, and that one is this
+#: control's subject. Its PAIR holds — `a single click put the selection and the cursor on the row
+#: it hit` — which is the whole design: a clause reading only "it opened nothing" is satisfied by a
+#: window receiving no input at all.
+_ONE_CLICK_OPENS_FAILS = (
+    "and it opened nothing",
+    "and the re-list reset the cursor and the selection",
+    "a double-click on a file row put a new pid in /proc",
+    "and the program's own record names the same spawn",
+    "the double-clicks reached the process as click counts",
+    "and the program's own record names the cursor's row",
+    "and so do its activations",
+    "the page's own verdict is ok",
+)
+
+#: What AN EMPTY `OPENS_FILES` must break. NINE, MEASURED: every clause about a row OPENING a file,
+#: by both routes, and the program's own record of each.
+#:
+#: THE REFUSAL IS THE POINT AND IT IS WHY `and it was refused BY NAME, and counted` IS IN THIS
+#: TUPLE. `docs/PLAN-SHELL.md` §M18 asks for the spawn clause to fail "by name, with the refusal
+#: counted rather than silent", and the measurement is `refusals: [{what: 'inner-0.txt', why: 'no
+#: program in this system opens a file of that type'}, {what: 'inner-1.txt', why: ...}, {what:
+#: '/tmp/m18', why: 'there is nowhere to go back to'}]` with `spawned: []`. So the clause that
+#: asserts EXACTLY ONE refusal — the Back at the bottom of the stack — goes red because two more
+#: arrived, each naming its own row. That is the control being visible in the account rather than
+#: only in a pid that never appeared, which is what tells this world apart from a double-click
+#: nobody delivered.
+#:
+#: THE DIRECTORY HALF HOLDS, ENTIRELY: a folder row is activated by `relist` and consults no
+#: association, so the re-list, the title, the cursor reset, both Backs and `relists: 4` are
+#: untouched. `activations` falls from 4 to 2, which is the one count that moves.
+_NO_HANDLER_TABLE_FAILS = (
+    "a double-click on a file row put a new pid in /proc",
+    "and that pid runs the program the association names, on that file",
+    "and the program's own record names the same spawn",
+    "Enter put a new pid in /proc",
+    "and it opened the row the ARROW reached, not the row the pointer touched",
+    "and the program's own record names the cursor's row",
+    "and it was refused BY NAME, and counted",
+    "and so do its activations",
+    "the page's own verdict is ok",
+)
+
+#: What PACKING A KEYSYM INTO THE BYTE FIELD must break. EIGHT, MEASURED, and the half that HOLDS
+#: is the half `docs/PLAN-SHELL.md` §M18 requires in as many words: "the arrow clauses MUST fail
+#: and the printable clauses MUST HOLD". Measured `keysyms: 0` against 2, and every BYTE key still
+#: works — `Enter put a new pid in /proc`, `Backspace went back, as a byte`, `a third Back at the
+#: bottom changed nothing`, `and it was refused BY NAME, and counted` and `the double-clicks
+#: reached the process as click counts` all hold.
+#:
+#: TWO OF THE EIGHT ARE DOWNSTREAM OF THE DROPPED ALT+LEFT rather than of the arrow, and naming
+#: them is cheaper than pretending the sequence is independent: with Back refused, the window is
+#: still in the child directory when the page double-clicks row 0 again, so that gesture opens
+#: `inner-0.txt` a THIRD time (`spawned` is 3 rows, not 2) and `backs` reaches 1 instead of 2.
+_KEYSYM_AS_BYTE_FAILS = (
+    "and the program's own record names the same spawn",
+    "a driven Down arrow moved the cursor",
+    "and it opened the row the ARROW reached, not the row the pointer touched",
+    "and the program's own record names the cursor's row",
+    "and two of them reached the process as keysyms",
+    "Alt+Left went back, as a keysym with a modifier",
+    "the program's back, re-list and history counts add up",
+    "the page's own verdict is ok",
+)
+
+
+def _m18_one_click_opens(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/wm/winhost.mjs", _CLICK_BITS, _CLICK_BITS_ALWAYS)
+
+
+def _m18_no_handler_table(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/libos/std.mjs", _OPENS_FILES, _OPENS_FILES_EMPTY)
+
+
+def _m18_keysym_as_byte(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/wm/winhost.mjs", _KEYSYM_CALL, _KEYSYM_AS_BYTE)
+
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -5634,6 +5916,14 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "refuses before it builds a host: scrolling a picture of a file list is not a "
                 "program receiving input. UNMEASURABLE rather than FAIL, because a FAIL would "
                 "claim 300 notches were queued and counted wrongly.",
+        ), "m18": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and nothing receives a click or a key. There "
+                "is also no FILESYSTEM, so `/tmp/m18` is never built and the fixture the three "
+                "proofs navigate does not exist — the page refuses before it builds a host, for "
+                "the reason www/m16.html and www/m17.html do. UNMEASURABLE rather than FAIL, "
+                "because a FAIL would claim a row was double-clicked and opened the wrong thing.",
         ), "landing": Expect(
             UNMEASURABLE,
             why="the same mechanism, at the page a reader actually opens: without COOP/COEP there "
@@ -7122,6 +7412,102 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "the start menu, while the desktop around it keeps working",
             failed=_LAUNCHER_STALE_FAILS,
             held=held_rest(LANDING_LABELS, _LAUNCHER_STALE_FAILS),
+        )},
+    ),
+    "one-click-opens": NegativeControl(
+        name="one-click-opens",
+        why="`clickBits` in the SERVED copy of src/wm/winhost.mjs answers a count of 2 for every "
+            "DOWN record, so a single click is an activation. `docs/PLAN-SHELL.md` §M18's first "
+            "control, in its own words.\n"
+            "A SERVED-BYTES FIXTURE (`repo_fixture`) AND NOT A QUERY PARAMETER, and that is a "
+            "property of the world rather than a preference: the bit is read in "
+            "src/wm/winhost.mjs, which www/m18.html does not own, and that page deliberately "
+            "parses no control parameter at all — a flag nobody consumes is a GREEN RUN OVER AN "
+            "UNMODIFIED WORLD, which www/m17.html measured twice. `the page takes no control "
+            "parameter` is the clause that holds it to that.\n"
+            "WHAT MUST BREAK: `and it opened nothing`, which is the clause the plan names, AND "
+            "SEVEN MORE — measured, declared, and a property of the world rather than of the "
+            "check. A double-click is four mouse events, so this world turns the page's eleven "
+            "gestures into `dblclicks: 9, activations: 8` and six spawned editors against 3, 4 "
+            "and 2: the re-list is immediately followed by an activation, so the cursor it reset "
+            "is set again, and the file double-click opens twice where the clause names one pid.\n"
+            "WHAT MUST HOLD, AND IT IS THE PAIR THAT MATTERS: `a single click put the selection "
+            "and the cursor on the row it hit`. A clause reading only 'it opened nothing' is "
+            "satisfied by a window receiving no input at all, so the control has to turn the half "
+            "about OPENING while the half about LANDING holds. It does.\n"
+            "WHY THE PATCH IS ON THE FUNCTION AND NOT ITS LISTENER: `clickBits` is called from one "
+            "place and the needle is its first line, so the fixture keeps patching the same fact "
+            "whichever event the bits are read off — and a fixture that silently patched nothing "
+            "is the worst case in this file, which is why `_patch_tree` verifies its own single "
+            "replacement.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m18_one_click_opens,
+        expects={"m18": Expect(
+            Outcome.FAIL,
+            why="a single click must come to open a row, which is the activation verb lost: a "
+                "reader selecting a file would launch a program",
+            failed=_ONE_CLICK_OPENS_FAILS,
+            held=held_rest(M18_LABELS, _ONE_CLICK_OPENS_FAILS),
+        )},
+    ),
+    "no-handler-table": NegativeControl(
+        name="no-handler-table",
+        why="`OPENS_FILES` in the SERVED copy of src/libos/std.mjs is emptied, so no extension "
+            "names a program and `openerForPath` answers null for everything. "
+            "`docs/PLAN-SHELL.md` §M18's second control.\n"
+            "A SERVED-BYTES FIXTURE for `one-click-opens`'s reason: the table is src/libos/std.mjs's "
+            "and the page parses no control parameter.\n"
+            "WHAT MUST BREAK: the spawn clauses, BY NAME. The plan requires the refusal be "
+            "'counted rather than silent', and it is: `activate` answers `refuse(row.name, \"no "
+            "program in this system opens a file of that type\")`, so `account.refused` rises and "
+            "`account.refusals` carries the ROW'S OWN NAME. That is what tells this world apart "
+            "from a double-click nobody delivered, which looks identical in the pid list and says "
+            "nothing in the account.\n"
+            "WHAT MUST HOLD: the directory half, entirely. A folder row is activated by `relist` "
+            "and consults no association, so the re-list, the title, the cursor reset, both Backs "
+            "and the refusal at the bottom of the stack are untouched — which is the honest shape "
+            "of 'the association is empty' as opposed to 'activation is broken'.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m18_no_handler_table,
+        expects={"m18": Expect(
+            Outcome.FAIL,
+            why="a file row must open nothing and be refused by its own name, with the refusal in "
+                "the program's account rather than only in a pid that never appeared",
+            failed=_NO_HANDLER_TABLE_FAILS,
+            held=held_rest(M18_LABELS, _NO_HANDLER_TABLE_FAILS),
+        )},
+    ),
+    "keysym-as-byte": NegativeControl(
+        name="keysym-as-byte",
+        why="the surface's `keydown` listener in the SERVED copy of src/wm/winhost.mjs packs the "
+            "keysym into the BYTE field — `#keys(id, bytes || [sym], e, 0)` — so an arrow reaches "
+            "a process as a one-byte key no program binds. `docs/PLAN-SHELL.md` §M18's third "
+            "control, in its own words: 'the page sends a keysym as a byte'.\n"
+            "IT IS PATCHED IN THE HOST AND NOT POSTED BY THE PAGE, and www/m18.html says so where "
+            "it declines to offer the flag: a page posting a `win-in` record of its own would "
+            "bypass the trusted-input path every cursor clause rests on, so it would turn those "
+            "clauses for the wrong reason. A double that cannot reach the real failure tests a "
+            "world that does not exist (CLAUDE.md).\n"
+            "WHAT MUST BREAK: the ARROW clause and the ALT+LEFT clause. WHAT MUST HOLD: every "
+            "BYTE key, which the plan requires in as many words. `bytesForKey` already spells "
+            "Enter 10 and Backspace 127, so the patch leaves them exactly as they were — Enter "
+            "still activates, Backspace still goes back, the third Back is still refused by name, "
+            "and the click counts never pass through this listener at all.\n"
+            "WHAT IT IS ABOUT: `a == 0` is the discriminator between a keysym and a key's bytes "
+            "(src/abi.mjs `keysymOf`), and this is that discriminator removed. It is the world "
+            "before M18 with the keys no longer dropped — which is the one world in which an "
+            "arrow arrives and still moves nothing.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m18_keysym_as_byte,
+        expects={"m18": Expect(
+            Outcome.FAIL,
+            why="an arrow delivered as a byte must leave the cursor where the pointer put it, so "
+                "Enter re-opens the pointer's row and the clause fails by naming the wrong file",
+            failed=_KEYSYM_AS_BYTE_FAILS,
+            held=held_rest(M18_LABELS, _KEYSYM_AS_BYTE_FAILS),
         )},
     ),
 }
@@ -14324,6 +14710,180 @@ def check_landing(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served index.html", env.served_matches_disk(env.document),
                     "the index.html served does not match the tree this phase serves on disk")
+
+
+# ======================================================================================
+# m18. Keys that are not bytes, and a row that opens.
+# ======================================================================================
+
+#: How long the driver waits for www/m18.html to reach a terminal state.
+#:
+#: THE FLOOR IS THE GESTURES THAT DELIBERATELY DO NOT REPAINT. Four of the eleven are `wantRepaint:
+#: false` — an activation on a FILE row changes nothing in this window, and a refused Back changes
+#: nothing anywhere — and each of those settles for a fixed 600 ms while the record crosses the
+#: kernel into a program parked in `poll`. On top of that sit the tree (four programs run to
+#: completion), two `editor` spawns, five fixed-string greps of `/proc`, and eleven CDP round trips.
+#: MEASURED at 6.2 s for a run whose every clause holds and 16.3 s for one where four gestures wait
+#: out a repaint that never comes, both at dpr 2 — so the margin here is large and deliberately so,
+#: because the one thing a smaller number buys is a BROKEN run on a slower machine.
+M18_TIMEOUT = 300.0
+
+
+def _m18_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE EXPECTATION PER CLAUSE AND NOT ONE PER PROOF, because all three controls name a NAMED
+    subset and the three subsets OVERLAP: measured, `one-click-opens` turns 8 of the 27,
+    `no-handler-table` 9 and `keysym-as-byte` 8, and only three labels are in all three. A check
+    recording "proof 1 passed" could not tell any of the three apart from the others.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause,
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m18",
+    milestone="m18",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.ONE_CLICK_OPENS,
+              Control.NO_HANDLER_TABLE, Control.KEYSYM_AS_BYTE),
+    labels=M18_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M18_DOCUMENT,
+    ready_expr=M18_READY,
+    ready_what="globalThis.M18 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m18.html?proofs=1)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M18 && globalThis.M18.state",
+    refusal_want="aborted",
+    note="KEYS THAT ARE NOT BYTES, AND A ROW THAT OPENS. Two things the driver owed before this "
+         "page could be driven at all, and both were ADDED here rather than worked around in the "
+         "page: `_perform_gesture`'s `key` branch dropped `modifiers` — every MOUSE gesture "
+         "already read them — so Alt+Left arrived as a bare Left, which `src/bin/files.mjs` "
+         "ignores on purpose; and `scripts/cdp.py`'s `KEYS` had no `Backspace` row, which raises "
+         "`CDPError: no virtual key code recorded` rather than pressing nothing. Both failures "
+         "point the page's way, which is why neither is a silent green.\n"
+         "ENTER IS DELIBERATELY NOT THE A3 CLAUSE. `bytesForKey` already returns byte 10 for it "
+         "(src/wm/terminal.mjs), so Enter reaches a process TODAY and a clause asserting it would "
+         "pass with the keysym table unimplemented. The clause is the PAIR: a driven Down arrow "
+         "moving the cursor off the row the pointer last touched, and Enter then opening the row "
+         "the ARROW reached. The previous gesture was a double-click on row 0, so a dropped arrow "
+         "leaves the cursor there and Enter re-opens `inner-0.txt` — the clause fails BY NAMING "
+         "THE WRONG FILE, which is the only shape of it that cannot pass without the keysym. The "
+         "`notTheOther` grep is what reads that.\n"
+         "ALL THREE CONTROLS ARE SERVED BYTES, which is this check's one structural difference "
+         "from M17's. Each world lives in a file www/m18.html does not own — `clickBits` and the "
+         "`keydown` listener in src/wm/winhost.mjs, `OPENS_FILES` in src/libos/std.mjs — and the "
+         "page parses no control parameter at all, because a flag nobody consumes is a green run "
+         "over an unmodified world (www/m17.html measured exactly that, twice). `the page takes "
+         "no control parameter` is the clause that holds the design to it.\n"
+         "WHAT THIS CHECK FOUND ON THE TREE IT WAS WRITTEN AGAINST, and the address: FIFTEEN of "
+         "the 38 clauses are RED because `WPTR_CLICK2` never arrives. `clickBits` is called from "
+         "a `pointerdown` listener in src/wm/winhost.mjs and Pointer Events Level 3 fixes "
+         "`detail` at 0 there, so no double-click reaches a program in EITHER engine — measured "
+         "in both by `bench/m18-keys/clickcount.py`, and reported live by www/m18.html's own "
+         "`diagnose` (`presses` rose to 7 and `dblclicks` is 0). The run is a `FAIL` with the "
+         "note carried into this check's evidence rather than a green over a product nobody can "
+         "double-click in, which is the whole point of registering it. With that one listener "
+         "moved to `mousedown`, all 38 pass and all three controls score — verified over a "
+         "patched copy of the tree (38 ok; 8 red / 30 intact, 9 / 29 and 8 / 30). ON THE LANDED "
+         "TREE ONLY `one-click-opens` SCORES, and that is not an accident: its fixture pins the "
+         "count rather than reading it, so it restores the bit the defect loses. The other two "
+         "are declared against the world the fix produces and REFUSE on this one, naming the "
+         "clauses they claim to hold and cannot — which is `Expect(held=..)` doing its job rather "
+         "than a control quietly satisfied by a failure it is not about.\n"
+         "negative controls: --negative one-click-opens pins `clickBits` at a count of 2, so "
+         "EVERY down record carries `WPTR_CLICK2` and a single click activates (measured: "
+         "`dblclicks: 9, activations: 8`, six spawned editors against 3, 4 and 2). It turns `and "
+         "it opened nothing`, which is the clause the plan names, and the PAIR of that clause "
+         "holds — without `a single click put the selection and the cursor on the row it hit`, a "
+         "window receiving no input at all would satisfy it. --negative no-handler-table empties "
+         "`OPENS_FILES`, so no row opens anything and `files` refuses BY THE ROW'S OWN NAME: "
+         "measured `spawned: []` and `refusals` carrying `inner-0.txt` and `inner-1.txt` with 'no "
+         "program in this system opens a file of that type'. The refusal being COUNTED is what "
+         "separates this world from a double-click that was never delivered, which looks "
+         "identical in the pid list and says nothing in the account. --negative keysym-as-byte "
+         "packs the keysym into the byte field, which is the plan's third world: measured "
+         "`keysyms: 0`, the arrow and Alt+Left clauses red, and every BYTE clause — Enter, "
+         "Backspace, the named refusal, the click counts — green, which is the half the plan "
+         "requires in as many words. --negative no-isolation must come out BROKEN: no SAB, no "
+         "kernel, no filesystem, so not even the fixture tree exists.",
+)
+def check_m18(env: Env) -> None:
+    performed = drive_gestures(env, "M18", timeout=M18_TIMEOUT)
+    got = env.read(READ_M18, M18_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m18.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m18.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed, no filesystem is mounted and "
+            "the tree the three proofs navigate is never built.%s"
+            % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m18.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE TWO `editor` PROCESSES THIS RUN SPAWNS ARE REAL PROGRAMS, and a process that faulted
+    # during its own init reads downstream as "a pid appeared" — `/proc` has the row either way
+    # until it is reaped. A swallowed failure is a defect (CLAUDE.md, harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because every row and ring reading on this page is a CSS-px box converted by a
+    # scale measured off the canvas (`FILES_METRICS.toSurface`). A figure labelled with a ratio it
+    # was not taken at is what cost M11 and M12 a milestone each (constraint 264).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, to the exact count. Every click, double-click and key below is
+    # input this driver dispatched; a page that finished without asking would have measured a list
+    # nobody touched and still produced row names.
+    env.expect_that("the page was really driven",
+                    performed == M18_GESTURES and got["gestures"] == performed,
+                    {"performed": performed, "want": M18_GESTURES,
+                     "pageLogged": got["gestures"], "phase": got["phase"]})
+    # CONSTRAINT 283'S SHAPE, AND THIS CHECK'S CONTROL DESIGN IN ONE CLAUSE: `proofs` is the only
+    # parameter this page reads, and every host-side, geometry-side and surface-side switch is
+    # off. So the three worlds below cannot be selected by a URL, which is why all three are
+    # `repo_fixture` patches — and a page that grew a control flag nobody consumed would fail
+    # here rather than reporting green over an unmodified world.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    env.expect_that("the page takes no control parameter",
+                    sorted(cfg) == ["proofs"] and cfg.get("proofs") is True
+                    and bool(live) and not [k for k, v in live.items() if v],
+                    {"asked": cfg, "inForce": live, "document": env.document,
+                     "tree": got["tree"]})
+
+    for proof, table in _M18_PROOFS:
+        _m18_record(env, got, proof, table)
+
+    # THE PAGE'S OWN DIAGNOSES RIDE THIS FAILURE. `diagnose` names the one fact that explains
+    # several red clauses at once, with the file and the measurement behind it — which is what
+    # keeps a reader from rediscovering it from four separate evidence blocks.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION: a list whose cursor moved and one whose cursor did not are
+    # the same picture at a glance, and the clause that reads the ring reads it out of the display
+    # list the program sent (constraint 40).
+    env.shoot("m18-open")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m18.html", env.served_matches_disk(env.document),
+                    "the m18.html served does not match www/m18.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

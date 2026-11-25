@@ -186,6 +186,10 @@ class Session:
         # plain arrow is KEY_STEP px and Shift one px (src/wm/window.mjs).
         "ArrowLeft": (37, ""),
         "ArrowRight": (39, ""),
+        # M18 drives Back with this, and it MUST NOT carry inserted text: `bytesForKey`
+        # (src/wm/terminal.mjs) produces byte 127 off `event.key` alone, and a `text`-carrying
+        # keyDown would also put the character into whatever the focus is.
+        "Backspace": (8, ""),
     }
 
     @staticmethod
@@ -197,11 +201,19 @@ class Session:
         """
         return "keyDown" if inserted_text else "rawKeyDown"
 
-    def press(self, key: str, *, shift: bool = False) -> None:
-        """Dispatch a real keypress."""
+    def press(self, key: str, *, shift: bool = False, modifiers: int = 0) -> None:
+        """Dispatch a real keypress, optionally with modifiers held.
+
+        `modifiers` is Chrome's own bitmask (`CTRL` below records it: Alt 1, Ctrl 2, Meta 4,
+        Shift 8) and is ORed with `shift`, which predates it. A MODIFIER DROPPED HERE IS A
+        DIFFERENT GESTURE, not a weaker one: M18 asks for Alt+Left, and a bare Left is a key
+        `src/bin/files.mjs` ignores on purpose — so the clause would fail rather than pass on a
+        gesture nobody made.
+        """
         if key not in self.KEYS:
             raise CDPError(f"no virtual key code recorded for {key!r}")
         virtual_key_code, inserted_text = self.KEYS[key]
+        held = int(modifiers) | (8 if shift else 0)
         for event_type in (self._event_type_for_key(inserted_text), "keyUp"):
             params = {
                 "type": event_type,
@@ -209,7 +221,7 @@ class Session:
                 "code": key,
                 "windowsVirtualKeyCode": virtual_key_code,
                 "nativeVirtualKeyCode": virtual_key_code,
-                "modifiers": 8 if shift else 0,
+                "modifiers": held,
             }
             if inserted_text and event_type == "keyDown":
                 params["text"] = inserted_text

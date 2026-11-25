@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M18 — keys that are not bytes, and a row that opens</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M17's pages do it,
+   and here it is load-bearing for the same reason it is on M16's and M17's: `.window-body` is the
+   client area a surface fills and the element every CSS-px reading below is measured off. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:160px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M18 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M18 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M18's page: KEYS THAT ARE NOT BYTES, AND A ROW THAT OPENS.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * fixture windows and then block in `gestureAsker`, which looks exactly like a broken product.
+ *
+ *   PROOF 1  THE ACTIVATION VERB (plan §M18). A driven DOUBLE-CLICK on a DIRECTORY row re-lists the
+ *            window — its row set changes and the title names the child — and a driven double-click
+ *            on a FILE row puts a new pid in `/proc` running the program the association names. A
+ *            SINGLE click only selects: the row set, the title and the process table are all
+ *            unmoved, which is the clause `one-click-opens` turns
+ *   PROOF 2  THE A3 CLAUSE, and Enter is deliberately not it. `bytesForKey` already returns byte 10
+ *            for Enter (`src/wm/terminal.mjs`), so Enter reaches a process TODAY and a clause
+ *            asserting it would pass with A3 unimplemented. So: a driven DOWN ARROW moves the
+ *            keyboard cursor off the row the pointer last touched, and THEN Enter opens the row the
+ *            ARROW reached. With the arrow dropped at `src/wm/winhost.mjs`'s old `if (!bytes)
+ *            return`, Enter re-opens the pointer's row and the clause fails BY NAMING THE WRONG
+ *            FILE — which is the only shape of this proof that cannot pass without the keysym
+ *   PROOF 3  BACK, BOTH WAYS. Alt+Left is a KEYSYM with a modifier; Backspace is a BYTE
+ *            (`keysymOf` answers 0 for it). Both return the window to the parent, and a third Back
+ *            at the bottom of the stack is REFUSED BY NAME — counted, with the reason on the
+ *            program's own exit line
+ *
+ * PROOFS 1 AND 3 ARE RED ON THE TREE AS IT STANDS, and the cause is measured rather than guessed:
+ * `WPTR_CLICK2` NEVER ARRIVES. `clickBits` in `src/wm/winhost.mjs` reads `event.detail` on a
+ * `pointerdown` listener, and the Pointer Events specification fixes `detail` at 0 for
+ * `pointerdown` and `pointerup` — only the mouse event carries the platform's click count. So no
+ * double-click can activate a row, by any driver or by hand, in either engine. `diagnose` below
+ * carries the measurement and the address; this page does NOT work around it, because that file is
+ * landed and is not this slice's, and a page that timed two presses for itself would be exactly
+ * what that file's own comment rejects.
+ *
+ * EVERY GESTURE HERE IS REAL INPUT and the page drives none of it: a synthesised `PointerEvent` is
+ * `isTrusted === false` (constraint 175), and `WinHost` counts trusted and synthetic keys apart for
+ * exactly that reason — so `keyCounts.trusted` is asserted rather than "a key arrived".
+ *
+ * WHAT A DRIVER OWES THAT IT DID NOT OWE BEFORE M18. Two additions, both in the page's favour if
+ * they are missing — a dropped modifier and an unknown key name both make a clause RED:
+ *
+ *   1. `kind: 'key'` MUST pass `modifiers` through. `scripts/check.py`'s `_perform_gesture` already
+ *      reads `modifiers = int(want.get("modifiers") or 0)` for every MOUSE gesture and drops it for
+ *      a key, and `scripts/cdp.py`'s `press(key, *, shift=False)` has no parameter for it. Alt+Left
+ *      asks for `modifiers: CHROME_MOD_ALT`. A driver that ignores it sends a BARE Left, which
+ *      `src/bin/files.mjs` ignores on purpose (there is no horizontal overflow to scroll), so the
+ *      Back clause fails instead of passing on a gesture nobody made.
+ *   2. `scripts/cdp.py`'s `KEYS` needs a `Backspace` row — `(8, "")`, which `_event_type_for_key`
+ *      then sends as `rawKeyDown`, and `bytesForKey` turns into byte 127 off `event.key` alone. An
+ *      absent row raises `CDPError: no virtual key code recorded for 'Backspace'`, which is loud.
+ *
+ * Neither file is this page's, so neither change is made here — the asks are published and the
+ * contract is stated, which is `www/m17.html`'s precedent for a `wheel` kind no driver yet
+ * performed. A driver that performs no `key` modifier at all raises rather than scrolling nothing:
+ * `_perform_gesture` ends in `raise Unmeasurable` for an unknown kind, and an unknown KEY raises
+ * out of `scripts/cdp.py`.
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import { DL_CLIP, DL_STROKE_RECT, DL_TEXT, DLT_RIGHT, decodeDrawOps, textOfOps } from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import {
+  bootKernel, spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+/* THE LIVE DESKTOP IS STAGED FROM HERE AND NOT BELOW, which is M17's lesson applied rather than
+ * repeated: a page's own copy of "assemble the shell" is how a program that landed in one page's
+ * copy came to be absent from every other. `place` comes from the same file because this page's
+ * copy of it would be identical to the line.
+ * THE PROOFS PATH BOOTS ITS OWN BARE HOST: its clauses are measured against one fixture window on
+ * an empty desktop, and a taskbar reserving a strip under it would be a different desktop. */
+import { stageDesktop, place, PROGRAMS, DESKTOP_HELP } from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. One spelling, so a call site cannot be read as a
+ *  condition nobody wrote. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+}
+globalThis.M18.config = CFG
+
+/* THE PAGE-SIDE CONTROLS ARE STATED EVEN WHERE THIS PAGE SETS NONE, because they are MODULE state
+ * and another page in this realm may have left them holding something. "None, and said so" is the
+ * fail-closed spelling; M16's and M17's pages carry the same note.
+ *
+ * M18's TWO NEGATIVE CONTROLS BELONG TO FILES THIS PAGE DOES NOT OWN, and that is stated here
+ * rather than hidden behind a query parameter this page would then have to lie about:
+ *   `one-click-opens`   sets the click count on EVERY down record — `clickBits` in
+ *                       `src/wm/winhost.mjs`, which is landed and is not this slice's. It turns
+ *                       `aSingleClickOnlySelects` below and nothing else.
+ *   `no-handler-table`  empties the association — `OPENS_FILES` in `src/libos/std.mjs`, likewise.
+ *                       It turns the two spawn clauses, BY NAME: `files` refuses with the row's own
+ *                       name and counts it, so the world is visible in `account.refusals` rather
+ *                       than only in a missing pid.
+ *   `keysym-as-byte`    the plan's third, and it needs a `setHostControls` key this page cannot
+ *                       supply: the translation it breaks is `keysymForKey` against `bytesForKey`
+ *                       inside `src/wm/winhost.mjs`'s own `keydown` listener. A PAGE posting a
+ *                       `win-in` record of its own would be a double that cannot reach the real
+ *                       failure — it would bypass the trusted-input path the cursor clauses rest
+ *                       on, and turn them for the wrong reason.
+ * None of the three is reachable as a flag on `src/bin/files.mjs` as it stands. A boot cfg, a
+ * `setHostControls` key or the `repo_fixture` hook is where each has to arrive; a page that merely
+ * passed a flag nobody consumed would report GREEN over an unmodified world, which is the failure
+ * `www/m17.html` measured twice and refused twice. */
+setSurfaceControls({})
+setHostControls({})
+
+/** Chrome's own modifier bitmask: Alt 1, Ctrl 2, Meta 4, Shift 8. It is the protocol's number and
+ *  not this project's — `scripts/cdp.py` records the same table beside its `CTRL = 2`, and a page
+ *  cannot import from a Python module, so this is a restatement with its source named rather than a
+ *  constant invented here. */
+const CHROME_MOD_ALT = 1
+
+const FILES = '/src/bin/files.mjs'
+const GREP = '/src/bin/grep.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+const RM = '/src/bin/rm.mjs'
+
+/**
+ * THE TREE THE PROOFS NAVIGATE, AND IT IS BUILT HERE THROUGH ORDINARY PROGRAMS.
+ *
+ * `/tmp` is the one writable mount besides the root, and it PERSISTS: OPFS outlives a page load, so
+ * a directory merely `touch`ed into existence accumulates whatever an earlier run left in it. Every
+ * clause below asserts an EXACT set of row names, so the tree is removed first — `rm -r -f` is the
+ * one call that makes a second run of this page mean the same thing as the first.
+ *
+ * THE SHAPE IS THE PROOF'S. The parent holds exactly one DIRECTORY and two files, so row 0 is the
+ * directory a double-click must enter (`files` sorts directories first, then by name) and the row
+ * count CHANGES on the way in, which is the plan's "its row set changed". The child holds only
+ * `.txt` files, because `std.openerForPath` maps `.txt` to `editor` — a TEXT window, which needs no
+ * surface and stays alive, so a spawned pid is still in `/proc` when it is grepped for.
+ */
+const ROOT_DIR = '/tmp/m18'
+const CHILD_DIR = '/tmp/m18/sub'
+/** The parent's two files, named so the sort is unambiguous. Row 0 is `sub`, row 1 `alpha.txt`. */
+const ROOT_FILES = ['alpha.txt', 'beta.txt']
+/** The child's rows. FIVE, and zero-padded so the sort is the numeric one: the A3 clause turns on
+ *  Enter opening row 1 rather than row 0, and `inner-0.txt`/`inner-1.txt` is the difference a run
+ *  prints. */
+const CHILD_FILES = [0, 1, 2, 3, 4].map((i) => `inner-${i}.txt`)
+/** The program the association names for a `.txt`, from `std.OPENS_FILES`. Restated as a STRING
+ *  here and nowhere else in this page: it is what `/proc/<pid>/cmdline` is grepped for, and that
+ *  grep is a fixed-string match against bytes the kernel wrote (constraint 138). */
+const TXT_OPENER = 'editor'
+
+/**
+ * The window the proofs drive, CSS px.
+ *
+ * TALL ENOUGH THAT NEITHER LISTING SCROLLS — five rows need `clientHeightFor(5)` and this is well
+ * past it — because the cursor's ring is located below through
+ * `FILES_METRICS.focusBox(i, scroll, wCss)` at `scroll === 0`, and `theListDoesNotScroll` is the
+ * clause that says so in the program's own words rather than in this page's arithmetic.
+ *
+ * AT THE TOP-LEFT OF THE DESKTOP, which is m17's corner and is here for a MEASURED reason. A
+ * dispatched mouse event carries a VIEWPORT coordinate, so a point past `innerWidth` reaches
+ * nothing at all: this box was `x: 600` first, the window's right edge landed at client x 1068, and
+ * the headless viewport of the first run was 756 wide — eleven gestures were performed into empty
+ * space, every clause went red, and `activeElement` fell back to BODY. `place` does not clamp a box
+ * the shell asked for, so nothing said so. `viewportPoint` below is the guard that now does, and
+ * this corner is where a 460x320 frame is inside any viewport the suite emulates.
+ *
+ * It OVERLAPS the (160, 48) origin every `editor` window opens at (`std.WIN_ORIGIN_X`/`Y`). That is
+ * what `raise` is for, before every gesture: the kernel owns the order and a pointer gesture is
+ * delivered by DOM hit-testing.
+ */
+const PROOF_BOX = { x: 20, y: 20, w: 460, h: 320 }
+
+/** HOW MANY KEYS THIS RUN DRIVES: Down, Enter, Alt+Left, Backspace, Backspace. Every one reaches
+ *  the surface's own `keydown` handler, which counts a trusted press apart from a synthesised one —
+ *  so this is the figure `keyCounts.trusted` must come to, and a page that dispatched its own
+ *  arrows would be visible as a `synthetic` count instead. The one synthetic key in the run is the
+ *  `q` that tears the fixture down. */
+const DRIVEN_KEYS = 5
+
+/** How far a rectangle read out of a display list may sit from the one `focusBox` names, DEVICE px.
+ *  ONE PIXEL, because `toSurface` rounds and the scale is MEASURED off the canvas rather than taken
+ *  from the program's `S` — which is what `FILES_METRICS`'s own docstring prescribes for a driver,
+ *  and the two agree only to a rounding. */
+const RECT_TOL_PX = 1
+
+globalThis.M18.proofs = { open: null, cursor: null, back: null }
+
+const ask = gestureAsker(globalThis.M18)
+
+/** The host, once there is one. */
+let HOST = null
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT, M16's: a `Surface` keeps counts and pixels, not ops, so the only way to read back
+ *  WHAT a program drew — which rows, which ink, which rings — is to keep the batch the kernel
+ *  announced. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a step can wait for a REPAINT rather than a timer. */
+const BATCHES = new Map()
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** One listener, installed by both paths BEFORE the host's — `kernelBoot` calls its listeners in
+ *  order, so a listener added first sees every batch the host is about to replay. */
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `LAST_BATCH` is module-private and the proofs read it directly, so a driver in ANOTHER ENGINE had
+ * no way to see which rows a program drew, where its cursor is, or which row is selected — and
+ * M18's whole subject is a list being walked and a row being opened. The precedent is
+ * `FILES_METRICS` and the lesson is recorded in CLAUDE.md: a bench script's excuse for restating a
+ * program's geometry was that it sits outside the process and cannot import the module, which was
+ * "true of the PROCESS and false of the page it drives".
+ */
+function publishHost (host) {
+  HOST = host
+  globalThis.M18.host = host
+  globalThis.M18.dpr = dpr()
+  globalThis.M18.listState = (what) => {
+    const entry = frameByTitle(host, String(what))
+    if (!entry || !entry.surface) return null
+    return listState(entry)
+  }
+}
+
+async function bootHost () {
+  const k = await bootKernel({ label: 'm18', bench: 1 }, globalThis.M18, say)
+  k.on(captureBatch)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  publishHost(host)
+  return { k, host }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** EVERY LIVE PID, as the kernel's own table holds it. `m4-state` reports `table.live`, so a
+ *  process that exited is gone from it — which is what makes "a new pid appeared" a reading of the
+ *  process table rather than of a counter this page kept. */
+async function pidsNow (k) {
+  const st = await askKernel(k, 'm4-state')
+  return (st.procs || []).map((p) => p.pid)
+}
+
+/** The frame a program's window is, by the title it set — and NOT one of `skip`. The exclusion is
+ *  M17's and for its reason: a program's exit and the page's `win-destroy` are two hops, so a plain
+ *  title match can return a window that is going away. */
+function frameByTitle (host, what, skip = null) {
+  for (const entry of host.frames.values()) {
+    if (skip && skip.has(entry.id)) continue
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE and at least one batch in it: an entry with no surface is a
+ *  frame whose canvas has not been built, and reading its ops would read nothing. */
+async function surfaced (host, title, skip = null, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title, skip)
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title, skip)
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer gesture is delivered by DOM
+ *  hit-testing and a frame above it would take it — and `editor` opens two of its own during this
+ *  run. The kernel owns the order (constraint 226), so this asks rather than restyling. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/** WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY, and say how long it took. A `win-geom`
+ *  arriving after a measurement queues a `WEV_CLIENT`, and a re-surface replaces the canvas — so
+ *  the scale a rectangle is converted with would not be the scale the program drew at. `geoms` is
+ *  the host's own count of posts, so this reads the subject. */
+async function geomsSettled (host, quietMs = 300, ms = 8000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = host.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await pause(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/* ---- reading the list back out of the display list ----------------------------------------- */
+
+/** The ops of one window's last batch. */
+function opsOf (entry) {
+  const bytes = LAST_BATCH.get(entry.id)
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length)
+}
+
+/** Every text run in a batch, through the ABI's own codec and with the index of its header op.
+ *  `textOfOps` is the declared inverse of the `encodeTextRun` the program drew with, so these are
+ *  the program's own strings and not a second opinion about the encoding (constraint 293). */
+function textRuns (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) { runs.push({ text: null, at: i }); continue }
+    runs.push({ text: got.text, at: i, x: ops[i].a0, y: ops[i].a1, ink: ops[i].a4,
+      flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/**
+ * THE ROWS, AS THE PROGRAM DREW THEM: one entry per visible row, in order.
+ *
+ * STRUCTURAL AND NOT POSITIONAL, which is the whole reason it is reliable at any ratio. `paint`
+ * draws the header, then pushes the `DL_CLIP`, then the rows — and within a row the NAME carries no
+ * `DLT_RIGHT` while the type column does. So "after the clip, left-aligned" names the rows exactly,
+ * with no coordinate and no scale in the test. A filter on `x` would also have matched the header's
+ * own `Name` label, which shares the rows' `NAME_X`.
+ */
+function rowRuns (ops) {
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (clipAt < 0) return []
+  return textRuns(ops).filter((r) => r.at > clipAt && typeof r.text === 'string'
+    && (r.flags & DLT_RIGHT) === 0)
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — which is what `FILES_METRICS`'s own
+ *  docstring prescribes for a driver, and what makes the conversions below independent of a
+ *  program state no export can carry. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+const near = (a, b) => Math.abs(a - b) <= RECT_TOL_PX
+
+/**
+ * WHICH ROW THE KEYBOARD CURSOR'S RING IS ON, or -1 for "no cursor is drawn".
+ *
+ * EVERY NUMBER COMES OUT OF `FILES_METRICS.focusBox`, which is the ONE definition `paint` strokes —
+ * the whole reason M18 exported it. A page that restated the one-pixel inset would be reading a
+ * ring one pixel from where the program drew it, which is the drift that export exists to stop.
+ *
+ * THE X IDENTIFIES THE RING AND THE Y IDENTIFIES THE ROW, and the two tolerances differ for a
+ * measured reason. `paint` strokes TWO rectangles per row — the selection's outline at the row's own
+ * left edge and this ring one CSS pixel inside it — so the x is the discriminator and is matched
+ * EXACTLY: at dpr 1 the two are 6 and 7, and a tolerance of one device pixel would accept the wrong
+ * one. Both are small numbers of `PAD` and `FOCUS_INSET` alone, so they round identically under the
+ * measured scale and the program's own `S`.
+ *
+ * THE WIDTH IS NOT MATCHED AT ALL, and that is the honest reading rather than a weakening. The
+ * ring's width is `wCss - PAD * 2 - 2`, and `wCss` here is the canvas's measured CSS box while the
+ * program's is the device box `WEV_CLIENT` carried divided by the ratio — equal to a rounding, which
+ * at dpr 2 is two device pixels of width. A clause resting on that would fail at some ratios on a
+ * cursor that was exactly where it should be.
+ *
+ * `scroll` IS 0 AND `theListDoesNotScroll` IS THE CLAUSE THAT EARNS IT: neither listing here is
+ * taller than its window, so the offset the ring is drawn at is the only offset the program has.
+ */
+function ringRow (entry, ops, scale) {
+  const wCss = entry.surface.extent().cssW
+  const rows = rowRuns(ops).length
+  // Read off the box rather than rebuilt from `PAD + FOCUS_INSET`: the ring's left edge is the same
+  // for every row, so row 0's box is the one definition of it.
+  const ringX = FILES_METRICS.toSurface(FILES_METRICS.focusBox(0, 0, wCss).x, scale)
+  const strokes = ops.filter((op) => op.op === DL_STROKE_RECT && op.a0 === ringX)
+  if (!strokes.length) return -1
+  for (let i = 0; i < rows; i += 1) {
+    const y = FILES_METRICS.toSurface(FILES_METRICS.focusBox(i, 0, wCss).y, scale)
+    if (strokes.some((op) => near(op.a1, y))) return i
+  }
+  return -1
+}
+
+/**
+ * WHICH ROW IS SELECTED, read as a COLOUR and not as a rectangle, or -1.
+ *
+ * A SELECTED ROW INVERTS: `paint` draws its name in `INK_SELECTED` where every other row gets
+ * `INK`. So the selected row is the one whose name is drawn in the minority ink, which needs
+ * neither the palette nor a geometry — the comparison is between runs of the SAME batch. There is
+ * no `selectBox` in `FILES_METRICS` to read the selection's outline from, and inventing one here
+ * would be this page restating a rectangle the program owns.
+ *
+ * It answers -1 for a one-row listing, where majority and minority cannot be told apart. Neither
+ * listing here is one row; `theTreeIsTheFixture` is what says so.
+ */
+function selectedRow (ops) {
+  const inks = rowRuns(ops).map((r) => r.ink)
+  if (inks.length < 2) return -1
+  const counts = new Map()
+  for (const ink of inks) counts.set(ink, (counts.get(ink) || 0) + 1)
+  if (counts.size !== 2) return -1
+  const odd = [...counts.entries()].sort((a, b) => a[1] - b[1])[0]
+  return odd[1] === 1 ? inks.indexOf(odd[0]) : -1
+}
+
+/** The header's own position line, which is the program's statement of whether its list scrolls at
+ *  all: `N items` when `scrollMax` is 0 and `a-b of N` when it is not. Read rather than derived,
+ *  because a figure this page computed from `FILES_METRICS` and a client height would be the
+ *  program's arithmetic done twice. */
+const ITEMS_RE = /^(\d+) items?$/
+function positionLine (ops) {
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  for (const run of textRuns(ops)) {
+    if (typeof run.text !== 'string') continue
+    if (clipAt >= 0 && run.at > clipAt) break
+    if ((run.flags & DLT_RIGHT) !== 0) return run.text
+  }
+  return ''
+}
+
+/** EVERYTHING THIS PAGE CAN SEE OF ONE `files` WINDOW, in one object: what a reader sees on screen
+ *  and what a driver in a second engine has no other route to. */
+function listState (entry) {
+  const ops = opsOf(entry)
+  const scale = scaleOf(entry)
+  return {
+    title: entry.win.titleText,
+    names: rowRuns(ops).map((r) => r.text),
+    cursor: ringRow(entry, ops, scale),
+    selected: selectedRow(ops),
+    position: positionLine(ops),
+    scale: Math.round(scale * 1000) / 1000,
+    batches: BATCHES.get(entry.id) || 0,
+  }
+}
+
+/* ---- aiming real input at a row ------------------------------------------------------------- */
+
+/**
+ * A POINT INSIDE THE WINDOW'S CLIENT AREA, `yCss` CSS px from its top, in VIEWPORT coordinates —
+ * and it THROWS rather than returning a point nothing can receive.
+ *
+ * NO SCALE IS INVOLVED AND THAT IS DELIBERATE. `FILES_METRICS`'s docstring states it: "A driver
+ * working in page coordinates needs no scale at all, because the canvas's CSS box IS the client
+ * area these are measured in — `rect.left + xCss` is the point." So the row arithmetic is read
+ * straight off the export and added to the canvas's own rect, which is the one rectangle that moves
+ * when a frame moves.
+ *
+ * THE VIEWPORT BOUND IS THE HARNESS-HONESTY HALF, and it is a measurement rather than caution.
+ * `Input.dispatchMouseEvent` takes a viewport coordinate, so a point past `innerWidth` is delivered
+ * to nothing — no error, no event, and a page that waited for a repaint simply reports a red clause.
+ * That is what the first run of this page did, eleven times (see `PROOF_BOX`). A harness must fail
+ * when it cannot reach what it was pointed at.
+ */
+function viewportPoint (entry, yCss, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the files surface has no measurable rect to aim ${what} at`)
+  }
+  const at = { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + yCss) }
+  if (at.x < 0 || at.y < 0 || at.x >= window.innerWidth || at.y >= window.innerHeight) {
+    throw new Error(`${what} is at client ${at.x},${at.y}, outside a `
+      + `${window.innerWidth}x${window.innerHeight} viewport — a dispatched mouse event carries a `
+      + 'VIEWPORT coordinate, so nothing would receive it. The frame is at '
+      + `${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`)
+  }
+  return at
+}
+
+/** Where row `i` is, aimed at the middle of the row. */
+const pointAtRow = (entry, i) =>
+  viewportPoint(entry, FILES_METRICS.rowMid(i, 0), `row ${i + 1}`)
+
+/** A POINT IN THE HEADER, above the clipped viewport. It is where the keyboard is aimed between
+ *  steps: a press there finds no row — `rowUnder` bounds the hit test by `viewBox`, whose top is
+ *  `VIEW_TOP` — so it clears the selection and LEAVES THE CURSOR, which is `src/bin/files.mjs`'s
+ *  own stated rule and is exactly what a step needing the keyboard back may do without disturbing
+ *  the thing under test. */
+const pointAtHeader = (entry) =>
+  viewportPoint(entry, FILES_METRICS.VIEW_TOP / 2, 'the header')
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR THE WINDOW TO HAVE REPAINTED — or not, when the gesture is one
+ * `files` deliberately does not repaint for.
+ *
+ * `wantRepaint: false` IS NOT A SHORTCUT. `activate` on a FILE row returns false and the comment
+ * beside it says why — "NOTHING IN THIS WINDOW CHANGED. The new process draws its own" — so a step
+ * that waited for a batch after Enter on a file would time out on correct behaviour. The same holds
+ * for a Back that was refused. Each call states which it is, so the waiting is a property of the
+ * gesture rather than a timeout nobody tuned.
+ */
+async function gesture (entry, spec, { wantRepaint = true, ms = 4000 } = {}) {
+  const had = BATCHES.get(entry.id) || 0
+  await ask(spec)
+  if (!wantRepaint) {
+    // A SETTLE AND NOT A GUESS AT THE OUTCOME: the record still has to cross the kernel and be
+    // drained by a program parked in `poll` with a 200 ms period, and nothing repaints to say so.
+    await pause(600)
+    return { repaintedMs: -1 }
+  }
+  const got = await until(() => (BATCHES.get(entry.id) || 0) > had, ms)
+  return { repaintedMs: Math.round(got) }
+}
+
+/** THE KEYBOARD, AIMED WITH REAL INPUT. Every window takes the keyboard when it opens
+ *  (`WinHost.#create` calls `term.focus()`), so the two `editor` windows this run spawns would
+ *  otherwise receive the arrow and the Back keys. A driven click in the HEADER re-focuses the
+ *  canvas through the same `el.focus()` a reader's click goes through, and finds no row — so it
+ *  cannot move the cursor the next clause is about. */
+async function aimKeyboard (k, entry, name) {
+  await raise(k, entry)
+  await gesture(entry, { kind: 'click', name, at: pointAtHeader(entry) },
+    { wantRepaint: false })
+  return entry.surface.el.ownerDocument.activeElement === entry.surface.el
+}
+
+/* ---- the fixture ---------------------------------------------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 20000)) }
+}
+
+/** Build the tree, through four ordinary programs and nothing privileged. `rm -r -f` goes first for
+ *  the reason stated at `ROOT_DIR`: OPFS persists, and a second run of this page must mean what the
+ *  first one did. */
+async function makeTree (k) {
+  const gone = await runProgram(k, RM, ['rm', '-r', '-f', ROOT_DIR])
+  const md = await runProgram(k, MKDIR, ['mkdir', '-p', CHILD_DIR])
+  const paths = ROOT_FILES.map((n) => `${ROOT_DIR}/${n}`)
+    .concat(CHILD_FILES.map((n) => `${CHILD_DIR}/${n}`))
+  const tc = await runProgram(k, TOUCH, ['touch', ...paths])
+  return { root: ROOT_DIR, child: CHILD_DIR, rm: gone.exit, mkdir: md.exit, touch: tc.exit,
+    files: paths.length }
+}
+
+/** `grep -c <fixed string> /proc/<pid>/cmdline`, as the kernel's own answer to "what is that pid
+ *  running". The pattern is a FIXED string (constraint 138) and `cmdline` is the argv NUL-joined
+ *  (`src/kernel/kernel.mjs`'s `spawnChild`), so a program name and an operand are each one match.
+ *  The EXIT STATUS is the reading: `grep` answers 1 for a file it read and did not match. */
+async function cmdlineHas (k, pid, needle) {
+  const path = `/proc/${pid}/cmdline`
+  const row = await runProgram(k, GREP, ['grep', '-c', needle, path])
+  return { path, needle, exit: row.exit, matched: row.matched }
+}
+
+/* ---- the driven sequence -------------------------------------------------------------------- */
+
+/**
+ * ONE WINDOW, ONE SEQUENCE, EIGHT DRIVEN GESTURES — because the state carries.
+ *
+ * The three proofs below are three CLAIMS over this one run, not three runs: a Back needs a
+ * directory to have been entered, and an Enter needs a cursor an arrow put somewhere. Staging each
+ * claim its own window would mean three windows whose histories were built by gestures no clause
+ * reads, which is more fixture and less proof.
+ *
+ * EVERY STEP RECORDS THE WHOLE LIST STATE AFTER IT, so a failed clause is diagnosed from what the
+ * program had drawn at the moment rather than from the end state.
+ */
+async function drive (k, host) {
+  const files = await surfaced(host, 'files')
+  if (!files) throw new Error('the files window never surfaced')
+  const pid = globalThis.M18.pids.files
+  await raise(k, files)
+  const staged = BATCHES.get(files.id) || 0
+  place(files, PROOF_BOX)
+  await until(() => (BATCHES.get(files.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+
+  const steps = []
+  const record = async (name, extra = {}) => {
+    const row = { name, ...listState(files), pids: await pidsNow(k), ...extra }
+    steps.push(row)
+    return row
+  }
+
+  const start = await record('before-any-gesture')
+
+  /* ---- a. A SINGLE CLICK ON A FILE ROW, which may SELECT and MUST NOT OPEN ----------------- */
+  const clickAt = pointAtRow(files, 1)
+  await gesture(files, { kind: 'click', name: 'single-click-a-file-row', at: clickAt })
+  const clicked = await record('after-a-single-click', { at: clickAt })
+
+  /* ---- b. A DOUBLE-CLICK ON THE DIRECTORY ROW, which RE-LISTS IN PLACE --------------------- */
+  const dirAt = pointAtRow(files, 0)
+  await gesture(files, { kind: 'dblclick', name: 'double-click-the-directory-row', at: dirAt })
+  const entered = await record('after-double-clicking-the-directory', { at: dirAt })
+
+  /* ---- c. A DOUBLE-CLICK ON A FILE ROW, which SPAWNS the association's program -------------
+     The re-list reset the cursor and the selection, so row 0 of the CHILD is `inner-0.txt`. No
+     repaint is owed: the new process draws its own window. */
+  const fileAt = pointAtRow(files, 0)
+  await gesture(files, { kind: 'dblclick', name: 'double-click-a-file-row', at: fileAt },
+    { wantRepaint: false })
+  const openedByPointer = await record('after-double-clicking-a-file', { at: fileAt })
+
+  /* ---- d. THE A3 CLAUSE. The keyboard comes back to this window through a driven header click,
+     which clears the selection and LEAVES the cursor the pointer put on row 0 — then a DOWN ARROW
+     moves the cursor to row 1, and Enter opens the row the ARROW reached. */
+  const aimedForArrow = await aimKeyboard(k, files, 'aim-the-keyboard-for-the-arrow')
+  const beforeArrow = await record('after-aiming-the-keyboard', { aimed: aimedForArrow })
+  await gesture(files, { kind: 'key', name: 'press-the-down-arrow', key: 'ArrowDown' })
+  const arrowed = await record('after-the-down-arrow')
+  await gesture(files, { kind: 'key', name: 'press-enter-on-the-cursor', key: 'Enter' },
+    { wantRepaint: false })
+  const openedByEnter = await record('after-enter')
+
+  /* ---- e. BACK, AS A KEYSYM WITH A MODIFIER ------------------------------------------------- */
+  const aimedForBack = await aimKeyboard(k, files, 'aim-the-keyboard-for-alt-left')
+  await gesture(files, { kind: 'key', name: 'press-alt-left', key: 'ArrowLeft',
+    modifiers: CHROME_MOD_ALT })
+  const wentBackByAlt = await record('after-alt-left', { aimed: aimedForBack })
+
+  /* ---- f. DOWN AGAIN, SO THERE IS SOMETHING TO COME BACK FROM ------------------------------- */
+  await gesture(files, { kind: 'dblclick', name: 'enter-the-directory-again',
+    at: pointAtRow(files, 0) })
+  const enteredAgain = await record('after-entering-again')
+
+  /* ---- g. BACK, AS A BYTE ------------------------------------------------------------------- */
+  await gesture(files, { kind: 'key', name: 'press-backspace', key: 'Backspace' })
+  const wentBackByByte = await record('after-backspace')
+
+  /* ---- h. AND BACK ONCE MORE AT THE BOTTOM OF THE STACK, WHICH IS A REFUSAL ------------------
+     Nothing repaints: `goBack` answers false and the window is left exactly as it was. The refusal
+     is readable only in the program's own account, which is the point of its being NAMED there. */
+  await gesture(files, { kind: 'key', name: 'press-backspace-at-the-bottom', key: 'Backspace' },
+    { wantRepaint: false })
+  const refused = await record('after-backspace-at-the-bottom')
+
+  /* THE ACCOUNT, and the window goes with it. A SYNTHESISED `q` AND IT SAYS SO: this is the page
+   * tearing its own fixture down rather than a gesture under test, `q` is how `src/bin/files.mjs`
+   * exits, and `WinHost` counts synthetic keys apart from trusted ones for exactly this reason — so
+   * nothing here can be mistaken for the input the clauses rest on. */
+  typeSynthetic(files.surface.el, 'q')
+  const row = await resultOf(k, pid, 20000)
+
+  return {
+    pid,
+    win: files.id,
+    dpr: dpr(),
+    box: { ...PROOF_BOX },
+    extent: files.surface ? { ...files.surface.extent() } : null,
+    steps,
+    keys: { ...host.report().keyCounts, keysyms: host.report().keysyms | 0 },
+    at: { start, clicked, entered, openedByPointer, beforeArrow, arrowed, openedByEnter,
+      wentBackByAlt, enteredAgain, wentBackByByte, refused },
+    account: accountOf(row),
+  }
+}
+
+/** THE M18 FIELDS OF A `files` ACCOUNT, with a shape for a program that never reached them. A
+ *  refusal path returns an account too, and defaulting rather than letting a clause dereference
+ *  `undefined` is what makes such a run report FAILED CLAUSES over a stated exit code instead of a
+ *  thrown page — the difference between a proof that failed and a harness that broke. */
+function accountOf (row) {
+  return {
+    exit: row.exit,
+    why: row.why || '',
+    dir: String(row.dir || ''),
+    rows: (row.rows || []).map((r) => r.name),
+    focus: row.focus === undefined ? -2 : row.focus | 0,
+    keysyms: row.keysyms | 0,
+    dblclicks: row.dblclicks | 0,
+    activations: row.activations | 0,
+    relists: row.relists | 0,
+    backs: row.backs | 0,
+    spawned: (row.spawned || []).map((s) => ({ pid: s.pid | 0, argv: (s.argv || []).map(String) })),
+    refused: row.refused | 0,
+    refusals: (row.refusals || []).map((r) => ({ what: String(r.what), why: String(r.why) })),
+    refusalWhy: String(row.refusalWhy || ''),
+    history: row.history | 0,
+    presses: row.presses | 0,
+    scrollMax: Number(row.scrollMax || 0),
+  }
+}
+
+/**
+ * WHY A DOUBLE-CLICK OPENED NOTHING, WHEN IT OPENED NOTHING — as a note with an address.
+ *
+ * A clause that is merely red says "the window did not re-list", and four clauses go red with it.
+ * This separates the one fact that explains all of them: the DOWN records ARRIVED — `presses` rose
+ * by the two per double-click — and not one of them carried `WPTR_CLICK2`, so `account.dblclicks`
+ * is 0 over gestures that were performed. The bit is lost BEFORE the kernel, in the page.
+ *
+ * MEASURED, NOT INFERRED. `clickBits(event)` in `src/wm/winhost.mjs` reads `event.detail` on a
+ * `pointerdown` listener, and the Pointer Events specification fixes `detail` at 0 for
+ * `pointerdown` and `pointerup` — only the MOUSE event carries the platform's click count. Chrome
+ * 158.0.8127.37, one `Input.dispatchMouseEvent` sequence of clickCount 1,1,2,2 at one canvas:
+ * `pointerdown detail=0, mousedown detail=1, pointerup detail=0, mouseup detail=1, click detail=1,
+ * pointerdown detail=0, mousedown detail=2, pointerup detail=0, mouseup detail=2, click detail=2,
+ * dblclick detail=2` — every event trusted. So `clickBits` on that listener can only ever answer 0,
+ * and `WPTR_CLICK2` is unreachable however the gesture is driven or performed by hand.
+ *
+ * THIS PAGE DOES NOT WORK AROUND IT. `src/wm/winhost.mjs` is landed and is not this slice's, and a
+ * page that timed two presses for itself would be the very thing that file's own comment rejects —
+ * "a program that timed two presses itself would disagree with every other application on their
+ * machine". So the clauses stay red and this says where to look.
+ */
+function diagnose (run) {
+  const { account } = run
+  if (account.dblclicks > 0 || account.presses === 0) return
+  const why = 'no DOWN record carried WPTR_CLICK2: `presses` rose to ' + account.presses
+    + ' and `dblclicks` is ' + account.dblclicks + '. `clickBits` in src/wm/winhost.mjs reads '
+    + '`event.detail` on a POINTERDOWN, and the Pointer Events spec fixes that at 0 — only '
+    + '`mousedown` carries the click count (measured on Chrome 158: pointerdown detail=0, '
+    + 'mousedown detail=2). WPTR_CLICK2 is unreachable from that listener.'
+  globalThis.M18.notes.push(why)
+  say('NOTE ' + why)
+}
+
+const sameSet = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
+
+/** The pids in `b` that are not in `a`. */
+const newPids = (a, b) => b.filter((p) => !a.includes(p))
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: THE ACTIVATION VERB — a double-click opens, a single click does not.
+
+   `docs/PLAN-SHELL.md` §M18's first, second and fourth clauses. Three facts, and each is read where
+   it is true: a RE-LIST is the window's own row set and its title, a SPAWN is a pid in `/proc`, and
+   "a single click only selects" is the ABSENCE of both after a gesture that did move the selection
+   — because a clause satisfied by a click that did nothing at all would be satisfied by a window
+   that is not receiving input.
+   -------------------------------------------------------------------------------------------- */
+function proofOpen (run) {
+  const { at, account } = run
+  const opened = at.openedByPointer
+  const spawnedByPointer = newPids(at.entered.pids, opened.pids)
+  const open = {
+    rootRows: at.start.names,
+    childRows: at.entered.names,
+    titles: { start: at.start.title, entered: at.entered.title },
+    click: { at: at.clicked.at, cursor: at.clicked.cursor, selected: at.clicked.selected,
+      names: at.clicked.names, title: at.clicked.title,
+      newPids: newPids(at.start.pids, at.clicked.pids) },
+    spawnedByPointer,
+    grep: run.grep.pointer,
+    account,
+  }
+
+  /* THE FIXTURE CLAUSES FIRST, because every clause below is vacuous without them: the tree this
+   * page built, a list that does not scroll (the cursor's ring is located at offset 0), and a
+   * listing of more than one row (the selection is read as a minority ink). */
+  open.theTreeIsTheFixture = sameSet(at.start.names, ['sub', ...ROOT_FILES])
+    && sameSet(at.entered.names, CHILD_FILES)
+  open.theListDoesNotScroll = ITEMS_RE.test(at.start.position)
+    && ITEMS_RE.test(at.entered.position) && account.scrollMax === 0
+
+  /* A SINGLE CLICK SELECTS AND OPENS NOTHING — four readings, because "it opened nothing" alone is
+   * satisfied by a window that received no input at all. The selection and the cursor BOTH moving
+   * to the clicked row is the proof the gesture landed; the row set, the title and the process
+   * table all standing still is the proof it did no more than select. This is the clause
+   * `one-click-opens` turns. */
+  open.theClickLanded = at.clicked.selected === 1 && at.clicked.cursor === 1
+  open.aSingleClickOnlySelects = sameSet(at.clicked.names, at.start.names)
+    && at.clicked.title === at.start.title
+    && open.click.newPids.length === 0
+
+  /* THE DIRECTORY RE-LISTED IN THIS WINDOW: the row set changed and the title names the child. Two
+   * facts and not one — a title that moved over the old rows would be a half-applied navigation,
+   * which is what `relist` lists before it commits anything. */
+  open.theDirectoryReListed = !sameSet(at.entered.names, at.start.names)
+    && sameSet(at.entered.names, CHILD_FILES)
+  open.theTitleNamesTheChild = at.entered.title.includes(CHILD_DIR)
+  /* AND THE RE-LIST RESET WHAT INDEXED THE OLD LIST. The cursor and the selection named rows in a
+   * directory that is gone, and carrying either over is how a drag comes to publish the bytes of a
+   * file the reader never touched (`relist`'s own note). */
+  open.theReListResetTheCursor = at.entered.cursor === -1 && at.entered.selected === -1
+
+  /* A DOUBLE-CLICK ON A FILE ROW PUT A NEW PID IN `/proc`, RUNNING THE EXPECTED PROGRAM. The pid is
+   * the kernel's table; the program and the operand are two fixed-string greps of that pid's own
+   * `cmdline`, asserted separately because a grep that matched `editor` alone would pass for a
+   * program opened on the wrong file. */
+  open.aFileRowSpawnedANewPid = spawnedByPointer.length === 1
+  open.theNewPidRunsTheOpener = run.grep.pointer !== null
+    && run.grep.pointer.prog.exit === 0 && run.grep.pointer.prog.matched === 1
+    && run.grep.pointer.path.exit === 0 && run.grep.pointer.path.matched === 1
+  /* AND THE PROGRAM'S OWN RECORD AGREES WITH THE PROCESS TABLE. `account.spawned` carries the argv
+   * exactly as `std.openerForPath(...).argv(path)` built it, which is the association's own answer
+   * — an operand this page assembled would be a second copy of the table `src/libos/std.mjs` owns. */
+  open.theAccountNamesTheSameSpawn = account.spawned.length === 2
+    && account.spawned[0].pid === spawnedByPointer[0]
+    && account.spawned[0].argv[0] === TXT_OPENER
+    && account.spawned[0].argv.includes(`${CHILD_DIR}/${CHILD_FILES[0]}`)
+  open.theDoubleClicksWereCounted = account.dblclicks === 3 && account.presses === 7
+
+  open.ok = open.theTreeIsTheFixture && open.theListDoesNotScroll
+    && open.theClickLanded && open.aSingleClickOnlySelects
+    && open.theDirectoryReListed && open.theTitleNamesTheChild && open.theReListResetTheCursor
+    && open.aFileRowSpawnedANewPid && open.theNewPidRunsTheOpener
+    && open.theAccountNamesTheSameSpawn && open.theDoubleClicksWereCounted
+  globalThis.M18.proofs.open = { ok: open.ok, evidence: open }
+  say((open.ok ? 'ok  ' : 'BAD ') + 'open: a click put the selection and the cursor on row '
+    + at.clicked.selected + '/' + at.clicked.cursor + ' and opened ' + open.click.newPids.length
+    + ' thing(s); a double-click took the window from [' + at.start.names.join(' ') + '] to ['
+    + at.entered.names.join(' ') + '] titled "' + at.entered.title + '"; a double-click on a file '
+    + 'spawned pid ' + (spawnedByPointer.join(',') || 'NOTHING') + ' as '
+    + (account.spawned[0] ? account.spawned[0].argv.join(' ') : 'nothing'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE A3 CLAUSE — a driven arrow moved the cursor, and Enter opened the row IT reached.
+
+   `docs/PLAN-SHELL.md` §M18 is explicit that Enter does not prove A3: `bytesForKey` already returns
+   byte 10 for it, so Enter reaches a process today and a clause asserting it would pass with A3
+   unimplemented. What cannot pass is the PAIR — the cursor leaving the row the pointer last touched
+   and Enter opening where it went.
+
+   THE PREVIOUS GESTURE WAS A DOUBLE-CLICK ON ROW 0, so with the arrow dropped at
+   `src/wm/winhost.mjs`'s old `if (!bytes) return` the cursor would still be on row 0 and Enter
+   would spawn `inner-0.txt` a second time. The clause then fails by NAMING THE WRONG FILE, which is
+   what makes it coupled to the keysym rather than to the keyboard.
+
+   AND THE KEYS WERE TRUSTED. `WinHost` counts a synthesised `KeyboardEvent` apart from a real one
+   (`isTrusted` is the only way to tell them), so a page that dispatched its own arrows could satisfy
+   an "a real keystroke arrived" clause. `keyCounts.trusted` is read, and `keysyms` beside it.
+   -------------------------------------------------------------------------------------------- */
+function proofCursor (run) {
+  const { at, account } = run
+  const spawnedByEnter = newPids(at.arrowed.pids, at.openedByEnter.pids)
+  const cursor = {
+    before: { cursor: at.beforeArrow.cursor, selected: at.beforeArrow.selected },
+    after: { cursor: at.arrowed.cursor, selected: at.arrowed.selected },
+    names: at.arrowed.names,
+    spawnedByEnter,
+    grep: run.grep.enter,
+    keys: run.keys,
+    account,
+  }
+
+  /* THE FIXTURE: the keyboard was aimed at THIS window, and the header click that aimed it cleared
+   * the selection without touching the cursor. The second half is `src/bin/files.mjs`'s own stated
+   * rule — "a press on the header clears the selection and must not clear the reader's place in the
+   * list" — and asserting it here is what makes the next clause about the ARROW and not about a
+   * cursor the click happened to move. */
+  cursor.theKeyboardWasAimedAtTheList = at.beforeArrow.aimed === true
+  cursor.theHeaderClickKeptTheCursor = at.beforeArrow.cursor === 0
+    && at.beforeArrow.selected === -1
+
+  // THE ARROW MOVED THE CURSOR, read as the ring `FILES_METRICS.focusBox` names.
+  cursor.theArrowMovedTheCursor = at.arrowed.cursor === 1 && at.beforeArrow.cursor === 0
+  // AND IT MOVED NOTHING ELSE: a keysym is not a scroll and not a selection.
+  cursor.theArrowSelectedNothing = at.arrowed.selected === -1
+    && sameSet(at.arrowed.names, at.beforeArrow.names)
+    && at.arrowed.position === at.beforeArrow.position
+
+  /* ENTER OPENED THE ROW THE ARROW REACHED, AND NOT THE ROW THE POINTER TOUCHED. The two readings
+   * are separate: one pid appeared, and that pid's `cmdline` names row 1's path. A grep for the
+   * program alone would be satisfied by row 0 opening twice. */
+  cursor.enterSpawnedANewPid = spawnedByEnter.length === 1
+  cursor.enterOpenedTheCursorsRow = run.grep.enter !== null
+    && run.grep.enter.prog.exit === 0 && run.grep.enter.prog.matched === 1
+    && run.grep.enter.path.exit === 0 && run.grep.enter.path.matched === 1
+    && run.grep.enter.notTheOther.exit === 1 && run.grep.enter.notTheOther.matched === 0
+  cursor.theAccountNamesTheCursorsRow = account.spawned.length === 2
+    && account.spawned[1].pid === spawnedByEnter[0]
+    && account.spawned[1].argv[0] === TXT_OPENER
+    && account.spawned[1].argv.includes(`${CHILD_DIR}/${CHILD_FILES[1]}`)
+
+  /* EVERY KEY WAS TRUSTED, AND TWO OF THEM WERE KEYSYMS. The arrow and Alt+Left are keysyms; Enter
+   * and both Backspaces are bytes (`keysymOf` answers 0 for them), which is why the program's own
+   * `keysyms` is 2 over `DRIVEN_KEYS` key gestures. */
+  cursor.theKeysWereTrusted = run.keys.trusted === DRIVEN_KEYS && run.keys.synthetic === 1
+  cursor.theProcessSawTwoKeysyms = account.keysyms === 2 && run.keys.keysyms === 2
+
+  cursor.ok = cursor.theKeyboardWasAimedAtTheList && cursor.theHeaderClickKeptTheCursor
+    && cursor.theArrowMovedTheCursor && cursor.theArrowSelectedNothing
+    && cursor.enterSpawnedANewPid && cursor.enterOpenedTheCursorsRow
+    && cursor.theAccountNamesTheCursorsRow
+    && cursor.theKeysWereTrusted && cursor.theProcessSawTwoKeysyms
+  globalThis.M18.proofs.cursor = { ok: cursor.ok, evidence: cursor }
+  say((cursor.ok ? 'ok  ' : 'BAD ') + 'cursor: the ring went from row '
+    + (at.beforeArrow.cursor + 1) + ' to row ' + (at.arrowed.cursor + 1)
+    + ' on a driven Down, and Enter spawned pid ' + (spawnedByEnter.join(',') || 'NOTHING') + ' as '
+    + (account.spawned[1] ? account.spawned[1].argv.join(' ') : 'nothing') + '; '
+    + run.keys.trusted + ' trusted key(s), ' + account.keysyms + ' keysym(s) reached the process')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: BACK, BOTH WAYS, AND REFUSED AT THE BOTTOM.
+
+   `docs/PLAN-SHELL.md` §M18's fifth clause. The two routes are not the same mechanism and that is
+   the whole reason both are driven: Alt+Left is a KEYSYM with a modifier riding the record, and
+   Backspace is a BYTE — `KEYSYM_BY_KEY` deliberately has no row for it, because one would take it
+   away from every program that reads 127 today.
+
+   THE THIRD BACK IS THE ONE THAT PROVES THE STACK IS A STACK. At the bottom there is nowhere to go,
+   and `files` refuses BY NAME and counts it rather than silently doing nothing — which is the
+   defect M14 shipped as an icon that launched a program that exited at once.
+   -------------------------------------------------------------------------------------------- */
+function proofBack (run) {
+  const { at, account } = run
+  const back = {
+    byAlt: { title: at.wentBackByAlt.title, names: at.wentBackByAlt.names,
+      aimed: at.wentBackByAlt.aimed === true },
+    down: { title: at.enteredAgain.title, names: at.enteredAgain.names },
+    byByte: { title: at.wentBackByByte.title, names: at.wentBackByByte.names },
+    refused: { title: at.refused.title, names: at.refused.names },
+    account,
+  }
+
+  // ALT+LEFT WENT BACK: the parent's rows, and a title that no longer names the child.
+  back.altLeftWentBack = sameSet(at.wentBackByAlt.names, at.start.names)
+    && at.wentBackByAlt.title.includes(ROOT_DIR)
+    && !at.wentBackByAlt.title.includes(CHILD_DIR)
+  // AND THERE WAS SOMEWHERE TO COME BACK FROM AGAIN, which is the fixture for the byte route.
+  back.theDirectoryWasEnteredAgain = sameSet(at.enteredAgain.names, CHILD_FILES)
+    && at.enteredAgain.title.includes(CHILD_DIR)
+  back.backspaceWentBack = sameSet(at.wentBackByByte.names, at.start.names)
+    && at.wentBackByByte.title.includes(ROOT_DIR)
+    && !at.wentBackByByte.title.includes(CHILD_DIR)
+
+  /* THE THIRD BACK WAS REFUSED, AND THE WINDOW IS UNMOVED. `goBack` answers false at the bottom of
+   * the stack and nothing repaints, so the live reading is that nothing changed and the program's
+   * account is where the refusal is NAMED. Both are asserted: "nothing changed" alone is also what
+   * a dropped key looks like. */
+  back.theWindowSurvivedTheRefusal = sameSet(at.refused.names, at.start.names)
+    && at.refused.title === at.wentBackByByte.title
+  back.theRefusalWasNamed = account.refused === 1
+    && account.refusals.length === 1
+    && account.refusals[0].what === ROOT_DIR
+    && account.refusals[0].why === 'there is nowhere to go back to'
+    && account.refusalWhy === `${ROOT_DIR}: there is nowhere to go back to`
+
+  /* THE PROGRAM'S OWN BOOKKEEPING, which is what separates a Back from a re-list that happened to
+   * land on the parent: `backs` counts only the successful ones, `relists` counts entering OR
+   * returning, and `history` is the stack's depth — zero, because both pushes were popped. */
+  back.theCountsAddUp = account.backs === 2 && account.relists === 4 && account.history === 0
+    && account.dir === ROOT_DIR && sameSet(account.rows, ['sub', ...ROOT_FILES])
+  back.theActivationsAddUp = account.activations === 4 && account.focus === -1
+
+  back.ok = back.altLeftWentBack && back.theDirectoryWasEnteredAgain && back.backspaceWentBack
+    && back.theWindowSurvivedTheRefusal && back.theRefusalWasNamed
+    && back.theCountsAddUp && back.theActivationsAddUp
+  globalThis.M18.proofs.back = { ok: back.ok, evidence: back }
+  say((back.ok ? 'ok  ' : 'BAD ') + 'back: Alt+Left -> "' + at.wentBackByAlt.title
+    + '", Backspace -> "' + at.wentBackByByte.title + '", and a third Back answered "'
+    + account.refusalWhy + '"; ' + account.backs + ' back(s) over ' + account.relists
+    + ' re-list(s), history ' + account.history)
+}
+
+/* ---- staging ------------------------------------------------------------------------------- */
+
+/** The one window the proofs drive, on the tree this page built. */
+async function stage (k, host) {
+  const pids = {}
+  pids.files = (await spawnProgram(k, FILES, ['files', ROOT_DIR])).pid
+  if (!await surfaced(host, 'files')) throw new Error('files never surfaced')
+  globalThis.M18.pids = pids
+  return pids
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+/**
+ * THE THREE WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * `files` OPENS ON `/usr` AND NOT ON `/usr/bin`, which is the one place this page overrides a
+ * `PROGRAMS` row. M18's subject is a row that OPENS: `/usr/bin` is thirty-three programs and not
+ * one of them is a directory or a file any association covers, so a reader double-clicking in it
+ * would meet nothing but the refusal. `/usr` is four folders, and `/usr/share` under it holds a
+ * `.txt` the association opens in `editor` — so the whole verb is two double-clicks from the bare
+ * URL.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure. `aero.ICON_CELL_W` is the cell's width, imported rather than guessed at.
+ *
+ * `taskmgr` IS HERE BECAUSE IT INHERITED THE ARROW KEYS FOR FREE (plan §M18): its table is a list
+ * and `src/wm/winhost.mjs` used to drop every key it could have been walked with. `term` is LAST
+ * because it spawns `sh` by syscall (`PROGRAMS.term`).
+ */
+const LIVE_X = aero.ICON_CELL_W + 20
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    argv: () => ['files', '/usr'],
+    box: () => ({ x: LIVE_X, y: 20, w: 460, h: 260 }),
+  },
+  {
+    ...PROGRAMS.taskmgr,
+    name: 'taskmgr',
+    box: (wa) => ({ x: LIVE_X + 480, y: 20, w: 620, h: Math.max(240, wa.h - 40) }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 300, w: 460, h: Math.max(160, wa.h - 320) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. The shared lines already name the wheel;
+ *  these are the facts only M18's page can state, and they are ADDED rather than substituted so a
+ *  reader here still learns what the rest of the shell does. */
+const M18_HELP = [
+  '  double-click a folder row in `files` and the SAME window lists it; the title follows',
+  '  Backspace or Alt+Left goes back up; at the top it refuses and says so',
+  '  the arrow keys, Home, End and the Page keys move a cursor the selection is not',
+  '  Enter opens the row the cursor is on; a single click only selects',
+  '  double-click /usr/share/readme.txt and `editor` opens it — the association, not a guess',
+]
+
+async function live () {
+  const { host } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M18,
+    say,
+    label: 'm18',
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M18_HELP),
+  })
+  publishHost(host)
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M18.state = 'done'
+    globalThis.M18.verdict = 'live'
+    await live()
+    return
+  }
+
+  say('M18 — keys that are not bytes, and a row that opens.')
+  say('dpr ' + dpr() + '. Every click, double-click and key below is REAL input, performed by')
+  say('something that is not this page: a synthesised event is isTrusted === false (175).')
+
+  const { k, host } = await bootHost()
+  globalThis.M18.kernelIsolated = true
+  globalThis.M18.controlsInForce = host.report().controls
+  globalThis.M18.tree = await makeTree(k)
+  say('staged ' + ROOT_DIR + ': rm exit ' + globalThis.M18.tree.rm + ', mkdir exit '
+    + globalThis.M18.tree.mkdir + ', touch exit ' + globalThis.M18.tree.touch + ' for '
+    + globalThis.M18.tree.files + ' file(s)')
+  await stage(k, host)
+
+  const run = await drive(k, host)
+  /* THE GREPS RUN AFTER THE SEQUENCE AND BEFORE THE CLAUSES, because they need the pids the
+   * sequence produced and because `editor` opens a TEXT window and stays alive — so the two
+   * children are still in `/proc` with their `cmdline` intact. A grep interleaved with the gestures
+   * would also be a spawn, and `newPids` would then be reading this page's own instruments. */
+  const pointerPid = newPids(run.at.entered.pids, run.at.openedByPointer.pids)[0]
+  const enterPid = newPids(run.at.arrowed.pids, run.at.openedByEnter.pids)[0]
+  run.grep = {
+    pointer: pointerPid === undefined ? null : {
+      pid: pointerPid,
+      prog: await cmdlineHas(k, pointerPid, TXT_OPENER),
+      path: await cmdlineHas(k, pointerPid, `${CHILD_DIR}/${CHILD_FILES[0]}`),
+    },
+    enter: enterPid === undefined ? null : {
+      pid: enterPid,
+      prog: await cmdlineHas(k, enterPid, TXT_OPENER),
+      path: await cmdlineHas(k, enterPid, `${CHILD_DIR}/${CHILD_FILES[1]}`),
+      /* AND NOT THE OTHER ROW. The A3 clause is about WHICH row Enter opened, so the grep that
+       * must FAIL is as load-bearing as the one that must match: a dropped arrow leaves the cursor
+       * on row 0 and this is the reading that says so. */
+      notTheOther: await cmdlineHas(k, enterPid, `${CHILD_DIR}/${CHILD_FILES[0]}`),
+    },
+  }
+  globalThis.M18.run = { ...run, steps: run.steps }
+
+  diagnose(run)
+  proofOpen(run)
+  proofCursor(run)
+  proofBack(run)
+
+  const proofs = globalThis.M18.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M18.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M18.verdict)
+  globalThis.M18.state = 'done'
+  globalThis.M18.phase = 'rendered'
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice.
+ *
+ * `main()` is called synchronously, and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all.
+ *
+ * Below every declaration is the only position where a module's entry point cannot be in a dead
+ * zone, so it is the position it keeps. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M18.state = 'aborted'
+  globalThis.M18.why = 'crossOriginIsolated === ' + self.crossOriginIsolated
+    + '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
+  out.className = 'bad'
+  say(globalThis.M18.why)
+} else {
+  main().catch((e) => {
+    globalThis.M18.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. A diagnostic
+     * that works in one engine is the kind of gap CLAUDE.md records four milestones of. */
+    globalThis.M18.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M18.why)
+  })
+}
+</script>
+</body>
+</html>

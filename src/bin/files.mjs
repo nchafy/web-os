@@ -50,6 +50,32 @@
 // knows where in the list they are. There is still no scrollbar, for the unchanged half of the
 // reason: a thumb is dragged, and a drag on one would be a gesture this program cannot route.
 //
+// M18: IT NAVIGATES, AND A ROW OPENS. Three pieces, and they are separate on purpose:
+//
+//   THE KEYBOARD CURSOR is `focus`, moved by `WKEY_UP`/`WKEY_DOWN`/`WKEY_HOME`/`WKEY_END` and the
+//   two Page keysyms — a `WEV_KEY` with no bytes, which this program could not receive before M18
+//   because `src/wm/winhost.mjs` dropped every key `bytesForKey` could not spell. It is NOT the
+//   selection: a press on the header clears the selection and must not clear the reader's place in
+//   the list, so the two are drawn differently and one can outlive the other. Moving it SCROLLS to
+//   it, because a cursor outside the viewport is a cursor on a row nobody can see.
+//
+//   THE ACTIVATION VERB is a DOUBLE-CLICK or Enter on the cursor. A single click only selects, and
+//   that is a real distinction rather than a convention: `WPTR_CLICK2` rides the DOWN record only,
+//   so the second click is the one place it can be read. A directory RE-LISTS IN THIS WINDOW — new
+//   rows, a title naming the child, the offset and the selection reset because they belonged to the
+//   directory that is gone. A file spawns the program `std.openerForPath` names, with the argv the
+//   association carries: `imgview` wants `-f PATH` and `editor` wants a bare path, and a caller
+//   that guessed would hand one program the other's operand.
+//
+//   BACK is Alt+Left or Backspace, because Windows 7 binds Backspace to Back and has no Up button.
+//   The history is a stack of directories and going back from the bottom of it is a REFUSAL — by
+//   name and counted, like every other thing this program declines to do.
+//
+// NOTHING IS FOCUSED AT STARTUP OR AFTER A RE-LIST, and `activate(-1)` refuses rather than opening
+// row 0. A first Enter that opened the first row would be this window acting on a choice the reader
+// never made, which is the same defect as a double-click that silently does nothing — so both ends
+// of it are counted in `refused` and named in `refusals`.
+//
 // `--no-drain MS` IS A FIXTURE AND NOT A CONTROL, which is why it is documented apart from the two
 // below. It holds the event loop for MS milliseconds before the first poll, so a notch stream longer
 // than `WIN_EVENT_CAP` laps a queue nobody is draining — the state the kernel's wheel coalescing is
@@ -77,7 +103,8 @@
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE, DT_DIR,
   WEV_KEY, WEV_POINTER, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_DRAG_DONE,
-  WEV_CLIENT, WPTR_DOWN, WPTR_UP, WPTR_MOVE, clientBoxAt, keyBytesOf,
+  WEV_CLIENT, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, clientBoxAt, keyBytesOf, keysymOf,
+  WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN, WMOD_ALT,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED, wheelAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP,
   DLT_BOLD, DLT_MONO, DLT_RIGHT, encodeTextRun,
@@ -86,6 +113,18 @@ import {
 } from "/src/abi.mjs";
 
 const NAME = "files";
+
+/** Where a program lives. Restated from `src/bin/sh.mjs`'s `DEFAULT_PATH` and
+ *  `src/bin/desktop.mjs`'s `BIN_DIR`, which is a second copy this file cannot remove: the one
+ *  definition would have to be in `src/libos/std.mjs`, and that file is not this change's. */
+const BIN_DIR = "/usr/bin";
+
+/* THE TWO BYTE KEYS THIS PROGRAM BINDS. They are BYTES and not keysyms — `src/wm/terminal.mjs`'s
+ * `bytesForKey` turns Enter into 10 (line feed, not carriage return) and Backspace into 127 (DEL),
+ * and `KEYSYM_BY_KEY` deliberately has no row for either, so `keysymOf` answers 0 for both. A
+ * program that waited for a keysym here would wait for ever. */
+const KEY_ENTER = 10;
+const KEY_BACKSPACE = 127;
 
 const POLL_MS = 200;
 const CEILING_MS = 300000;
@@ -153,6 +192,21 @@ const rowAt = (yCss, scroll = 0) => {
   // the row above it by rounding.
   return yCss - rowTop(i, scroll) < ROW_H ? i : -1;
 };
+
+/** How far inside a row the keyboard cursor's ring sits, CSS px. One pixel, so a row that is both
+ *  selected and focused shows the selection's outline AND this one rather than one over the other.
+ *  `focusBox` is the only reader. */
+const FOCUS_INSET = 1;
+
+/** THE KEYBOARD CURSOR'S RING as a rectangle, CSS px — the ONE definition of where it is drawn.
+ *  `paint` strokes it and anything outside the process that wants to read its pixels asks here, for
+ *  `rowTop`'s reason: a second copy of an inset is a check sampling one pixel off the ring. */
+const focusBox = (i, scroll = 0, wCss = 0) => ({
+  x: PAD + FOCUS_INSET,
+  y: rowTop(i, scroll) + FOCUS_INSET,
+  w: Math.max(0, wCss - PAD * 2 - FOCUS_INSET * 2),
+  h: ROW_H - FOCUS_INSET * 2,
+});
 
 /**
  * THE CLIPPED VIEWPORT, CSS px, inside a client area `wCss` x `hCss`. One rectangle, read in three
@@ -235,11 +289,17 @@ const kindOf = (row) => (row.dir ? "DIR"
  * its account, and the line it prints on exit) and passes it here; `scrollMax` is what the end
  * clamps are, so a driver can assert the clamp against the program's own arithmetic rather than a
  * number of its own.
+ *
+ * M18: `focusBox` IS HERE FOR THE SAME REASON `rowTop` IS. The keyboard cursor's ring is a
+ * rectangle inset inside a row, and a driver that wanted to read its pixels would otherwise restate
+ * the inset — which is the drift this export exists to stop, one pixel's worth of it. The ROW
+ * GEOMETRY ITSELF DID NOT MOVE: the ring is drawn inside the row it marks, so `rowTop` and `rowMid`
+ * mean exactly what they meant before and the drivers that aim at them need no change.
  */
 export const FILES_METRICS = Object.freeze({
-  ROW_H, ROW_GAP, ROW_STRIDE, PAD, HEAD_H, VIEW_TOP, NAME_X, GLYPH_W, TEXT_PX,
+  ROW_H, ROW_GAP, ROW_STRIDE, PAD, HEAD_H, VIEW_TOP, NAME_X, GLYPH_W, TEXT_PX, FOCUS_INSET,
   SURFACE_W: START_W,
-  rowTop, rowMid, rowAt, toSurface, viewBox, scrollMax, rowsThatFit,
+  rowTop, rowMid, rowAt, toSurface, viewBox, scrollMax, rowsThatFit, focusBox,
 });
 
 const PAPER = 0x12161cff;
@@ -263,6 +323,11 @@ const SELECT_FILL_DIR = 0xe8aa3cff;
 /** A DIRECTORY'S BAND, which is a kind rather than a format: amber, because that is the colour the
  *  shell's folder icon is drawn in (`src/wm/icons.mjs`) and a reader should see one thing. */
 const BAND_DIR = 0xe8aa3cff;
+/** THE KEYBOARD CURSOR'S RING, and it is its own HUE rather than its own brightness: the selection
+ *  already owns a filled band outlined in `OUTLINE`, so a second near-white rectangle would make
+ *  "focused" and "selected" the same picture — which is the state a press on the header produces,
+ *  and the one a reader most needs to tell apart. */
+const FOCUS_RING = 0x8fd0ffff;
 
 /**
  * HOW FAR THE POINTER MUST MOVE BEFORE A PRESS BECOMES A DRAG, in CSS pixels.
@@ -344,7 +409,10 @@ export function run(env) {
   if (bad) {
     return { exit: env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE), program: NAME };
   }
-  const dir = operands[0] || DEFAULT_DIR;
+  /** WHERE THE WINDOW IS, AND IT MOVES. M18 re-lists in place, so the directory is state rather
+   *  than an argument — and `history` is the stack Back pops. */
+  let dir = operands[0] || DEFAULT_DIR;
+  const history = [];
   const t0 = performance.now();
   const account = {
     program: NAME, dir, win: 0, fd: 0, rows: [], drags: 0, refusedDrags: 0,
@@ -367,20 +435,17 @@ export function run(env) {
      * other's bound. Nothing is HIDDEN any more: `rows.length - shownRows` is what the reader
      * scrolls to rather than what they are told about. */
     maxRows: START_ROWS, shownRows: 0, firstRow: 0,
+    /* M18. THE CURSOR, THE NAVIGATION AND EVERY REFUSAL. `focus` is the keyboard cursor's row and
+     * `-1` is "nothing is focused", which is a state and not an absence — a first Enter in it is a
+     * refusal and the count below is where that is visible. `refusals` carries each one BY NAME,
+     * because a counter alone passes for a window that refused the wrong thing. */
+    focus: -1, keysyms: 0, dblclicks: 0, activations: 0, relists: 0, backs: 0,
+    spawned: [], refused: 0, refusals: [], refusalWhy: "", history: 0,
     controls: { frozenSurface, cssPxSurface, unclampedScroll },
     // A FIXTURE AND NOT A CONTROL (see this file's header), so it is reported apart from them.
     noDrainMs, heldMs: 0,
   };
 
-  // The directory with exactly one trailing slash, so a child path is `base + name` and the
-  // root does not become `//name`.
-  const base = dir.endsWith("/") ? dir : `${dir}/`;
-  const entries = env.std.listDir(env, dir);
-  if (typeof entries === "number") {
-    return {
-      exit: env.std.complainErrno(env, NAME, dir, entries), program: NAME, errno: -entries,
-    };
-  }
   /* A ROW PER ENTRY, AND A DIRECTORY IS AN ENTRY — which M14 is why: `files /` showed NOTHING,
    * because the root holds only directories and this program listed only files whose format it
    * knew. So a double-click on the desktop's Computer icon opened a program that exited at once
@@ -393,35 +458,55 @@ export function run(env) {
    * `startDrag` refuses it by name. A FILE no format rule covers is kept for the same reason the
    * directory is: a row a reader can see and cannot drag is honest, and an invisible file is not.
    */
-  const rows = entries
-    .filter((e) => e.name !== "." && e.name !== "..")
-    .map((e) => {
-      const dir = e.type === DT_DIR;
-      const format = dir ? 0 : env.std.formatForPath(e.name);
-      /* THE KIND, WHICH IS WHAT THE TYPE COLUMN SHOWS WHEN THERE IS NO FORMAT.
-       *
-       * It printed `fmt?0` for every row of `/usr/bin` — `fmtName(0)` for a file whose extension
-       * nothing maps, which is every program in the system. A column that reads `fmt?0` thirty-two
-       * times is a column carrying no information, and it was the first thing visible once the
-       * names were legible.
-       *
-       * One `lstat` per row buys it. That is 32 extra calls for a directory of 32 things, which is
-       * what `ls -l` already costs — and the alternative is a listing that cannot tell a program
-       * from a data file, which is the distinction a reader of `/usr/bin` most wants. */
-      let exec = false;
-      if (!dir) {
-        const st = env.fs.lstat(dir ? e.name : `${base}${e.name}`);
-        if (typeof st !== "number") exec = (st.mode & 0o111) !== 0;
-      }
-      return { name: e.name, dir, format, exec };
-    })
-    .sort((a, b) => {
-      // Directories first, then by name, which is every file manager's order.
-      if (a.dir !== b.dir) return a.dir ? -1 : 1;
-      return a.name < b.name ? -1 : 1;
-    })
-    .map((r) => ({ ...r, path: dir.endsWith("/") ? `${dir}${r.name}` : `${dir}/${r.name}` }));
+  const buildRows = (path) => {
+    const entries = env.std.listDir(env, path);
+    if (typeof entries === "number") return entries;
+    // The directory with exactly one trailing slash, so a child path is `base + name` and the
+    // root does not become `//name`.
+    const base = path.endsWith("/") ? path : `${path}/`;
+    return entries
+      .filter((e) => e.name !== "." && e.name !== "..")
+      .map((e) => {
+        const isDir = e.type === DT_DIR;
+        const format = isDir ? 0 : env.std.formatForPath(e.name);
+        /* THE KIND, WHICH IS WHAT THE TYPE COLUMN SHOWS WHEN THERE IS NO FORMAT.
+         *
+         * It printed `fmt?0` for every row of `/usr/bin` — `fmtName(0)` for a file whose extension
+         * nothing maps, which is every program in the system. A column that reads `fmt?0`
+         * thirty-two times is a column carrying no information, and it was the first thing visible
+         * once the names were legible.
+         *
+         * One `lstat` per row buys it. That is 32 extra calls for a directory of 32 things, which
+         * is what `ls -l` already costs — and the alternative is a listing that cannot tell a
+         * program from a data file, which is the distinction a reader of `/usr/bin` most wants. */
+        let exec = false;
+        if (!isDir) {
+          const st = env.fs.lstat(`${base}${e.name}`);
+          if (typeof st !== "number") exec = (st.mode & 0o111) !== 0;
+        }
+        return { name: e.name, dir: isDir, format, exec, path: `${base}${e.name}` };
+      })
+      .sort((a, b) => {
+        // Directories first, then by name, which is every file manager's order.
+        if (a.dir !== b.dir) return a.dir ? -1 : 1;
+        return a.name < b.name ? -1 : 1;
+      });
+  };
+
+  /** The rows, AND THEY ARE STATE SINCE M18: a re-list replaces the whole array rather than opening
+   *  a second window, so everything that indexes it — the selection, the press, the cursor — is
+   *  reset by `relist` and not by its callers. */
+  let rows = buildRows(dir);
+  if (typeof rows === "number") {
+    return {
+      exit: env.std.complainErrno(env, NAME, dir, rows), program: NAME, errno: -rows,
+    };
+  }
   account.rows = rows.map((r) => ({ name: r.name, format: kindOf(r) }));
+  /* AN EMPTY DIRECTORY ON THE COMMAND LINE IS STILL A REFUSAL, AND AN EMPTY ONE NAVIGATED INTO IS
+   * NOT. The difference is whether there is a window to say it in: here there is none, so the only
+   * honest place for the message is stdout and the only honest outcome is an exit. `relist` keeps
+   * the window and draws a header reading `0 items`, which is where a reader meets the same fact. */
   if (rows.length === 0) {
     return {
       exit: env.std.complain(env, NAME, dir, "this directory is empty"), program: NAME,
@@ -449,6 +534,11 @@ export function run(env) {
   let press = null;
   let dragging = false;
   let hot = -1;
+  /** THE KEYBOARD CURSOR, and `-1` is "nothing is focused" rather than "row 0". It is NOT `hot`:
+   *  a press on the header clears the selection, and clearing the reader's place in the list with
+   *  it would make the arrow keys start over every time the pointer missed. */
+  let focus = -1;
+  const setFocus = (i) => { focus = i; account.focus = i; };
 
   /* ---- THE SCROLL OFFSET, WHICH IS WHAT M17 ADDED ------------------------------------------ */
 
@@ -730,6 +820,15 @@ export function run(env) {
       if (selected) {
         stroke(ops, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
       }
+      /* THE KEYBOARD CURSOR, LAST AND INSIDE THE ROW. Windows 7 draws a dotted focus rectangle and
+       * the display list has no dash pattern, so this is a hairline inset by one CSS pixel — which
+       * is what lets a row that is both focused and selected show both rings instead of one hiding
+       * the other. Its ink follows the row: `INK_SELECTED` on an inverted band, `FOCUS_RING` on
+       * paper, for the contrast reason the selected text already has. */
+      if (i === focus) {
+        const ring = FILES_METRICS.focusBox(i, scroll, clientW);
+        stroke(ops, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
+      }
     }
     return env.win.draw(made.fd, ops);
   };
@@ -767,7 +866,12 @@ export function run(env) {
      * row the window got too short for is SCROLLED to, not gone, so dropping the selection would
      * discard a choice the reader can still reach. The pre-M17 rule dropped it because the row left
      * the drawn list entirely. A press is still dropped if its row left the LIST, which only an
-     * empty directory could do, so there is nothing left to test. */
+     * empty directory could do, so there is nothing left to test.
+     *
+     * M18: THE CURSOR IS NOT SCROLLED TO EITHER. A resize is the reader's gesture on the WINDOW,
+     * and moving the list under it to chase a cursor they are not using would be this program
+     * taking over a scroll they did not ask for. The next arrow key reveals it, which is the one
+     * moment the cursor's position is what the reader is thinking about. */
   };
 
   /* `--css-px-surface`: THE UNIT ERROR, ON PURPOSE, AND IT CANNOT GO THROUGH `std.resurface` —
@@ -794,9 +898,167 @@ export function run(env) {
     relayout(w, h, 1);
   };
 
+  /* ---- M18: THE CURSOR, THE ACTIVATION VERB AND BACK ---------------------------------------- */
+
+  /**
+   * SOMETHING THIS WINDOW WILL NOT DO, SAID BY NAME AND COUNTED.
+   *
+   * `account.why` is deliberately not touched. It is the EXIT reason and the event loop breaks on
+   * it — `startDrag` uses it that way, so a drag onto a directory ends the program — and a refused
+   * open must leave a reader with a window they can go on using.
+   *
+   * THE NAME IS THE POINT. A count alone is satisfied by a window that refused the wrong row, so
+   * `refusals` carries what was asked for beside why it was declined, and a check reads the entry
+   * rather than the number.
+   */
+  const refuse = (what, why) => {
+    account.refused += 1;
+    account.refusals.push({ what: String(what), why });
+    account.refusalWhy = `${what}: ${why}`;
+    env.std.say(env, `${NAME}: ${what}: ${why}\n`);
+    return false;
+  };
+
+  /**
+   * SCROLL THE LEAST THAT BRINGS ROW `i` FULLY INSIDE THE VIEWPORT, CSS px.
+   *
+   * IT IS NOT A CLAMP AND MUST NOT BE COUNTED AS ONE. `scrollBy` counts an end it refused to pass;
+   * here nothing was refused — the offset is CHOSEN — so `dyTotal` and `clamped` are untouched, and
+   * `scroll === dyTotal` stays an assertion about what the wheel did.
+   *
+   * THE REVEALED ROW KEEPS THE LIST'S OWN `PAD` beside it, which is what makes the two ends come
+   * out exact: revealing row 0 lands on offset 0, and revealing the last row lands on `scrollMax`
+   * (the pad takes the target past it and the clamp brings it back).
+   */
+  const revealRow = (i) => {
+    if (i < 0 || i >= rows.length) return false;
+    const box = FILES_METRICS.viewBox(clientW, clientH);
+    if (box.h <= 0) return false;
+    const top = rowTop(i);
+    let next = scroll;
+    if (top - PAD - scroll < box.y) next = top - PAD - box.y;
+    else if (top + ROW_H + PAD - scroll > box.y + box.h) next = top + ROW_H + PAD - box.y - box.h;
+    next = Math.max(0, Math.min(maxScroll(), next));
+    if (next === scroll) return false;
+    scroll = next;
+    account.scroll = scroll;
+    account.scrollMax = maxScroll();
+    return true;
+  };
+
+  /** Put the cursor on row `i`, clamped to the list, and scroll to it. A CURSOR OUTSIDE THE
+   *  VIEWPORT IS A CURSOR ON A ROW NOBODY CAN SEE — and the clip makes that literal, so the move
+   *  and the reveal are one operation rather than two a caller could forget to pair. */
+  const focusAt = (i) => {
+    if (rows.length === 0) return refuse("the list", "is empty, so there is no row to focus");
+    const next = Math.max(0, Math.min(rows.length - 1, i));
+    const moved = next !== focus;
+    if (moved) setFocus(next);
+    return revealRow(next) || moved;
+  };
+
+  /** Move the cursor by `delta` rows. WITH NOTHING FOCUSED THE CURSOR ENTERS AT THE NEAR END AND
+   *  DOES NOT ALSO TAKE THE STEP: a first Down lands on the first row and a first Page Down lands
+   *  there too, rather than a page into a list the reader has not looked at yet. That is an entry
+   *  rule and not an activation — `focus` is `-1` until a key asks for a row, which is what keeps a
+   *  first Enter a refusal. */
+  const moveFocus = (delta) => {
+    if (rows.length === 0) return refuse("the list", "is empty, so there is no row to focus");
+    if (focus < 0) return focusAt(delta > 0 ? 0 : rows.length - 1);
+    return focusAt(focus + delta);
+  };
+
+  /**
+   * ENTER `next` IN THIS WINDOW: new rows, a new title, and a reader who has not lost their place
+   * in a stack of windows. A re-list and not a spawn, because a file manager that opened a window
+   * per folder is a window manager's problem rather than a file manager.
+   *
+   * EVERYTHING THAT INDEXES THE OLD LIST IS DROPPED HERE. The offset, the selection, the press and
+   * the cursor all named rows in a directory that is gone, and carrying any of them over is how a
+   * drag comes to publish the bytes of a file the reader never touched.
+   *
+   * THE LISTING IS DONE BEFORE ANYTHING IS COMMITTED, so a directory that cannot be read leaves the
+   * window exactly as it was — with the refusal named. A half-applied navigation would be a title
+   * naming one directory over the rows of another.
+   */
+  const relist = (next, { push = true } = {}) => {
+    const built = buildRows(next);
+    if (typeof built === "number") return refuse(next, env.std.errnoName(built));
+    if (push) history.push(dir);
+    dir = next;
+    rows = built;
+    account.dir = dir;
+    account.rows = rows.map((r) => ({ name: r.name, format: kindOf(r) }));
+    account.history = history.length;
+    account.relists += 1;
+    scroll = 0;
+    account.scroll = 0;
+    account.scrollMax = maxScroll();
+    hot = -1;
+    press = null;
+    dragging = false;
+    setFocus(-1);
+    // THE TITLE NAMES WHERE THE WINDOW IS, which is the only text outside the surface a reader has
+    // and the one thing a driver outside the process can read without decoding a display list.
+    env.win.setTitle(made.fd, `${NAME} — ${dir}`);
+    env.std.say(env, `${NAME}: ${dir}, ${rows.length} row(s)\n`);
+    return true;
+  };
+
+  /** Back, which is Alt+Left and Backspace. GOING BACK FROM THE BOTTOM OF THE STACK IS A REFUSAL —
+   *  this window was opened on a directory and there is nothing above it that a reader asked for.
+   *  The entry is put back if the re-list fails, so a directory deleted under the window does not
+   *  silently cost a level. */
+  const goBack = () => {
+    if (history.length === 0) return refuse(dir, "there is nowhere to go back to");
+    const to = history.pop();
+    if (!relist(to, { push: false })) {
+      history.push(to);
+      account.history = history.length;
+      return false;
+    }
+    account.backs += 1;
+    return true;
+  };
+
+  /**
+   * OPEN ROW `i`. A directory re-lists in place; a file spawns the program the association names.
+   *
+   * THE ASSOCIATION IS `std.openerForPath` AND NOT A TABLE OF THIS PROGRAM'S. It carries the ARGV
+   * as well as the program, because `imgview` wants `-f PATH` and `editor` wants a bare path — a
+   * caller that guessed would hand one of them the other's operand (`src/libos/std.mjs`).
+   *
+   * A FILE NOTHING OPENS IS REFUSED BY NAME AND COUNTED. Silently doing nothing is the defect:
+   * M14 shipped a desktop icon that launched a program which exited at once, and a reader reported
+   * it as an icon that did not work. `openerForPath` answers null rather than defaulting, for the
+   * reason recorded there — launching an arbitrary program on unknown bytes shows a reader a binary
+   * as text.
+   */
+  const activate = (i) => {
+    if (i < 0) return refuse("no row is focused", "press a row or use the arrow keys first");
+    if (i >= rows.length) return refuse(`row ${i + 1}`, "is not in this list");
+    const row = rows[i];
+    if (row.dir) {
+      if (!relist(row.path)) return false;
+      account.activations += 1;
+      return true;
+    }
+    const open = env.std.openerForPath(row.path);
+    if (!open) return refuse(row.name, "no program in this system opens a file of that type");
+    const argv = open.argv(row.path);
+    const pid = env.proc.spawn(`${BIN_DIR}/${argv[0]}`, argv);
+    if (pid < 0) return refuse(row.name, `spawn ${open.prog}: ${env.std.errnoName(pid)}`);
+    account.activations += 1;
+    account.spawned.push({ pid, argv });
+    env.std.say(env, `${NAME}: ${argv.join(" ")} -> pid ${pid}\n`);
+    // NOTHING IN THIS WINDOW CHANGED. The new process draws its own.
+    return false;
+  };
+
   env.std.say(env, `${NAME}: win ${made.win}, ${rows.length} row(s) in ${dir}\n`);
   rows.forEach((r, i) => env.std.say(env, `  row ${i + 1}  ${r.name}\t${kindOf(r)}\n`));
-  env.std.say(env, "press a row and drag it onto another window. the wheel scrolls. q quits.\n");
+  env.std.say(env, "press a row and drag it onto another window. the wheel scrolls. "
+    + "arrows move, Enter or a double-click opens, Backspace goes back. q quits.\n");
 
   /** Publish one row as a drag. The object's fd is CLOSED immediately and on purpose: the session
    *  holds the kernel's own reference, so the payload outlives this program's handle on it — and
@@ -990,7 +1252,22 @@ export function run(env) {
           press = i >= 0 ? { row: i, x: at.x, y: at.y } : null;
           dragging = false;
           if (i !== hot) { hot = i; repaint = true; }
-          if (i >= 0) account.presses += 1;
+          if (i >= 0) {
+            account.presses += 1;
+            // THE POINTER CARRIES THE CURSOR WITH IT. Without this, Enter after a click opens a
+            // row other than the one the reader just highlighted.
+            if (i !== focus) { setFocus(i); repaint = true; }
+          }
+          /* THE SECOND CLICK IS THE ACTIVATION VERB, AND THE FIRST ONE IS NOT. `WPTR_CLICK2` rides
+           * the DOWN record and nothing else (`src/wm/winhost.mjs`), so this is the only place it
+           * can be read — and a single click reaching here has already done the whole of what it
+           * may do, which is select. A double-click on blank paper is not a refusal: there is no
+           * row under it to refuse, which is a different thing from a row this program will not
+           * open. */
+          if (ev.mods & WPTR_CLICK2) {
+            account.dblclicks += 1;
+            if (i >= 0 && activate(i)) repaint = true;
+          }
           continue;
         }
         if (ev.mods & WPTR_MOVE) {
@@ -1019,10 +1296,48 @@ export function run(env) {
         continue;
       }
       if (ev.type === WEV_KEY) {
+        /* A KEYSYM AND A KEY'S BYTES ARE DISJOINT AND EXHAUSTIVE (`src/abi.mjs`'s `keysymOf`), so
+         * the keysym is tested first and the byte reader below it never sees an arrow. Reading the
+         * bytes first would be reading an empty array for every navigation key. */
+        const sym = keysymOf(ev);
+        if (sym !== 0) {
+          account.keysyms += 1;
+          /* ALT+LEFT IS BACK, AND IT IS TESTED BEFORE THE BARE KEYSYM. The modifier changes the
+           * verb and not the key, so a plain Left — which this list has no use for, having no
+           * horizontal overflow — must not fall into it. */
+          if (sym === WKEY_LEFT) {
+            if ((ev.mods & WMOD_ALT) && goBack()) repaint = true;
+            continue;
+          }
+          /* A PAGE IS WHAT THE VIEWPORT HOLDS, read from the live client height and not from
+           * `START_ROWS`: a reader who made the window taller gets a longer page, which is the
+           * whole of what a page key means. `rowsThatFit` already floors at one. */
+          const page = rowsThatFit(clientH);
+          if (sym === WKEY_DOWN && moveFocus(1)) repaint = true;
+          else if (sym === WKEY_UP && moveFocus(-1)) repaint = true;
+          else if (sym === WKEY_PAGE_DOWN && moveFocus(page)) repaint = true;
+          else if (sym === WKEY_PAGE_UP && moveFocus(-page)) repaint = true;
+          else if (sym === WKEY_HOME && focusAt(0)) repaint = true;
+          else if (sym === WKEY_END && focusAt(rows.length - 1)) repaint = true;
+          continue;
+        }
         const bytes = keyBytesOf(ev);
-        if (bytes.length === 1 && String.fromCharCode(bytes[0]) === "q") {
-          account.why = "q";
-          break;
+        if (bytes.length === 1) {
+          /* ENTER AND BACKSPACE ARE BYTES, NOT KEYSYMS, and that is the ABI's decision rather than
+           * this program's: `bytesForKey` already spells them 10 and 127, and a keysym row for
+           * either would take them away from every program that reads them as bytes today. */
+          if (bytes[0] === KEY_ENTER) {
+            if (activate(focus)) repaint = true;
+            continue;
+          }
+          if (bytes[0] === KEY_BACKSPACE) {
+            if (goBack()) repaint = true;
+            continue;
+          }
+          if (String.fromCharCode(bytes[0]) === "q") {
+            account.why = "q";
+            break;
+          }
         }
         continue;
       }
@@ -1054,5 +1369,13 @@ export function run(env) {
     + `(${account.coalescedWheels} coalesced, ${account.pageWheels} by the page), `
     + `${Math.round(account.dyTotal)} CSS px asked for, clamped ${account.clamped.top} at the top `
     + `and ${account.clamped.bottom} at the end\n`);
+  /* THE NAVIGATION, AND THE REFUSALS BESIDE IT. A reader looking at a window that did not open
+   * what they double-clicked needs the reason on the same line as the count, and the LAST one is
+   * printed because that is the one they just hit; `account.refusals` carries the rest. */
+  env.std.say(env, `${NAME}: ${dir}, cursor ${account.focus < 0 ? "none" : account.focus + 1}, `
+    + `${account.activations} opened from ${account.dblclicks} double-click(s), `
+    + `${account.relists} re-list(s), ${account.backs} back, ${account.spawned.length} spawned, `
+    + `${account.refused} refused`
+    + `${account.refused ? ` (last: ${account.refusalWhy})` : ""}\n`);
   return { exit: 0, ...account };
 }

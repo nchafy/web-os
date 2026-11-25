@@ -748,9 +748,25 @@ export class WinHost {
         this.stats.unknown += 1;
       }
       el.focus();
-      /* M18. THE CLICK COUNT RIDES THE DOWN RECORD, and only the DOWN. `event.detail` is
-       * meaningful on both halves of a double-click, so a program reading it on the UP as well
-       * would open a row twice for one gesture. `clickBits` is the one place it is read. */
+    });
+    /* M18. THE DOWN RECORD IS SENT FROM `mousedown`, BECAUSE THAT IS THE EVENT THAT CARRIES THE
+     * CLICK COUNT (constraint 300). It was sent from `pointerdown` above, and
+     * `bench/m18-keys/clickcount.py` measured what that cost: `pointerdown.detail` is `[0, 0]`
+     * across both presses of a driven double-click in Firefox AND Chrome, while `mousedown.detail`
+     * is `[1, 2]` — so the bits were always zero, for every driver and by hand, and `--only m18`
+     * was 15 of 38 red with `dblclicks: 0` in the program's own account.
+     *
+     * A LISTENER AND NOT AN ALGORITHM. Timing two presses here would disagree with the threshold
+     * the reader configured for every other application on their machine, so the count stays the
+     * platform's.
+     *
+     * `pointerdown` KEEPS the capture and the focus, and that split is what makes this safe:
+     * `setPointerCapture` must be taken on the pointer event that owns the `pointerId`, and it is
+     * what makes a drag that leaves the canvas keep arriving (constraint 279). `send` reads only
+     * `clientX`/`clientY`/`buttons` and the modifier flags, all present on a MouseEvent, and
+     * `pointerdown` fires BEFORE `mousedown`, so the DOWN-then-UP order a program sees is
+     * unchanged and the capture is already held when this record goes out. */
+    el.addEventListener("mousedown", (e) => {
       send(WPTR_DOWN | clickBits(e), e);
     });
     el.addEventListener("pointermove", (e) => {

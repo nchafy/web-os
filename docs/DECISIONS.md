@@ -961,3 +961,40 @@ work scheduled *before* M0.
 
 The lesson both share: a number that is not re-derived from its source is a number nobody checked,
 including when it comes from a critic.
+
+## D40 — the session is a WRITABLE COPY of a read-only base, seeded once
+
+**Evidence class: a product decision, taken by the owner.** It is recorded here rather than argued
+from a measurement, because what a reader may modify is not a question a benchmark answers.
+
+**The question it settles.** `docs/PLAN-SHELL.md` §10.1 left one thing to a human: what Delete does
+when the volume is read-only. `/usr` is `FS_PROVIDER` with `MNT_RO` and `mutErrno: "EROFS"`
+(`src/kernel/providerfs.mjs:180`), and `src/bin/files.mjs` opened `/usr/share` — so every mutating
+verb M20 adds was unreachable from the one directory the file manager showed.
+
+**The answer, in the owner's words:** *"i would like all operating systems to be a copy of the read
+only base. then each session can be modified freely."*
+
+So the read-only mounts stop being the reader's working tree and become what they already resemble:
+install media. The base is copied ONCE into the writable journaled volume, and the session works on
+the copy. Delete, rename, New folder and paste then need no read-only case at all, because nothing
+a reader can reach is read-only — which is a better answer than the refusal this plan was going to
+ship, and it removes the special case rather than handling it.
+
+**What it rejects.** Refusing Delete by name on a read-only mount (correct but a dead end: the file
+manager's own default directory stays unmodifiable); hiding the verb (a command absent for a reason
+the reader cannot see); and treating Delete as a copy into the Bin while leaving the original, which
+reports a deletion that did not happen and is the dishonest-success class this project refuses.
+
+**THE SEED IS ONCE, AND CONSTRAINT 28 IS THE TRAP HERE.** That constraint forbids RESEEDING: a bad
+superblock mounts read-only and reports, and never reseeds, because webxp reseeded and that is
+silent data loss presented as success. Seeding a FRESH volume is not reseeding — `store.mjs:246`
+already writes an initial superblock on one — so the copy MUST be gated on the same fresh-volume
+signal and MUST NOT run against a volume that exists, nor against one that failed to mount. A
+second copy over a reader's edited tree is exactly the defect constraint 28 names, arriving through
+a new door.
+
+**What it costs.** The base and the copy can diverge: a program added to `/usr/bin` after a reader's
+volume was seeded is present in the base and absent from their copy. That is the real behaviour of
+every installed system and is not a defect, but it IS a thing a check can assert and a reader can be
+told, so the seeded set and the base set are both readable rather than assumed equal.

@@ -307,7 +307,7 @@ being dragged bigger.
 
 ---
 
-### M18 — keys that are not bytes, and a row that opens · 2.5 d
+### M18 — keys that are not bytes, and a row that opens · 2.5 d · DONE
 
 **Closes.** R4, R5, R6, R9, A3, A4.
 
@@ -338,6 +338,31 @@ existing byte reader is unaffected. `keyBytesOf` returns an empty array for a le
 (`src/abi.mjs:1428-1436`), so a program that does not know the table sees a key with no bytes. If any
 caller in `src/bin/` treats an empty array as a printable key, the discriminator moves to a `mods`
 bit instead — a half-day change, and `grep -rn keyBytesOf src/bin/` is the measurement.
+
+> **CORRECTION, from the implementation.** The specification above is left as written and corrected
+> here rather than edited, which is this repo's rule for a falsified claim. The assumption it names
+> HELD — the grep was run first, eight call sites across seven programs, every one guards on length
+> or decodes to a string, so the `mods`-bit fallback was never needed (constraint 299). Three other
+> sentences did not.
+>
+> 1. **"`WPTR_CLICK2: 0x80` … from `event.detail`" is underspecified, and the obvious reading does
+>    not work.** `detail` is 0 on `pointerdown` in BOTH engines; only `mousedown` carries the
+>    platform's count. Measured by `bench/m18-keys/clickcount.py` — `pointerdown [0, 0]`,
+>    `mousedown [1, 2]` on Firefox 156 and Chrome alike (constraint 300). The host reads it off a
+>    `pointerdown` listener, so **no double-click reaches any program**, and the proof this row
+>    specifies is 15 of 38 expectations red on the tree as it stands. The ABI and the program are
+>    both correct; one listener is not.
+> 2. **"`editor` and `taskmgr` inherit arrow keys for free" is true of the DELIVERY and false of the
+>    behaviour.** Both now receive a keysym record, and neither binds one: `grep -rn keysymOf
+>    src/bin/` names `src/bin/files.mjs` and nothing else. What they inherited is a key they can
+>    read when someone writes the binding, which is M19's to do.
+> 3. **"The arrows belong to the frame" is narrower than it was written.** `src/abi.mjs`'s keysym
+>    comment and `src/bin/taskmgr.mjs:578` both say a process never sees an arrow because
+>    `src/wm/window.mjs` binds it. That binding is on the TITLE BAR (`src/wm/window.mjs:286`,
+>    `bar.addEventListener("keydown", …)`), not the frame, so a window whose SURFACE has focus
+>    receives arrows — measured, in Chrome by `www/m18.html` proof 2 and in Firefox by
+>    `bench/m18-keys/firefox-keys.py`, both of which move a cursor with a real Down arrow. The two
+>    comments overstate it and are a later slice's to amend.
 
 ---
 

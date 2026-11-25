@@ -231,7 +231,7 @@ number of records and answers **EINVAL** — never a short read — for a buffer
 
 | type | carries |
 | --- | --- |
-| `WEV_KEY` | the UTF-8 bytes INLINE: `a` is the length 1–4 and `b` the bytes, little-endian. `mods` carries SHIFT/CTRL/ALT for a reader that wants them, never for deriving the byte |
+| `WEV_KEY` | TWO KINDS, told apart by `a`. A key that is BYTES carries its UTF-8 INLINE: `a` is the length 1–4 and `b` the bytes, little-endian. A key that is a KEYSYM carries `a == 0` and a `WKEY_*` in `c` (M18, below). `mods` carries SHIFT/CTRL/ALT/META for a reader that wants them, never for deriving the byte |
 | `WEV_RESIZE` | `a` = columns, `b` = rows. CELLS and not pixels, because a terminal needs it for `tty_winsize_set`; the pixel box is published in `/proc/<pid>/win/<winid>` |
 | `WEV_CLOSE` | the X button was pressed. M7 DELIVERS it and the frame still goes; M9 is what lets the process refuse |
 | `WEV_FOCUS` | `a` = 1 entering, 0 leaving |
@@ -314,7 +314,8 @@ older reason: there is nothing to draw on, and the clip rect is never inspected.
 **`WEV_POINTER` is how a surface is reached**: `a` and `b` are x and y in SURFACE pixels, `c` is the
 button mask, and `mods` carries `WPTR_DOWN` / `WPTR_UP` / `WPTR_MOVE` beside the keyboard
 modifiers. A move is sent only while a button is down, because a hover would overflow the window's
-256-record queue in about a second (constraint 223).
+256-record queue in about a second (constraint 223). **M18 added `WPTR_CLICK2` and `WPTR_CLICK3` to
+the same field, on the DOWN record only** — see below.
 
 **One content mode per window**: `write(2)` on a surfaced window is EINVAL, because the page has
 replaced the text widget with a canvas and cells have nowhere to go (constraint 221).
@@ -407,6 +408,65 @@ is collected exactly once (constraints 241, 245).
 **`/proc/dataobj`** publishes every live object, the clipboard, the session and the budget. Not
 under a pid, because the clipboard outlives the process that filled it — the creator is a column
 instead.
+
+### Keys that are not bytes, and the click count, as M18 built them
+
+**NO NEW SYSCALL.** Three additions to records that already exist: a keysym space on `WEV_KEY`, a
+fourth modifier bit, and two click-count bits on `WEV_POINTER`.
+
+**A `WEV_KEY` IS EITHER BYTES OR A KEYSYM, AND `a` SAYS WHICH.** `a` in 1..4 is a byte length;
+`a == 0` with `c` in 1..`WKEY_MAX` is a keysym. The two are **disjoint and exhaustive by
+construction**, not by convention: `keyBytesOf` answers `[]` for a keysym record and `keysymOf`
+answers 0 for a byte record, `selfTest` asserts both directions over the whole table, and
+`keyBytesOf(ev).length === 0 && keysymOf(ev) === 0` therefore means a corrupt record rather than a
+third kind of key. Constraint 299 carries why `a == 0` was safe to pick, and it was measured before
+it was picked.
+
+| keysym | `WKEY_*` |
+| --- | --- |
+| arrows | `LEFT` 1, `RIGHT` 2, `UP` 3, `DOWN` 4 |
+| navigation | `HOME` 5, `END` 6, `PAGE_UP` 7, `PAGE_DOWN` 8 |
+| editing | `DELETE` 9, `INSERT` 10 |
+| the context-menu key | `MENU` 11 |
+| function keys | `F1` 12 … `F12` 23 |
+
+**DENSE AND FROM 1, with `WKEY_MAX` 23.** Dense so a reader may switch on it and a table may be
+indexed by it; from 1 because 0 is what `c` holds on a key that IS bytes, and a zeroed record must
+not decode as a keysym. **`keysymOf` VALIDATES THE RANGE** rather than returning whatever `c` held:
+a sym past `WKEY_MAX` is a record this build cannot name, and 0 is the honest answer — a program
+switching on it falls through to its default instead of acting on a number it does not understand.
+There is no counterpart to `packKeyBytes`, because a keysym needs no packing.
+
+**ENTER, TAB AND BACKSPACE ARE BYTES, NOT KEYSYMS, AND THAT IS DELIBERATE.** `bytesForKey` already
+spells them 10, 9 and 127 (`src/wm/terminal.mjs` is where that mapping lives), so `keysymOf`
+answers **0** for all three and every program that reads them today keeps reading bytes. A keysym
+row for any of them would take the key away from all of them. Two consequences a caller must plan
+for: Windows 7 binds **Backspace to Back** in a file list and that arrives as a byte, while
+**Alt+Left** arrives as a keysym with `WMOD_ALT` on the record — the same verb over two different
+mechanisms, which is why `www/m18.html` drives both.
+
+**IT IS ALSO WHY ENTER CANNOT PROVE THE KEYSYM PATH.** Enter reaches a process on a tree where the
+table does not exist, so an Enter clause is green with M18 unimplemented. The assertable claim is an
+arrow MOVING a cursor and Enter then opening the row the arrow reached (constraint 299).
+
+**`WMOD_META: 0x8` is the fourth modifier**, beside `WMOD_SHIFT` 0x1, `WMOD_CTRL` 0x2 and
+`WMOD_ALT` 0x4. Named META and not CMD or WIN because `KeyboardEvent.metaKey` is what the page
+reads, and which physical key sets it differs by platform while the bit does not. It is the bit
+M17's wheel flags were pushed off 0x8 to reserve, and the `mods` namespace is asserted as ONE table
+in `src/abi.mjs`'s `selfTest` — `WPTR_*`, `WMOD_*` and `WWHEEL_*` together — because three separate
+pairwise assertions let a third sub-table collide with either, unseen.
+
+**`WPTR_CLICK2: 0x80` and `WPTR_CLICK3: 0x100` ride the DOWN record and nothing else.** The count is
+the PLATFORM's, from the browser's `event.detail`: a double-click has a threshold the reader
+configured, and a program that timed two presses itself would disagree with every other application
+on their machine. DOWN only, because `detail` is meaningful on the UP of a double-click too and a
+program reading both would open a row twice for one gesture. There is no `WPTR_CLICK4` — a count
+past 3 is still a third click, since a quadruple-click is not a gesture Windows 7 has.
+
+**THE COUNT MUST BE READ OFF THE EVENT THAT CARRIES IT.** `pointerdown.detail` is **0 in both
+engines** and only `mousedown` carries the platform's count — measured, constraint 300 — so a host
+that builds the DOWN record from a pointer event delivers no click count to any program, with
+nothing thrown anywhere.
 
 ---
 

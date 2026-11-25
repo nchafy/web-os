@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 298 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 301 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  298 normative constraints  ← cite these
+  CONSTRAINTS.md  301 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -84,6 +84,10 @@ bench/
   m17-wheel/      M17's probes. `probe.py` measured the WHEEL'S UNIT (constraint 297) and that the
                   transport does not coalesce (298); `probe.mjs` asserts the clip RESET under node;
                   `firefox-scroll.py` scrolls the list in a SECOND ENGINE with trusted input
+  m18-keys/       M18's gates. `clickcount.py` measured WHICH EVENT CARRIES THE CLICK COUNT in both
+                  engines — `pointerdown.detail` 0, `mousedown.detail` 1 then 2 (constraint 300) —
+                  and `firefox-keys.py` opens a row and walks a list with REAL keys in Firefox,
+                  with a `--prove-failure` half that substitutes `j` for the Down arrow
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -182,6 +186,14 @@ www/
                   edges, and the coalescing — a 300-notch stream into a program held in its
                   declared `--no-drain` mode, scored on `queued:`/`coalesced:`/`dropped:`. The
                   bare URL is a live desktop you can scroll; `?proofs=1` is the harness
+  m18.html        M18's 27 clauses over three driven proofs: a DOUBLE-CLICK that re-lists a window
+                  and one that spawns the program the association names, a driven Down arrow moving
+                  a cursor and Enter opening THE ROW THE ARROW REACHED, and Back over two
+                  mechanisms — Alt+Left as a keysym with a modifier, Backspace as a byte. It takes
+                  NO control flag deliberately: all three of its worlds live in files it does not
+                  own, so they are `repo_fixture` patches and a clause asserts the page reads only
+                  `proofs`. `diagnose` names the ONE fact behind several red clauses, with the
+                  address
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -189,7 +201,7 @@ www/
   shell.mjs       the ONE DEFINITION of staging the desktop shell, a layer above `pagekernel.mjs`:
                   `PROGRAMS` and `DESKTOP_HELP` as frozen DATA a milestone adds to, `stageDesktop`
                   as the order a desktop is assembled in, and `requireIsolation` as the abort gate
-                  nineteen proof pages still paste. index, m14 and m17 import it; it re-exports
+                  nineteen proof pages still paste. index, m14, m17 and m18 import it; it re-exports
                   `gestureAsker`/`spawnProgram`/`until`/`sleep` rather than redefining them,
                   because a second banner is a second handshake for `scripts/check.py` to agree
                   with by hand
@@ -253,7 +265,9 @@ row below rather than restate it.
 | How a glass seam is sampled, and what separates a ramp from a step | `band_profile`, `transition` and `local_range` in `scripts/png.py`. `scripts/check.py` asserts with them and `bench/m11-glass/probe.py` chose the threshold with them, so the gate and the measurement behind it are ONE arithmetic |
 | A data format, its offer bit and its name | `DOBJ_*` + `fmtBit`/`fmtsOf`/`fmtName` and `DOBJ_FORMATS`/`DOBJ_FMT_ALL` in `src/abi.mjs`. The offer is a BITMASK in one register, so the packing has one definition and three readers: the kernel builds it, an event record carries it, a target tests it |
 | The `DOBJ_BITMAP` payload's header | `BMP_*` + `encodeBitmap`/`decodeBitmap` in `src/abi.mjs`. `8 + w*h*4` written a second time is the drift this exists to stop |
+| A PATH'S EXTENSION | `extOf` in `src/libos/std.mjs`. It existed FOUR times — inside `formatForPath`, inside `iconForPath`, and as `desktop.mjs`'s own `extOf` — each spelling the same split, so the rule that `.profile` is a name and not a file of type `profile` was decided four times. Every table keyed by extension asks this one function |
 | Which format a file's bytes are | `FORMAT_BY_EXT` + `formatForPath` in `src/libos/std.mjs`. A USERLAND convention — the kernel knows no names — and three programs need it, so a second copy is how `clip` and `files` come to disagree about a `.rgba` |
+| Which program opens a FILE, and with what argv | `OPENS_FILES` + `openerForPath` in `src/libos/std.mjs`, beside `FORMAT_BY_EXT` and `ICON_BY_EXT` and userland's for their reason. It MOVED there from `src/bin/desktop.mjs` when M18 gave `files` an activation verb — the second reader is what justified the move, and a copy in `files` is how a `.rgba` comes to open in one program from the desktop and another from the file list. **The argv is part of the association**, not a caller's business: `imgview` wants `-f PATH` and `editor` a bare path. `null` and never a default, because launching an arbitrary program on unknown bytes is how a reader is shown a binary as text |
 | A data object's lifetime, the clipboard slot and the drag session | `src/kernel/dataobj.mjs`, and nowhere else. `WinMgr.pointer` is the one record of whether a button is down, because `feed` is the one place a pointer event enters the kernel |
 | Where a drop landed, in a window's own unit | `WinHost.#dropPointAt` in `src/wm/winhost.mjs`: surface pixels for a surfaced window, CELLS for a text one — the two units `WEV_POINTER` and `WEV_RESIZE` already use |
 | A window's SHOW STATE and ROLE, and what a published row is | `WST_*`, `WROLE_*`, `WITEM_*`, `WICON_*` + `encodeWinItems`/`decodeWinItems`/`winItemSize` in `src/abi.mjs`. The kernel validates a row's index and the shell draws its label, which is the two sides |
@@ -270,10 +284,12 @@ row below rather than restate it.
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
 | A window's CLIENT BOX and the ratio that relates it to CSS px | `WEV_CLIENT` + `clientBoxAt`/`dprFixed` and `DPR_FIXED_ONE` in `src/abi.mjs`. The box is DEVICE px — the unit `win_surface` takes and `SURFACE_MAX_PX` bounds — and the ratio RIDES THE RECORD because a process has no other route to it. A program's own layout constants are CSS px, and this is what converts them |
 | A WHEEL's deltas and the point it was aimed at | `WEV_WHEEL` + `wheelAt`/`packWheelPoint` and `WWHEEL_PAGE`/`WWHEEL_COALESCED` in `src/abi.mjs`. Surface px for a surfaced window, CELLS for a text one (constraint 248) — never device px. `packWheelPoint` is `wheelAt`'s declared inverse, because x and y share one 32-bit word |
-| The `mods` bit namespace, as ONE table | `selfTest` in `src/abi.mjs`, derived from `INTS` by the prefixes `WPTR_`/`WMOD_`/`WWHEEL_`. It was three separate clauses — pointer bits against each other, modifiers against each other, pointer against modifier — so a THIRD sub-table could collide with either, unseen. M17's wheel bits were the third one |
+| The `mods` bit namespace, as ONE table | `selfTest` in `src/abi.mjs`, derived from `INTS` by the prefixes `WPTR_`/`WMOD_`/`WWHEEL_`. It was three separate clauses — pointer bits against each other, modifiers against each other, pointer against modifier — so a THIRD sub-table could collide with either, unseen. M17's wheel bits were the third one, and M18's `WMOD_META`/`WPTR_CLICK2`/`WPTR_CLICK3` are why it has to stay derived |
+| A KEY THAT IS NOT BYTES | `WKEY_*` (dense 1..`WKEY_MAX`) + `keysymOf` in `src/abi.mjs`, and `KEYSYM_BY_KEY`/`keysymForKey` in `src/wm/winhost.mjs` — the ABI's table and the ONE browser-key mapping onto it, which is `event.key` and never `code`, because `code` is a physical position and would make an AZERTY keyboard send the wrong keysym. `a == 0` is the discriminator and `keysymOf` is the one place it is read, as `keyBytesOf` is the one place the bytes are unpacked: the two are disjoint and exhaustive, asserted BOTH ways in `selfTest` (constraint 299). **Enter, Tab and Backspace are BYTES** — `bytesForKey` in `src/wm/terminal.mjs` spells them 10, 9 and 127, and a keysym row for any of them would take the key away from every program reading them today |
+| A CLICK COUNT | `WPTR_CLICK2`/`WPTR_CLICK3` in `src/abi.mjs`, set by `clickBits` in `src/wm/winhost.mjs` and nowhere else, on the DOWN record only — `event.detail` is meaningful on the UP of a double-click too, and a program reading both opens a row twice for one gesture. The count is the PLATFORM's and never a timer's, so it MUST be read off the event that carries it: `pointerdown.detail` is 0 in both engines and only `mousedown` has it (`bench/m18-keys/clickcount.py`, constraint 300) |
 | The CLIP, and who resets it | `DL_CLIP` + `DLC_RESET` in `src/abi.mjs`, applied in `Surface.replay` in `src/wm/surface.mjs` — which MUST reset at the top of every batch, because a canvas clip only ever intersects. A clip left set by batch N makes batch N+1 draw nothing: a window blank on its next repaint with no error anywhere. `bench/m17-wheel/probe.mjs` is what proves the reset exists |
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
-| The 298 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 301 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -290,9 +306,15 @@ cannot import the module; that was true of the PROCESS and false of the page it 
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 **The desktop-staging copy left it with the landing page**, and the isolation gate now HAS a one
 definition it did not have: `requireIsolation`/`isolationFailure` in `www/shell.mjs`.
-`grep -ln crossOriginIsolated www/*.html` still names 20 files and only `www/index.html` reaches
-it through that function, so the row above is understated rather than closed — the remaining
-nineteen are proof pages, which this round did not touch.
+`grep -ln crossOriginIsolated www/*.html` now names **21** files and only `www/index.html` reaches
+it through that function, so the row above is understated rather than closed — the remaining twenty
+are proof pages, and M18 added one more rather than retiring any.
+**ONE MORE LEFT IT IN M18, AND IT WAS FOUR COPIES RATHER THAN TWO**: the extension split lived
+inside `formatForPath`, inside `iconForPath` and as `src/bin/desktop.mjs`'s own `extOf`, each
+spelling the same `lastIndexOf(".")` rule. It is `std.extOf` now, and the file-association table
+went with it — `OPENS_FILES` moved from `src/bin/desktop.mjs` to `src/libos/std.mjs` because
+`files` became its second reader, which is the rule for when an abstraction is earned rather than
+anticipated.
 
 ## Architecture rules
 
@@ -397,6 +419,16 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   accounted or revoked (constraint 219, `docs/DECISIONS.md` D31). The window ABI is still `win_*`
   calls rather than a `/dev/wm` device file, but for the reason a window needs identity, an owner
   and an fd — not because of a transfer.
+- **Enter, Tab and Backspace are NOT in the keysym table, and adding them is a regression.**
+  `bytesForKey` already spells them 10, 9 and 127, so every program that reads them reads bytes —
+  a keysym row for any one of them takes the key away from all of them. The space is disjoint by
+  construction and `selfTest` asserts it both ways (constraint 299). It is also why **Enter cannot
+  be the clause that proves the keysym path**: Enter reaches a process on a tree where the table
+  does not exist.
+- **A double-click's count comes from the browser and rides the DOWN record only.** The threshold
+  is the reader's own, so a program that timed two presses itself would disagree with every other
+  application on their machine; and `event.detail` is meaningful on the UP of a double-click too, so
+  a program reading both would open a row twice for one gesture (constraint 300).
 
 ## Code conventions
 
@@ -412,6 +444,12 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   so review it as untrusted-adjacent: it must not acquire a capability the kernel did not hand it.
 - A syscall number, errno or SAB offset is a named constant in one place, imported on both sides.
   Two copies hand-synced across the kernel/process boundary is the defect this rule exists for.
+- **A page's entry point goes BELOW every declaration, at the bottom of its module.** `www/m17.html`
+  called `main()` about 800 lines above a `const` its live branch reads, so the bare URL threw
+  `Cannot access 'LIVE_PROGRAMS' before initialization` in both engines while the suite — which
+  loads `?proofs=1` — stayed green. `scripts/check_pages.py` cannot catch it: `node --check` parses
+  and does not execute (288), and a temporal dead zone is a runtime error. Below every declaration
+  is the only position in which an entry point cannot be in one (301).
 
 ## Verification
 
@@ -509,6 +547,16 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   M12 repeated it exactly: `413 windows to the budget` is a dpr-2 figure, and Firefox at dpr 1
   needs 1,651 — so the assertion failed on an engine whose governor was fine. The claim is a floor
   now, and the exact figure lives in the host probe where the ratio is pinned (264).
+  **IT HAS NOW COST FIVE, and the fifth was not a ratio.** `www/m17.html`'s bare URL threw before
+  it rendered, in BOTH engines, while the Chrome suite was green — found by
+  `bench/m17-wheel/firefox-scroll.py` being the first gate to load the product URL rather than
+  `?proofs=1` (301). A gate in a second engine is also a gate on the path a reader takes.
+- **A PLATFORM FACT MUST BE READ OFF THE EVENT THAT CARRIES IT, AND BOTH ENGINES MUST BE ASKED
+  WHICH ONE DOES.** M18 took a double-click's count from `event.detail` on a `pointerdown`, where
+  a pointer event carries no click count — so no double-click reached any program, in any engine,
+  and 15 of 38 expectations went red with nothing thrown anywhere.
+  `bench/m18-keys/clickcount.py` is what answers it: print the field per event kind, in both
+  engines, with the pointer capture the host really takes, before building a record out of it (300).
 - `bench/` harnesses must assert `crossOriginIsolated === true` and **abort** rather than report a
   number from a non-isolated context. `scripts/serve.py --no-isolation` exists to prove they do.
 
@@ -585,6 +633,17 @@ python3 bench/m17-wheel/probe.py    # WHAT UNIT IS A DRIVEN WHEEL DELTA? four de
 node bench/m17-wheel/probe.mjs      # ...and the clip RESET between batches, under node
 python3 bench/m17-wheel/firefox-scroll.py  # DOES THE LIST SCROLL IN FIREFOX? real trusted input
 python3 bench/m17-wheel/firefox-scroll.py --prove-failure  # ...and with a zero delta, it must not
+python3 bench/m18-keys/firefox-keys.py   # DOES A ROW OPEN AND DOES THE KEYBOARD REACH IT? in Firefox
+python3 bench/m18-keys/firefox-keys.py --prove-failure  # ...and with `j` for the arrow, it must not
+python3 bench/m18-keys/clickcount.py     # WHICH EVENT CARRIES THE CLICK COUNT? both engines
+scripts/check.py --only m18         # M18's 38 expectations. 15 are RED on this tree, on one
+                                  # listener — see MILESTONES.md M18
+scripts/check.py --negative one-click-opens  # every DOWN record carries a count of 2, so a single
+                                  # click activates a row
+scripts/check.py --negative no-handler-table # ...and the world with no file association, where
+                                  # `files` refuses BY THE ROW'S OWN NAME
+scripts/check.py --negative keysym-as-byte   # ...and a keysym packed into the byte field: the
+                                  # arrow clauses fall and every BYTE key holds
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end
