@@ -8,34 +8,101 @@
   :root { color-scheme: dark; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center;
          background: #0b1016; color: #c7d3e0; }
-  main { width: min(52rem, 90vw); }
+  #desktop { display: none; }
+  #diag { width: min(52rem, 90vw); }
+  /* The preflight IS the page until it passes, so there is nothing to disclose yet. */
+  body:not(.live) #diag > summary { display: none; }
   h1 { font-size: 1rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase;
        color: #74b8fc; margin: 0 0 1.5rem; }
   table { border-collapse: collapse; width: 100%; }
-  td { padding: .35rem .75rem .35rem 0; vertical-align: top; }
+  /* THREE DISTINCT COLOURS, and that is an assertion rather than a palette: `scripts/check.py`'s
+     check_boot pairs each row's class with its painted colour and fails when two classes paint
+     the same one — a `.bad` repainted green leaves every class assertion intact over a screen
+     that reads as an all-clear. The default cell colour is stated here and not inherited, so a
+     live-mode background change cannot collapse it onto `.ok` or `.bad`. */
+  td { padding: .35rem .75rem .35rem 0; vertical-align: top; color: #c7d3e0; }
   td:first-child { color: #7d8da0; white-space: nowrap; }
   .ok   { color: #7ddc8a; }
   .bad  { color: #ff7b72; }
   .note { margin-top: 1.5rem; color: #7d8da0; max-width: 46rem; }
   code { color: #e0c06a; }
+  /* `:where` SO THE DEFAULT COLOUR LOSES TO `.bad`, and that is the point of it rather than a
+     flourish. An id selector outranks a class, so `#log { color }` painted a refusal grey — and
+     the default cannot move onto a class instead, because `requireIsolation` ASSIGNS
+     `log.className = 'bad'` and would drop any other class with it. Zero specificity is the only
+     shape where both hold. */
+  :where(#log) { color: #7d8da0; }
+  #log { white-space: pre-wrap; margin: 1.5rem 0 0; }
+
+  /* LIVE: THE DESKTOP IS THE PAGE. The page at the obvious URL is the PRODUCT and a reader must
+     see it first (constraint 283), so the preflight becomes a one-line disclosure strip at the
+     bottom and the desktop takes the rest of the viewport. The strip STAYS, closed, because a
+     second engine gives no other channel than a log the page printed itself (CLAUDE.md's
+     second-engine rule) and because the refusal path renders into the same element. */
+  body.live { display: flex; flex-direction: column; height: 100vh; min-height: 0;
+              align-items: stretch; overflow: hidden; }
+  body.live #desktop { display: block; flex: 1 1 auto; min-height: 0; }
+  body.live #diag { flex: 0 0 auto; width: auto; max-height: 40vh; overflow: auto;
+                    border-top: 1px solid #1b2430; background: #070b10; }
+  body.live #diag > summary { cursor: pointer; padding: 4px 10px; color: #7d8da0;
+                              font-size: 12px; }
+  body.live #diag-body { padding: 0 10px 10px; }
+  body.live h1 { margin: 10px 0 .75rem; }
 </style>
 </head>
 <body>
-<main>
-  <h1>web-os &mdash; boot preflight</h1>
-  <table id="checks"></table>
-  <p class="note" id="verdict"></p>
-</main>
+<div id="desktop"></div>
+<details id="diag" open>
+  <summary>diagnostics &mdash; the boot preflight, the kernel's log, and what the shell has on it</summary>
+  <div id="diag-body">
+    <h1>web-os &mdash; boot preflight</h1>
+    <table id="checks"></table>
+    <p class="note" id="verdict"></p>
+    <pre id="log">starting&hellip;
+</pre>
+  </div>
+</details>
 
+<script>
+  /* PUBLISHED BEFORE THE MODULE, in a CLASSIC script: a module that fails to parse publishes
+   * nothing, and a driver polling an object that does not exist reports a timeout where there was
+   * a syntax error. `/www/shell.mjs`'s `newReport` fills in the rest of the shape once it has
+   * loaded, so this is the floor and not a second copy of it.
+   *
+   * THE NAME IS THIS PAGE'S FILENAME, UPPER-CASED, because that is how a driver derives it:
+   * `bench/m7-win/drive.py --page index` reads `globalThis.INDEX`. */
+  globalThis.INDEX = {
+    state: 'starting', isolated: self.crossOriginIsolated === true, phase: '', errors: [],
+  }
+</script>
 <script type="module">
-/* The boot gate.
+/* The boot gate, and then the desktop.
  *
  * Nothing is loaded until the environment is proven. A kernel that silently degrades to a
  * non-isolated context is the worst outcome available, because every benchmark downstream
  * still reports a number — it just reports it about a different system.
  *
  * docs/CONSTRAINTS.md constraints 1-13 and 30-33 are what this screen enforces.
+ *
+ * ON SUCCESS THIS PAGE IS THE PRODUCT: the Windows 7 desktop, its taskbar, its start orb and its
+ * icons, staged by `/www/shell.mjs` — the ONE definition of that staging, which every milestone
+ * page's live mode imports too. A feature that lands there lands here, which is what "the landing
+ * page is always up to date" has to mean to be true.
+ *
+ * THERE ARE NO PROOFS HERE and there is no `?proofs=1` (constraint 283). A page that stages
+ * fixture windows and then blocks waiting for a driver reads exactly like a broken desktop; three
+ * defects were reported against `www/m14.html` that way and none of them was a defect. Nothing on
+ * this page asks for a gesture, so `gestureAsker`'s driver banner — the one definition of it, in
+ * `www/pagekernel.mjs` — has nothing to announce. Any proof added here would have to come with it.
  */
+
+const report = globalThis.INDEX
+const desktop = document.getElementById('desktop')
+const diag = document.getElementById('diag')
+const out = document.getElementById('log')
+/* EVERY LINE REACHES THE DOM AS TEXT. A kernel note, a program's output, a filename and a caught
+ * error all arrive here, and all of them are untrusted data by the encode-at-sink rule. */
+const say = (s) => { out.textContent += s + '\n' }
 
 const CHECKS = [
   ['crossOriginIsolated', () => self.crossOriginIsolated === true,
@@ -117,9 +184,9 @@ for (const [name, ok, why] of [
 
 const verdict = document.getElementById('verdict')
 if (fatal === 0) {
-  verdict.innerHTML = '<span class="ok">Environment is sufficient.</span> No kernel yet &mdash; '
-    + 'see <code>MILESTONES.md</code>. M0 is the next thing to build and the one that can '
-    + 'invalidate the plan.'
+  verdict.innerHTML = '<span class="ok">Environment is sufficient.</span> Starting the desktop '
+    + '&mdash; the shell, its windows and its programs are staged by <code>www/shell.mjs</code>, '
+    + 'and this panel keeps the log.'
 } else {
   verdict.innerHTML = `<span class="bad">${fatal} required capabilit${fatal === 1 ? 'y' : 'ies'} `
     + 'missing. The kernel cannot boot.</span> This screen refusing to proceed is correct '
@@ -127,6 +194,67 @@ if (fatal === 0) {
     + '<code>CLAUDE.md</code>.'
 }
 document.documentElement.dataset.preflight = fatal === 0 ? 'ok' : 'fail'
+
+if (fatal > 0) {
+  /* THE REFUSAL IS THIS PAGE'S FIRST JOB, and the gate is the TABLE rather than the shell's own
+   * `isolationFailure()`: that predicate names the two capabilities a SAB cannot be constructed
+   * without, and these ten rows name every one a desktop needs. A shell started over a missing
+   * OPFS still renders — it just renders a different system. */
+  report.state = 'aborted'
+  report.why = `${fatal} required capabilit${fatal === 1 ? 'y' : 'ies'} missing; `
+    + 'nothing was started.'
+  out.className = 'bad'
+  say(report.why)
+} else {
+  try {
+    await live()
+  } catch (error) {
+    report.state = 'error'
+    report.why = String((error && error.stack) || error)
+    /* REOPENED, because the panel is now the only thing on the page with anything to say. A
+     * collapsed strip over a desktop that never arrived is a blank screen. */
+    diag.open = true
+    out.className = 'bad'
+    say(report.why)
+  }
+}
+
+async function live () {
+  /* THE SHELL IS IMPORTED DYNAMICALLY RATHER THAN LINKED, and that is load-bearing. A static
+   * `import` would make this screen's own refusal depend on the shell's whole module graph
+   * resolving: `scripts/check.py`'s boot check serves `www/` as the document root, where
+   * `/src/wm/winhost.mjs` 404s, and a preflight that cannot render because the thing it refuses
+   * to start could not be fetched is the exact failure it exists to prevent. */
+  let shell
+  try {
+    shell = await import('/www/shell.mjs')
+  } catch (error) {
+    throw new Error('/www/shell.mjs did not load, so there is no desktop: '
+      + String((error && error.message) || error)
+      + ' — the preflight above passed, so this is a serving or a module error and not a browser '
+      + 'capability one. Serve the REPOSITORY ROOT (scripts/serve.py): /src/ sits outside www/.')
+  }
+  /* ONE SHAPE, FILLED IN rather than replaced: `newReport` owns what a page publishes, and the
+   * classic stub above is the same object the kernel and the host are about to write to. */
+  Object.assign(report, shell.newReport(report))
+  /* The shell's own predicate, asked rather than restated. Rows 1-2 of the table are its two
+   * terms rendered for a human; calling it means a capability `isolationFailure()` learns about
+   * later gates this page too, with no edit here. */
+  if (!shell.requireIsolation(report, say, out)) return
+  /* Every page-side control, OFF. The product is the world with no control armed, and the four
+   * setters are module-level state in this realm — naming them all is the only way to say so. */
+  shell.applyControls({})
+  /* COLLAPSED BEFORE THE KERNEL BOOTS. `stageDesktop` adds `liveClass` and then measures: the
+   * desktop's height is what the taskbar reserves its strip out of and what every frame is
+   * clamped into, so this panel must already be its live size (M13's `WinHost.relayout` lesson). */
+  diag.open = false
+  say('desktop: staged by /www/shell.mjs, which is what every page\'s live mode imports.')
+  await shell.stageDesktop({
+    into: desktop, report, say, label: 'index', liveClass: 'live',
+  })
+  report.state = 'done'
+  report.verdict = 'live'
+}
 </script>
 </body>
 </html>

@@ -18,7 +18,7 @@ checks is a wish.
 | | Milestone | Est | Actual | Status |
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
-| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **35 negative controls over 18 checks and 695 expectations**; the spine checks landed per milestone |
+| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **54 named negative controls over 22 checks and 819 expectations**; the spine checks landed per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
@@ -44,6 +44,7 @@ checks is a wish.
 | M15a | The registration debt, and the rule that stops it recurring | 0.5 | 0.25 | ✅ done — **ACCEPT**, `check_m15` at a real prompt (24 expectations), `audit()` rule 16 over this file's own status table, and `--negative milestone-unchecked` |
 | M16 | The client box IS the surface, in device pixels | 2.5 | 0.5 | ✅ done — **ACCEPT**, 42 expectations at **two device-pixel ratios**, 4 controls, the first driven resize grip in this project, and 3 measurement assumptions retired by a probe |
 | M17 | The wheel, the clip, and a list that scrolls | 2 | — | ✅ done — **ACCEPT**, 35 expectations over 3 driven proofs, **the first REAL WHEEL this suite has dispatched**, 57 clauses under node, 2 controls wired and 2 registered UNMEASURABLE with an address, constraint 294 amended and 298 qualified by the proof itself |
+| M17a | **A consolidation, not a feature**: one landing desktop, one staging definition | — | 0.5 | ✅ done — the bare URL is the product, `www/shell.mjs` is the only copy of the staging, 17 expectations DERIVED from `/usr/bin` and the mount table, `--negative launcher-stale`, and a Firefox gate with real trusted input |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -3473,6 +3474,129 @@ project a defect found by a human opening the page (175, 206, M11's constant-off
 dpr-2 budget figure), and a wheel is the second input path after a resize grip whose delivery
 differs by engine. `scripts/bidi.py` drives real trusted input and `www/m17.html` prints its own
 log, so the gate exists — it has not been run.
+
+---
+
+## M17a — one landing desktop, one staging definition · done · 0.5 days
+
+**IT IS M17a AND NOT M18, and the number matters.** `docs/PLAN-SHELL.md` §2 M18 is "keys that are
+not bytes, and a row that opens" — a different row, with its own ABI and its own proof. This work
+has no number of its own in that plan because it is not in it: it came out of a reader asking for
+one landing page instead of a milestone to pick. The `a` suffix is this repo's existing spelling
+for work that lands beside a numbered row rather than after it (M4a, M4b, M15a).
+
+**A CONSOLIDATION, NOT A FEATURE.** It adds no syscall, no constraint and no pixel a milestone page
+could not already show. What it removes is a second copy, and the ask it answers is a user's
+sentence: *"we should have a singular landing page that is the actual desktop view, and it is always
+up to date with the latest features. instead of having to load specific milestones."*
+
+### What it closed
+
+`www/index.html` was a 132-line capability preflight and `www/m14.html` was the desktop, so the
+obvious URL was not the product — which inverts constraint 283 at the top level of the project. The
+deeper defect was underneath it: `bootHost()` and `live()` in `www/m14.html` were the definition of
+staging a desktop, and every other page carried its own copy. "Up to date with the latest features"
+was therefore a promise kept by hand, and the failure mode of a hand-kept promise is silent: a
+program that landed in one page's copy was simply absent from the rest, and nothing said so.
+
+`www/shell.mjs` (405 lines) is the one definition now, page-side beside `www/pagekernel.mjs`:
+`PROGRAMS` and `DESKTOP_HELP` as frozen data a milestone adds a row or a line to, `stageDesktop` as
+the order a desktop is assembled in, and `requireIsolation`/`isolationFailure` as the abort gate
+nineteen proof pages still paste by hand. It re-exports `gestureAsker`, `spawnProgram`, `until` and
+`sleep` from `pagekernel.mjs` rather than redefining them — a second `gestureAsker` is a second
+banner and a second handshake for `scripts/check.py` to agree with by hand, which is the same defect
+one level down. It also enforces one ordering rule no copy could: `term` spawns `sh` by syscall, so
+a program declaring `spawnsChildren` MUST be last in `programs`, and a bad list throws before the
+kernel boots rather than racing.
+
+`www/index.html` is 260 lines and is the preflight AND the desktop. Not a redirect to `m14.html`: a
+redirect leaves two pages claiming to be the product, and the preflight's refusal path has to stay
+reachable at the obvious URL. It publishes `globalThis.INDEX` from a classic pre-module script, so a
+module parse error still publishes a state a driver can read. `www/m14.html` and `www/m17.html`
+import `stageDesktop` for their live modes; `git diff --numstat 96dcf50 -- www/m14.html` is
+`26 81`, which is the shape of the change — staging deleted, an import added.
+
+### The proof
+
+`scripts/check.py --only landing`, on `/www/index.html` with **no query string**, floor 17 in
+`scripts/check_floors.json`. Measured: `[ ok ] landing m18 17 expectations 3.00s`, Chrome
+158.0.8127.37 — one minor version ahead of the 157 every figure in `docs/CONSTRAINTS.md` was taken
+on, which matters for nothing here because this check asserts no timing.
+
+**THREE OF THE SEVENTEEN ARE DERIVED, which is what makes "always up to date" structural rather
+than remembered.** Each reads a set out of the thing that moves when a feature lands:
+
+| Clause | Derived from |
+|---|---|
+| the mount table carries every mount the kernel adds | `mounts.add("<path>"` in `src/kernel/kernel.mjs` — 6 today |
+| the start menu lists every program /usr carries | `name: "bin/<prog>"` in `USR_ENTRIES`, `src/kernel/providerfs.mjs` — 33 today |
+| every program that draws its own window has a row of its own | `OPENS_OWN_WINDOW` and `HIDDEN_FROM_MENU` in `src/bin/desktop.mjs` — 7 launchable today |
+
+A fourth clicks each launchable row for real and asserts a window of its own came up. Two more are
+constraint 283 from the product side: the page asked for no gesture, and **no query parameter can
+select a mode** — asserted as the ABSENCE of `URLSearchParams`, `location.search` and `searchParams`
+from every `<script>` in `www/index.html`. Every proof page carries one; the product must carry
+none, so adding a query-string read here turns that clause red by design.
+
+**Changing the SHAPE of any derivation point needs `_landing_facts`'s parser repointed; changing its
+CONTENTS needs nothing.** That is the whole trade: a parser over the source of truth, instead of a
+list in the check.
+
+### The negative control
+
+`scripts/check.py --negative launcher-stale` — re-runnable, and it edits no source file. It copies
+the repository to a tmpdir (`repo_fixture`, new) and adds `taskmgr` to `HIDDEN_FROM_MENU` in the
+SERVED copy of `src/bin/desktop.mjs`, so a program that is in `/usr/bin` and in `OPENS_OWN_WINDOW`
+has no row in the start menu. It takes a served-bytes fixture rather than a query parameter for the
+reason above: the product reads no control parameter, and giving it one would be giving it a proof
+mode.
+
+Measured: `landing came out fail as required, with 3 red and 14 intact`. The three are the derived
+clauses, reporting `{'absent': ['taskmgr'], 'wanted': 32, 'shown': 34, 'published': 35}`. The
+fourteen that held are the desktop still working — the preflight, the kernel, the taskbar, the orb,
+the published icons, the mount table. **A check carrying a hand-written program list comes out GREEN
+under this control**, because the list and the menu are wrong together, and that is the defect this
+control exists to tell apart from a check that reads the launcher's own allowlist.
+
+Its needle is the verbatim `new Set([NAME]);` in `src/bin/desktop.mjs`, and the fixture requires
+EXACTLY ONE occurrence and refuses the run otherwise — so an edit that reflows that line breaks the
+control loudly rather than silently.
+
+### Firefox, with real trusted input
+
+`python3 bench/shell-landing/firefox-landing.py` — `bench/m14-shell/firefox-drive.py` pointed at the
+landing page, over `scripts/bidi.py`. It exists because `www/index.html` is now the ONE url a reader
+opens, which makes it the worst place in the repository for the Chrome-only defect to happen a fifth
+time (175, 206, M11's constant-offset blur band, M12's dpr-2 budget figure — every one shipped with
+every Chrome expectation green and was found by a person opening the page).
+
+Reported: exit 0, `taskbar=True orb=True icons=['Computer','Programs','Shared files','Terminal']`,
+each icon double-clicked taking the window count 1 → 2 → 3 → 4 → 5, every icon's own click point
+hit-tested as still reachable after each launch, and a start-menu row launching `cat` in a terminal.
+Nothing in it reads a page global and nothing in it names a program: the icons are enumerated from
+the DOM and the console row is the first one `src/bin/desktop.mjs` suffixed `"(in a terminal)"`, so
+a program a later milestone publishes is covered the day it lands.
+
+`--prove-failure` exits 0 and parks a window on the icon column: the `reachable` clause fires four
+times while `desktop` stays green — a control that moves a NAMED subset, not one satisfied by any
+failure. A second control is written down rather than wired: served `--no-isolation`, the run exits 1
+with `preflight='fail'`, no taskbar, no orb, no icons and clauses 2-4 not run, which is the
+preflight refusing and is the behaviour `www/index.html` must keep.
+
+### What is not done
+
+**THE OTHER NINETEEN PAGES STILL PASTE THE ISOLATION GATE.** `grep -ln crossOriginIsolated
+www/*.html` names 20 files and only `www/index.html` reaches it through `requireIsolation`. The one
+definition now exists, so each remaining copy is a deletion rather than a design question — but they
+are proof pages and this round did not touch them.
+
+**TWO `ALLOWED_404` ALLOWANCES ARE REPORTED DEAD** by both runs above: `/src/does-not-exist.mjs` and
+`/www/shell.mjs`. The second is live only under `check_boot`'s `www/` root, where the landing page's
+dynamic `import('/www/shell.mjs')` 404s, so a `--only landing` run cannot exercise it and the note
+is the harness being honest rather than a defect. A full-suite run is what settles it.
+
+**M17'S FIREFOX DEBT IS NOT PAID BY THIS ROW.** `www/m17.html` has still not been opened in a second
+engine; `firefox-landing.py` drives the landing page, which stages no `files` wheel proof.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

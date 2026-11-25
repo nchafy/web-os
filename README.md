@@ -7,33 +7,45 @@ Research and plan first, kernel second — deliberately, and in that order. The 
 ([webxp](https://github.com/nchafy/webxp)) was built first and designed afterwards, and became a very
 good window manager that was not an operating system.
 
-**M0 to M14 are done, which is the whole spine and the whole window half**: the syscall channel,
+**M0 to M17 are done, which is the whole spine and the whole window half**: the syscall channel,
 the process table, the journalled filesystem, the mount table with `/proc`, `/dev`, `/tmp`, `/usr`
-and `/usr/share`, pipes, a pty with a line discipline, a shell with fifteen programs, the process
-realm stripped of its ambient capabilities — and then a window that IS a file description, a
-kernel-owned surface a process draws on by sending a display list, modality and an advisory close,
+and `/usr/share`, pipes, a pty with a line discipline, a shell and the 33 programs in `/usr/bin`
+behind it, the realm stripped of its ambient capabilities — and then a window that IS a file
+description, a kernel-owned surface a process draws on by sending a display list,
+modality and an advisory close,
 a typed clipboard and drag-and-drop, Aero glass as four separately filtered strips, an admission
-controller over blurred area, a geometry harness that drives a real pointer, and Aero Snap, the
-Superbar, jump lists, a tray and a desktop whose icons are rows a PROCESS published.
+controller over blurred area, a geometry harness that drives a real pointer, Aero Snap, the
+Superbar, jump lists, a tray, a desktop whose icons are rows a PROCESS published, a client box in
+device pixels, and a driven wheel over a list that scrolls and clips.
 
 ```sh
 scripts/serve.py          # then open http://127.0.0.1:8000/www/
 ```
 
-**Or go straight to the desktop:** `http://127.0.0.1:8000/www/m14.html` — double-click an
-icon, use the Start orb, drag a caption to an edge to snap it, right-click a taskbar button for its
-jump list, drag an icon and watch it take a grid cell. Every row in that menu is `/usr/bin` as a
-process read it.
+**That URL is the desktop.** Not a milestone page and not an index of them: the preflight runs,
+and then the Windows 7 shell comes up with a terminal, Explorer, the task manager and the icon
+view on it. Double-click an icon, use the Start orb, drag a caption to an edge to snap it,
+right-click a taskbar button for its jump list, drag an icon and watch it take a grid cell, scroll
+a directory with the wheel. Every row in that menu is `/usr/bin` as a process read it.
 
-That page is the DESKTOP. `?proofs=1` is the harness, and it is the harness's to open: the proofs
-stage their own windows and then block waiting for a driver to perform a gesture, so a person who
-opens them gets fixture windows and a thrown `nothing performed the … gesture` a minute later. It
-used to be the other way around, which is how three defects came to be reported that were not
-defects. Any proof page says so on itself now, in a banner, if nothing drives it.
+There is one definition of what that desktop is made of — `www/shell.mjs`, whose `PROGRAMS` and
+`DESKTOP_HELP` are frozen data a feature adds a row or a line to. The landing page imports it, and
+`www/m14.html` and `www/m17.html` import it for their live modes, so a program that lands lands
+once. It used to be a copy of the staging on every page, which made "up to date with the latest
+features" a promise kept by hand: a program added to one copy was silently absent from the rest.
+That consolidation is M18 in `MILESTONES.md`.
 
-That serves a preflight which checks the seven capabilities the kernel needs and refuses to
-proceed if any are missing. `scripts/serve.py --no-isolation` makes it fail on purpose, which is
-how you know it works.
+The preflight is still in front of it: seven capabilities the kernel needs, and a refusal that
+says which one is missing rather than a blank page. `scripts/serve.py --no-isolation` makes it
+fail on purpose, which is how you know it works.
+
+The proof pages stay where they are, at `www/m0.html` through `www/m17.html`, and they are the
+harness's to open — not a reader's. The proofs stage their own windows and then block waiting for
+a driver to perform a gesture, so a person who opens one gets fixture windows and a thrown
+`nothing performed the … gesture` a minute later. It used to be the other way around, which is how
+three defects came to be reported that were not defects. Any proof page says so on itself now, in
+a banner, if nothing drives it. The landing page carries no proofs and reads no query string at
+all, which is the clause its own check asserts.
 
 ## Read in this order
 
@@ -44,10 +56,10 @@ how you know it works.
 | [MILESTONES.md](MILESTONES.md) | The tracker. What is done, what is next, the proof each milestone owes. |
 | [CLAUDE.md](CLAUDE.md) | Working rules for this codebase. Architecture invariants, conventions, verification discipline. |
 | [docs/LEARNING-MODE.md](docs/LEARNING-MODE.md) | Option D — the learning mode: an interactive drill-down into every OS principle, and the RV32I teaching machine that makes virtual memory and preemption real. |
-| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 209 numbered constraints. Normative — cite by number. |
+| [docs/CONSTRAINTS.md](docs/CONSTRAINTS.md) | 298 numbered constraints. Normative — cite by number. |
 | [docs/designs/REVIEW-FINDINGS.md](docs/designs/REVIEW-FINDINGS.md) | 24 critiques that survived adversarial verification. |
 | `docs/designs/*.md` | Four long-form candidate architectures, ~900 lines each. |
-| `docs/research/*.md` | 662 distinct cited URLs across 16 files; re-derive with the `research-urls` recipe below. Raw evidence; append-only. `09-hobbyist-os-actions.md` is the distilled proposal from the newest round. |
+| `docs/research/*.md` | 664 distinct cited URLs across 16 files; re-derive with the `research-urls` recipe below. Raw evidence; append-only. `09-hobbyist-os-actions.md` is the distilled proposal from the newest round. |
 
 ## The thesis
 
@@ -82,17 +94,23 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 
 ## What is already verified
 
-- **The environment.** `www/index.html` proves isolation, SAB, `Atomics.wait` in a worker, and an
-  OPFS sync access handle, in the context each has to work in.
+- **The environment, and then the product.** `www/index.html` proves isolation, SAB,
+  `Atomics.wait` in a worker, and an OPFS sync access handle, in the context each has to work in —
+  and then stages the desktop. `scripts/check.py --only landing` is its gate: 17 expectations that
+  derive what the desktop owes from `src/bin/desktop.mjs`'s own allowlist, `/usr/bin`'s 33 entries
+  and the kernel's 6 mounts, so a program that lands and does not reach the landing page turns it
+  red without anyone editing a list. `--negative launcher-stale` is that world, built by patching
+  a copy of the tree rather than the tree.
 - **The syscall channel, under contention.** M0: a kernel Worker, process Workers it spawns itself
   as nested workers, and the SAB ABI, measured closed-loop at N ∈ {1, 4, 16, 64, 128}. ACCEPT.
   `bench/syscall-contention/`, and `scripts/check.py --negative kernel-stall` keeps the negative
   control re-runnable.
-- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and thirty-five negative controls over eighteen checks and 695 expectations.
+- **The harness.** `scripts/check.py` — one registry, `--prove-failure`, and 54 named negative
+  controls over 22 checks and 819 expectations; re-derive both with the `suite` recipe below.
   Every row of its own failure-mode table has been shown firing; a row whose detector cannot fire is
   the defect that table exists to forbid.
-- **There is a Windows 7 desktop, and everything on it is a process.** M13 and M14:
-  `http://127.0.0.1:8000/www/m14.html`. The icons and the start menu are rows
+- **There is a Windows 7 desktop, and everything on it is a process.** M13 and M14, now at
+  `http://127.0.0.1:8000/www/`. The icons and the start menu are rows
   `/usr/bin/desktop` published after reading the filesystem, a jump list is rows the program that
   owns the window published, and a snap is a real drag the kernel records as a show state — so the
   shell is a renderer and not an authority. `scripts/check.py --only m14` is 57 expectations over
@@ -106,6 +124,16 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
   on a desktop whose Chrome suite was green (constraints 289-292). `scripts/bidi.py` is what makes
   it possible: Firefox 156 speaks WebDriver BiDi, so a second engine can be asserted in and not
   only photographed.
+- **And the landing page is asked the same question, because it is the one URL a reader opens.**
+  `bench/shell-landing/firefox-landing.py` is that gate pointed at `www/index.html`: it reports
+  `taskbar=True orb=True` and the icons it found — `Computer`, `Programs`, `Shared files`,
+  `Terminal` — double-clicks each one and watches the window count go 1 → 2 → 3 → 4 → 5,
+  hit-tests every icon's own click point afterwards, and opens the start menu and launches the
+  first "(in a terminal)" row, which is `cat` today and is read out of the menu rather than named
+  in the script. Every clause comes out of the DOM `src/wm/` builds, so it depends on no page
+  global and can be pointed at a second page. `--prove-failure` parks a window on the icon column:
+  the `reachable` clause fires four times and `desktop` stays green, which is a control that moved
+  a named subset and not just something.
 - **There is a working terminal, and you can watch M6 from inside it.** `scripts/serve.py`, then
   `http://127.0.0.1:8000/www/m4a.html?live=1` — a real window with `/usr/bin/sh` in its own
   process over a real pty. `ls /usr/bin`, `ps`, `echo hi` and Ctrl-C all work. Typing
@@ -126,8 +154,8 @@ dropped. One 4× arithmetic error made during planning is recorded, with its cor
 
 ## Mockups
 
-The spine and four milestones of the window half are built — M0 through M10, with the Aero skin
-(M11 onward) still ahead. The intended shape of what is not yet built is drawn and rendered:
+The spine and the whole window half are built — M0 through M17. What remains undrawn in code is
+option D, the learning mode, and its intended shape is rendered:
 
 - [`mockups/milestones.html`](mockups/milestones.html) — what is on screen at each milestone, M0
   through M14. Honest about the first five having no user interface at all.
@@ -163,8 +191,16 @@ no reproduction path is an assertion.
 grep -ohE 'https?://[^ )>]+' docs/research/*.md | sort -u | wc -l
 ls docs/research/*.md | wc -l
 
-# constraints: the numbered, normative ones
+# constraints: the numbered, normative ones. The count and the highest NUMBER must agree, or a
+# constraint was deleted or duplicated and every citation to it is now ambiguous
 grep -cE '^[0-9]+\.' docs/CONSTRAINTS.md
+grep -oE '^[0-9]+\.' docs/CONSTRAINTS.md | tr -d '.' | sort -n | tail -1
+
+# suite: registered checks, their committed expectation floors, and the named negative controls.
+# `--list` prints its "measured nothing" line on stderr, so tail starts at the row after the header
+python3 scripts/check.py --list 2>/dev/null | tail -n +2 | awk -F'|' '{n++; s+=$7} END {print n, s}'
+python3 scripts/check.py --list 2>/dev/null | tail -n +2 | cut -d'|' -f5 | tr ',' '\n' \
+  | sort -u | grep -vE '^(invert|no-isolation)$' | grep -c .
 ```
 
 ## Licence

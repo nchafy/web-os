@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os — the landing gate's own desktop</title>
+<style>
+/* STRUCTURAL ONLY, as every page in this project is: the look is `src/wm/aero.mjs`'s and this file
+   says nothing about it. One log and one desktop, and the desktop gets everything the log does not
+   — a desktop that stops short of the bottom of the window was a reported defect on m14. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative }
+body.live { height:100vh; display:flex; flex-direction:column; overflow:hidden }
+body.live #log { flex:0 0 auto; height:auto; max-height:22vh; margin:0; padding:6px 10px;
+                 overflow:auto; white-space:pre-wrap; border-bottom:1px solid #1b2430 }
+body.live #desktop { flex:1 1 auto; height:auto; margin:0; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">starting…</pre>
+<div id="desktop"></div>
+<script>
+  /* A CLASSIC SCRIPT AND NOT THE MODULE'S: a module that fails to parse publishes nothing, and a
+     driver with no object to read reports a timeout where there was a syntax error. */
+  globalThis.LANDING = { state: 'starting', isolated: self.crossOriginIsolated === true }
+</script>
+<script type="module">
+/**
+ * THE LANDING GATE'S OWN SUBJECT: `www/shell.mjs`'s staging, with no proofs on it.
+ *
+ * `bench/shell-landing/firefox-landing.py` defaults to `/www/index.html` — the product — and this
+ * page is what the gate is shaken down against: it must be shown capable of PASSING on a desktop
+ * that is known good, and the product page is not that while it is being written. It is not a
+ * second product page and nothing links to it.
+ *
+ * It is also the narrower question underneath the landing page, asked on its own: does the ONE
+ * staging definition produce a usable desktop in a second engine? Everything here comes from
+ * `/www/shell.mjs`, so this page learns no program url, no argv and no boot order.
+ */
+import { newReport, requireIsolation, stageDesktop } from "/www/shell.mjs";
+
+const log = document.getElementById("log")
+const report = Object.assign(globalThis.LANDING, newReport())
+/* `textContent`, never `innerHTML`: a line of this log carries filenames, a program's stdout and
+   the text of a `catch`, which is untrusted data at the sink. */
+const say = (line) => { log.textContent += `\n${line}` }
+
+async function main() {
+  log.textContent = ""
+  if (!requireIsolation(report, say, log)) return
+  try {
+    await stageDesktop({ into: document.getElementById("desktop"), report, say, liveClass: "live" })
+    report.state = "live"
+  } catch (error) {
+    // NAMED, not swallowed: a desktop that did not stage must say which step did not finish, or a
+    // blank page is the only report a second engine gives.
+    log.className = "bad"
+    report.state = "failed"
+    report.errors.push(String(error && error.stack || error))
+    say(`FAILED  ${error && error.message || error}`)
+  }
+}
+
+main()
+</script>
+</body>
+</html>

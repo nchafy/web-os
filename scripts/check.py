@@ -181,6 +181,34 @@ VIEWPORT_SCALE = 2.0
 PROBE_MISSING_PATH = "/src/does-not-exist.mjs"
 ALLOWED_404 = ("/favicon.ico", PROBE_MISSING_PATH)
 
+#: A 404 THAT IS A PROPERTY OF THE DOCUMENT ROOT AND NOT OF THE TREE, which the flat list above
+#: cannot express: its own rule is that a path answering 200 is a failure, because the allowance
+#: would pre-forgive a genuine 404 — and `/www/shell.mjs` answers 404 under `www/` and 200 under
+#: the repository root, so it belongs in neither column of that rule unqualified.
+#:
+#: `www/index.html` imports `/www/shell.mjs` DYNAMICALLY so that this screen's own refusal does not
+#: depend on the shell's module graph resolving (www/index.html:222-227 says so where it is done),
+#: and `check_boot` serves `www/` — where both that path and the `/src/` tree the shell imports sit
+#: outside the root. The 404 is the measured consequence of that decision, and what `check_boot`
+#: asserts is that all ten preflight rows render anyway.
+#:
+#: SCOPING KEEPS THE RULE'S TEETH IN BOTH DIRECTIONS. Under `Root.WWW` the path must 404 or the
+#: allowance is reported dead; under `Root.REPO` it is not allowed at all, so a shell this suite
+#: could not fetch is still an unexpected non-200 there.
+SHELL_MODULE_PATH = "/www/shell.mjs"
+ALLOWED_404_BY_ROOT: Dict[str, Tuple[str, ...]] = {Root.WWW: (SHELL_MODULE_PATH,)}
+
+#: Every allowance, for the two readers that are already keyed on a status the server recorded and
+#: so cannot pre-forgive anything: `_unclaimed` intersects with this serving's own non-200s, and
+#: `allowance_notes` reports an entry nothing requested.
+ALL_ALLOWED_404 = ALLOWED_404 + tuple(
+    path for paths in ALLOWED_404_BY_ROOT.values() for path in paths)
+
+
+def _allowed_404(root: str = "") -> Tuple[str, ...]:
+    """The 404s one document root forgives: the universal ones, plus that root's own."""
+    return ALLOWED_404 + ALLOWED_404_BY_ROOT.get(root, ())
+
 #: Statuses that mean the server served what was asked for. 206 joined 200 when scripts/serve.py
 #: learned single byte ranges: the `local` storage provider is this server, so a ranged block read
 #: is a SUCCESS and counting it as "a file this tree does not serve" turned every /usr mount into
@@ -780,6 +808,13 @@ class Control:
     #: so the page asks for the world, MEASURES whether it got it, and throws when the kernel
     #: coalesced anyway. `node bench/m17-wheel/probe.mjs` is the only driver of that world.
     NO_WHEEL_COALESCE = "no-wheel-coalesce"
+    #: THE LANDING DESKTOP'S OWN CONTROL, and the drift the page exists to remove, as a world: one
+    #: program that draws its own window is added to `HIDDEN_FROM_MENU` in src/bin/desktop.mjs, so
+    #: it is in `/usr/bin`, it is in `OPENS_OWN_WINDOW`, and the start menu has no row for it. A
+    #: SERVED-BYTES control and not a query parameter, because the product parses no control
+    #: parameter (`www/index.html` calls `applyControls({})`) and a page that could be put into a
+    #: broken world by its own URL would be a page with a proof mode (constraint 283).
+    LAUNCHER_STALE = "launcher-stale"
     ONCE = "once"
 
 
@@ -840,6 +875,7 @@ CONTROL_RUNS = {
     Control.RAW_WHEEL: ("raw-wheel",),
     Control.UNCLAMPED_SCROLL: ("unclamped-scroll",),
     Control.NO_WHEEL_COALESCE: ("no-wheel-coalesce",),
+    Control.LAUNCHER_STALE: ("launcher-stale",),
 }
 
 
@@ -1767,18 +1803,23 @@ class Report:
             print("         " + result.reason)
         sys.stdout.flush()
 
-    def witness(self, serving: Serving, label: str = "") -> List[str]:
+    def witness(self, serving: Serving, label: str = "", root: str = "") -> List[str]:
         """Derived, never a hand-written list of paths: a listed witness shrinks every milestone
         while the report keeps printing "served == disk". Returns this phase's failures so a
-        gate can scope strays to its own phase."""
+        gate can scope strays to its own phase.
+
+        `root` is the Root name this server was bound for, because one allowance is a property of
+        the document root rather than of the tree — see `ALLOWED_404_BY_ROOT`.
+        """
         found: List[str] = []
+        allowed = _allowed_404(root)
         responses = serving.responses()
         paths = [s.path for s in responses]
         if not paths:
             found.append(
                 "the server recorded no responses at all, so the page never loaded from it")
         unexpected = [s for s in responses
-                      if s.status not in SERVED_OK and s.path not in ALLOWED_404]
+                      if s.status not in SERVED_OK and s.path not in allowed]
         for served in unexpected:
             found.append(
                 "GET %s returned %d and is not in ALLOWED_404 - the page asked for a file this "
@@ -1790,7 +1831,7 @@ class Report:
                 found.append(
                     "GET %s does not byte-match %s, so this run measured something other than "
                     "this tree" % (path, _mapped(serving.canonical, path)))
-        for path in ALLOWED_404:
+        for path in allowed:
             statuses = sorted({s.status for s in responses if s.path == path})
             if not statuses:
                 # Nothing to say yet: another serving in this phase may have requested it. The
@@ -1843,7 +1884,7 @@ class Report:
         product expectation failed" — and then printing "see the lines marked FAIL" when there are
         none is the harness lying about its own subject.
         """
-        for path in ALLOWED_404:
+        for path in ALL_ALLOWED_404:
             if path not in self.allowance_seen:
                 self.witness_notes.append(
                     "ALLOWED_404 allows %s and no serving requested it during this run, so the "
@@ -1960,6 +2001,16 @@ class NegativeControl:
     serve_kwargs: Dict[str, Any]
     fixture: Optional[Callable[[pathlib.Path], pathlib.Path]]
     expects: Dict[str, Expect]
+    #: A fixture over the REPOSITORY root, for a check that declares `Root.REPO`. Separate from
+    #: `fixture` because the two roots are genuinely different trees — `fixture` is handed the
+    #: `--root` tree, which is `www/`, and a file under `src/` is not in it — and because
+    #: `phase_roots` resolves `Root.REPO` from this file, never from a flag (see `Root`).
+    #:
+    #: IT IS THE ONLY LEVER A PAGE THAT READS NO QUERY STRING LEAVES. `www/index.html` is the
+    #: product and parses no control parameter at all (it calls `applyControls({})`), so the
+    #: `query` route below cannot reach it and a world for it has to be built out of the bytes it
+    #: is served.
+    repo_fixture: Optional[Callable[[pathlib.Path], pathlib.Path]] = None
     #: Query parameters merged into every check's document for this control's phase. The third
     #: way to build a broken world, beside the headers and the fixture: the subject is behind a
     #: switch the PAGE owns, so the control turns it on through the page's own interface rather
@@ -2013,41 +2064,51 @@ def _empty_root(_source: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(tempfile.mkdtemp(prefix="webos-check-empty-"))
 
 
-def _patch_probe(source: pathlib.Path, needle: str) -> pathlib.Path:
-    """Copy the served tree to a tmpdir and force one capability probe to return false.
+def _patch_tree(source: pathlib.Path, relative: str, needle: str,
+                replacement: str) -> pathlib.Path:
+    """Copy the served tree to a tmpdir and replace ONE occurrence in ONE file.
 
     The fixture verifies its own patch: exactly one replacement, and the written bytes differ
     from the original at exactly that offset. A control that silently patched nothing is the
     worst case in this file. Patches never go into the repo.
+
+    `relative` is a path under the served root, so one patcher serves both a capability probe in
+    `www/index.html` and a userland constant under `src/`. Two patchers would be two sets of
+    self-verification to keep in step, which is the defect the single-definition rule names.
     """
+    where = "%s/%s" % (source, relative)
     try:
-        original = (source / "index.html").read_text(encoding="utf-8")
+        original = (source / relative).read_text(encoding="utf-8")
     except OSError as error:
         # An OSError escaping here exits 1 - the code for "a product expectation failed" - with
         # a bare traceback, so a control that could not be built would read as a product defect.
-        raise ServeError("the fixture could not read %s/index.html: %s" % (source, error),
+        raise ServeError("the fixture could not read %s: %s" % (where, error),
                          reason=Gate.FIXTURE) from error
     if original.count(needle) != 1:
         raise ServeError(
-            "the fixture expected exactly one occurrence of %r in %s/index.html and found %d, "
+            "the fixture expected exactly one occurrence of %r in %s and found %d, "
             "so it would have patched the wrong thing or nothing at all"
-            % (needle, source, original.count(needle)), reason=Gate.FIXTURE)
-    patched = original.replace(needle, "() => false", 1)
+            % (needle, where, original.count(needle)), reason=Gate.FIXTURE)
+    patched = original.replace(needle, replacement, 1)
     offset = original.index(needle)
     if patched == original:
-        raise ServeError("the fixture changed nothing in %s/index.html" % source,
-                         reason=Gate.FIXTURE)
+        raise ServeError("the fixture changed nothing in %s" % where, reason=Gate.FIXTURE)
     if patched[:offset] != original[:offset]:
-        raise ServeError("the fixture changed bytes before offset %d, not just the probe"
+        raise ServeError("the fixture changed bytes before offset %d, not just the needle"
                          % offset, reason=Gate.FIXTURE)
     if patched[offset:offset + len(needle)] == original[offset:offset + len(needle)]:
-        raise ServeError("the fixture left the probe at offset %d untouched" % offset,
+        raise ServeError("the fixture left the needle at offset %d untouched" % offset,
                          reason=Gate.FIXTURE)
 
     root = pathlib.Path(tempfile.mkdtemp(prefix="webos-check-fixture-"))
     shutil.copytree(str(source), str(root), dirs_exist_ok=True)
-    (root / "index.html").write_text(patched, encoding="utf-8")
+    (root / relative).write_text(patched, encoding="utf-8")
     return root
+
+
+def _patch_probe(source: pathlib.Path, needle: str) -> pathlib.Path:
+    """Force one of `www/index.html`'s capability probes to return false."""
+    return _patch_tree(source, "index.html", needle, "() => false")
 
 
 #: www/index.html:49. Required: its absence must turn the verdict to 'fail'.
@@ -5425,6 +5486,61 @@ _NO_WHEEL_COALESCE_FAILS = (
     "the page's own verdict is ok",
 )
 
+# ======================================================================================
+# The landing desktop. www/index.html at its BARE URL, which is the product.
+# ======================================================================================
+
+#: THE PROGRAM THIS CHECK'S CONTROL HIDES FROM THE START MENU. Named once, because the fixture
+#: builds the world and the control's prose names it, and the two disagreeing would be a control
+#: described as breaking something else.
+LANDING_STALE_PROG = "taskmgr"
+
+#: `src/bin/desktop.mjs:64`'s one-member set, verbatim, and the same line with one program added.
+#: The fixture asserts this needle occurs exactly once before it writes anything.
+_HIDDEN_SET = "new Set([NAME]);"
+_HIDDEN_SET_PLUS = 'new Set([NAME, "%s"]);' % LANDING_STALE_PROG
+
+
+def _landing_launcher_stale(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/bin/desktop.mjs", _HIDDEN_SET, _HIDDEN_SET_PLUS)
+
+
+#: WHAT A STALE LAUNCHER MUST BREAK, and the whole reason this check derives its expectations
+#: instead of listing them: the clauses that read the LAUNCHABLE SET go red while every clause
+#: about the desktop being up and usable holds. A check carrying a hand-written list of programs
+#: would pass this world, because the list and the page would be wrong together.
+_LAUNCHER_STALE_FAILS = (
+    "the start menu lists every program /usr carries",
+    "every program that draws its own window has a row of its own",
+    "and a real click on each one opened its own window",
+)
+
+#: Every expectation `check_landing` records. Seventeen, and the three the control moves are the
+#: three derived ones.
+LANDING_LABELS = (
+    "the preflight passed",
+    "page isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    # CONSTRAINT 283, both halves: nothing on this page asks for a gesture, and the page carries
+    # no proof harness to ask with. A product that blocks on a driver reads as a broken product.
+    "the page asked for no gesture",
+    "and no query parameter can select a mode",
+    "verdict is live",
+    "a taskbar is on the page",
+    "the start orb is there and can be clicked",
+    "the desktop drew the rows the process published",
+    # THE THREE DERIVED CLAUSES. Each reads a set out of the source of truth that moves when a
+    # feature lands, so none of them can go stale by nobody remembering to edit this file.
+    "the mount table carries every mount the kernel adds",
+    "the start menu lists every program /usr carries",
+    "every program that draws its own window has a row of its own",
+    "and a real click on each one opened its own window",
+    "document COOP",
+    "document COEP",
+    "served index.html",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -5518,6 +5634,16 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "refuses before it builds a host: scrolling a picture of a file list is not a "
                 "program receiving input. UNMEASURABLE rather than FAIL, because a FAIL would "
                 "claim 300 notches were queued and counted wrongly.",
+        ), "landing": Expect(
+            UNMEASURABLE,
+            why="the same mechanism, at the page a reader actually opens: without COOP/COEP there "
+                "is no SAB, so no kernel boots, no desktop process publishes a row and there is "
+                "no start menu to click. THIS PAGE'S FIRST JOB IS THE REFUSAL ITSELF — it is a "
+                "capability preflight that says which of ten rows is missing and starts nothing "
+                "(www/index.html) — and that refusal is asserted by gate N3 through "
+                "refusal_expr/refusal_want, not by a label here. UNMEASURABLE rather than FAIL, "
+                "because a FAIL would claim the launchable programs were enumerated and found "
+                "unreachable, when the desktop never existed.",
         ), "m15": Expect(
             UNMEASURABLE,
             why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots and "
@@ -6961,6 +7087,41 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "fewer notches than the page sent it",
             failed=_NO_WHEEL_COALESCE_FAILS,
             held=held_rest(M17_LABELS, _NO_WHEEL_COALESCE_FAILS),
+        )},
+    ),
+    "launcher-stale": NegativeControl(
+        name="launcher-stale",
+        why="`%s` is added to `HIDDEN_FROM_MENU` in the SERVED copy of src/bin/desktop.mjs, so a "
+            "program that is in /usr/bin and in `OPENS_OWN_WINDOW` has no row in the start menu. "
+            "A served-bytes fixture over the REPOSITORY root (`repo_fixture`), because "
+            "www/index.html is the product and reads no control parameter: it calls "
+            "`applyControls({})`, so the query route every other control here takes cannot reach "
+            "it, and giving it one would be giving the product a proof mode (constraint 283).\n"
+            "WHAT MUST BREAK: the three DERIVED clauses, and only those. The launchable set comes "
+            "from `OPENS_OWN_WINDOW` in the repository's own copy of that file and the program "
+            "list from `USR_ENTRIES`, so the expectation is unchanged while the page's menu is one "
+            "row short — which is the whole point of deriving them.\n"
+            "WHAT MUST HOLD: that the desktop is UP. The preflight, the kernel, the taskbar, the "
+            "orb, the icons the desktop process published and the mount table are untouched, so "
+            "what a reader sees is a working Windows 7 desktop with one program they cannot "
+            "start.\n"
+            "WHAT IT IS ABOUT: the ask this page answers, in the user's words — 'always up to "
+            "date with the latest features'. A check carrying a hand-written list of programs "
+            "comes out GREEN under this control, because the list and the menu are wrong "
+            "together; that is the defect this control exists to tell apart from a check that "
+            "reads the launcher's own allowlist. It is also the realistic mistake: the allowlist "
+            "is an allowlist on purpose (src/bin/desktop.mjs:50), so a new program that draws its "
+            "own window is unlisted until someone says otherwise."
+            % LANDING_STALE_PROG,
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_landing_launcher_stale,
+        expects={"landing": Expect(
+            Outcome.FAIL,
+            why="a program in /usr/bin that draws its own window must stop being reachable from "
+                "the start menu, while the desktop around it keeps working",
+            failed=_LAUNCHER_STALE_FAILS,
+            held=held_rest(LANDING_LABELS, _LAUNCHER_STALE_FAILS),
         )},
     ),
 }
@@ -8785,20 +8946,27 @@ def phase_document(candidate: Check, phase: "Phase") -> str:
 
 
 def phase_roots(checks: Tuple[Check, ...], *, www: pathlib.Path,
-                www_canonical: pathlib.Path) -> Dict[str, Tuple[pathlib.Path, pathlib.Path]]:
+                www_canonical: pathlib.Path, repo: Optional[pathlib.Path] = None,
+                repo_canonical: Optional[pathlib.Path] = None,
+                ) -> Dict[str, Tuple[pathlib.Path, pathlib.Path]]:
     """The servers a set of checks needs. Derived from what they declare, never listed: a root
     nothing declares is a server nothing loads from, and a check whose root is unserved would
     read a 404 instead of its page.
 
     --root overrides Root.WWW only, which is what it has always meant: the tree a user's browser
     is pointed at. Root.REPO is resolved from this file - see Root.
+
+    `repo` is for a REPO-root fixture and nothing else: it defaults to REPO, so a phase that
+    builds no fixture tree serves and byte-compares the repository, which is what every phase
+    before `launcher-stale` did unconditionally.
     """
     out: Dict[str, Tuple[pathlib.Path, pathlib.Path]] = {}
+    served = repo or REPO
     for candidate in checks:
         if candidate.root == Root.WWW:
             out[Root.WWW] = (www, www_canonical)
         else:
-            out[Root.REPO] = (REPO, REPO)
+            out[Root.REPO] = (served, repo_canonical or served)
     return out
 
 
@@ -8915,7 +9083,7 @@ def _unclaimed(env: Env) -> List[ConsoleEntry]:
         if entry in env.claimed:
             continue
         path = urllib.parse.urlsplit(entry.url).path if entry.url else ""
-        if path in ALLOWED_404 and path in non_200:
+        if path in ALL_ALLOWED_404 and path in non_200:
             continue
         out.append(entry)
     return out
@@ -8927,6 +9095,9 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
     if args.negative:
         control = CONTROLS[args.negative]
         fixture_root = control.fixture(root) if control.fixture else root
+        # Built BEFORE `scored` is narrowed, so a fixture that cannot apply its patch refuses the
+        # run rather than being skipped for a selection that happens to exclude its check.
+        repo_root = control.repo_fixture(REPO) if control.repo_fixture else None
         isolated = bool(control.serve_kwargs.get("isolate", True))
         policy = bool(control.serve_kwargs.get("csp", True))
         # Only what this control scores. A check the control declares nothing about would be
@@ -8940,7 +9111,8 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
                       # its own single replacement, so the pin there is the fixture, not www/.
                       roots=phase_roots(scored, www=fixture_root,
                                         www_canonical=fixture_root if control.fixture
-                                        else CANONICAL),
+                                        else CANONICAL,
+                                        repo=repo_root, repo_canonical=repo_root),
                       isolated=isolated, csp=policy, checks=scored,
                       filtered=tuple(
                           (c, "CONTROLS[%r] declares no expectation for it, so this phase would "
@@ -8949,7 +9121,8 @@ def phases(args, selected: Tuple[Check, ...]) -> Tuple[List[Phase], Optional[int
                           for c in selected if c not in scored),
                       inverted=False, query=control.query,
                       label="negative %s (%s)" % (control.name, control.why),
-                      cleanup=(fixture_root,) if control.fixture else ())], None
+                      cleanup=tuple(path for path in (
+                          fixture_root if control.fixture else None, repo_root) if path))], None
 
     out: List[Phase] = []
     if args.prove_failure in (MODE_INVERT, "both"):
@@ -9058,7 +9231,8 @@ def run_phase(phase: Phase, report: Report, header: Callable[[str], None]) -> Ph
                               reason="%s: %s" % (candidate.name, why)))
         witness_failures: List[str] = []
         for name in phase.roots:
-            witness_failures.extend(report.witness(servings[name], "%s %s" % (phase.mode, name)))
+            witness_failures.extend(report.witness(
+                servings[name], "%s %s" % (phase.mode, name), root=name))
     return PhaseRun(phase, results, witness_failures)
 
 
@@ -13071,8 +13245,16 @@ M15_SCREEN = "(document.querySelector('.terminal') || {}).textContent || ''"
 _M15_PROMPT = re.compile(r"\$ $|\$\s*$")
 
 
-def _m15_type(env: Env, cmd: str, timeout: float = 25.0) -> str:
-    """Type one command at the real prompt and return what the shell printed for it."""
+def _m15_type(env: Env, cmd: str, timeout: float = 25.0, *, until: str = "") -> str:
+    """Type one command at the real prompt and return what the shell printed for it.
+
+    `until` IS A SECOND CONDITION AND ITS ABSENCE IS THE OFF SWITCH, because the prompt rule above
+    races a command whose output the shell does not wait for. MEASURED on the landing desktop:
+    `cat /proc/mounts` came back as `cat /proc/mounts\\n~$ ` — the echo and a fresh prompt with no
+    table between them — and the six mount rows arrived about 250 ms later, so a caller that must
+    PARSE the output names a string it has to see first. The prompt still has to come back either
+    way; this only stops the loop accepting the prompt alone.
+    """
     before = len(env.page.evaluate(M15_SCREEN) or "")
     env.page.type_keys(cmd + "\n")
     deadline = time.monotonic() + timeout
@@ -13080,12 +13262,14 @@ def _m15_type(env: Env, cmd: str, timeout: float = 25.0) -> str:
     while True:
         screen = env.page.evaluate(M15_SCREEN) or ""
         out = screen[before:]
-        if _M15_PROMPT.search(out) and len(out.strip()) > len(cmd):
+        if (_M15_PROMPT.search(out) and len(out.strip()) > len(cmd)
+                and (not until or until in out)):
             return out
         if time.monotonic() >= deadline:
             # NAMED, never silently returned as empty: "the prompt never came back" and "the
             # command printed nothing" are different facts about this shell.
-            return out + "\n[no prompt within %.0fs]" % timeout
+            return out + "\n[no prompt%s within %.0fs]" % (
+                (" and no %r" % until) if until else "", timeout)
         time.sleep(0.12)
 
 
@@ -13675,6 +13859,471 @@ def check_m17(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m17.html", env.served_matches_disk(env.document),
                     "the m17.html served does not match www/m17.html on disk")
+
+
+# ======================================================================================
+# landing. THE PRODUCT, at the bare URL: www/index.html's preflight and then the desktop.
+# ======================================================================================
+
+#: THE BARE URL, AND THAT IS THE WHOLE POINT. No query string, because the page at the obvious URL
+#: is the product (constraint 283) and because this page reads no parameter at all — there is no
+#: `?proofs=1` here, and `and ?proofs=1 is not a mode it has` is the clause that asserts it.
+LANDING_DOCUMENT = "/www/index.html"
+
+LANDING_READY = ("(() => { const I = globalThis.INDEX || {}; const s = I.state; "
+                 "return (s === 'done' || s === 'aborted' || s === 'error') ? 1 : 0 })()")
+
+#: `WITEM_DESKTOP` AND `WITEM_MENU` ARE IMPORTED, NOT RESTATED. `src/abi.mjs` is the one definition
+#: of a row's flags and this expression is a second reader of them, so it awaits the module the
+#: page already loaded rather than carrying two integers this harness would have to keep in step.
+READ_LANDING = """(async () => {
+  const A = await import('/src/abi.mjs')
+  const I = globalThis.INDEX || {}
+  const host = I.host || null
+  const shell = I.shell || null
+  const desk = shell ? shell.desktopEntry() : null
+  const view = I.view || null
+  const seen = view ? view.report() : null
+  const bar = document.querySelector('.taskbar')
+  const orb = document.querySelector('[data-start]')
+  const spot = (el) => {
+    if (!el) return null
+    const b = el.getBoundingClientRect()
+    const at = { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }
+    const hit = document.elementFromPoint(at.x, at.y)
+    return { w: Math.round(b.width), h: Math.round(b.height), at,
+             onTop: Boolean(hit && el.contains(hit)) }
+  }
+  const rows = desk ? desk.items : []
+  return {
+    state: String(I.state || ''), why: String(I.why || ''), phase: String(I.phase || ''),
+    verdict: String(I.verdict || ''),
+    isolated: I.isolated === true,
+    preflight: String(document.documentElement.dataset.preflight || ''),
+    errors: (I.errors || []).map(String),
+    faults: (I.faults || []).map((f) => String(f && f.why)),
+    proofs: Object.keys(I.proofs || {}),
+    asked: Boolean(I.want) || (I.gestureLog || []).length > 0,
+    frames: host ? host.frames.size : 0,
+    bar: bar ? spot(bar) : null,
+    orb: orb ? spot(orb) : null,
+    icons: seen ? seen.icons : -1,
+    labels: seen ? seen.labels : [],
+    deskRows: rows.filter((r) => (r.flags & A.WITEM_DESKTOP) !== 0).length,
+    menuRows: rows.filter((r) => (r.flags & A.WITEM_MENU) !== 0).length,
+    /* CONSTRAINT 283, STRUCTURALLY: can this page read its own query string at all? Every proof
+     * page here parses one (`www/m14.html`, `www/m17.html` and `www/m7.html` carry exactly one
+     * `URLSearchParams` each) and the product must parse none, because a parameter that selects a
+     * mode is a mode. ITS OWN SCRIPTS AND NOT `outerHTML`: by now the desktop has staged a
+     * terminal and a file list, and a program's rendered text is not this page's code. A TEXT
+     * SEARCH OVER THE WHOLE DOCUMENT CANNOT ANSWER THIS EITHER WAY — www/index.html's comments
+     * name `?proofs=1` and `gestureAsker` precisely in order to say it carries neither — so the
+     * needles are identifiers a comment would not contain by accident. */
+    queryReads: ['URLSearchParams', 'location.search', 'searchParams'].filter((needle) =>
+      [...document.querySelectorAll('script')].some((s) => s.textContent.includes(needle))),
+  }
+})()"""
+
+LANDING_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "preflight": str,
+    "errors": list, "faults": list, "proofs": list, "asked": bool,
+    "frames": int, "icons": int, "labels": list,
+    "deskRows": int, "menuRows": int, "queryReads": list,
+    "bar": (dict, type(None)), "orb": (dict, type(None)),
+}
+
+#: The centre of the Start orb, as the page measures it. One expression, because every menu this
+#: check opens is opened by a REAL CLICK on that pixel and a second copy could drift to the band.
+LANDING_ORB_AT = """(() => {
+  const el = document.querySelector('[data-start]')
+  if (!el) return '{}'
+  const b = el.getBoundingClientRect()
+  return JSON.stringify({ x: Math.round(b.left + b.width / 2),
+                          y: Math.round(b.top + b.height / 2) })
+})()"""
+
+#: What kind of popup is open and what the start menu's left column RENDERED. The rendered rows and
+#: not the published ones: a row the process published and the shell did not draw is a program a
+#: reader cannot start, which is the difference this page exists to keep honest (D39).
+LANDING_MENU = """(() => {
+  const popup = document.querySelector('.shell-popup')
+  return JSON.stringify({
+    kind: String((popup && popup.dataset.popup) || ''),
+    labels: [...document.querySelectorAll('.start-list .shell-row .shell-label')]
+      .map((el) => el.textContent),
+  })
+})()"""
+
+#: ONE MENU ROW, BROUGHT INTO VIEW AND HIT-TESTED.
+#:
+#: `scrollIntoView` IS STAGING AND NOT THE MEASUREMENT. `.start-list` is `overflow: auto` with a
+#: 300 px cap over ~27 rows (src/wm/aero.mjs:754), so a row below the fold has a rect outside the
+#: popup and a click at its centre lands on the desktop — which a reader resolves by scrolling.
+#: What is asserted is the CLICK: the row is hit-tested at the pixel the click is dispatched to,
+#: so a row rendered outside its own menu (constraint 285's defect) still fails.
+#:
+#: THE LABEL MUST BE THE BARE PROGRAM NAME. A program outside `OPENS_OWN_WINDOW` gets
+#: `<name> (in a terminal)` from src/bin/desktop.mjs:255, so an `includes` test would accept the
+#: row that opens a console instead of the program's own window.
+LANDING_ROW = """(() => {
+  const want = %s
+  const rows = [...document.querySelectorAll('.start-list .shell-row')]
+  const row = rows.find((r) => (r.querySelector('.shell-label') || {}).textContent === want)
+  if (!row) {
+    return JSON.stringify({ found: false, onTop: false, disabled: false, opened: false,
+      wasAbsent: true, shown: rows.length })
+  }
+  row.scrollIntoView({ block: 'nearest' })
+  const b = row.getBoundingClientRect()
+  const at = { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }
+  const hit = document.elementFromPoint(at.x, at.y)
+  const host = (globalThis.INDEX || {}).host
+  return JSON.stringify({ found: true, at, disabled: row.disabled === true,
+    onTop: Boolean(hit && hit.closest('.shell-row') === row),
+    index: String(row.dataset.menuIndex || ''),
+    wasAbsent: [...host.frames.values()].filter((e) => e.prog === want).length === 0,
+    shown: rows.length })
+})()"""
+
+#: Whether a window whose program the KERNEL named is on screen. `prog` comes from `win-create`
+#: and the page cannot invent it (src/wm/winhost.mjs:473), so this is the kernel's answer to "did
+#: that row start that program" and not the title, which is whatever a program says it is.
+LANDING_OPENED = """(() => {
+  const want = %s
+  const host = (globalThis.INDEX || {}).host
+  const mine = [...host.frames.values()].filter((e) => e.prog === want)
+  return JSON.stringify({ opened: mine.length > 0, frames: host.frames.size,
+    titles: mine.map((e) => e.win.titleText) })
+})()"""
+
+#: How long one menu row gets to produce its program's window. The route is page -> kernel index
+#: validation -> the desktop process's own `spawn` -> a program fetch -> `win_create`, and the
+#: measured spread over seven programs was under two seconds each.
+LANDING_OPEN_S = 15.0
+
+
+def _landing_source(relative: str) -> str:
+    """One of the repository's own files, read as the EXPECTATION side of a derived clause.
+
+    THE REPOSITORY AND NOT THE SERVED TREE, which is what makes `--negative launcher-stale`
+    scoreable: the fixture serves a patched copy, so a parser pointed at the served bytes would
+    move the expectation along with the subject and the control could never fire.
+    """
+    try:
+        return (REPO / relative).read_text(encoding="utf-8")
+    except OSError as error:
+        raise Unmeasurable(
+            "%s cannot be read, and it is where this check's expectations come from, so nothing "
+            "below would be evidence about this tree: %s" % (relative, error))
+
+
+def _js_set_members(text: str, name: str, consts: Mapping[str, str], where: str) -> Tuple[str, ...]:
+    """Every member of a `const <name> = new Set([..])` literal in JavaScript source.
+
+    A PARSER AND NOT A LIST. The alternative is this file carrying its own copy of the launcher's
+    allowlist, which is the promise-kept-by-hand that `www/index.html` exists to remove: the list
+    and the menu would then be wrong together and `--negative launcher-stale` would come out green.
+
+    An unresolvable member is a REFUSAL rather than a skip. A parser that silently dropped one
+    would shrink the expectation to whatever it understood, which is the harness-honesty failure
+    CLAUDE.md names first.
+    """
+    match = re.search(r"const\s+%s\s*=\s*new Set\(\[([^\]]*)\]\)" % re.escape(name), text)
+    if match is None:
+        raise Unmeasurable(
+            "no `const %s = new Set([..])` in %s, so the set this check derives its expectations "
+            "from could not be read. If it moved, point this parser at it" % (name, where))
+    out: List[str] = []
+    for raw in match.group(1).split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        literal = re.fullmatch(r'"([^"]*)"', token)
+        if literal:
+            out.append(literal.group(1))
+        elif token in consts:
+            out.append(consts[token])
+        else:
+            raise Unmeasurable(
+                "%s's %s carries %r, which is neither a string literal nor one of the constants "
+                "this parser resolves (%s). Dropping it would shrink the expectation to whatever "
+                "the parser understood" % (where, name, token, ", ".join(sorted(consts)) or "none"))
+    if not out:
+        raise Unmeasurable("%s's %s parsed empty, and an empty expectation is one the page cannot "
+                           "fail" % (where, name))
+    return tuple(out)
+
+
+def _landing_facts() -> Dict[str, Tuple[str, ...]]:
+    """What the landing page OWES, derived from the four places those facts are defined.
+
+    Every entry moves when a feature lands, which is the whole reason this check is worth having:
+    the ask it answers is a page "always up to date with the latest features", and a check carrying
+    a hand-written feature list relocates that promise instead of removing it.
+    """
+    desktop = _landing_source("src/bin/desktop.mjs")
+    name = re.search(r'const\s+NAME\s*=\s*"([^"]*)"', desktop)
+    if name is None:
+        raise Unmeasurable("src/bin/desktop.mjs declares no `const NAME`, and both sets below "
+                           "name it, so neither could be resolved")
+    consts = {"NAME": name.group(1)}
+    launchers = _js_set_members(desktop, "OPENS_OWN_WINDOW", consts, "src/bin/desktop.mjs")
+    hidden = _js_set_members(desktop, "HIDDEN_FROM_MENU", consts, "src/bin/desktop.mjs")
+
+    # `/usr`'s committed layout. A program is a `bin/<name>` row and nothing below (the comment on
+    # USR_ENTRIES says so in as many words), so a program added to the system appears here first.
+    manifest = _landing_source("src/kernel/providerfs.mjs")
+    programs = tuple(dict.fromkeys(re.findall(r'name:\s*"bin/([^"/]+)"', manifest)))
+
+    # Every mount the kernel adds, from the kernel. `/bench` is among them because the page asks
+    # for a bench boot (www/shell.mjs `bootShell`); a mount that became conditional on something
+    # this page does not set would fail this clause, which is the drift message firing rather than
+    # a defect, and the two sides are then decided between.
+    mounts = tuple(dict.fromkeys(
+        re.findall(r'mounts\.add\(\s*"([^"]+)"', _landing_source("src/kernel/kernel.mjs"))))
+
+    if not programs or not mounts:
+        raise Unmeasurable(
+            "the derived sets came out short (%d programs, %d mounts), so the clauses below would "
+            "be about nothing" % (len(programs), len(mounts)))
+    return {"launchers": launchers, "hidden": hidden, "programs": programs, "mounts": mounts}
+
+
+def _landing_menu(env: Env) -> Dict[str, Any]:
+    """Open the Start menu with a REAL CLICK on the orb, and report what it rendered.
+
+    THE PAGE CANNOT DRIVE THIS. A synthesised click is `isTrusted === false`, and the route under
+    assertion — orb -> menu -> row -> `activateItem` -> the kernel validating the index -> the
+    desktop process's `spawn` -> a window — is exactly the one a reader takes. `www/index.html`
+    publishes no gesture protocol, because it is the product and asks for nothing (constraint 283),
+    so the coordinates are read off the rendered rects here instead of being requested.
+
+    IT DOES NOT RAISE WHEN THE MENU STAYS SHUT. A closed menu is a product failure a clause has to
+    be able to record; `Unmeasurable` is reserved for there being no taskbar at all.
+    """
+    # The menu is closed first, because a row click already closed it and an orb click TOGGLES:
+    # without this, every second program would be clicked against a menu that had just shut.
+    env.page.evaluate("globalThis.INDEX.shell.closePopup()")
+    at = json.loads(env.page.evaluate(LANDING_ORB_AT) or "{}")
+    if not at:
+        raise Unmeasurable("the taskbar renders no [data-start] orb, so there is no menu to open "
+                           "and nothing below was measured")
+    _perform_gesture(env.page, {"kind": "click", "at": at}, held=False)
+    deadline = time.monotonic() + 5.0
+    while True:
+        seen = json.loads(env.page.evaluate(LANDING_MENU))
+        if seen["kind"] == "start" or time.monotonic() >= deadline:
+            return seen
+        time.sleep(0.1)
+
+
+def _landing_mount_paths(printed: str) -> Tuple[str, ...]:
+    """Every mount point in what `cat /proc/mounts` printed.
+
+    A row is `type  path  ro|rw  dev=N` (src/kernel/procfs.mjs `mountsText`), and the path is
+    located RELATIVE TO THE `dev=` FIELD rather than by column index. MEASURED: this shell prints
+    its next prompt before `cat`'s output flushes, so the first row arrives as
+    `~$ proc\\t/proc\\tro\\tdev=2` and a fixed-column parse read `proc` as the mount point and
+    dropped `/proc` — the one mount whose absence this check would otherwise have reported as a
+    kernel defect.
+    """
+    out: List[str] = []
+    for line in printed.splitlines():
+        parts = line.split()
+        for index, token in enumerate(parts):
+            if token.startswith("dev=") and index >= 2:
+                out.append(parts[index - 2])
+                break
+    return tuple(out)
+
+
+def _landing_reach(env: Env, name: str) -> Dict[str, Any]:
+    """Reach one program from the Start menu with real input, and report what happened."""
+    menu = _landing_menu(env)
+    if menu["kind"] != "start":
+        return {"program": name, "found": False, "onTop": False, "disabled": False,
+                "opened": False, "why": "a real click on the orb left popup=%r" % menu["kind"]}
+    spot = json.loads(env.page.evaluate(LANDING_ROW % json.dumps(name)))
+    spot["program"] = name
+    if not spot["found"]:
+        return spot
+    _perform_gesture(env.page, {"kind": "click", "at": spot["at"]}, held=False)
+    deadline = time.monotonic() + LANDING_OPEN_S
+    while True:
+        spot.update(json.loads(env.page.evaluate(LANDING_OPENED % json.dumps(name))))
+        if spot["opened"] or time.monotonic() >= deadline:
+            return spot
+        time.sleep(0.1)
+
+
+@check(
+    name="landing",
+    milestone="m17a",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.LAUNCHER_STALE),
+    labels=LANDING_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=LANDING_DOCUMENT,
+    ready_expr=LANDING_READY,
+    ready_what="globalThis.INDEX reaching done/aborted/error (www/index.html at its BARE URL — "
+               "the preflight, and then the desktop)",
+    ready_timeout=240.0,
+    refusal_expr="globalThis.INDEX && globalThis.INDEX.state",
+    refusal_want="aborted",
+    note="THE LANDING DESKTOP: one page at the obvious URL that is the product, in the user's own "
+         "words 'always up to date with the latest features, instead of having to load specific "
+         "milestones'. The staging is `www/shell.mjs`, which every milestone page's LIVE mode "
+         "imports too, so a feature that lands there lands here.\n"
+         "WHAT MAKES THIS CHECK WORTH HAVING IS THAT IT CANNOT GO STALE, and that is a property "
+         "of its expectations rather than of its prose. A check carrying a hand-written list of "
+         "programs would relocate the promise instead of removing it: the list and the page would "
+         "go wrong together and nothing would say so. So the three clauses that are about "
+         "FEATURES read their sets out of the places those features are defined — "
+         "`OPENS_OWN_WINDOW` and `HIDDEN_FROM_MENU` in src/bin/desktop.mjs, the `bin/` rows of "
+         "`USR_ENTRIES` in src/kernel/providerfs.mjs, and every `mounts.add` in "
+         "src/kernel/kernel.mjs — and a parse that cannot resolve a member REFUSES instead of "
+         "shrinking the expectation to what it understood.\n"
+         "THE EXPECTATIONS COME FROM THE REPOSITORY AND THE SUBJECT IS THE SERVED TREE, which is "
+         "what makes the control scoreable: `--negative launcher-stale` serves a patched copy of "
+         "src/bin/desktop.mjs, so the launchable set is unchanged while the menu is one row "
+         "short. A parser pointed at the served bytes would move both and the control could never "
+         "fire.\n"
+         "EVERY LAUNCH IS A REAL CLICK through `Input.dispatchMouseEvent` — on the Start orb, then "
+         "on the row — and the evidence a program started is the `prog` the KERNEL put on the new "
+         "window (`win-create`, src/wm/winhost.mjs:473), not its title, which is whatever a "
+         "program says it is. There is no gesture protocol on this page and there must not be: a "
+         "page that stages fixture windows and blocks for a driver reads exactly like a broken "
+         "desktop, which is how three non-defects came to be reported against www/m14.html "
+         "(constraint 283). Two clauses keep it that way, and they are different claims: nothing "
+         "ASKED for a gesture after seven real launches, and the page CANNOT read its own query "
+         "string — every proof page here carries exactly one `URLSearchParams` and this one "
+         "carries none, so there is no parameter for a mode to hang off. A text search over the "
+         "whole document could say neither: this page's comments name `?proofs=1` and "
+         "`gestureAsker` precisely in order to say it carries neither.\n"
+         "THE MOUNT TABLE IS READ AT A REAL PROMPT, `cat /proc/mounts` typed as real keys into the "
+         "terminal the page staged, because that is the only route a page-side driver has to the "
+         "kernel's own table: `www/index.html` publishes the host and the shell and no kernel "
+         "handle. It is `check_m15`'s own mechanism and `_m15_type` is the one definition of it.\n"
+         "negative controls: --negative launcher-stale adds one program to `HIDDEN_FROM_MENU` in "
+         "the served copy of src/bin/desktop.mjs, so a program that is in /usr/bin and draws its "
+         "own window has no row — the three derived clauses must go red and the desktop around "
+         "them must keep working. --negative no-isolation must come out BROKEN: the preflight "
+         "refuses, `INDEX.state` is 'aborted', and there is no kernel, no desktop process and no "
+         "menu to click.",
+)
+def check_landing(env: Env) -> None:
+    want = _landing_facts()
+    got = env.read(READ_LANDING, LANDING_SHAPE, await_promise=True)
+
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/index.html reported state 'error': %s. The preflight passed and the desktop did "
+            "not start, so nothing below was measured." % (got["why"] or "no reason given"))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/index.html refused to proceed: %s. Without cross-origin isolation the kernel's "
+            "SAB is not constructible, so there is no process, no window and no shell — which is "
+            "this page's first job and is asserted as a refusal by gate N3, not here."
+            % (got["why"] or "no reason given"))
+    if got["state"] != "done":
+        env.unmeasurable("www/index.html never reached a terminal state (state=%r, phase=%r)"
+                         % (got["state"], got["phase"]))
+
+    env.expect("the preflight passed", got["preflight"], "ok")
+    env.expect("page isolated", got["isolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    "errors: %s" % "; ".join(got["errors"][:4]))
+    env.expect_that("no process faulted", not got["faults"],
+                    "faults: %s" % "; ".join(got["faults"][:4]))
+    env.expect("verdict is live", got["verdict"], "live")
+
+    # A BAR AND AN ORB A POINTER CAN REACH, hit-tested at the pixel a click goes to. An element in
+    # the DOM and an element a reader can press are different claims, and a window parked over the
+    # bar satisfies the first (constraint 289's shape, one surface along).
+    bar = got["bar"] or {}
+    env.expect_that("a taskbar is on the page",
+                    bool(bar) and bar.get("h", 0) > 0 and bar.get("w", 0) > 0,
+                    {"bar": got["bar"], "frames": got["frames"]})
+    # D39's HONESTY CLAUSE: the shell is page-side chrome whose CONTENTS are a process's. What is
+    # drawn must be what `src/bin/desktop.mjs` published, and it must be more than nothing.
+    env.expect_that("the desktop drew the rows the process published",
+                    got["icons"] == got["deskRows"] and got["deskRows"] > 0,
+                    {"drawn": got["icons"], "published": got["deskRows"],
+                     "labels": got["labels"]})
+
+    # ---- the mount table, read at a REAL PROMPT -----------------------------------------------
+    # BEFORE ANY PROGRAM IS LAUNCHED, because `M15_SCREEN` takes the FIRST `.terminal` on the page
+    # and a launched `term` would add a second one. `dev=` is the string the parse below needs (see
+    # `_m15_type`'s `until`).
+    printed = _m15_type(env, "cat /proc/mounts", until="dev=")
+    seen = _landing_mount_paths(printed)
+    missing = [path for path in want["mounts"] if path not in seen]
+    env.expect_that("the mount table carries every mount the kernel adds", not missing,
+                    {"missing": missing, "wanted": list(want["mounts"]), "read": list(seen),
+                     "printed": printed[-400:]})
+
+    # ---- the start menu, against /usr's own manifest -------------------------------------------
+    menu = _landing_menu(env)
+    orb = got["orb"] or {}
+    env.expect_that("the start orb is there and can be clicked",
+                    bool(orb) and orb.get("onTop") is True and menu["kind"] == "start"
+                    and bool(menu["labels"]),
+                    {"orb": got["orb"], "bar": got["bar"], "popup": menu["kind"],
+                     "rows": len(menu["labels"])})
+
+    # EVERY PROGRAM, AND THE RIGHT LABEL FOR EACH. A row reading `<name> (in a terminal)` is the
+    # default for a program that owns no window (src/bin/desktop.mjs:50), so asserting the label
+    # tells a menu that lists everything from one that lists everything twice over.
+    hidden = set(want["hidden"])
+    owns = set(want["launchers"])
+    wanted_rows = {prog: (prog if prog in owns else "%s (in a terminal)" % prog)
+                   for prog in want["programs"] if prog not in hidden}
+    shown = set(menu["labels"])
+    absent = sorted(label for label in wanted_rows.values() if label not in shown)
+    env.expect_that("the start menu lists every program /usr carries", not absent,
+                    {"absent": absent, "wanted": len(wanted_rows), "shown": len(menu["labels"]),
+                     "published": got["menuRows"], "hidden": sorted(hidden)})
+
+    # ---- every program that draws its own window, reached with a REAL CLICK --------------------
+    launchable = [prog for prog in want["launchers"] if prog not in hidden]
+    reached = [_landing_reach(env, prog) for prog in launchable]
+    unreachable = [row for row in reached
+                   if not (row["found"] and row["onTop"] and not row["disabled"])]
+    env.expect_that("every program that draws its own window has a row of its own",
+                    bool(launchable) and not unreachable,
+                    {"launchable": launchable, "unreachable": unreachable,
+                     "rowsShown": [row.get("shown") for row in reached]})
+    unopened = [row for row in reached if row.get("opened") is not True]
+    env.expect_that("and a real click on each one opened its own window",
+                    bool(launchable) and not unopened,
+                    {"launchable": launchable, "unopened": unopened,
+                     "windows": [[row["program"], row.get("titles")] for row in reached]})
+
+    env.shoot("landing-desktop")
+
+    # ---- constraint 283, both halves ----------------------------------------------------------
+    # THE RUN FIRST: after every launch above and a menu driven open as many times, nothing on this
+    # page has asked for a gesture and nothing has registered a proof. A page that blocks for a
+    # driver reads exactly like a broken desktop, which is how three non-defects came to be
+    # reported against www/m14.html.
+    after = env.read(READ_LANDING, LANDING_SHAPE, await_promise=True)
+    env.expect_that("the page asked for no gesture",
+                    after["asked"] is False and not after["proofs"],
+                    {"asked": after["asked"], "proofs": after["proofs"]})
+    # AND THEN THE CAPACITY: a page that cannot read its own query string cannot have a mode
+    # selected by one. `served index.html` below pins these bytes to the tree on disk.
+    env.expect_that("and no query parameter can select a mode", not after["queryReads"],
+                    {"reads": after["queryReads"], "document": env.document})
+
+    # `env.document` AND NOT `LANDING_DOCUMENT`: it is the request path the browser was actually
+    # pointed at, which is the key the server recorded the response under. A second copy of the
+    # path here is a copy to drift (`Env.document`).
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served index.html", env.served_matches_disk(env.document),
+                    "the index.html served does not match the tree this phase serves on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

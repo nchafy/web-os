@@ -87,6 +87,12 @@ import {
 import {
   bootKernel, spawnProgram, ask as askKernel, until, sleep, gestureAsker,
 } from '/www/pagekernel.mjs'
+/* THE LIVE DESKTOP IS STAGED FROM HERE AND NOT BELOW. `live()` was the definition of "assemble the
+ * full shell" and every other page carried a copy of it, so a feature that landed here reached the
+ * other pages only when somebody remembered. `www/shell.mjs` is that definition now; THE PROOFS
+ * PATH BELOW IS UNCHANGED and still boots its own host, because its staging is the fixture nine
+ * checks measure and a shared one would be measuring a different desktop. */
+import { stageDesktop, appFrames } from '/www/shell.mjs'
 
 const out = document.getElementById('log')
 const desktop = document.getElementById('desktop')
@@ -231,12 +237,6 @@ async function grabOn (entry, box) {
   return { at, under: frameUnder(at), want: `win-${entry.id}` }
 }
 
-/** The windows a reader would call windows: everything but the desktop. */
-function appFrames (host) {
-  return [...host.frames.values()]
-    .filter((e) => e.role !== WROLE_DESKTOP)
-    .sort((a, b) => a.id - b.id)
-}
 
 function deskRect () {
   return desktop.getBoundingClientRect()
@@ -1037,82 +1037,27 @@ function proofPixels () {
 /* ---- the live desktop ---------------------------------------------------------------------- */
 
 async function live () {
+  /* `#seam` IS THIS PAGE'S OWN, and only proof 9 reads it: it is the hard black/white edge the
+   * glass is sampled across, and a desktop with a test pattern on it is not the product. */
   seam.hidden = true
-  /* THE CLASS BEFORE THE KERNEL, because the desktop's size is what the shell reserves its strip
-   * out of and what every frame is clamped into: a window laid out against a 560 px desktop and
-   * then handed a 740 px one is M13's own lesson (`WinHost.relayout`), and the cheap way not to
-   * need it is to be the right size before anything is placed. */
-  document.body.classList.add('live')
-  const { k, host, shell } = await bootHost()
-  await spawnProgram(k, DESKTOP, ['desktop', '-c', '3600000'])
-  await until(() => Boolean(shell.desktopEntry()), 10000)
-  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
-  await until(() => appFrames(host).length >= 1, 10000)
-  const entry = host.newest()
-  /* CLEAR OF THE ICON COLUMN, because a first-run desktop should show what is on it. `term` asks
-   * for its own geometry and gets it; this is the SHELL placing the one window it opened itself,
-   * through the frame's own route, and it is a decision rather than a default — the icon column is
-   * at the desktop's left edge, which is exactly where a fresh window opens.
-   *
-   * It cost two screenshots and a Firefox run to notice: "4 icons drawn" and a desktop with no
-   * icons on it are both true when a window is sitting on top of them. */
-  if (entry) {
-    const wa = host.workArea()
-    entry.win.box = {
-      x: Math.max(120, Math.round(wa.w * 0.45)), y: 40,
-      w: entry.win.placed.w, h: entry.win.placed.h,
-    }
-    entry.win.apply()
-    entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
-  }
-  if (entry && entry.term) entry.term.focus()
-  /* WHAT THE SHELL ACTUALLY HAS, PRINTED. A second engine gives no other channel — Mozilla
-   * removed CDP, so `bench/m7-win/firefox.py` can only photograph the page — and the first
-   * Firefox run of this desktop showed no icons with no way to tell a desktop process that never
-   * started from an icon view that never drew. These pages print their own log for exactly that
-   * reason (`CLAUDE.md`, the second-engine rule). */
-  const deskEntry = shell.desktopEntry()
-  const view = deskEntry ? deskEntry.icons : null
-  /* PUBLISHED FOR A DRIVER, because the live desktop is a path with no assertions on it and this
-   * is the handle a probe reads the arrangement back through. It carries no capability a page did
-   * not already have: the view is a DOM widget the page built. */
-  globalThis.M14.view = view
-  globalThis.M14.shell = shell
-  globalThis.M14.host = host
-  say('')
-  say('desktop:  ' + (deskEntry
-    ? `win ${deskEntry.id}, ${deskEntry.items.length} rows published, `
-      + `${view ? view.report().icons : 'NO ICON VIEW'} icons drawn`
-    : 'NO DESKTOP PROCESS — nothing published a row'))
-  say('shell:    ' + shell.report().buttons + ' taskbar button(s), work area ' +
-    JSON.stringify(host.workArea()))
-  /* AND THE RECTS, because "4 icons drawn" and "4 icons a reader can see" are different claims —
-   * which is constraint 40 in the small. The first Firefox run of this desktop reported four icons
-   * drawn and showed none, and a PNG cannot say whether a box is empty or elsewhere. */
-  if (deskEntry) {
-    const r = (el) => {
-      if (!el) return 'none'
-      const b = el.getBoundingClientRect()
-      return `${Math.round(b.width)}x${Math.round(b.height)} at ${Math.round(b.left)},${Math.round(b.top)}`
-    }
-    say('rects:    frame ' + r(deskEntry.win.el) + ' | body ' + r(deskEntry.win.bodyEl)
-      + ' | view ' + r(view && view.el) + ' | icon 1 '
-      + r(view && view.el.querySelector('.desk-icon')))
-    const svg = view && view.el.querySelector('.desk-icon svg')
-    const path = svg && svg.querySelector('path')
-    say('icon svg: ' + (svg ? `${r(svg)}, ${svg.childElementCount} children, `
-      + `${svg.querySelectorAll('linearGradient').length} gradient(s), first fill `
-      + (path ? getComputedStyle(path).fill : 'no path') : 'NONE'))
-  }
-  say('')
-  say('A LIVE WINDOWS 7 DESKTOP.')
-  say('  double-click an icon, or use the Start orb — both are rows the `desktop` process')
-  say('  published from the filesystem, so the menu is a listing of /usr/bin')
-  say('  drag a caption to an edge to snap, to the top to maximize; 20 px of drag-out releases')
-  say('  right-click a taskbar button for its jump list; hover one for a thumbnail')
-  say('  hover the strip at the far right to peek, click it to minimize everything')
-  globalThis.M14.phase = 'live'
-  globalThis.M14.livePid = row.pid
+  /* EVERY DECISION THIS FUNCTION USED TO MAKE NOW LIVES IN `www/shell.mjs`: the class going on
+   * BEFORE the kernel
+   * (the desktop's size is what the shell reserves its strip out of and what every frame is clamped
+   * into), the desktop process first, the wait for its ROWS and not only its window, and the
+   * terminal placed clear of the icon column. `programs: ['term']` is the only thing this page
+   * chooses, and `cfg.noItems` is the one control that reaches a live desktop. */
+  const { host, shell } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M14,
+    say,
+    label: 'm14',
+    liveClass: 'live',
+    cfg: { noItems: CFG.noItems ? 1 : 0 },
+    noItems: CFG.noItems,
+    programs: ['term'],
+  })
+  HOST = host
+  SHELL = shell
 }
 
 async function main () {

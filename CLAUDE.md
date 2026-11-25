@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 270 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 298 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -138,7 +138,10 @@ src/
     icons.mjs     M14: one vector drawing per `WICON_*`, with `selfTest` asserting the ABI's
                   table is covered
 www/
-  index.html      boot preflight: refuses to proceed if a capability is missing
+  index.html      THE LANDING PAGE: the boot preflight, which still refuses to proceed and says
+                  which capability is missing, AND THEN THE DESKTOP. It carries NO proofs and
+                  reads no query string, so the bare URL is the product (constraint 283) and
+                  there is no mode to select. `scripts/check.py --only landing` is its gate
   m0.html         the syscall-channel bench page
   m4a.html        the window and the terminal. The one page a check types REAL keys into
   m6.html         the realm, the volume, the loader and the fault. M6's five proofs
@@ -183,6 +186,13 @@ www/
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
                   m11, m13 and m14 import it; the older pages still carry their own copies
+  shell.mjs       the ONE DEFINITION of staging the desktop shell, a layer above `pagekernel.mjs`:
+                  `PROGRAMS` and `DESKTOP_HELP` as frozen DATA a milestone adds to, `stageDesktop`
+                  as the order a desktop is assembled in, and `requireIsolation` as the abort gate
+                  nineteen proof pages still paste. index, m14 and m17 import it; it re-exports
+                  `gestureAsker`/`spawnProgram`/`until`/`sleep` rather than redefining them,
+                  because a second banner is a second handshake for `scripts/check.py` to agree
+                  with by hand
 ```
 
 **`src/abi.mjs` sits outside the three-directory layout deliberately.** A syscall number, errno or
@@ -262,6 +272,7 @@ row below rather than restate it.
 | A WHEEL's deltas and the point it was aimed at | `WEV_WHEEL` + `wheelAt`/`packWheelPoint` and `WWHEEL_PAGE`/`WWHEEL_COALESCED` in `src/abi.mjs`. Surface px for a surfaced window, CELLS for a text one (constraint 248) — never device px. `packWheelPoint` is `wheelAt`'s declared inverse, because x and y share one 32-bit word |
 | The `mods` bit namespace, as ONE table | `selfTest` in `src/abi.mjs`, derived from `INTS` by the prefixes `WPTR_`/`WMOD_`/`WWHEEL_`. It was three separate clauses — pointer bits against each other, modifiers against each other, pointer against modifier — so a THIRD sub-table could collide with either, unseen. M17's wheel bits were the third one |
 | The CLIP, and who resets it | `DL_CLIP` + `DLC_RESET` in `src/abi.mjs`, applied in `Surface.replay` in `src/wm/surface.mjs` — which MUST reset at the top of every batch, because a canvas clip only ever intersects. A clip left set by batch N makes batch N+1 draw nothing: a window blank on its next repaint with no error anywhere. `bench/m17-wheel/probe.mjs` is what proves the reset exists |
+| How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
 | The 298 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
@@ -277,6 +288,11 @@ with a note saying a drift "arrives as the WRONG FILE being dragged" — then M1
 both read `FILES_METRICS` now. The bench script's excuse was that it is outside the process and
 cannot import the module; that was true of the PROCESS and false of the page it drives.
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
+**The desktop-staging copy left it with the landing page**, and the isolation gate now HAS a one
+definition it did not have: `requireIsolation`/`isolationFailure` in `www/shell.mjs`.
+`grep -ln crossOriginIsolated www/*.html` still names 20 files and only `www/index.html` reaches
+it through that function, so the row above is understated rather than closed — the remaining
+nineteen are proof pages, which this round did not touch.
 
 ## Architecture rules
 
@@ -499,7 +515,16 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 ## Running it
 
 ```sh
-scripts/serve.py                    # serves the repo root with COOP/COEP on 8000
+scripts/serve.py                    # ...then http://127.0.0.1:8000/www/ IS THE DESKTOP: the
+                                  # preflight, and then the Windows 7 shell. No milestone page,
+                                  # no query parameter. The server is the repo root with
+                                  # COOP/COEP on 8000
+scripts/check.py --only landing     # the landing page's gate: 17 expectations
+scripts/check.py --negative launcher-stale  # ...and the world where a program landed in /usr/bin
+                                  # and the desktop's launcher allowlist never heard about it
+python3 bench/shell-landing/firefox-landing.py  # CAN A READER OPEN THE DESKTOP IN FIREFOX?
+python3 bench/shell-landing/firefox-landing.py --prove-failure  # ...and with a window parked on
+                                  # the icon column, it cannot
 scripts/serve.py --no-isolation     # omit the headers, to prove a check fails without them
 scripts/check.py                    # the suite
 scripts/check.py --prove-failure    # invert every expectation; the run MUST report failures
@@ -578,7 +603,9 @@ this. `www/m0.html` carries a module-graph preflight, so serving it from the wro
 imports 404'd rather than rendering a blank screen.
 
 `python3 -m http.server` **will not work** — it cannot send COOP/COEP, so `SharedArrayBuffer` is
-undefined and nothing boots. `www/index.html` is a preflight that refuses to proceed and says why.
+undefined and nothing boots. `www/index.html` gates the desktop behind a preflight that refuses to
+proceed and says which capability is missing, which is the only reason that failure reads as a
+sentence rather than a blank page.
 
 ## When a constraint looks wrong
 

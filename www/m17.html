@@ -78,6 +78,14 @@ import { FILES_METRICS } from '/src/bin/files.mjs'
 import {
   bootKernel, spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
 } from '/www/pagekernel.mjs'
+/* THE LIVE DESKTOP IS STAGED FROM HERE AND NOT BELOW. `live()` was this page's own copy of "assemble
+ * the shell", so M14's Superbar, start menu and desktop icons were on M14's page and not on this
+ * one — "the latest features" kept by hand. `www/shell.mjs` is the one definition now, and `place`
+ * comes from it because this page's copy of it was identical to the line.
+ * THE PROOFS PATH IS UNCHANGED and still boots its own bare host: its eleven clauses are measured
+ * against fixture windows on an empty desktop, and a taskbar reserving a strip under them would be
+ * a different desktop. */
+import { stageDesktop, place, PROGRAMS, DESKTOP_HELP } from '/www/shell.mjs'
 
 const out = document.getElementById('log')
 const desktop = document.getElementById('desktop')
@@ -119,9 +127,10 @@ globalThis.M17.config = CFG
 setSurfaceControls({ noClip: CFG.noClip })
 setHostControls({ rawWheel: CFG.rawWheel })
 
+/* THE PROOFS' OWN SPAWNS, and only theirs: the live desktop's URLs are `PROGRAMS` rows in
+ * `www/shell.mjs`, so `term`'s is no longer named here. */
 const FILES = '/src/bin/files.mjs'
 const TASKMGR = '/src/bin/taskmgr.mjs'
-const TERM = '/src/bin/term.mjs'
 const GREP = '/src/bin/grep.mjs'
 const MKDIR = '/src/bin/mkdir.mjs'
 const TOUCH = '/src/bin/touch.mjs'
@@ -217,19 +226,42 @@ const dpr = () => window.devicePixelRatio || 1
  *  applied — a second copy is how a page comes to dispatch a constant and assert a constant. */
 const devFor = (cssPx) => cssPx * dpr()
 
-if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
-  globalThis.M17.state = 'aborted'
-  globalThis.M17.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
-    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
-  out.className = 'bad'
-  say(globalThis.M17.why)
-} else {
-  main().catch((e) => {
-    globalThis.M17.state = 'error'
-    globalThis.M17.why = String((e && e.stack) || e)
-    out.className = 'bad'
-    say(globalThis.M17.why)
-  })
+
+/** THE PAGE'S OWN INSTRUMENT, as one listener both paths install: a `Surface` keeps counts and
+ *  pixels, not ops, so keeping the batch the kernel announced is the only way to read back WHAT a
+ *  program drew. It is registered BEFORE the host's listener in both — `kernelBoot` calls its
+ *  listeners in order, so a listener added first sees every batch the host is about to replay. */
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `LAST_BATCH` is module-private and the proofs read it directly, so a driver in ANOTHER ENGINE had
+ * no way to see the strings a program painted — and M17's whole subject is whether a list scrolls,
+ * which is a fact about those strings. `bench/m17-wheel/firefox-scroll.py` is the caller, and it
+ * drives the LIVE desktop, which is why this cannot live in the proofs' boot alone.
+ *
+ * THE PRECEDENT IS `FILES_METRICS`, and the lesson behind it is recorded in CLAUDE.md: a bench
+ * script's excuse for restating a program's geometry was that it sits outside the process and
+ * cannot import the module, which was "true of the PROCESS and false of the page it drives". The
+ * same holds here. Publishing the page's own decoder is what stops a second engine's gate from
+ * growing a second display-list reader that can disagree with this one.
+ */
+function publishHost (host) {
+  HOST = host
+  globalThis.M17.host = host
+  globalThis.M17.dpr = dpr()
+  globalThis.M17.lastTextRuns = (what) => {
+    const entry = frameByTitle(host, String(what))
+    if (!entry) return null
+    return textRuns(LAST_BATCH.get(entry.id))
+      .map((r) => ({ text: r.text, x: Math.round(r.x), y: Math.round(r.y) }))
+  }
 }
 
 async function bootHost () {
@@ -240,36 +272,11 @@ async function bootHost () {
   const cfg = { label: 'm17', bench: 1 }
   if (CFG.noWheelCoalesce) cfg.noWheelCoalesce = 1
   const k = await bootKernel(cfg, globalThis.M17, say)
-  /* THE CAPTURE GOES ON FIRST. `kernelBoot` calls its listeners in order, so a listener added
-   * before the host's sees every batch the host is about to replay. */
-  k.on((m) => {
-    if (m.t !== 'win-draw') return
-    const id = m.win | 0
-    LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
-    BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
-  })
+  k.on(captureBatch)
   const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
   k.on((m) => { host.handle(m) })
   aero.install(desktop)
-  HOST = host
-  globalThis.M17.host = host
-  globalThis.M17.dpr = dpr()
-  /* WHAT A WINDOW LAST DREW, FOR A DRIVER THAT IS NOT THIS PAGE. `LAST_BATCH` is module-private and
-   * the proofs below read it directly, so a driver in ANOTHER ENGINE had no way to see the strings
-   * a program painted — and M17's whole subject is whether a list scrolls, which is a fact about
-   * those strings. `bench/m17-wheel/firefox-scroll.py` is the caller.
-   *
-   * THE PRECEDENT IS `FILES_METRICS`, and the lesson behind it is recorded in CLAUDE.md: a bench
-   * script's excuse for restating a program's geometry was that it sits outside the process and
-   * cannot import the module, which was "true of the PROCESS and false of the page it drives". The
-   * same holds here. Publishing the page's own decoder is what stops a second engine's gate from
-   * growing a second display-list reader that can disagree with this one. */
-  globalThis.M17.lastTextRuns = (what) => {
-    const entry = frameByTitle(host, String(what))
-    if (!entry) return null
-    return textRuns(LAST_BATCH.get(entry.id))
-      .map((r) => ({ text: r.text, x: Math.round(r.x), y: Math.round(r.y) }))
-  }
+  publishHost(host)
   return { k, host }
 }
 
@@ -306,15 +313,6 @@ async function surfaced (host, title, skip = null, ms = 20000) {
     return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
   }, ms)
   return got < 0 ? null : frameByTitle(host, title, skip)
-}
-
-/** Put a window at a known box, through `apply()` — M13's `place`, and the `keyup` is what makes the
- *  page report the box the clamp settled on rather than the one it asked for. */
-function place (entry, box) {
-  entry.win.box = { x: box.x | 0, y: box.y | 0, w: box.w | 0, h: box.h | 0 }
-  entry.win.apply()
-  entry.win.barEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }))
-  return { ...entry.win.placed }
 }
 
 /** THE WINDOW UNDER TEST GOES TO THE TOP, because a wheel is delivered by DOM hit-testing and a
@@ -989,36 +987,63 @@ async function stage (k, host) {
 
 /* ---- the live desktop ---------------------------------------------------------------------- */
 
+/**
+ * THE THREE WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure and what `PROGRAMS.term`'s box records. `aero.ICON_CELL_W` is the cell's width,
+ * imported rather than guessed at.
+ *
+ * THE HEIGHTS COME OFF THE WORK AREA and not off the 560 px in this page's stylesheet, because the
+ * taskbar reserves a strip out of the desktop and a frame sized against the desktop is a frame the
+ * clamp moves after the fact.
+ *
+ * SHORT ENOUGH TO SCROLL, which is the point of this desktop: `/usr/bin` is 33 rows and a frame this
+ * tall shows about nine of them. NONE OF THE THREE OVERLAPS — a frame over `taskmgr`'s footer hides
+ * the `rows A-B of N` line that says the table scrolled, which is the one thing a reader came here
+ * to see. `term` is LAST because it spawns `sh` by syscall (`PROGRAMS.term`).
+ */
+const LIVE_X = aero.ICON_CELL_W + 20
+const LIVE_PROGRAMS = [
+  { ...PROGRAMS.files, name: 'files', box: () => ({ x: LIVE_X, y: 20, w: 460, h: 260 }) },
+  {
+    ...PROGRAMS.taskmgr,
+    name: 'taskmgr',
+    box: (wa) => ({ x: LIVE_X + 480, y: 20, w: 620, h: Math.max(240, wa.h - 40) }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 300, w: 460, h: Math.max(160, wa.h - 320) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. The shared lines already name the wheel;
+ *  these four are the facts only M17's page can state, and they are ADDED rather than substituted so
+ *  a reader here still learns what the rest of the shell does. */
+const M17_HELP = [
+  '  the viewport is a DL_CLIP, so a row scrolled under the header is cut at its edge',
+  '  push at either end and it stops — the offset clamps at 0 and at the last row',
+  '  shift, ctrl and alt ride along in the record; a trackpad\'s page mode jumps a viewport',
+  '  `cat /proc/<pid>/win/<winid>` prints queued:, coalesced: and dropped: for that window',
+]
+
 async function live () {
-  const { k, host } = await bootHost()
-  await spawnProgram(k, FILES, ['files', '/usr/bin'])
-  await spawnProgram(k, TASKMGR, ['taskmgr'])
-  const row = await spawnProgram(k, TERM, ['term', '--ceiling', '3600000'])
-  await until(() => host.frames.size >= 3, 15000)
-  for (const [title, box] of [
-    /* SHORT ENOUGH TO SCROLL, which is the point of this desktop: `/usr/bin` is 33 rows and a
-     * frame this tall shows about nine of them. NONE OF THE THREE OVERLAPS — a frame over
-     * `taskmgr`'s footer hides the `rows A-B of N` line that says the table scrolled, which is the
-     * one thing a reader came here to see. */
-    ['files', { x: 20, y: 20, w: 460, h: 260 }],
-    ['Terminal', { x: 20, y: 300, w: 460, h: 240 }],
-    ['Task Manager', { x: 500, y: 20, w: 620, h: 460 }],
-  ]) {
-    const entry = frameByTitle(host, title)
-    if (entry) place(entry, box)
-  }
-  const term = frameByTitle(host, 'Terminal')
-  if (term && term.term) term.term.focus()
-  say('')
-  say('A LIVE DESKTOP, and M17 is the row that made a list SCROLL.')
-  say('  turn the wheel over the file list or the task table: the rows move and the header stays')
-  say('  the viewport is a DL_CLIP, so a row scrolled under the header is cut at its edge')
-  say('  push at either end and it stops — the offset clamps at 0 and at the last row')
-  say('  shift, ctrl and alt ride along in the record; a trackpad\'s page mode jumps a viewport')
-  say('  `cat /proc/<pid>/win/<winid>` prints queued:, coalesced: and dropped: for that window')
-  say('  type `files /usr/share` or `taskmgr` at the prompt for more to scroll')
-  globalThis.M17.phase = 'live'
-  globalThis.M17.livePid = row.pid
+  const { host } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M17,
+    say,
+    label: 'm17',
+    /* THE URL'S KERNEL CONTROL REACHES THE LIVE KERNEL TOO, because `live()` used to boot through
+     * `bootHost` and so carried it: a flag a page accepts on one path and drops on the other is how
+     * a reader comes to believe a world was selected when it was not. It is still unconsumed by
+     * `src/kernel/kernel.mjs` — `proofCoalesce` is what measures that, and it refuses. */
+    cfg: CFG.noWheelCoalesce ? { noWheelCoalesce: 1 } : {},
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M17_HELP),
+  })
+  publishHost(host)
 }
 
 async function main () {
@@ -1060,6 +1085,41 @@ async function main () {
   say('verdict ' + globalThis.M17.verdict)
   globalThis.M17.state = 'done'
   globalThis.M17.phase = 'rendered'
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice.
+ *
+ * It used to sit here, about 800 lines above `LIVE_PROGRAMS`. `main()` is called synchronously, and
+ * on the BARE URL it reaches `live()` before the first `await` — so the object literal handed to
+ * `stageDesktop` read `LIVE_PROGRAMS` while that `const` was still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines.
+ *
+ * WHY NOTHING CAUGHT IT: the registered suite loads `?proofs=1`, whose branch of `main()` does not
+ * touch `LIVE_PROGRAMS` until well after the module has finished evaluating. The live desktop at the
+ * bare URL — the thing a reader opens — had no check at all, and
+ * `bench/m17-wheel/firefox-scroll.py` is what found it by being the first gate to load that URL.
+ * A page whose product path is only exercised by the opt-in harness is a page whose product is
+ * unchecked (constraint 283's rule, from the other direction).
+ *
+ * Below every declaration is the only position where a module's entry point cannot be in a dead
+ * zone, so it is the position it keeps. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M17.state = 'aborted'
+  globalThis.M17.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
+  out.className = 'bad'
+  say(globalThis.M17.why)
+} else {
+  main().catch((e) => {
+    globalThis.M17.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX. V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not — so this line
+     * reported a bare `live@.../m17.html:1057` for a failure whose cause was in the message, and
+     * `bench/m17-wheel/firefox-scroll.py` could say only that no window appeared. A diagnostic
+     * that works in one engine is the kind of gap CLAUDE.md records four milestones of. */
+    globalThis.M17.why = String(e && e.message ? `${e.message}\n${e.stack || ''}` : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M17.why)
+  })
 }
 </script>
 </body>
