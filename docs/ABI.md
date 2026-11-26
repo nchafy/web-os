@@ -84,6 +84,14 @@ Not WASI's errno-plus-outparam.
 array, and a wasi-libc binary needs no translation. One extension: **`EHOSTGONE = 100`** — the DOM
 object behind a host fd was destroyed. 77–99 are reserved for WASI.
 
+**SO THE NUMBERS ARE NOT LINUX'S, AND A CHECK MUST ASSERT THE NAME.** `EEXIST` is **20** here (17 on
+Linux), `ENOTDIR` 54, `EACCES` 2, `EROFS` 69. A clause written against a remembered number fails
+over a CORRECT refusal, which is not a hypothetical: M19a's first bench draft asserted 17 for EEXIST
+and the run went red on a filesystem that had refused exactly as it owed. `errName(errno)` in
+`src/abi.mjs` is the one table, and `std.errnoName(r)` in `src/libos/std.mjs` is what a program calls
+— it takes a negative return directly, so there is no sign to get wrong at the call site.
+(constraint 306)
+
 ## No `*at` variants, no capability sandbox
 
 Every path call takes its path in the byte region: UTF-8, no NUL, absolute or CWD-relative. WASI's

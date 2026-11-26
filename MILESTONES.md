@@ -47,6 +47,7 @@ checks is a wish.
 | M17a | **A consolidation, not a feature**: one landing desktop, one staging definition | — | 0.5 | ✅ done — the bare URL is the product, `www/shell.mjs` is the only copy of the staging, 17 expectations DERIVED from `/usr/bin` and the mount table, `--negative launcher-stale`, and a Firefox gate with real trusted input |
 | M18 | Keys that are not bytes, and a row that opens | 2.5 | — | **PARTIAL — code landed, proof RED and deliberately so** — 38 expectations over 3 driven proofs, 23 green, **15 red on one listener**: `clickBits` reads `event.detail` on a `pointerdown`, whose `detail` is 0 in BOTH engines, so `WPTR_CLICK2` reaches no program (constraint 300). The keysym half is green end to end; `--negative one-click-opens` scores 8 red / 30 intact, the other two controls REFUSE and name the clauses they cannot hold; a Firefox gate with real trusted keys and a `--prove-failure` half |
 | M19 | Details, sort, selection, hover | 3 | — | ✅ done — **ACCEPT**, 60 expectations over 5 driven proofs in one 20.3 s run, 5 controls each moving its own named subset (2/58, 2/58, 3/57, 2/58, 4/56), a Firefox gate with real trusted input and a `--prove-failure` half, **constraint 223 reversed on a measurement** — 500 appended moves drop 247 and tail-replaced drop 0 — and an advance table measured in two engines at three ratios before a byte of it was published (302, 303) |
+| M19a | The session is a WRITABLE COPY of the read-only base, seeded once | — | 0.5 | ✅ done — **ACCEPT**, 44 expectations over 5 proofs and **three kernels against one volume in one page load**, 3 controls each moving its own named subset (19/25, 6/38, 2/42), 21 clauses under node over **six mount worlds** with a `--control` that reseeds a populated volume, a seeded journal replayed at all 7,763 truncations and 1,109 bit flips, and a Firefox gate with real trusted input and a `--prove-failure` half. **Constraint 28 at a new door, which is constraint 306** |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test, **now CALLED at module load**; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -3995,6 +3996,225 @@ not change the pointer.
 of its own. Firefox covers dpr 1, by its own six clauses and not by the suite — except in
 `bench/m19-advance/`, which is the first gate in this project to drive a second engine at three
 chosen ratios.
+
+## M19a — the session is a writable copy of the read-only base · done · 0.5 days
+
+`docs/DECISIONS.md` D40, in the owner's words: *"i would like all operating systems to be a copy of
+the read only base. then each session can be modified freely."* `/usr` and `/bench` are
+`FS_PROVIDER` with `MNT_RO` and `mutErrno: "EROFS"` — the read-only BASE, which is what they already
+resemble: install media. `src/kernel/seed.mjs` copies that base into the writable journaled volume
+**once**, under `/Users/Default`, and the session works on the copy. **No syscall, no errno and no
+record**, so `docs/ABI.md` is unchanged.
+
+### What it closed, and what stops being true
+
+`docs/PRD-SHELL.md` §10.1 asked what Delete does when the volume is mounted read-only and left it to
+a human. **It is answered by removing the case rather than handling it**: nothing a reader reaches is
+read-only any more, so M20's New folder, rename, Delete and paste need no read-only branch at all.
+`src/bin/files.mjs` opened `/usr/share` — `EROFS` — so every mutating verb M20 is about to add was
+unreachable from the one directory the file manager showed. The desktop's third icon was labelled
+`Shared files` on that same mount: the row a reader was most likely to press was the one where
+nothing could be deleted.
+
+Three paths that each restated a landing directory now read one: `src/bin/files.mjs` with no operand
+and `src/bin/desktop.mjs`'s folder row both go through `std.sessionDir(env)`, and `www/shell.mjs`
+passes no path at all. `DEFAULT_DIR = "/usr/share"` and `DESK_DIR = "/desktop"` are gone, and the
+desktop folder is `${sessionDir}/Desktop` resolved **per publish**, because `Refresh` is this ABI's
+whole answer to having no inotify and a cached `stat` is exactly the fact that goes stale.
+
+### The gate is three conjuncts, and six mount worlds say why none is spare
+
+`bench/m19a-seed/probe.mjs` drives the **real** `src/kernel/store.mjs` through a mount-only I/O
+surface over a `Map`, under plain Node, and scores one expression against six worlds — 21 clauses,
+all green:
+
+    store.report.mountable === MOUNT_FRESH && store.mode === MOUNT_RW && !!store.vfs
+
+| world | `mountable` | `mode` | `vfs` | seeds |
+| --- | --- | --- | --- | --- |
+| `fresh` | `fresh` | `rw` | yes | **yes — the only one** |
+| `populated` | `rw` | `rw` | yes | no |
+| `refused` | `refuse` | `refuse` | no | no |
+| `floor-unknown` | `ro` | `ro` | **yes** | no |
+| `sb-write-failed` | `ro` | `ro` | yes | no |
+| `no-boot-lock` | `ro` | `ro` | no | no |
+
+**`floor-unknown` IS THE ROW THAT EARNS THE SECOND CONJUNCT.** It is a FRESH volume whose
+blob-directory listing refused, so `Store.mount` overwrites `report.mountable` to `MOUNT_RO`
+(`store.mjs:221-224`; `:254` is the same for a refused initial superblock) — a gate written on
+`fsck()`'s own answer admits it. And after a successful fresh mount `mode` is `rw` **exactly as it is
+for a populated volume** (`:258`, `:276`), so `mode` alone admits the volume constraint 28 is about.
+`no-boot-lock` returns a report with no VFS at all (`:184-192`).
+
+**`node bench/m19a-seed/probe.mjs --control` substitutes `!store.readOnly`** — the expression a
+reader reaches for first — and the run reports `control: the naive gate seeds ["populated"] as well
+as fresh`, 19 of 21 clauses. That is constraint 28's defect through a new door, as a run. Constraint
+306 carries the whole of it.
+
+**AND THE SEEDED TREE'S JOURNAL WAS FUZZED BEFORE THE KERNEL WROTE ONE.** The seed's actual op stream
+is 82 records / 7,762 bytes; replayed at **every one of 7,763 truncations** (7,763 ok, 0 crashes, 0
+divergent — every prefix builds a PREFIX of the tree and never a different one) and **1,109 bit
+flips** (1,109 refused, 0 indistinguishable), with the tree compared against the writer's 43 paths.
+`scripts/fsfuzz.py` was re-run beside it.
+
+### What the copy costs, measured three ways and not conflated
+
+| what | harness | figure |
+| --- | --- | --- |
+| the copy in userland, per-file `fsync` | `bench/m19a-seed/probe.py`, headless Chrome 158, 3 runs | **208–248 ms** |
+| the same copy, no per-file `fsync` | same | **131–164 ms** |
+| the kernel's own seed, on a product boot | `bench/m19a-seed-firefox/firefox-session.py`, Firefox 156, dpr 1 | **442 ms**, self-timed in `seed.ms` |
+| the base | `USR_ENTRIES` + a walk inside a process | **39 files, 4 directories, 42 chunks at `MAX_INLINE`**, largest 177,933 B (`include/abi.mjs`) |
+
+**THE PER-FILE `fsync` IS 95 ms OF THE 247 AND IS NOT SPENT.** Constraint 23's flush points are
+`fsync`, snapshot and idle, and `closeFd` already publishes the generation — so each file is created
+`O_EXCL`, written, closed, and the boot's only flush is ONE `writeSnapshot`, which is what makes the
+next boot mount from a slot instead of replaying the copy's whole journal. The seed is still plainly visible at
+boot; that is the cost and it is stated rather than smoothed.
+
+**THE PLAIN READING OF CONSTRAINT 22 IS WRONG FOR A COPY.** `openFd` on a file the same call just
+created resolves at generation 0, so no `IO_BLOB_OPEN` is taken and no `createSyncAccessHandle` with
+it; `copyUp` creates the handle on the FIRST WRITE. Measured over 39 files: open **0.21 ms** mean,
+first write **2.72 ms** mean (2.38 median, 8.39 max), later chunks **0.14 ms**. An implementation
+that budgets 22's 495 µs to `open` mis-attributes its own slow path.
+
+**`bytes` IS NOT A CONSTANT AND IS NOT ASSERTED AS ONE.** `USR_ENTRIES` maps mount names onto this
+repository's own source files, so the total is the live size of the source tree: **623,827** at the
+commit the bench measured and **627,911** on the working tree, the 4,084-byte gap being M19a's own
+edits to three files that are themselves rows of the base. `check_m19a` asserts `files === 39` — a
+table LENGTH — and derives the byte and chunk totals from two independent readings.
+
+### Five proofs, 34 clauses, 44 expectations, and three kernels against one volume in one load
+
+`www/m19a.html` is a live desktop at its bare URL and the harness at `?proofs=1` (constraint 283).
+The OPFS is one per ORIGIN, so the page **wipes it from the page** and then boots three kernels
+against the same volume in one load — fresh, populated, and one whose three superblock slots it has
+corrupted in place. The wipe is never done by a kernel: a kernel that could wipe the volume is a
+kernel with a reseed path in it. `the page wiped the volume before it measured anything` is the
+anti-vacuity for boot 1.
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | `seeded`, 9 clauses | a fresh volume seeded; it landed where userland opens; 39 files and 6 directories by the kernel's count, by a walk of the base inside a process, and by a chunk count DERIVED from `MAX_INLINE`; the four base directories are present and really are directories; and every copied file is byte-identical to the base |
+| 2 | `writable`, 5 clauses | a file can be created in the copy, reads back as a regular file **with the owner write bit set**, holds its bytes through a real `read(2)`, can be deleted, and is then gone. Five and not one, because "the copy is writable" failing says nothing about which verb M20 would find broken |
+| 3 | `base`, 6 clauses | the base's bytes are unchanged, the copy carries a write bit the base does not, and a `mkdir`, a create and a delete in the base each refuse **separately** with the errno asserted BY NAME — plus the base's mountpoint is still a directory on the volume beneath it |
+| 4 | `persists`, 7 clauses | a second boot did not copy again, says WHY, copied nothing, **the edit the first boot made survived**, the other 38 files are still the base's bytes, a second copy over the tree refuses EEXIST by name having written nothing, and no half-copy was left |
+| 5 | `refused`, 7 clauses | all three superblock slots really were corrupted (the anti-vacuity, and it is first for that reason), the volume refuses to mount, no seed ran, it names no destination, the report says the volume did not mount, and the volume itself was not written |
+
+**THE PERSISTENCE CLAUSE CANNOT PASS ON A VOLUME NOBODY WROTE**, which is the trap in any two-boot
+proof. The edit is a DIFFERENT base file's bytes `cp`'d over a seeded one, so the surviving length is
+a number the seed never writes at that path. A clause the seed itself could satisfy proves nothing
+about the second boot.
+
+**NO GESTURE IS ASKED FOR**, unlike every page since M13, and that is not a gap: a seeded tree and an
+unseeded one are not the same picture — `ls` answers ENOENT — so there is nothing here a screenshot
+could be mistaken for. Every reading comes back through a PROCESS's result row: `ls` returns
+`listed`, `stat` returns `rows`, `wc` returns a `total` read to end of file through a real `read(2)`,
+`rm` returns `files`, and `bench/m19a-seed/program.mjs`'s `verify` returns a byte-for-byte comparison
+of all 39 files.
+
+The other ten expectations are the preamble and the envelope: isolation on the page and in the
+kernel, no kernel error, **no process faulted** (about 20 programs run to completion across the three
+boots, and a process that faulted during its own init reads downstream as "the call returned
+nothing"), the controls in force matching the document, the wipe, the page's own verdict, and
+COOP/COEP plus the document actually served.
+
+### Three controls, each moving its own named subset, all three re-run
+
+| control | world | measured |
+| --- | --- | --- |
+| `no-seed` | `cfg.noSeed`, a DECLARED boot key on a query string: the copy is skipped, so `files` falls back to `/usr/share` | **19 red / 25 intact** |
+| `reseed-always` | constraint 28's defect restored in the SERVED copy of `src/kernel/seed.mjs`: the freshness conjunct goes AND the destination is moved aside before the rename | **6 red / 38 intact** |
+| `seed-moves-base` | the seed `rmdir`s the base's mountpoint once it has copied it — the plausible tidy-up, and exactly the difference between a move and a copy | **2 red / 42 intact** |
+
+**`no-seed` IS AN OPT-OUT AND IS DELIBERATELY NOT BENCH-GATED**, so the world D40 removes is
+re-runnable from a URL without a source edit, and the product keeps the seed by default — a feature a
+page has to remember to request is a promise kept by hand. **What it leaves standing is the
+informative half:** clause 3 survives almost whole (the base's read-only-ness has nothing to do with
+the copy, which is what clause 3 claims) and clause 5 survives entirely.
+
+**`reseed-always` NEEDED TWO PATCHES, AND THAT IS A FINDING RATHER THAN BELT-AND-BRACES.** Measured:
+dropping the gate ALONE loses no data. The seed stages its copy under `SEED_STAGING` and publishes it
+with ONE rename, and `VFS.rename` answers ENOTEMPTY onto a non-empty directory (`src/fs/vfs.mjs:663`)
+— so an ungated second seed copies 39 files, fails the rename, rolls back and leaves the tree alone.
+The staging-and-rename design is a **second guard nobody wrote it to be**, and a one-patch control
+would have turned only the two clauses that read the report while `the edit made on the first boot
+SURVIVED` stayed coupled to nothing.
+
+**A WRITABLE BASE IS NOT EXPRESSIBLE, AND THAT WAS MEASURED RATHER THAN ASSUMED** — which is why
+`seed-moves-base` moves ONE reading and not clause 3's byte and mode readings. `/usr` refuses at two
+independent layers, `mountReadOnly` in `src/kernel/calls.mjs:297` and `SynthFS`'s own `mutErrno` in
+`src/kernel/synth.mjs:192`, and the generated filesystem has no write path at all. Clearing `MNT_RO`
+changes nothing a clause can see. So those readings rest on inversion, and the control says so on
+itself rather than leaving it to be discovered.
+
+**`--negative no-isolation` comes out BROKEN by declaration**: no SAB, no kernel, no volume, so there
+is nothing to copy and nothing to copy it into. The measurement going away IS the control.
+
+The two repo fixtures patch **verbatim spans** — `maySeed`'s three conjuncts, and the
+`renamed = store.vfs.rename(CRED, SEED_STAGING, SEED_DEST);` line — and `_patch_tree` raises unless
+it finds exactly one occurrence. Any edit to either span breaks both controls loudly rather than
+patching nothing.
+
+### The second engine, and what it is a gate on
+
+`bench/m19a-seed-firefox/firefox-session.py` drives Firefox 156 over `scripts/bidi.py` with real
+trusted input on the **landing page**, not the proof page, so it is a gate on the path a reader takes
+(constraint 301). The question it asks is the reader's: **can a reader change things, and do the
+changes stay?** Verbatim from the run:
+
+    desktop  taskbar=True orb=True icons=['Computer', 'Programs', 'Default', 'Terminal']
+    seed     {'dest': '/Users/Default', ..., 'ran': True, 'dirs': 6, 'files': 39,
+              'bytes': 627911, 'chunks': 42, 'ms': 442, 'rolledBack': None, 'partial': None}
+    $ echo PERSISTED-11e16ad7 > /Users/Default/m19a-a1d717.txt | ~$
+    $ echo PERSISTED-11e16ad7 > /usr/m19a-a1d717.txt | sh: /usr/m19a-a1d717.txt: EROFS ~$
+    $ ls /Users/Default  | Desktop/ include/ m19a-a1d717.txt bin/ lib/ share/ ~$
+    reload   ...
+    seed     {'ran': False, 'why': 'this is not a fresh read-write mount
+              (mountable=rw, mode=rw, vfs=true)', 'files': 0, 'bytes': 0, 'ms': 0}
+
+The rows are read back out of the file manager by tapping `CanvasRenderingContext2D.fillText`, so a
+`DL_TEXT` run drawn by any other call reports "the file manager drew no text at all" rather than
+passing silently. **Its `--prove-failure` half takes the volume away between the two boots**, the
+second boot then re-seeds, and the run reports `['no-reseed', 'persists']` fired while the six
+`KEPT_TAGS` — `desktop`, `session`, `writable`, `created`, `reloaded`, `bare-url` — stayed green:
+*"the kernel SEEDED AGAIN on the second boot — 39 file(s), 627911 bytes copied over a volume that
+already had a tree. That is constraint 28's silent data loss."*
+
+### What is owed, in files no M19a slice owned
+
+1. **`README.md:59` says 298 constraints** and is owed **306**. It was owed 301 by M18 and 305 by
+   M19, and is still not in a slice's file list.
+2. **`journalMeta`'s tail has three callers and one is still a copy.** `src/kernel/seed.mjs` exports
+   it and the kernel's mountpoint creation imports it; `metaOp` in `src/kernel/calls.mjs` carries its
+   own. The fix is an import, not a rewrite.
+3. **`src/wm/surface.mjs` still does not honour `a5`**, so M19's `DLT_ELLIPSIS` debt is now also
+   M19a's: a long name in the session's tree overflows the Date column exactly as one in `/usr/share`
+   did.
+
+### What is NOT done
+
+**THE SEED INVENTS NO DIRECTORY THE BASE DOES NOT HAVE.** `Desktop` is created by
+`src/bin/desktop.mjs` inside `publish()`, not by the seed — which is the right division (which
+directory the shell treats as a desktop is the shell's) but it means **on the fallback there is no
+desktop folder**: `ensureDeskDir("/usr/share/Desktop")` refuses, and the refusal is counted in the
+program's `account.refusals` rather than swallowed. A reader on a volume that never got a seed sees a
+desktop with its four shortcuts and no files.
+
+**NOTHING PRUNES A HALF-COPY.** `SEED_STAGING` left by a page killed mid-copy is reported in
+`seed.partial` and never removed, deliberately: that volume is no longer fresh and removing a tree
+the reader did not ask to lose is constraint 28's defect arriving as a tidy-up. There is no command
+that cleans it up, and a reader who hits it has a `.Default.partial` directory for ever.
+
+**FRESHNESS IS SPENT BY THE MOUNT, NOT BY THE SEED.** `Store.mount` writes the initial superblock, so
+a volume whose first boot found no base to copy is never fresh again and never gets a session tree.
+The alternative — seeding whenever `SEED_DEST` is absent — is constraint 28's defect exactly: it
+copies back over a reader who deleted it. The cost is real and it is the right trade.
+
+**THE BASE AND THE COPY DIVERGE, BY DESIGN** (D40 §What it costs). A program added to `USR_ENTRIES`
+after a volume was seeded is in the start menu's listing of `/usr/bin` and absent from the reader's
+copy. Both sets are readable — `fsState().seed` publishes `base`, `files` and `bytes` — rather than
+assumed equal, but nothing reconciles them and no upgrade path exists.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

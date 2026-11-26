@@ -1,0 +1,320 @@
+{
+  "mode": "gate",
+  "gate": "store.report.mountable === MOUNT_FRESH && store.mode === MOUNT_RW && !!store.vfs",
+  "worlds": [
+    {
+      "world": "fresh",
+      "mountable": "fresh",
+      "mode": "rw",
+      "readOnly": false,
+      "vfs": true,
+      "seeds": true
+    },
+    {
+      "world": "populated",
+      "mountable": "rw",
+      "mode": "rw",
+      "readOnly": false,
+      "vfs": true,
+      "seeds": false,
+      "root": [
+        "home"
+      ]
+    },
+    {
+      "world": "refused",
+      "mountable": "refuse",
+      "mode": "refuse",
+      "readOnly": true,
+      "vfs": false,
+      "seeds": false,
+      "problems": 1
+    },
+    {
+      "world": "floor-unknown",
+      "mountable": "ro",
+      "mode": "ro",
+      "readOnly": true,
+      "vfs": true,
+      "seeds": false
+    },
+    {
+      "world": "sb-write-failed",
+      "mountable": "ro",
+      "mode": "ro",
+      "readOnly": true,
+      "vfs": true,
+      "seeds": false
+    },
+    {
+      "world": "no-boot-lock",
+      "mountable": "ro",
+      "mode": "ro",
+      "readOnly": true,
+      "vfs": false,
+      "seeds": false
+    }
+  ],
+  "base": {
+    "files": 39,
+    "bytes": 623827,
+    "dirs": [
+      "bin",
+      "include",
+      "lib",
+      "share"
+    ],
+    "largest": [
+      {
+        "name": "include/abi.mjs",
+        "bytes": 177933
+      },
+      {
+        "name": "bin/files",
+        "bytes": 119265
+      },
+      {
+        "name": "bin/taskmgr",
+        "bytes": 56841
+      }
+    ],
+    "median": {
+      "name": "bin/wc",
+      "bytes": 3196
+    }
+  },
+  "journal": {
+    "records": 82,
+    "journalBytes": 7762,
+    "prefixes": {
+      "cuts": 7763,
+      "ok": 7763,
+      "crashes": 0,
+      "divergent": 0
+    },
+    "flips": {
+      "tried": 1109,
+      "indistinguishable": 0,
+      "refused": 1109
+    },
+    "treePaths": 43
+  },
+  "rows": [
+    {
+      "clause": "A",
+      "name": "a fresh volume reports MOUNT_FRESH and mounts rw",
+      "ok": true,
+      "detail": {
+        "mountable": "fresh",
+        "mode": "rw",
+        "readOnly": false,
+        "vfs": true,
+        "seeds": true
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a fresh volume is the world the gate admits",
+      "ok": true,
+      "detail": {
+        "mountable": "fresh",
+        "mode": "rw",
+        "readOnly": false,
+        "vfs": true,
+        "seeds": true
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a populated volume reports MOUNT_RW, not MOUNT_FRESH",
+      "ok": true,
+      "detail": {
+        "mountable": "rw",
+        "mode": "rw",
+        "readOnly": false,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "the tree the first boot wrote is still there",
+      "ok": true,
+      "detail": [
+        "home"
+      ]
+    },
+    {
+      "clause": "A",
+      "name": "a populated volume is REFUSED by the gate",
+      "ok": true,
+      "detail": {
+        "mountable": "rw",
+        "mode": "rw",
+        "readOnly": false,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a volume whose slots do not decode mounts REFUSE",
+      "ok": true,
+      "detail": {
+        "mountable": "refuse",
+        "mode": "refuse",
+        "readOnly": true,
+        "vfs": false,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a failed mount is REFUSED by the gate",
+      "ok": true,
+      "detail": {
+        "mountable": "refuse",
+        "mode": "refuse",
+        "readOnly": true,
+        "vfs": false,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a fresh volume with an unreadable blob directory mounts RO",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "...and it is REFUSED by the gate",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a fresh volume whose initial superblock refuses mounts RO",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "...and it is REFUSED by the gate",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": true,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "a mount that could not take the boot lock has no VFS",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": false,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "...and it is REFUSED by the gate",
+      "ok": true,
+      "detail": {
+        "mountable": "ro",
+        "mode": "ro",
+        "readOnly": true,
+        "vfs": false,
+        "seeds": false
+      }
+    },
+    {
+      "clause": "A",
+      "name": "EXACTLY ONE world admits a seed, and it is `fresh`",
+      "ok": true,
+      "detail": {
+        "admitted": [
+          "fresh"
+        ],
+        "gate": "store.report.mountable === MOUNT_FRESH && store.mode === MOUNT_RW && !!store.vfs"
+      }
+    },
+    {
+      "clause": "B",
+      "name": "every row in USR_ENTRIES names a file that exists in this tree",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "clause": "B",
+      "name": "the base is a counted number of files and bytes, not an estimate",
+      "ok": true,
+      "detail": {
+        "files": 39,
+        "bytes": 623827
+      }
+    },
+    {
+      "clause": "C",
+      "name": "the intact journal of a seed replays every op",
+      "ok": true,
+      "detail": {
+        "ops": 82,
+        "applied": 82,
+        "refusedAt": null
+      }
+    },
+    {
+      "clause": "C",
+      "name": "the replayed tree is byte-for-byte the tree the writer built",
+      "ok": true,
+      "detail": {
+        "paths": 43
+      }
+    },
+    {
+      "clause": "C",
+      "name": "no truncation of the seed's journal crashes replay",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "clause": "C",
+      "name": "every truncation builds a PREFIX of the seeded tree and never a divergent one",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "clause": "C",
+      "name": "no bit flip in the seed's journal crashes replay",
+      "ok": true,
+      "detail": []
+    }
+  ],
+  "failed": [],
+  "ok": true
+}

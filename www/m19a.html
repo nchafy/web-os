@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M19a — the session is a writable copy of the read-only base</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as every page from M11 on does it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect a page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:160px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M19a starting…</pre>
+<div id="desktop"></div>
+<script>
+  /* PUBLISHED FROM A CLASSIC SCRIPT, before the module runs: a module that fails to parse
+     publishes nothing, and a harness with no object to read reports a timeout where there was a
+     syntax error. */
+  globalThis.M19A = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M19a's page: THE SESSION IS A WRITABLE COPY OF THE READ-ONLY BASE, SEEDED ONCE (D40).
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283).
+ *
+ *   CLAUSE 1  A FRESH VOLUME IS SEEDED. The kernel's own figures (39 files, 623,827 bytes, 42
+ *             chunks), a walk of the base that agrees with them, the landing directory's four
+ *             entries, and every copied file read back BYTE FOR BYTE against `/usr`.
+ *   CLAUSE 2  THE COPY IS WRITABLE: a file created in it, bytes written into it and read back
+ *             through a real `read(2)`, then deleted, then gone.
+ *   CLAUSE 3  THE BASE IS UNCHANGED, which is what makes this a copy rather than a move. The
+ *             base's own file is untouched after the copy was written in; the copy carries an
+ *             owner write bit the base does not; and the base refuses a mkdir, a create and a
+ *             delete — each refusal asserted SEPARATELY, and the mkdir's errno BY NAME, because
+ *             "it refused" passes for a refusal for the wrong reason.
+ *   CLAUSE 4  A SECOND BOOT DOES NOT RE-COPY. This is constraint 28's clause and the important
+ *             one: an edit made on the first boot must survive the second, because a re-copy
+ *             discards a reader's work and reports success.
+ *   CLAUSE 5  A VOLUME THAT FAILED TO MOUNT IS NOT SEEDED, and says why.
+ *
+ * HOW THE TWO BOOTS ARE DONE, because this is the hard part of the page. The OPFS is one per
+ * ORIGIN, so this page WIPES it once at the top and then boots three kernels against the SAME
+ * volume in one load: boot 1 meets an empty volume and is seeded, boot 2 meets boot 1's and must
+ * leave it alone, boot 3 meets one whose three superblock slots this page has corrupted. The wipe
+ * is done from the PAGE and never from a kernel, for `www/m2.html`'s reason: a kernel that could
+ * wipe the volume would be a kernel with a reseed path in it (constraint 28).
+ *
+ * AND THE PERSISTENCE CLAUSE CANNOT PASS ON A VOLUME NOBODY WROTE. The edit is `cp`ing a
+ * DIFFERENT base file over a seeded one, so the surviving length is a number the seed never
+ * writes: a fresh volume's copy of `share/readme.txt` is readme's length, and the clause asserts
+ * logo.rgba's. A clause satisfied by the seed itself would prove nothing about the second boot.
+ *
+ * EVERY READING COMES BACK THROUGH A PROCESS'S RESULT ROW, never off the page. A program returns
+ * its account to the kernel (`src/bin/true.mjs`'s contract), and `ls` returns `listed`, `stat`
+ * returns `rows`, `wc` returns `total`, `rm` returns `files`, and
+ * `bench/m19a-seed/program.mjs`'s `verify` returns a byte-for-byte comparison with the errno BY
+ * NAME out of `src/abi.mjs`'s own table. This ABI's numbers are not Linux's — EEXIST is 20 here,
+ * EROFS 69 — so a check asserting a NUMBER would be right about Linux and wrong about this
+ * system, and the one that did failed over a correct refusal.
+ */
+import {
+  bootKernel, shutdown, spawnProgram, resultOf,
+} from '/www/pagekernel.mjs'
+import { stageDesktop, DESKTOP_HELP } from '/www/shell.mjs'
+import { SUPER_SLOTS, MAX_INLINE } from '/src/abi.mjs'
+import { HOME_DIR } from '/src/libos/std.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const M = globalThis.M19A
+const params = new URLSearchParams(location.search)
+
+/* THE ONE CONTROL THIS PAGE'S URL CARRIES. `cfg.noSeed` is a kernel boot key and is deliberately
+ * NOT bench-gated (`src/kernel/kernel.mjs`), so the world D40 removes — the file manager's
+ * directory read-only again — is re-runnable from a query string with no source edit. The other
+ * two registered controls are SERVED-BYTES fixtures over `src/kernel/seed.mjs`, which this page
+ * does not own and must not be able to select by URL: the clauses below MEASURE those worlds
+ * rather than being told about them. */
+const CFG = Object.freeze({
+  proofs: params.get('proofs') === '1',
+  noSeed: params.get('no_seed') === '1',
+})
+
+const BENCH = '/bench/m19a-seed/program.mjs'
+const LS = '/src/bin/ls.mjs'
+const STAT = '/src/bin/stat.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+const RM = '/src/bin/rm.mjs'
+const CP = '/src/bin/cp.mjs'
+const WC = '/src/bin/wc.mjs'
+
+/** The base, and the two of its files this page uses by name. `readme.txt` is the file the EDIT
+ *  lands on and `logo.rgba` supplies the edit's bytes; they must differ in LENGTH, which is what
+ *  makes the surviving length a number no seed writes. */
+const BASE = '/usr'
+const BASE_EDIT = '/usr/share/readme.txt'
+const BASE_SOURCE = '/usr/share/logo.rgba'
+/** The copy's own four directories, in the order `ls` sorts them. */
+const BASE_DIRS = Object.freeze(['bin', 'include', 'lib', 'share'])
+/**
+ * HOW MANY FILES THE BASE HAS, and it is the ONE figure written here as a literal: it is
+ * `USR_ENTRIES.length` in `src/kernel/providerfs.mjs`, which is a manifest a milestone adds a row
+ * to and not a measurement of content. An expectation derived from its subject is one the subject
+ * cannot fail, so this one is stated.
+ *
+ * THE BYTE AND CHUNK TOTALS ARE NOT LITERALS HERE, and that is a correction rather than a
+ * weakening. `bench/m19a-seed/probe.py` measured 623,827 bytes and this page measured 627,911 —
+ * the difference is M19a's own edits to `src/bin/files.mjs` and `src/libos/std.mjs`, which ARE
+ * rows of the base. A byte constant is a number that goes stale on the next edit to any program,
+ * and a harness that fails for that reason teaches a reader to lower it. So both totals are
+ * asserted against TWO independent readings instead: a walk of the base inside a real process,
+ * and a `stat` of all 39 paths, with the chunk count derived from those sizes and `MAX_INLINE`.
+ */
+const BASE_FILES = 39
+/** `/Users`, the staging root, and the base's four. The seed never creates `SEED_DEST` itself —
+ *  the rename makes it, which is what makes its appearance the signal the copy is whole. */
+const SEED_DIRS = 6
+/** A path nothing in the base has, used for the create that must land in the copy and the create
+ *  that must be refused in the base. */
+const PROBE = 'm19a-probe.txt'
+
+/** A name a path under the base maps to inside the copy. */
+const under = (dest, path) => dest + path.slice(BASE.length)
+
+/* ---- the volume, from the page -------------------------------------------------------------- */
+
+/**
+ * EVERY ENTRY OF THE OPFS ROOT, REMOVED. Without this, boot 1 meets whatever check ran before it
+ * in the same Chrome and the seed does not run, so clause 1 would be measuring a volume somebody
+ * else seeded. `www/m2.html` carries the same function for the same reason.
+ */
+async function wipe () {
+  const root = await navigator.storage.getDirectory()
+  const names = []
+  for await (const name of root.keys()) names.push(name)
+  for (const name of names) {
+    try { await root.removeEntry(name, { recursive: true }) } catch (e) { /* gone is fine */ }
+  }
+  return names.length
+}
+
+async function readRaw (name) {
+  const root = await navigator.storage.getDirectory()
+  const fh = await root.getFileHandle(name, { create: false })
+  return new Uint8Array(await (await fh.getFile()).arrayBuffer())
+}
+
+async function writeRaw (name, bytes) {
+  const root = await navigator.storage.getDirectory()
+  const fh = await root.getFileHandle(name, { create: true })
+  const w = await fh.createWritable()
+  await w.truncate(0)
+  await w.write(bytes)
+  await w.close()
+}
+
+/** A cheap fingerprint of a slot's bytes, so "the volume was not written" is a claim about the
+ *  bytes rather than about the report. Not a checksum for correctness — a comparison for equality. */
+function sum16 (bytes) {
+  let s = 0
+  for (let i = 0; i < bytes.length; i += 1) s = (s + bytes[i] * (i % 251 + 1)) & 0xffff
+  return s
+}
+
+/**
+ * EVERY SUPERBLOCK SLOT CORRUPTED IN PLACE, KEEPING ITS LENGTH.
+ *
+ * A short slot is refused by the LENGTH check rather than by the magic, and clause 5 is about the
+ * volume's verdict and not about which guard produced it. All three, because one or two is the
+ * case `src/fs/fsck.mjs` is built to SURVIVE: it falls back to a good slot and says so. Three is
+ * the case constraint 28 is about, and the one where a reseed would be silent data loss.
+ */
+async function wreckSlots () {
+  const wrecked = []
+  for (const name of SUPER_SLOTS) {
+    let bytes = null
+    try { bytes = await readRaw(name) } catch (e) { bytes = null }
+    if (!bytes || bytes.length === 0) {
+      wrecked.push({ name, present: false })
+      continue
+    }
+    const junk = new Uint8Array(bytes.length).fill(0x5a)
+    await writeRaw(name, junk)
+    wrecked.push({ name, present: true, length: junk.length, sum: sum16(junk) })
+  }
+  return wrecked
+}
+
+async function readSlots () {
+  const seen = []
+  for (const name of SUPER_SLOTS) {
+    let bytes = null
+    try { bytes = await readRaw(name) } catch (e) { bytes = null }
+    seen.push(bytes
+      ? { name, present: true, length: bytes.length, sum: sum16(bytes) }
+      : { name, present: false })
+  }
+  return seen
+}
+
+/* ---- processes ------------------------------------------------------------------------------ */
+
+/** One program, start to result row. `resultOf` carries kernel state on a timeout rather than
+ *  raising a bare "no result": a stopped pipeline raises no error anywhere (constraint 122). */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 120000)) }
+}
+
+/** `stat`'s rows, keyed by the path asked for. A path that refused has NO row and the program's
+ *  exit is non-zero, which is how "it is gone" and "it is there" are told apart. */
+async function statOf (k, ...paths) {
+  const r = await runProgram(k, STAT, ['stat', ...paths])
+  const rows = {}
+  for (const row of (r.rows || [])) rows[row.path] = row
+  return { exit: r.exit, rows, count: (r.rows || []).length }
+}
+
+/** `ls`'s ENTRY COUNT over one or more directories. The count is what a readdir answers, and it
+ *  comes back in the program's own result row rather than off a screen. */
+async function listed (k, ...paths) {
+  const r = await runProgram(k, LS, ['ls', ...paths])
+  return { exit: r.exit, listed: r.listed | 0 }
+}
+
+/** The volume's verdict, as the kernel reports it on the boot message. `mountable` and `mode` are
+ *  BOTH read because they disagree on two fresh-volume paths — `bench/m19a-seed/probe.mjs`
+ *  measured all six worlds, and `maySeed`'s three conjuncts are one per failure world. */
+function volumeOf (up) {
+  const fs = (up && up.fs) || {}
+  return {
+    mounted: fs.mounted === true,
+    mode: String(fs.mode),
+    mountable: fs.report ? String(fs.report.mountable) : null,
+    readOnly: fs.readOnly === true,
+    seed: fs.seed || null,
+  }
+}
+
+/* ---- the proofs ----------------------------------------------------------------------------- */
+
+const BOOT = Object.freeze({ bench: 1, ...(CFG.noSeed ? { noSeed: 1 } : {}) })
+
+/**
+ * BOOT 1: a volume no kernel has ever written. Clauses 1, 2 and 3, and the EDIT clause 4 reads
+ * back on the next boot.
+ *
+ * The order inside it is load-bearing twice. The base's own `stat` is taken BEFORE anything is
+ * written in the copy and again AFTER, because "the base is unchanged" is a claim about two
+ * readings of the same path. And the write-bit reading is taken before the edit, because `cp`
+ * opens its destination `O_TRUNC` and the mode of an existing file is not the create mode.
+ */
+async function bootOne () {
+  const k = await bootKernel(BOOT, M, say)
+  const ev = { }
+  try {
+    const vol = volumeOf(k.events.find((m) => m.t === 'up'))
+    const seed = vol.seed
+    ev.volume = vol
+    ev.seed = seed
+    /* THE DESTINATION THE KERNEL REPORTED, and `HOME_DIR` when there is none. `src/kernel/seed.mjs`
+     * owns `SEED_DEST` and `src/libos/std.mjs` owns `HOME_DIR`; a process may not import kernel
+     * code, so the two cannot be one constant and a drift is an empty file manager with no error
+     * anywhere. `destAgrees` is that drift as a clause. */
+    const dest = (seed && seed.dest) || HOME_DIR
+    ev.dest = dest
+    ev.home = HOME_DIR
+    say('boot 1: ' + JSON.stringify(vol))
+
+    /* CLAUSE 1 --------------------------------------------------------------------------------- */
+    ev.ran = Boolean(seed && seed.ran === true && seed.why === '' && seed.rolledBack === null
+      && seed.partial === null)
+    ev.destAgrees = Boolean(seed && seed.dest === HOME_DIR)
+    ev.counts = Boolean(seed && seed.files === BASE_FILES && seed.dirs === SEED_DIRS
+      && seed.base === BASE)
+
+    // An INDEPENDENT reading of the same base, through real syscalls inside a real process: the
+    // kernel counting 39 files and the base holding 39 are two facts.
+    ev.walk = await runProgram(k, BENCH, ['walk'])
+    ev.agrees = Boolean(ev.walk.ok === true && seed
+      && ev.walk.files === seed.files && ev.walk.bytes === seed.bytes)
+
+    /* A THIRD READING, and the only one that can price the CHUNKS: every base file's size out of
+     * `stat`, summed, and turned into the write count `MAX_INLINE` implies. A seed that wrote one
+     * call per file would report 39 against a base whose two largest files take 3 and 2, so the
+     * chunk count is a real reading of the chunking and not a restatement of the file count. */
+    const sizes = await statOf(k, ...(ev.walk.order || []))
+    const rows = Object.values(sizes.rows)
+    const sumBytes = rows.reduce((n, r) => n + r.size, 0)
+    const sumChunks = rows.reduce((n, r) => n + Math.ceil(r.size / MAX_INLINE), 0)
+    ev.sizes = { count: sizes.count, exit: sizes.exit, sumBytes, sumChunks, maxInline: MAX_INLINE }
+    ev.chunksDerived = sizes.exit === 0 && rows.length === BASE_FILES && Boolean(seed)
+      && seed.bytes === sumBytes && seed.chunks === sumChunks && sumChunks > BASE_FILES
+
+    const top = await listed(k, dest)
+    const deep = await listed(k, ...BASE_DIRS.map((d) => `${dest}/${d}`))
+    const baseDeep = await listed(k, ...BASE_DIRS.map((d) => `${BASE}/${d}`))
+    ev.top = top
+    ev.deep = deep
+    ev.baseDeep = baseDeep
+    ev.topLevel = top.exit === 0 && top.listed === BASE_DIRS.length
+    ev.entries = deep.exit === 0 && deep.listed === BASE_FILES
+      && baseDeep.exit === 0 && baseDeep.listed === deep.listed
+
+    const dirStat = await statOf(k, dest, ...BASE_DIRS.map((d) => `${dest}/${d}`))
+    ev.dirStat = dirStat
+    ev.topLevelAreDirs = dirStat.exit === 0
+      && dirStat.count === BASE_DIRS.length + 1
+      && Object.values(dirStat.rows).every((r) => r.type === 'directory')
+
+    // BYTE FOR BYTE, every file, against the base it came from. A copy that reported a count and
+    // wrote the wrong bytes is the worst outcome available here.
+    ev.verify = await runProgram(k, BENCH, ['verify', dest])
+    ev.identical = ev.verify.ok === true && ev.verify.compared === BASE_FILES
+      && ev.verify.bytes === sumBytes && (ev.verify.dirsMissing || []).length === 0
+
+    /* CLAUSE 3, FIRST HALF: what the base reads as BEFORE anything is written in the copy. ----- */
+    const baseBefore = await statOf(k, BASE_EDIT, BASE_SOURCE)
+    ev.baseBefore = baseBefore
+    const copyBefore = await statOf(k, under(dest, BASE_EDIT))
+    ev.copyBefore = copyBefore
+    // THE OWNER WRITE BIT, which is the whole of what D40 buys: the base's data files are 0o444,
+    // and `src/kernel/seed.mjs` ORs 0o200 into the copy's mode, because a copy unmodifiable by its
+    // MODE where the base was unmodifiable by its MOUNT is the same refusal through another door.
+    const copyMode = (copyBefore.rows[under(dest, BASE_EDIT)] || {}).mode || ''
+    const baseMode = (baseBefore.rows[BASE_EDIT] || {}).mode || ''
+    ev.modes = { copy: copyMode, base: baseMode }
+    ev.writeBit = copyMode !== '' && baseMode !== ''
+      && (parseInt(copyMode, 8) & 0o200) !== 0 && (parseInt(baseMode, 8) & 0o200) === 0
+
+    /* CLAUSE 2 --------------------------------------------------------------------------------- */
+    const probe = `${dest}/${PROBE}`
+    const made = await runProgram(k, TOUCH, ['touch', probe])
+    ev.made = { exit: made.exit, created: made.created || [] }
+    ev.created = made.exit === 0 && (made.created || []).includes(probe)
+
+    const probeStat = await statOf(k, probe)
+    ev.probeStat = probeStat
+    const probeRow = probeStat.rows[probe] || {}
+    ev.readsBack = probeStat.exit === 0 && probeRow.type === 'regular file'
+      && probeRow.size === 0 && (parseInt(probeRow.mode || '0', 8) & 0o200) !== 0
+
+    // BYTES INTO IT, AND BACK OUT THROUGH A REAL `read(2)`. `wc` opens the file and reads it to
+    // end of file, so this is the copy answering rather than the directory entry.
+    const wrote = await runProgram(k, CP, ['cp', BASE_SOURCE, probe])
+    const counted = await runProgram(k, WC, ['wc', '-c', probe])
+    const sourceSize = (baseBefore.rows[BASE_SOURCE] || {}).size
+    ev.wrote = { exit: wrote.exit, bytes: wrote.bytes }
+    ev.counted = { exit: counted.exit, total: counted.total || null, want: sourceSize }
+    ev.bytesBack = wrote.exit === 0 && wrote.bytes === sourceSize
+      && counted.exit === 0 && Boolean(counted.total) && counted.total.bytes === sourceSize
+
+    const gone = await runProgram(k, RM, ['rm', probe])
+    ev.removed = { exit: gone.exit, files: gone.files }
+    ev.deleted = gone.exit === 0 && gone.files === 1
+    const afterRm = await statOf(k, probe)
+    ev.afterRm = afterRm
+    ev.gone = afterRm.exit !== 0 && afterRm.count === 0
+
+    /* CLAUSE 3, THE REFUSALS. Each one SEPARATELY, because a single "it refused" passes for a
+     * filesystem that refused for the wrong reason, and the errno BY NAME, because this ABI's
+     * numbers are not Linux's. --------------------------------------------------------------- */
+    // The one refusal whose errno arrives as a NAME: `bench/m19a-seed/program.mjs` builds its
+    // refusal with `env.std.errnoName`, so the assertion is on EROFS and not on 69.
+    ev.intoBase = await runProgram(k, BENCH, ['copy', `${BASE}/m19a-base-copy`])
+    ev.mkdirErofs = ev.intoBase.ok === false && ev.intoBase.errnoName === 'EROFS'
+
+    const baseTouch = await runProgram(k, TOUCH, ['touch', `${BASE}/share/${PROBE}`])
+    const baseTouchStat = await statOf(k, `${BASE}/share/${PROBE}`)
+    ev.baseTouch = { exit: baseTouch.exit, created: baseTouch.created || [] }
+    ev.touchRefused = baseTouch.exit !== 0 && (baseTouch.created || []).length === 0
+      && baseTouchStat.count === 0
+
+    const baseRm = await runProgram(k, RM, ['rm', BASE_EDIT])
+    ev.baseRm = { exit: baseRm.exit, files: baseRm.files }
+    ev.rmRefused = baseRm.exit !== 0 && baseRm.files === 0
+
+    /* A MOUNTPOINT IS A REAL DIRECTORY ON THE VOLUME BENEATH IT (constraint 238), and that is the
+     * one part of the base a seed can actually damage: `src/kernel/seed.mjs` is the only code that
+     * writes to the volume's root area. `/usr/..` is handed to the ROOT mount with the `..`
+     * intact, so it resolves against the volume and answers for the directory under the mount —
+     * which is why this reading, and not a read of `/usr` itself, is what a seed that MOVED the
+     * base instead of copying it would turn. */
+    const mountpoint = await statOf(k, `${BASE}/..`)
+    ev.mountpoint = mountpoint.exit === 0 && mountpoint.count === 1
+    ev.mountpointStat = mountpoint
+
+    /* THE EDIT CLAUSE 4 READS BACK. A DIFFERENT base file's bytes over a seeded one, so the
+     * surviving length is a number the seed never writes. */
+    const edited = await runProgram(k, CP, ['cp', BASE_SOURCE, under(dest, BASE_EDIT)])
+    ev.edited = { exit: edited.exit, bytes: edited.bytes, path: under(dest, BASE_EDIT) }
+    ev.editSize = sourceSize
+
+    /* CLAUSE 3, SECOND HALF: the base, read again, after all of that. */
+    const baseAfter = await statOf(k, BASE_EDIT, BASE_SOURCE)
+    ev.baseAfter = baseAfter
+    ev.baseUnchanged = baseAfter.exit === 0 && baseAfter.count === 2
+      && JSON.stringify(baseAfter.rows) === JSON.stringify(baseBefore.rows)
+
+    /* THREE SNAPSHOTS, so all three superblock slots hold live copies of a real volume before
+     * clause 5 corrupts them. One or two corrupt slots is the case fsck SURVIVES. */
+    ev.snapshots = []
+    for (let i = 0; i < SUPER_SLOTS.length; i += 1) {
+      k.post({ t: 'snapshot' })
+      const snap = await k.expect('snapshot', 60000)
+      ev.snapshots.push({ ok: snap.ok === true, r: snap.r })
+    }
+  } finally {
+    await shutdown(k, M)
+  }
+  return ev
+}
+
+/**
+ * BOOT 2: THE SAME VOLUME, and the clause constraint 28 is about. Nothing here wipes, nothing
+ * here writes a superblock on purpose: the question is whether the kernel copies again.
+ */
+async function bootTwo (dest, editSize) {
+  const k = await bootKernel(BOOT, M, say)
+  const ev = {}
+  try {
+    const vol = volumeOf(k.events.find((m) => m.t === 'up'))
+    const seed = vol.seed
+    ev.volume = vol
+    ev.seed = seed
+    say('boot 2: ' + JSON.stringify(vol))
+
+    /* `!seed.rolledBack` AND NOT `=== null`, because the one report that carries no counts at all
+     * — `cfg.noSeed`'s — has no `rolledBack` field either. The reading is "it did not copy and it
+     * undid nothing", and an absent field and a null are the same fact here; `=== null` would turn
+     * this clause under a control whose whole subject is a seed that never ran. The same applies
+     * to the two below. */
+    ev.noReseed = Boolean(seed && seed.ran === false && !seed.rolledBack)
+    // THE REASON, AND NOT ONLY THE REFUSAL. `ran: false` with no `why` is a step that silently did
+    // nothing, which is indistinguishable from one that silently did the wrong thing — and the
+    // three worlds `maySeed` refuses are not the same fact. This volume is the POPULATED one.
+    ev.why = (seed && seed.why) || ''
+    ev.whyNotFresh = /not a fresh read-write mount/.test(ev.why)
+    ev.copiedNothing = Boolean(seed) && !seed.files && !seed.bytes && !seed.chunks
+    ev.noPartial = Boolean(seed) && !seed.partial
+
+    /* THE EDIT. `wc` reads the file to end of file, so this is the volume answering. The length is
+     * logo.rgba's, which is NOT what a seed writes at that path — so this clause cannot pass
+     * against a volume that was seeded again, and cannot pass against a fresh one either. */
+    const counted = await runProgram(k, WC, ['wc', '-c', under(dest, BASE_EDIT)])
+    ev.counted = { exit: counted.exit, total: counted.total || null, want: editSize }
+    ev.editSurvived = counted.exit === 0 && Boolean(counted.total)
+      && counted.total.bytes === editSize
+
+    /* AND NOTHING ELSE MOVED. `verify` compares every copied file against the base, so after one
+     * edit it must report EXACTLY ONE wrong row — the edited one — and 38 compared clean. A clean
+     * verify here is a tree that was copied again. */
+    ev.verify = await runProgram(k, BENCH, ['verify', dest])
+    const wrong = ev.verify.wrong || []
+    ev.restIntact = ev.verify.ok === false && ev.verify.compared === BASE_FILES - 1
+      && wrong.length === 1 && wrong[0].path === under(dest, BASE_EDIT)
+
+    /* A SECOND COPY MUST REFUSE, AND MUST HAVE WRITTEN NOTHING WHEN IT DOES.
+     * `bench/m19a-seed/program.mjs` opens `O_WRONLY|O_CREAT|O_EXCL` deliberately: an
+     * implementation that used `O_TRUNC` would overwrite silently and lose this failure. EEXIST
+     * BY NAME — it is 20 in this ABI, not Linux's 17. */
+    ev.secondCopy = await runProgram(k, BENCH, ['copy', dest])
+    ev.secondCopyRefused = ev.secondCopy.ok === false && ev.secondCopy.errnoName === 'EEXIST'
+      && ev.secondCopy.written === 0
+  } finally {
+    await shutdown(k, M)
+  }
+  return ev
+}
+
+/**
+ * BOOT 3: a volume whose three superblock slots are garbage. It must refuse, report read-only,
+ * seed NOTHING and write nothing — the arm of constraint 28 webxp got wrong, reached through the
+ * new door D40 opens.
+ */
+async function bootThree () {
+  const wrecked = await wreckSlots()
+  const ev = { wrecked }
+  const k = await bootKernel(BOOT, M, say)
+  try {
+    const vol = volumeOf(k.events.find((m) => m.t === 'up'))
+    const seed = vol.seed
+    ev.volume = vol
+    ev.seed = seed
+    say('boot 3: ' + JSON.stringify(vol))
+    // THE ANTI-VACUITY FOR EVERY CLAUSE BELOW. "It refused" says nothing about a volume whose
+    // slots were already fine, and `readRaw` on an absent slot answers `present: false`.
+    ev.allThreeCorrupted = wrecked.filter((s) => s.present).length === SUPER_SLOTS.length
+    ev.readOnly = vol.readOnly === true
+    ev.refused = vol.mode === 'refuse'
+    ev.noSeed = Boolean(seed && seed.ran === false && seed.dest === null)
+    // THE DOCUMENTED SENTENCE, not merely a non-empty string. A refused mount has NO VFS, so
+    // `src/kernel/kernel.mjs` skips the whole mount-table block and `seedVolume` is never called:
+    // what a reader is told comes from the report the kernel installs BEFORE the mount, which is
+    // why `seed` is never null once a mount has been attempted.
+    ev.saysWhy = /the volume did not mount/.test((seed && seed.why) || '')
+    // NO COUNTS AT ALL IS THE CORRECT STATE HERE, because the function that counts never ran — so
+    // the reading is "nothing was copied", which absent and zero both satisfy, and not "the
+    // counters read zero", which would assert a field this path does not publish.
+    ev.copiedNothing = Boolean(seed) && !seed.files && !seed.bytes && !seed.chunks
+  } finally {
+    await shutdown(k, M)
+  }
+  // "IT WROTE NOTHING" IS A CLAIM ABOUT THE VOLUME, not about the report: a reseed writes a slot,
+  // so the slots are read back and compared with what this page put there.
+  ev.after = await readSlots()
+  ev.wroteNothing = JSON.stringify(ev.wrecked) === JSON.stringify(ev.after)
+  return ev
+}
+
+/* ---- the live desktop ----------------------------------------------------------------------- */
+
+const M19A_HELP = Object.freeze([
+  '  `files` with no operand opens the session\'s own tree: a writable copy of /usr, made once',
+  '  rename, delete and new-folder have somewhere to work, because nothing here is read-only',
+  '  `files /usr` opens the BASE, which is install media and answers EROFS',
+])
+
+async function live () {
+  await stageDesktop({
+    into: desktop,
+    report: M,
+    say,
+    label: 'm19a',
+    cfg: CFG.noSeed ? { noSeed: 1 } : {},
+    programs: ['files', 'term'],
+    help: DESKTOP_HELP.concat(M19A_HELP),
+  })
+}
+
+/* ---- the run -------------------------------------------------------------------------------- */
+
+/** One proof's booleans, in the order the page measured them, under the names the check reads. */
+function proof (ok, evidence) {
+  return { ok, evidence }
+}
+
+async function proofs () {
+  say('M19a — the session is a WRITABLE COPY of the read-only base, seeded once (D40).'
+    + (CFG.noSeed ? ' CONTROL: no_seed (the copy is skipped).' : ''))
+  say('The OPFS is one per origin, so this page WIPES it and then boots three kernels against the')
+  say('same volume: fresh, populated, and one whose three superblock slots are corrupt.')
+
+  M.phase = 'wipe'
+  M.wiped = await wipe()
+  say('wiped ' + M.wiped + ' entr(ies) from the OPFS root')
+
+  M.phase = 'boot1'
+  const one = await bootOne()
+  M.proofs.seeded = proof(one.ran && one.destAgrees && one.counts && one.agrees
+    && one.chunksDerived && one.topLevel && one.topLevelAreDirs && one.entries
+    && one.identical, one)
+  M.proofs.writable = proof(one.created && one.readsBack && one.bytesBack && one.deleted
+    && one.gone, one)
+  M.proofs.base = proof(one.baseUnchanged && one.writeBit && one.mkdirErofs && one.touchRefused
+    && one.rmRefused && one.mountpoint, one)
+
+  M.phase = 'boot2'
+  const two = await bootTwo(one.dest, one.editSize)
+  M.proofs.persists = proof(two.noReseed && two.whyNotFresh && two.copiedNothing
+    && two.editSurvived && two.restIntact && two.secondCopyRefused && two.noPartial, two)
+
+  M.phase = 'boot3'
+  const three = await bootThree()
+  M.proofs.refused = proof(three.allThreeCorrupted && three.readOnly && three.refused
+    && three.noSeed && three.saysWhy && three.copiedNothing && three.wroteNothing, three)
+
+  /* THE VOLUME IS LEFT CLEAN. This page corrupts every superblock slot, and a refusing volume is
+   * not a state the next check in the same Chrome should inherit. It is also what makes a second
+   * `--only m19a` in a row measure the same world as the first. */
+  M.phase = 'cleanup'
+  M.wipedAfter = await wipe()
+
+  const bad = Object.entries(M.proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  M.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + M.verdict)
+  M.state = 'done'
+  M.phase = 'rendered'
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    M.state = 'done'
+    M.verdict = 'live'
+    await live()
+    return
+  }
+  M.cfg = CFG
+  await proofs()
+}
+
+/* THE ENTRY POINT RUNS BELOW EVERY DECLARATION, which is not a style choice: `main()` is called
+ * synchronously and on the BARE URL it reaches `live()` before the first `await`, so a `const` the
+ * live path reads would still be in its temporal dead zone. `www/m17.html` shipped exactly that
+ * and threw `Cannot access 'LIVE_PROGRAMS' before initialization` in both engines while the suite,
+ * which loads `?proofs=1`, stayed green. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  M.state = 'aborted'
+  M.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No kernel, no volume, no filesystem, so there is nothing to copy and nothing to copy it to.'
+  out.className = 'bad'
+  say(M.why)
+} else {
+  main().catch((e) => {
+    M.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order: `e.stack` ALONE LOSES THE MESSAGE IN FIREFOX,
+     * because SpiderMonkey does not prefix its stack with the error's type and text. */
+    M.why = String(e && e.message ? `${e.message}\n${e.stack || ''}` : (e && e.stack) || e)
+    out.className = 'bad'
+    say(M.why)
+  })
+}
+</script>
+</body>
+</html>

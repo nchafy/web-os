@@ -7,7 +7,7 @@
 // caching a file description is the first thing that would break it.
 
 import {
-  E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName,
+  E, MAX_INLINE, O_DIRECTORY, O_RDONLY, errName, S_IFMT, S_IFDIR,
   DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
   WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
   WEV_CLIENT, clientBoxAt, pointerAt,
@@ -362,6 +362,61 @@ export function iconForPath(path, { isDir = false, isProgram = false } = {}) {
   if (Object.prototype.hasOwnProperty.call(ICON_BY_EXT, ext)) return ICON_BY_EXT[ext];
   if (isProgram) return WICON_PROGRAM;
   return WICON_GENERIC;
+}
+
+/* ---- M19a: where a session's files are (D40) ------------------------------------------------ */
+
+/**
+ * THE SESSION'S OWN TREE: the writable copy of the read-only base, under userland's name for it.
+ *
+ * `/usr` is a provider mount with `MNT_RO` and `mutErrno: "EROFS"` — install media — so the kernel
+ * copies it into the journaled volume ONCE, on a fresh volume and on no other, and a session works
+ * on the copy (D40). Delete, rename and paste then need no read-only case, because nothing a reader
+ * lands in is read-only.
+ *
+ * IT IS THE SAME PATH AS `SEED_DEST` IN `src/kernel/seed.mjs`, UNDER A NAME A PROCESS MAY IMPORT.
+ * A process may not import kernel code, so these two cannot be one constant from here; they MUST
+ * agree, and `www/shell.mjs` is where they are compared, because it is the one place that holds
+ * both this and the kernel's published `fs.seed.dest`.
+ *
+ * ONE DEFINITION FOR THE PROGRAMS, which is what it buys: `files` opens it when nobody named a
+ * directory and `desktop` hangs its icon folder off it. The same path written in two programs is
+ * how the file manager and the desktop come to disagree about where a reader's files are.
+ */
+export const HOME_DIR = "/Users/Default";
+
+/**
+ * THE BASE'S DATA DIRECTORY, AND IT IS READ-ONLY. Where `files` opened before D40, and where it
+ * opens again on a volume that carries no session tree — one booted with `cfg.noSeed`, or one whose
+ * seed was refused and rolled back. A reader meets the pre-D40 world there: a mutating verb answers
+ * EROFS. That is the state D40 removes, so it has to stay reachable rather than become unreachable.
+ */
+export const BASE_DIR = "/usr/share";
+
+/**
+ * WHERE A PROGRAM OPENS WHEN NOBODY NAMED A DIRECTORY: `{dir, home, why}`.
+ *
+ * IT IS MEASURED WITH A `stat` AND NOT READ OFF THE KERNEL'S SEED REPORT, because `ran` in that
+ * report answers a different question. A volume seeded on an earlier boot reports `ran: false` — it
+ * is no longer fresh — and still holds the whole tree, so a program keying off the seed having RUN
+ * would send every returning reader back to the read-only base. The report also cannot tell a
+ * volume that predates D40 from one whose copy landed: both are "not fresh". A `stat` can.
+ *
+ * `why` is non-empty exactly when the fallback was taken, and it names the errno. A program that
+ * quietly opened somewhere else is one a reader cannot tell from a seed that failed.
+ */
+export function sessionDir(env) {
+  const st = env.fs.stat(HOME_DIR);
+  if (typeof st === "number") {
+    return { dir: BASE_DIR, home: false, why: `${HOME_DIR}: ${errnoName(st)}` };
+  }
+  // A non-directory at that path takes the same fallback rather than being handed on as the
+  // caller's ENOTDIR: only a volume with no session tree can have one, and what a reader needs to
+  // be told is still which path is wrong.
+  if ((st.mode & S_IFMT) !== S_IFDIR) {
+    return { dir: BASE_DIR, home: false, why: `${HOME_DIR} is not a directory` };
+  }
+  return { dir: HOME_DIR, home: true, why: "" };
 }
 
 /* ---- M16: a surfaced program's answer to WEV_CLIENT -----------------------------------------

@@ -31,6 +31,7 @@ import {
 } from "../fs/mounts.mjs";
 import { mountProvider, USR_ENTRIES, BENCH_ENTRIES } from "./providerfs.mjs";
 import { makeExec, EXEC_VIEW_ID, EXEC_CHUNK } from "./exec.mjs";
+import { seedVolume, journalMeta, SEED_VIEW_ID, SEED_CHUNK } from "./seed.mjs";
 import { makeProcFS } from "./procfs.mjs";
 import { makeDevFS, renderTrace, TRACE_RENDER_LIMIT } from "./devfs.mjs";
 import { TmpFS } from "./tmpfs.mjs";
@@ -107,6 +108,10 @@ let execView = null;
 let usrReport = null;
 /** The same for `/bench`, which exists only under a bench boot. Null reads as "no such mount". */
 let benchReport = null;
+/** M19a. What the session's copy of the read-only base did, or why it did not run (D40). Published
+ *  in `fsState()`, because a step that silently did nothing is indistinguishable from one that
+ *  silently did the wrong thing. Null only before the mount table is built. */
+let seedReport = null;
 /** Whether this kernel was booted as a bench. Module-level because the boot `cfg` is scoped to the
  *  boot handler, and M12's runtime budget hook is gated on it from the message switch. */
 let benchBoot = false;
@@ -977,6 +982,10 @@ function fsState() {
     noteTexts: noteTexts.slice(),
     quota: QUOTA ? { usage: QUOTA.usage, quota: QUOTA.quota } : null,
     inline: !!(IO && IO.inline),
+    // M19a. WHETHER THE SESSION'S TREE WAS COPIED, and how much of it: a seed that ran and a seed
+    // that was refused are the same boot from outside, and only one of them is constraint 28
+    // working (D40).
+    seed: seedReport,
   };
 }
 
@@ -1415,6 +1424,12 @@ async function handle(m) {
         // fresh, the one mistake constraint 28 exists to prevent.
         await IO.ready(5000);
       }
+      /* NEVER NULL once a mount has been attempted: `seed: null` reads as "no information", and
+       * the world this covers — a volume that refused to mount — is precisely the one constraint 28
+       * is about, so it has to say so rather than say nothing. Overwritten by the real report
+       * below when there is a volume to copy into. */
+      seedReport = { ran: false, why: "the volume did not mount, so there is nothing to seed",
+        dest: null };
       // Mounted BEFORE any process exists: a process's first syscall may be an open, and a
       // half-mounted filesystem has no honest answer for it.
       if (ioBooted) {
@@ -1483,12 +1498,9 @@ async function handle(m) {
           }
           try {
             const op = STORE.vfs.mkdir(cred, where, { mode: 0o555 });
-            // `freed` is stripped exactly as `metaOp` strips it: it is an instruction to the
-            // store, not a field of the record, and journalling it would write a record no
-            // replay understands.
-            const { freed, ...record } = op || {};
-            const r = op === null ? 0 : await STORE.journal(record);
-            if (r >= 0 && freed) await STORE.freeInode(freed);
+            // `journalMeta` is the apply-then-journal-then-free tail, in one place: it was written
+            // out here and again in the seed before M19a made it one function.
+            const r = await journalMeta(STORE, op);
             mountpoints.push(r < 0
               ? { path: where, made: false, why: `journal errno ${-r}` }
               : { path: where, made: true });
@@ -1574,6 +1586,50 @@ async function handle(m) {
             };
             noteOut(`/bench not mounted: ${benchReport.code} ${benchReport.why}`);
           }
+        }
+
+        /* M19a: THE SESSION'S WRITABLE COPY OF THE READ-ONLY BASE (D40). Last in the mount table's
+         * block, because it needs `/usr` mounted to read and the volume's root to write.
+         *
+         * SYNCHRONOUS AT BOOT, decided on the measurement and not on taste. The whole copy is
+         * 131-164 ms without a per-file fsync (`bench/m19a-seed/probe.py`, headless Chrome 158),
+         * which is roughly a boot's budget again — but it is paid ONCE PER VOLUME and never again,
+         * because a volume that exists is never re-copied. Deferred, it would cost the same
+         * milliseconds and add a race no process can resolve: there is no change notification in
+         * this system, so a `files` that listed the tree before the copy finished has no way to
+         * learn it moved, and the first thing a reader does on a first boot is open the file
+         * manager. One slow first boot beats a tree that fills in under the reader's hands.
+         *
+         * BEFORE ANY PROCESS EXISTS, which is also why it can hold no lock and race nothing: the
+         * first process is created by a `spawn` message, and this runs inside `boot`.
+         *
+         * A BENCH BOOT MUST ASK. `cfg.noSeed` is the opt-out and it is NOT bench-gated, unlike
+         * every control hook below: `www/m2.html` wipes the OPFS and mounts a fresh volume ~35
+         * times to measure the superblock and the journal, and a 45-inode copy inside each of
+         * those measures this instead of the subject. It is an opt-out and not an opt-in so the
+         * product keeps it by default — a feature a page has to remember to request is a promise
+         * kept by hand.
+         */
+        if (cfg.noSeed) {
+          seedReport = { ran: false, why: "cfg.noSeed", dest: null };
+        } else {
+          // The seed's own byte region, under a NEGATIVE id for the reason `execSab`'s is: the I/O
+          // worker keys views by pid and pids start at 1, so no process can name this one. LOCAL,
+          // where the loader's is module-level, because it has exactly one use and goes with it.
+          const seedSab = new SharedArrayBuffer(SEED_CHUNK);
+          if (IO) IO.register(SEED_VIEW_ID, seedSab);
+          const base = mounts.at("/usr");
+          seedReport = await seedVolume({
+            store: STORE,
+            fs: base ? base.fs : null,
+            label: "/usr",
+            view: new Uint8Array(seedSab),
+            note: noteOut,
+          });
+          // UNREGISTERED, unlike the loader's buffer, which is read for the life of the kernel. A
+          // region the I/O worker will still write into on request, with nothing left to ask for
+          // it, is a capability waiting for a later defect.
+          if (IO) IO.unregister(SEED_VIEW_ID);
         }
       }
 

@@ -5,9 +5,10 @@
 // THIS IS M14's HEADLINE AS A PROGRAM YOU CAN RUN, and the thing it demonstrates is that the shell
 // is DATA from a process rather than a page's hard-coded list. It opens one window, takes the
 // `WROLE_DESKTOP` role, reads the filesystem, and publishes what it found as rows: the files in
-// `/desktop` flagged for the desktop, the programs in `/usr/bin` flagged for the start menu. The
-// page draws those rows as icons and menu entries, and when one is activated the kernel queues a
-// `WEV_ITEM` on this window's own fd — so this program decides what opening something means.
+// the session's own `Desktop` folder flagged for the desktop, the programs in `/usr/bin` flagged
+// for the start menu. The page draws those rows as icons and menu entries, and when one is
+// activated the kernel queues a `WEV_ITEM` on this window's own fd — so this program decides what
+// opening something means.
 //
 // WHY THAT DIVISION. A desktop icon needs a label, a picture, a double-click, a selection, a
 // rubber band and a context menu. A display list has no text op and no image op, and a
@@ -30,10 +31,26 @@ import {
 
 const NAME = "desktop";
 
-/** Where a reader's own files live. Created if it is missing, which is the one write this program
- *  makes to the volume — and it is a mkdir rather than a seed: a desktop that invented files would
- *  be a desktop that disagreed with the filesystem. */
-const DESK_DIR = "/desktop";
+/**
+ * Where a reader's own files live, UNDER THE SESSION'S TREE: `${std.sessionDir}/Desktop`. Created
+ * if it is missing, which is the one write this program makes to the volume — and it is a mkdir
+ * rather than a seed: a desktop that invented files would be a desktop that disagreed with the
+ * filesystem.
+ *
+ * IT WAS A BARE `/desktop`, which was `docs/PLAN-SHELL.md` §7.3's proposal and predates D40. With
+ * the whole base copied into the volume a home-shaped tree is expressible, and a directory at the
+ * volume root beside it is a second place a reader's files could be. The seed creates no `Desktop`
+ * — it copies the base and invents nothing — so this program still makes its own, which is why the
+ * mkdir above is unchanged.
+ *
+ * ON A VOLUME WITH NO SESSION TREE it is under the read-only base and the mkdir is REFUSED, by
+ * name, in `account.refusals`: the four shortcuts below still publish, so a desktop in that world
+ * has rows and no file icons rather than nothing at all.
+ *
+ * It is resolved inside `run` and not here, because the answer is a `stat` and a module body holds
+ * no `env`.
+ */
+const DESK_LEAF = "Desktop";
 
 /** Where the programs are. The start menu is a listing of this directory, so a program added to
  *  `src/kernel/providerfs.mjs`'s manifest appears in the menu with no change here. */
@@ -109,7 +126,10 @@ export function run(env) {
   const account = {
     program: NAME, win: 0, fd: 0, role: 0, items: 0, publishes: 0,
     activations: 0, launched: [], refusals: [], states: [], why: "",
-    deskDir: DESK_DIR, madeDeskDir: false,
+    /* M19a. BOTH DIRECTORIES AND THE REASON, because a driver reading `deskDir` alone cannot tell a
+     * desktop folder inside the session's tree from one under the read-only base (D40).
+     * `sessionWhy` is "" exactly when the tree is there. */
+    deskDir: "", madeDeskDir: false, sessionDir: "", sessionWhy: "",
   };
 
   /* THE WINDOW FIRST, THEN THE ROLE. `win_create` carries no role — it has no spare register and
@@ -135,14 +155,14 @@ export function run(env) {
    *  row 3 is. */
   let published = [];
 
-  /** Make `/desktop` if it is not there. A DIRECTORY AND NOTHING IN IT: a program that wrote
-   *  example files would be a program that invented a reader's documents. */
-  const ensureDeskDir = () => {
-    const st = env.fs.stat(DESK_DIR);
+  /** Make the desktop folder if it is not there. A DIRECTORY AND NOTHING IN IT: a program that
+   *  wrote example files would be a program that invented a reader's documents. */
+  const ensureDeskDir = (deskDir) => {
+    const st = env.fs.stat(deskDir);
     if (typeof st !== "number") return 0;
-    const r = env.fs.mkdir(DESK_DIR, 0o755);
+    const r = env.fs.mkdir(deskDir, 0o755);
     if (r < 0) {
-      account.refusals.push(`mkdir ${DESK_DIR}: ${env.std.errnoName(r)}`);
+      account.refusals.push(`mkdir ${deskDir}: ${env.std.errnoName(r)}`);
       return r;
     }
     account.madeDeskDir = true;
@@ -152,11 +172,20 @@ export function run(env) {
   /**
    * Read the filesystem and publish. Returns how many rows went out, or a negative errno.
    *
-   * THE ORDER IS THE ORDER A READER SEES: the fixed rows first, then `/desktop`'s contents, then
-   * the programs. Every row carries its own `WITEM_*` flags, which is what lets ONE list be a
-   * desktop, a start menu and a jump list at once (`src/abi.mjs`).
+   * THE ORDER IS THE ORDER A READER SEES: the fixed rows first, then the desktop folder's
+   * contents, then the programs. Every row carries its own `WITEM_*` flags, which is what lets ONE
+   * list be a desktop, a start menu and a jump list at once (`src/abi.mjs`).
    */
   const publish = () => {
+    /* M19a. RESOLVED PER PUBLISH AND NOT ONCE AT STARTUP. `Refresh` is this ABI's whole answer to
+     * having no inotify, so a reader who asks for a re-read must get the filesystem as it is now —
+     * and the session's tree is a `stat`, which is exactly the kind of fact a cached copy gets
+     * wrong. */
+    const session = env.std.sessionDir(env);
+    const deskDir = `${session.dir}/${DESK_LEAF}`;
+    account.sessionDir = session.dir;
+    account.sessionWhy = session.why;
+    account.deskDir = deskDir;
     /* BUILT INTO A SEPARATE LIST AND COMMITTED ONLY ON SUCCESS, which a critic found this did not
      * do: `rows` was replaced before the publish was attempted, so a refused publish left the
      * KERNEL holding the previous list while this process held the new one — and a `WEV_ITEM`
@@ -168,7 +197,7 @@ export function run(env) {
      * desktop has the same kind: Computer, a user's folder, the Recycle Bin. EVERY ONE OF THEM
      * DOES SOMETHING, which is the rule the caption buttons follow too: a row that opened nothing
      * would be the live-looking-button defect with a label on it. They are what makes a desktop
-     * usable before a reader has put anything in `/desktop`.
+     * usable before a reader has put anything in their desktop folder.
      *
      * THERE IS NO RECYCLE BIN, and that is why: nothing in this system has a trash. A row for it
      * would be a drawing of a feature. */
@@ -184,11 +213,22 @@ export function run(env) {
       label: "Programs",
       run: () => ["files", BIN_DIR],
     });
+    /* THE SESSION'S OWN TREE, which is Windows 7's user-folder row and the one place a reader can
+     * change anything (D40). It was `Shared files` on `/usr/share` — a READ-ONLY mount, so the row
+     * a reader was most likely to press was the one where nothing could be deleted or renamed.
+     *
+     * THE LABEL IS THE FOLDER'S OWN NAME, so the icon, the file manager's title and the path all
+     * say one thing. A fixed label would be a second opinion about where the row goes, and on a
+     * volume with no session tree it would be the wrong one.
+     *
+     * THE BASE IS STILL REACHABLE: `Computer` lists the mount table and `Programs` opens `/usr/bin`
+     * directly. A shell that could not show the system would be a worse answer than a read-only
+     * default. */
     rows.push({
       icon: WICON_FOLDER,
       flags: WITEM_DESKTOP | WITEM_CONTAINER,
-      label: "Shared files",
-      run: () => ["files", "/usr/share"],
+      label: session.dir.split("/").filter((s) => s.length).pop() || "/",
+      run: () => ["files", session.dir],
     });
     rows.push({
       icon: WICON_TERMINAL,
@@ -197,14 +237,14 @@ export function run(env) {
       run: () => ["term", "--ceiling", String(ceiling)],
     });
 
-    ensureDeskDir();
-    const desk = env.std.listDir(env, DESK_DIR);
+    ensureDeskDir(deskDir);
+    const desk = env.std.listDir(env, deskDir);
     if (typeof desk === "number") {
-      account.refusals.push(`${DESK_DIR}: ${env.std.errnoName(desk)}`);
+      account.refusals.push(`${deskDir}: ${env.std.errnoName(desk)}`);
     } else {
       for (const entry of desk) {
         if (entry.name === "." || entry.name === "..") continue;
-        const path = `${DESK_DIR}/${entry.name}`;
+        const path = `${deskDir}/${entry.name}`;
         const isDir = entry.type === DT_DIR;
         // THE ASSOCIATION IS USERLAND'S AND IT HAS ONE DEFINITION, in `src/libos/std.mjs` beside
         // `FORMAT_BY_EXT` and `iconForPath`. It lived here while the desktop was its only reader;
@@ -221,7 +261,7 @@ export function run(env) {
           run: () => {
             if (isDir) return ["files", path];
             if (open) return open.argv(path);
-            return ["files", DESK_DIR];
+            return ["files", deskDir];
           },
         });
       }

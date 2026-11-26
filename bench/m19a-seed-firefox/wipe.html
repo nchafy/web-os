@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>wipe the OPFS volume</title>
+<!--
+  THE CONTROL'S OWN PAGE, and it exists for one reason: a volume cannot be wiped from the page that
+  is using it.
+
+  `bench/m19a-seed-firefox/firefox-session.py --prove-failure` has to produce the world constraint
+  28 names — a reader's edited tree replaced by a fresh copy of the base — and the honest way to
+  produce it from outside the kernel is to take the VOLUME away, so the next boot meets a fresh one
+  and seeds again. But the kernel holds `createSyncAccessHandle` locks on the blob files
+  (`src/kernel/iocore.mjs`), and `removeEntry` on a locked file answers `NoModificationAllowedError`
+  rather than removing it. A dedicated worker dies with its document, so NAVIGATING HERE is what
+  releases the locks — and this page has to be same-origin, because OPFS is keyed by origin and a
+  `data:` url is nobody's.
+
+  It boots no kernel and imports nothing. It needs no COOP/COEP either: OPFS is reachable without
+  cross-origin isolation, which is the whole reason this is a separate document rather than a flag
+  on the landing page.
+
+  THE REPORT IS THE POINT, not the removal. A control that silently removed nothing would make the
+  run that follows it prove nothing, so `wipeOpfs` returns what it found, what it removed, what it
+  could not, and every error by name. The driver refuses to continue on an empty `before`.
+-->
+<style>
+  body { font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; margin: 2rem; max-width: 42rem }
+  code { font: 13px/1.4 ui-monospace, Menlo, monospace }
+  pre { background: #f4f4f4; padding: .6rem; overflow-x: auto }
+</style>
+<h1>wipe the OPFS volume</h1>
+<p>
+  The negative control for
+  <code>bench/m19a-seed-firefox/firefox-session.py</code>. It takes the writable volume away so the
+  next boot of the desktop meets a fresh one and seeds a new copy of the base over what the reader
+  had — which is the defect <code>docs/CONSTRAINTS.md</code> 28 forbids, and the world the
+  <code>persists</code> clause has to be able to see.
+</p>
+<p>Nothing happens on load. The driver calls <code>wipeOpfs()</code>.</p>
+<pre id="out">idle</pre>
+<script type="module">
+  const out = document.getElementById('out')
+
+  const sleep = (ms) => new Promise((done) => setTimeout(done, ms))
+
+  /** Every top-level name in the OPFS root. `keys()` is the modern spelling and `entries()` the
+   *  one that shipped first; a driver that reported "nothing to remove" because the iterator had
+   *  the other name would be a control that silently did not take. */
+  async function namesIn(dir) {
+    const found = []
+    if (typeof dir.keys === 'function') {
+      for await (const name of dir.keys()) found.push(name)
+      return found
+    }
+    for await (const pair of dir.entries()) found.push(pair[0])
+    return found
+  }
+
+  /**
+   * Remove every entry of the OPFS root, retrying a locked one.
+   *
+   * THE RETRY IS NOT PADDING. A file with a live `FileSystemSyncAccessHandle` is exclusively
+   * locked, and the lock is released when the holder is collected rather than when its document
+   * goes — so the first attempt after a navigation can still answer `NoModificationAllowedError`.
+   * A single attempt would leave the volume half there, which mounts as a POPULATED volume: the
+   * next boot would neither seed nor carry the reader's tree, and the control would be proving a
+   * third thing nobody asked about.
+   */
+  globalThis.wipeOpfs = async function wipeOpfs(tries = 24, waitMs = 250) {
+    const root = await navigator.storage.getDirectory()
+    const before = await namesIn(root)
+    const removed = []
+    const left = []
+    const errors = []
+    for (const name of before) {
+      let gone = false
+      for (let i = 0; i < tries && !gone; i += 1) {
+        try {
+          await root.removeEntry(name, { recursive: true })
+          gone = true
+        } catch (error) {
+          errors.push(`${name}: ${String((error && error.name) || error)}`)
+          await sleep(waitMs)
+        }
+      }
+      ;(gone ? removed : left).push(name)
+    }
+    const report = {
+      before, removed, left, after: await namesIn(root), errors: errors.slice(0, 12),
+    }
+    out.textContent = JSON.stringify(report, null, 2)
+    return report
+  }
+
+  out.textContent = 'ready: call wipeOpfs()'
+  document.documentElement.dataset.wipe = 'ready'
+</script>
+</html>

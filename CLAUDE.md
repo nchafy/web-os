@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 305 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 306 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  305 normative constraints  ← cite these
+  CONSTRAINTS.md  306 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -104,6 +104,16 @@ bench/
   m19-details/    `firefox-details.py`: the sort, the range select and the hover on the LANDING
                   page in Firefox with real trusted input. Two controls, each naming its own
                   subset, and `--prove-failure`
+  m19a-seed/      M19a's three measurements, run BEFORE the seed was written. `probe.mjs` drives the
+                  REAL `src/kernel/store.mjs` through six mount worlds under plain Node and scores
+                  the gate expression against all of them — `--control` substitutes `!store.readOnly`
+                  and the run then seeds a POPULATED volume (constraint 306); `probe.py` times the
+                  copy phase by phase inside a real process against a real OPFS; and the seed's own
+                  journal is replayed at all 7,763 truncations and 1,109 bit flips
+  m19a-seed-firefox/  `firefox-session.py`: CAN A READER CHANGE THINGS, AND DO THE CHANGES STAY? The
+                  bare URL in Firefox with real trusted input — a file created in the session's tree,
+                  read back out of the file manager's own rows, and still there after a reload.
+                  `--prove-failure` takes the volume away between the boots
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -122,6 +132,10 @@ src/
     advance.mjs   M19: the measured glyph advances, as DATA and never as a measuring capability.
                   One frozen table and the string /dev/advance serves, built once at load
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
+    seed.mjs      M19a: the read-only base copied into the writable volume ONCE (D40). `maySeed` is
+                  the gate and it is three conjuncts, one per failure world; the copy is staged and
+                  published by ONE rename, so a reader's tree either is the whole base or does not
+                  exist. A second copy over an edited tree is constraint 28's defect (306)
     wins.mjs      M7: a window IS a file description. The event ring, the owner chain, the
                   destroy cascade, the not-responding detector. It replaced M4a's console.
                   M12's blur governor is here too: `governBlur` is an admission controller
@@ -219,6 +233,13 @@ www/
                   It asks for EXACTLY 56 gestures, 41 of them the hover stream. `M19.listState` and
                   `M19.aimAt` are its own decoder and its own aim, published so a driver in another
                   engine grows neither
+  m19a.html       M19a's 34 clauses over five proofs, and the only page in this project that boots
+                  THREE kernels against ONE volume in one load: fresh, populated, and one whose
+                  three superblock slots it corrupted in place. It WIPES the OPFS from the page
+                  first — a kernel that could wipe the volume is a kernel with a reseed path in it —
+                  and `wiped` is what says boot 1 really met an empty volume. `no_seed=1` is its one
+                  query control. ASKS FOR NO GESTURE, because a seeded tree and an unseeded one are
+                  not the same picture: `ls` answers ENOENT
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -308,6 +329,7 @@ row below rather than restate it.
 | Where a window opens when its program has no opinion | `WIN_ORIGIN_X`/`WIN_ORIGIN_Y` in `src/libos/std.mjs` — userland's convention, beside `iconForPath`, because the kernel knows nothing about icons. It is NOT the top-left corner: that is the desktop's icon column, and a window there makes the desktop stop working (constraint 289). The kernel spreads what comes after, by stepping an exact corner collision down-right (`WinMgr.#cascade`, constraint 291) |
 | Which programs open a window of their own | `OPENS_OWN_WINDOW` in `src/bin/desktop.mjs`. An ALLOWLIST: everything else in `/usr/bin` writes to stdout, so a menu row runs it inside a terminal rather than spawning a process with nothing to show (constraint 290) |
 | A whole file's bytes by path | `readFileBytes` in `src/libos/std.mjs`. `src/bin/clip.mjs` had its own copy until M14 needed the same three lines for `imgview -f` |
+| WHERE A PROGRAM LANDS — the session's own tree | `SEED_DEST = "/Users/Default"` in `src/kernel/seed.mjs` is where the copy LANDS; `HOME_DIR` in `src/libos/std.mjs` is what userland OPENS, with `BASE_DIR = "/usr/share"` as the fallback and `sessionDir(env)` the one function that chooses between them and says `why`. **TWO CONSTANTS AND THEY MUST BE EQUAL**, and that is not a second copy evadable: a process may not import kernel code, so the kernel publishes `dest` in the boot report (`fsState().seed.dest`) and `www/shell.mjs`'s `seedState` compares the two on every boot and publishes `drifted`. A drift means every program opens a directory the seed did not create, and the only symptom is an empty window. `DEFAULT_DIR`/`DESK_DIR` were the three restatements M19a removed; the desktop folder is `${sessionDir(env).dir}/Desktop`, resolved per publish and created by `src/bin/desktop.mjs` (constraint 306, D40) |
 | A window's CLIENT BOX and the ratio that relates it to CSS px | `WEV_CLIENT` + `clientBoxAt`/`dprFixed` and `DPR_FIXED_ONE` in `src/abi.mjs`. The box is DEVICE px — the unit `win_surface` takes and `SURFACE_MAX_PX` bounds — and the ratio RIDES THE RECORD because a process has no other route to it. A program's own layout constants are CSS px, and this is what converts them |
 | A WHEEL's deltas and the point it was aimed at | `WEV_WHEEL` + `wheelAt`/`packWheelPoint` and `WWHEEL_PAGE`/`WWHEEL_COALESCED` in `src/abi.mjs`. Surface px for a surfaced window, CELLS for a text one (constraint 248) — never device px. `packWheelPoint` is `wheelAt`'s declared inverse, because x and y share one 32-bit word |
 | The `mods` bit namespace, as ONE table | `selfTest` in `src/abi.mjs`, derived from `INTS` by the prefixes `WPTR_`/`WMOD_`/`WWHEEL_`. It was three separate clauses — pointer bits against each other, modifiers against each other, pointer against modifier — so a THIRD sub-table could collide with either, unseen. M17's wheel bits were the third one, and M18's `WMOD_META`/`WPTR_CLICK2`/`WPTR_CLICK3` are why it has to stay derived |
@@ -320,7 +342,7 @@ row below rather than restate it.
 | The GLYPH ADVANCES, and the set of sizes they are priced at | `src/kernel/advance.mjs` holds the measured table and builds the string `/dev/advance` serves; `TEXT_SIZES`, `ADVANCE_PATH`, `encodeAdvances`/`decodeAdvances`, `advanceWidth`, `advanceKey` and `ADV_CP_MIN`/`ADV_CP_MAX` are in `src/abi.mjs`. The sizes are SURFACE px — the unit `DL_TEXT`'s `a2` carries — and DERIVED from the CSS sizes programs draw at, half-UP as `Math.round` is. A size outside the set has NO ROW on purpose (constraints 302, 303). These sit beside `TEXT_SIZES` and not in `INTS`, so the device's own header is the stale-copy gate rather than `ABI_FINGERPRINT` |
 | The two font stacks | `UI_FAMILY`/`MONO_FAMILY` in `src/abi.mjs`. The renderer and the advance table MUST agree about them or the table prices a font nothing draws — which is why `bench/m19-advance/probe.py` reads the pair out of `src/wm/surface.mjs` by regex and fails loudly if either stops being a quoted const. **`src/wm/surface.mjs:26-27` and `src/wm/taskbar.mjs:95` still carry copies**; that is the import this row is waiting for |
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
-| The 305 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 306 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -420,6 +442,18 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   5 µs write. This is POSIX's own contract. (23)
 - **A bad superblock mounts read-only and reports.** It never reseeds. webxp reseeds; that is the
   defect being fixed, and it is silent data loss presented as success. (28)
+- **THERE ARE TWO COPIES OF THE BASE ON A SEEDED VOLUME, AND THAT IS THE FEATURE.** `/usr` is the
+  read-only base — install media — and `/Users/Default` is the session's WRITABLE copy of it, made
+  once at the first boot of a fresh volume (`src/kernel/seed.mjs`, D40, 306). A reader seeing `bin`,
+  `include`, `lib` and `share` in both places is seeing the design: the owner's words are *"all
+  operating systems to be a copy of the read only base. then each session can be modified freely."*
+  Deleting the copy's half, or pointing the file manager back at `/usr/share`, reinstates the defect
+  — every mutating verb unreachable from the one directory a reader lands in. **The seed is ONCE and
+  the gate is not negotiable**: it is `maySeed`'s three conjuncts on the FRESH-volume signal, and a
+  second copy over an edited tree is constraint 28 arriving through a new door.
+  `scripts/check.py --negative reseed-always` is that world, measured. A half-copy left under
+  `/Users/.Default.partial` is REPORTED and never removed, for the same reason: tidying away a tree
+  the reader did not ask to lose is the same data loss wearing an apron.
 - **A published data object is SEALED, and `dataobj_set` on it answers -EPERM.** Two processes
   reading one object must not be shown different bytes, so a source cannot rewrite what it put on
   the clipboard. (242)
@@ -547,9 +581,13 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   Python's `round` is half-to-EVEN: 11 CSS px at dpr 1.5 is JS 17 and Python 16. A set derived with
   the wrong rounding publishes a row nothing draws at and omits one two programs do, with no error
   anywhere, because an undeclared size falls back by design (303).
-- **Assert each refusal's errno separately.** A single "it refused" passes for a filesystem that
-  refused for the wrong reason. M3's `truncate` answered ENOENT where it owed EROFS, and only the
-  per-call assertion caught it.
+- **Assert each refusal's errno separately, and BY NAME.** A single "it refused" passes for a
+  filesystem that refused for the wrong reason. M3's `truncate` answered ENOENT where it owed EROFS,
+  and only the per-call assertion caught it. **The numbers are WASI preview1's and not Linux's** —
+  `EEXIST` is 20 here, `ENOTDIR` 54, `EACCES` 2, `EROFS` 69 — so a clause written against a
+  remembered number fails over a CORRECT refusal, which M19a's first bench draft did with 17 for
+  EEXIST. Name it through `errName` in `src/abi.mjs`, or `std.errnoName` inside a program
+  (constraint 306).
 - **A timeout MUST carry state.** A stopped pipeline raises no error anywhere — a parked reader and
   a parked writer are both legitimate — so the only way to tell a working pipe from a deadlocked
   one is to read the counts. `www/m4.html` attaches the kernel's park and refcount dump to its own
@@ -724,6 +762,23 @@ scripts/check.py --negative no-dir-stat       # ...and a folder with no Date cel
                                   # paid for the call
 scripts/check.py --negative band-from-row     # ...and a press on a row that bands instead of dragging
 scripts/check.py --negative no-hover-coalesce # ...and a hover stream APPENDED into a held program
+python3 bench/m19a-seed-firefox/firefox-session.py  # CAN A READER CHANGE THINGS, AND DO THE CHANGES
+                                  # STAY? the bare URL in Firefox, with real trusted input
+python3 bench/m19a-seed-firefox/firefox-session.py --prove-failure  # ...and with the volume taken
+                                  # away between the boots, they do not
+scripts/check.py --only m19a        # M19a's 44 expectations over five proofs and THREE kernels
+                                  # against one volume in one page load
+node bench/m19a-seed/probe.mjs      # THE GATE, scored against six mount worlds under plain Node
+node bench/m19a-seed/probe.mjs --control  # ...and `!store.readOnly`, which seeds a POPULATED volume
+python3 bench/m19a-seed/probe.py    # WHAT DOES COPYING THE BASE COST? phase by phase, in a real
+                                  # process against a real OPFS. 208-248 ms with a per-file fsync,
+                                  # 131-164 without — and the cost is in the FIRST WRITE, not the open
+python3 bench/m19a-seed/probe.py --prove-failure  # ...the UNGATED world, which must succeed
+scripts/check.py --negative no-seed          # the world D40 removes: no session tree, so `files`
+                                  # falls back to the read-only mount and no verb can run
+scripts/check.py --negative reseed-always    # ...and constraint 28's defect restored: a seed on
+                                  # every boot, installed over the tree the reader edited
+scripts/check.py --negative seed-moves-base  # ...and a seed that MOVES the base instead of copying
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end

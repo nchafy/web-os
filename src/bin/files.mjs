@@ -6,7 +6,8 @@
 // milestone's claim is that bytes of a declared format cross from one process to another on a
 // gesture, so there have to be two processes and a gesture:
 //
-//   files                       a row per file in /usr/share
+//   files                       a row per file in the SESSION'S OWN TREE — the writable copy of
+//                               the read-only base (`std.sessionDir`, D40)
 //   press a row and drag it     onto `imgview`'s window. The row's bytes arrive there under the
 //                               format this program declared, and the kernel owns the payload in
 //                               between — so this process may exit mid-drag and the drop still
@@ -199,8 +200,11 @@ const KEY_BACKSPACE = 127;
 const POLL_MS = 200;
 const CEILING_MS = 300000;
 
-/** The default directory, which is where M10's own assets live. */
-const DEFAULT_DIR = "/usr/share";
+/* THERE IS NO DEFAULT DIRECTORY CONSTANT HERE. It was `/usr/share` — a READ-ONLY provider mount,
+ * which is the whole of what D40 fixed: every mutating verb M20 adds would have been unreachable
+ * from the one directory this program showed. The default is now the session's own tree, resolved
+ * by `std.sessionDir` — one definition, beside the other userland conventions, read by this program
+ * and by `src/bin/desktop.mjs`. */
 
 /* ONE ROW, IN CSS PIXELS — the unit a list view's metrics are reasoned about in, and the unit
  * every constant below shares. A surface coordinate is `S` times one of these and is produced
@@ -749,13 +753,30 @@ export function run(env) {
   if (bad) {
     return { exit: env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE), program: NAME };
   }
+  /* M19a. AN OPERAND IS THE READER'S WORD AND IS NEVER SECOND-GUESSED: a named directory that is
+   * not there must answer ENOENT by name, not be replaced with somewhere that works. The fallback
+   * belongs to the case where nobody named one. */
+  const opened = operands[0]
+    ? { dir: operands[0], home: false, why: "" }
+    : env.std.sessionDir(env);
+  if (opened.why) {
+    env.std.warn(env, `${NAME}: no session tree (${opened.why}), opening ${opened.dir}, `
+      + "which is the base's own data directory and is READ-ONLY");
+  }
   /** WHERE THE WINDOW IS, AND IT MOVES. M18 re-lists in place, so the directory is state rather
    *  than an argument — and `history` is the stack Back pops. */
-  let dir = operands[0] || DEFAULT_DIR;
+  let dir = opened.dir;
   const history = [];
   const t0 = performance.now();
   const account = {
     program: NAME, dir, win: 0, fd: 0, rows: [], drags: 0, refusedDrags: 0,
+    /* M19a. WHO CHOSE THE DIRECTORY, and why it is not the session's tree when it is not: `dir`
+     * alone cannot tell a reader's own operand from the read-only fallback, and those are the two
+     * worlds D40 is about. THREE VALUES AND NOT A BOOLEAN — `argv`, `session`, `fallback` — because
+     * an operand may name the session's tree or anywhere else, and a flag would have to lie about
+     * one of them. `dirWhy` is "" except under `fallback`. */
+    dirFrom: operands[0] ? "argv" : (opened.home ? "session" : "fallback"),
+    dirWhy: opened.why,
     pointers: 0, presses: 0, drops: [], effects: [], why: "",
     // M16. The geometry, in both units, and what happened to it: `surface` is DEVICE px (what the
     // kernel granted), `client` is CSS px (what the layout is in), `dpr` is the factor.

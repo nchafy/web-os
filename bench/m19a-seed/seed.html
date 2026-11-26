@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M19a — what does seeding the base cost?</title>
+<style>
+body { background:#0b0d11; color:#cdd6e4; font:13px/1.5 ui-monospace, Menlo, monospace;
+  margin:0; padding:16px }
+pre { white-space:pre-wrap; margin:0 }
+.bad { color:#f88 }
+</style>
+</head>
+<body>
+<pre id="log">M19a starting…</pre>
+<script>
+  globalThis.M19A = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    phases: {}, errors: [], faults: [], notes: [],
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M19a's browser half: THE COST OF THE COPY, AND THE TWO VOLUME STATES ON REAL OPFS.
+ *
+ * `bench/m19a-seed/probe.mjs` tells the six mount worlds apart under Node, which is the only
+ * place three of them are reachable. This page answers the two questions Node cannot:
+ *
+ *   1. WHAT DOES THE COPY COST on a real volume, where `createSyncAccessHandle` is 495 us
+ *      (constraint 22) rather than a Map insertion. That figure decides whether D40's seed runs
+ *      synchronously at boot or is deferred, and the brief is explicit that it is not a silent
+ *      call.
+ *   2. IS THE SEED DURABLE AND NON-REPEATABLE — the copy survives a kernel reboot, the SECOND
+ *      boot reports `rw` and not `fresh`, and a second copy over it REFUSES. The last one is the
+ *      load-bearing half: it is what makes an ungated seed a visible failure rather than silent
+ *      data loss (constraint 28).
+ *
+ * `scripts/cdp.py` hands every run a fresh `--user-data-dir`, so the FIRST kernel in a run meets
+ * an empty OPFS. That is where the fresh world comes from; nothing here wipes storage, because a
+ * page that could would be a page that can reseed.
+ *
+ * It carries no proofs for `scripts/check.py`. It is a bench page: the figures go to
+ * `bench/m19a-seed/probe.py`, which prints the table.
+ */
+import { bootKernel, shutdown, spawnProgram, resultOf, ask } from '/www/pagekernel.mjs'
+
+const PROGRAM = '/bench/m19a-seed/program.mjs'
+const DEST = '/base'
+const NOFSYNC_DEST = '/nofsync'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const M = globalThis.M19A
+const params = new URLSearchParams(location.search)
+
+/** The control: skip the gate a seed step would apply and copy into the SECOND boot's volume as
+ *  well. It must collide, and `probe.py --prove-failure` scores that it did. */
+const UNGATED = params.get('ungated') === '1'
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  M.state = 'aborted'
+  M.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer +
+    '. No kernel, no volume, no figure to report.'
+  out.className = 'bad'
+  say(M.why)
+} else {
+  main().catch((e) => {
+    M.state = 'error'
+    M.why = String((e && e.stack) || e)
+    out.className = 'bad'
+    say(M.why)
+  })
+}
+
+/** One program run, start to result. `resultOf` carries state on a timeout (constraint 122). */
+async function runProgram (k, argv) {
+  const { pid } = await spawnProgram(k, PROGRAM, argv)
+  return await resultOf(k, pid, 120000)
+}
+
+/** The volume's own verdict, as the kernel reports it. `mountable` and `mode` are BOTH read
+ *  because they disagree on two paths — see `bench/m19a-seed/probe.mjs`. */
+async function volumeState (k) {
+  const fs = (await ask(k, 'fs-state')).fs || {}
+  return {
+    mounted: fs.mounted === true,
+    mountable: fs.report ? String(fs.report.mountable) : null,
+    mode: String(fs.mode),
+    readOnly: fs.readOnly === true,
+    generation: String(fs.generation),
+    problems: fs.report && fs.report.problems ? fs.report.problems.length : null,
+  }
+}
+
+async function main () {
+  const boot = { bench: 1 }
+
+  /* BOOT 1: a volume no kernel has ever written. */
+  const k1 = await bootKernel(boot, M, say)
+  M.phases.boot1 = await volumeState(k1)
+  say('boot 1: ' + JSON.stringify(M.phases.boot1))
+
+  M.phases.walk = await runProgram(k1, ['walk'])
+  say('walk: ' + JSON.stringify(M.phases.walk))
+
+  M.phases.copy = await runProgram(k1, ['copy', DEST])
+  say('copy: ' + JSON.stringify(M.phases.copy))
+
+  M.phases.verify = await runProgram(k1, ['verify', DEST])
+  say('verify: ' + JSON.stringify(M.phases.verify))
+
+  M.phases.nofsync = await runProgram(k1, ['copy-nofsync', NOFSYNC_DEST])
+  say('copy-nofsync: ' + JSON.stringify(M.phases.nofsync))
+
+  M.phases.afterCopy = await volumeState(k1)
+  await shutdown(k1, M)
+
+  /* BOOT 2: the same OPFS, now holding a snapshot. This is the world a seed MUST NOT run in. */
+  const k2 = await bootKernel(boot, M, say)
+  M.phases.boot2 = await volumeState(k2)
+  say('boot 2: ' + JSON.stringify(M.phases.boot2))
+
+  M.phases.verifyAfterReboot = await runProgram(k2, ['verify', DEST])
+  say('verify after reboot: ' + JSON.stringify(M.phases.verifyAfterReboot))
+
+  // THE SECOND COPY. An ungated seed would run this, and it must REFUSE rather than overwrite:
+  // `program.mjs` opens with O_EXCL for exactly this reason.
+  M.phases.secondCopy = await runProgram(k2, ['copy', DEST])
+  say('second copy: ' + JSON.stringify(M.phases.secondCopy))
+
+  if (UNGATED) {
+    // The control's world: the second copy is attempted into a DIFFERENT name, so it succeeds and
+    // the volume now holds two copies of the base. That is the cost an ungated seed pays, charged
+    // and reported rather than described.
+    M.phases.ungated = await runProgram(k2, ['copy', '/base-again'])
+    say('ungated second copy: ' + JSON.stringify(M.phases.ungated))
+  }
+
+  M.phases.afterReboot = await volumeState(k2)
+  await shutdown(k2, M)
+
+  M.state = 'done'
+  say('done')
+}
+</script>
+</body>
+</html>

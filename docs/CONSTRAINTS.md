@@ -3184,3 +3184,44 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     **`WCUR_DEFAULT` IS 0 BECAUSE A WINDOW IS BORN WITH IT.** `SYS_NAME`'s shape — dense from 0 so
     the array is the lookup — plus the fact that an unset cursor must mean the ordinary arrow, which
     is what `win.el.dataset.cursor` being ABSENT distinguishes from its being `"0"`.
+
+306. **A SEED IS NOT A RESEED, AND THE DIFFERENCE IS THE FRESH-VOLUME SIGNAL. CONSTRAINT 28, AT A
+    NEW DOOR.** The session's tree is a WRITABLE COPY of the read-only base, copied into the
+    journaled volume ONCE (`docs/DECISIONS.md` D40, `src/kernel/seed.mjs`). Constraint 28 forbids
+    RESEEDING — "a bad superblock mounts read-only and reports; it never reseeds" — and a copy step
+    is exactly how that defect returns: a second copy over a reader's edited tree is silent data
+    loss presented as a successful boot. Seeding a FRESH volume is not reseeding, because
+    `Store.mount` already writes an initial superblock on one (`src/kernel/store.mjs:246`). So the
+    copy MUST be gated on that same signal and on nothing weaker. The gate is one expression,
+    `maySeed` in `src/kernel/seed.mjs`, and it is three conjuncts because there are three failure
+    worlds to tell apart:
+    `store.report.mountable === MOUNT_FRESH && store.mode === MOUNT_RW && !!store.vfs`.
+    **NO CONJUNCT IS REDUNDANT, AND THAT WAS MEASURED OVER SIX MOUNT WORLDS** by driving the real
+    `Store` through a Map-backed I/O surface under plain Node (`bench/m19a-seed/probe.mjs`, 21
+    clauses). After a successful fresh mount `mode` is `rw` exactly as it is for a POPULATED volume
+    (`store.mjs:258`, `:276`), so `mode` alone admits the volume this constraint is about.
+    `Store.mount` OVERWRITES `report.mountable` to `MOUNT_RO` on two FRESH-volume paths — a refused
+    blob-directory listing, so the staging floor is unknown (`:221-224`), and a refused initial
+    superblock write (`:254`) — so a gate written on `fsck()`'s own answer admits the measured
+    `floor-unknown` world, which carries a VFS and reports `ro`/`ro`. And the boot-lock arm
+    (`:184-192`) returns a report with NO VFS at all.
+    **`!store.readOnly` IS THE EXPRESSION A READER REACHES FOR FIRST, AND IT IS THE DEFECT.** It is
+    true in `fresh` AND in `populated`; `node bench/m19a-seed/probe.mjs --control` substitutes it
+    and the run then reports a seed over a volume that already holds a tree — 19 of 21 clauses, the
+    two that turn being the populated world's.
+    **THE COPY IS STAGED AND PUBLISHED BY ONE RENAME**, so a reader's tree either is the whole base
+    or does not exist, and a half-copy left by a page killed mid-copy is REPORTED under
+    `SEED_STAGING` and never removed: tidying away a tree the reader did not ask to lose is 28's
+    defect wearing an apron. **`scripts/check.py --negative reseed-always` is the world that proves
+    the gate holds** — it drops the freshness conjunct and moves the destination aside in the SERVED
+    copy of `src/kernel/seed.mjs`, and the second boot then loses the edit the first boot made: 6 of
+    44 expectations red, 38 intact. **IT TAKES TWO PATCHES AND NOT ONE, WHICH IS ITSELF A FINDING:**
+    dropping the gate alone loses no data, because `VFS.rename` answers ENOTEMPTY onto a non-empty
+    directory (`src/fs/vfs.mjs:663`), so an ungated second seed copies 39 files, fails its rename,
+    rolls back and leaves the tree alone. The staging-and-rename design is a second guard nobody
+    wrote it to be.
+    **A REFUSAL IS ASSERTED BY ERRNO NAME, NEVER BY NUMBER, BECAUSE THIS ABI IS NOT LINUX'S.** The
+    numbers are WASI preview1's (`docs/ABI.md` §Errors): `EEXIST` is **20** here, `ENOTDIR` 54,
+    `EACCES` 2, `EROFS` 69. This milestone's first bench draft asserted 17 for EEXIST and FAILED
+    over a correct refusal; the clause reads `errnoName` now, and so does every refusal clause of
+    `check_m19a`.

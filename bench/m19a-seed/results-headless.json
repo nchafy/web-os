@@ -1,0 +1,1079 @@
+{
+  "chrome": "158.0.8127.37",
+  "state": "done",
+  "why": "",
+  "isolated": true,
+  "phases": {
+    "boot1": {
+      "mounted": true,
+      "mountable": "fresh",
+      "mode": "rw",
+      "readOnly": false,
+      "generation": "1",
+      "problems": 0
+    },
+    "walk": {
+      "mode": "walk",
+      "ms": 9.235000014305115,
+      "ok": true,
+      "dirs": 4,
+      "files": 39,
+      "bytes": 623827,
+      "walkMs": 3.1449999809265137,
+      "readMs": 6.025000035762787,
+      "perFileReadMs": 0.15448718040417403,
+      "largest": 177933,
+      "order": [
+        "/usr/bin/cat",
+        "/usr/bin/clip",
+        "/usr/bin/cp",
+        "/usr/bin/desktop",
+        "/usr/bin/df",
+        "/usr/bin/echo",
+        "/usr/bin/editor",
+        "/usr/bin/files",
+        "/usr/bin/grep",
+        "/usr/bin/head",
+        "/usr/bin/imgview",
+        "/usr/bin/kill",
+        "/usr/bin/ls",
+        "/usr/bin/mkdir",
+        "/usr/bin/mv",
+        "/usr/bin/paint",
+        "/usr/bin/ps",
+        "/usr/bin/pwd",
+        "/usr/bin/rm",
+        "/usr/bin/rmdir",
+        "/usr/bin/sh",
+        "/usr/bin/sleep",
+        "/usr/bin/sort",
+        "/usr/bin/stat",
+        "/usr/bin/tail",
+        "/usr/bin/taskmgr",
+        "/usr/bin/term",
+        "/usr/bin/touch",
+        "/usr/bin/true",
+        "/usr/bin/uniq",
+        "/usr/bin/wc",
+        "/usr/bin/winopen",
+        "/usr/bin/yes",
+        "/usr/include/abi.mjs",
+        "/usr/lib/process.mjs",
+        "/usr/lib/syscall.mjs",
+        "/usr/share/logo.png",
+        "/usr/share/logo.rgba",
+        "/usr/share/readme.txt"
+      ],
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.968905,
+        "meanMs": 0.00015592498987913132,
+        "maxMs": 0.019999980926513672,
+        "distinct": [
+          [
+            0,
+            193781
+          ],
+          [
+            0.004999995231628418,
+            5745
+          ],
+          [
+            0.005000054836273193,
+            464
+          ],
+          [
+            0.009999990463256836,
+            4
+          ],
+          [
+            0.010000050067901611,
+            1
+          ],
+          [
+            0.014999985694885254,
+            2
+          ],
+          [
+            0.019999980926513672,
+            3
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 1,
+      "calls": 179,
+      "replies": 179,
+      "errors": 0,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "copy": {
+      "mode": "copy",
+      "ms": 250.16499996185303,
+      "firstWrite": {
+        "n": 39,
+        "meanMs": 2.716794875951914,
+        "medianMs": 2.3799999952316284,
+        "maxMs": 8.394999980926514
+      },
+      "ok": true,
+      "dest": "/base",
+      "fsync": true,
+      "dirs": 5,
+      "files": 39,
+      "bytes": 623827,
+      "chunks": 42,
+      "totalMs": 247.77999997138977,
+      "phases": {
+        "mkdirMs": 1.1850000023841858,
+        "srcReadMs": 7.894999861717224,
+        "openMs": 8.079999804496765,
+        "writeMs": 106.46500015258789,
+        "firstWriteMs": 105.95500016212463,
+        "restWriteMs": 0.41499996185302734,
+        "fsyncMs": 95.29499995708466,
+        "closeMs": 28.640000104904175
+      },
+      "perFileMs": 6.353333332599738,
+      "open": {
+        "meanMs": 0.20717948216658372,
+        "medianMs": 0.13999998569488525,
+        "maxMs": 2.130000054836273
+      },
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.96897,
+        "meanMs": 0.00015572499781847,
+        "maxMs": 0.025000035762786865,
+        "distinct": [
+          [
+            0,
+            193794
+          ],
+          [
+            0.004999995231628418,
+            5710
+          ],
+          [
+            0.005000054836273193,
+            487
+          ],
+          [
+            0.009999990463256836,
+            1
+          ],
+          [
+            0.010000050067901611,
+            1
+          ],
+          [
+            0.014999985694885254,
+            1
+          ],
+          [
+            0.01500004529953003,
+            1
+          ],
+          [
+            0.019999980926513672,
+            2
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 2,
+      "calls": 343,
+      "replies": 343,
+      "errors": 0,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "verify": {
+      "mode": "verify",
+      "ms": 74.27000004053116,
+      "ok": true,
+      "compared": 39,
+      "bytes": 623827,
+      "files": 39,
+      "wrong": [],
+      "dirsMissing": [],
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.970105,
+        "meanMs": 0.00015052499413490295,
+        "maxMs": 0.06499999761581421,
+        "distinct": [
+          [
+            0,
+            194021
+          ],
+          [
+            0.004999995231628418,
+            5509
+          ],
+          [
+            0.005000054836273193,
+            459
+          ],
+          [
+            0.009999990463256836,
+            2
+          ],
+          [
+            0.014999985694885254,
+            1
+          ],
+          [
+            0.01500004529953003,
+            2
+          ],
+          [
+            0.019999980926513672,
+            1
+          ],
+          [
+            0.02499997615814209,
+            2
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 3,
+      "calls": 342,
+      "replies": 342,
+      "errors": 0,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "nofsync": {
+      "mode": "copy-nofsync",
+      "ms": 145.4350000023842,
+      "firstWrite": {
+        "n": 39,
+        "meanMs": 1.5989743639261296,
+        "medianMs": 1.4700000286102295,
+        "maxMs": 2.5199999809265137
+      },
+      "ok": true,
+      "dest": "/nofsync",
+      "fsync": false,
+      "dirs": 5,
+      "files": 39,
+      "bytes": 623827,
+      "chunks": 42,
+      "totalMs": 143.54999995231628,
+      "phases": {
+        "mkdirMs": 0.625,
+        "srcReadMs": 6.254999935626984,
+        "openMs": 4.2299999594688416,
+        "writeMs": 62.75500017404556,
+        "firstWriteMs": 62.36000019311905,
+        "restWriteMs": 0.2900000214576721,
+        "fsyncMs": 0,
+        "closeMs": 69.50999999046326
+      },
+      "perFileMs": 3.6807692295465713,
+      "open": {
+        "meanMs": 0.10846153742227799,
+        "medianMs": 0.10500001907348633,
+        "maxMs": 0.20999997854232788
+      },
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.964765,
+        "meanMs": 0.0001761999958753586,
+        "maxMs": 0.010000050067901611,
+        "distinct": [
+          [
+            0,
+            192953
+          ],
+          [
+            0.004999995231628418,
+            6497
+          ],
+          [
+            0.005000054836273193,
+            549
+          ],
+          [
+            0.010000050067901611,
+            1
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 4,
+      "calls": 304,
+      "replies": 304,
+      "errors": 0,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "afterCopy": {
+      "mounted": true,
+      "mountable": "fresh",
+      "mode": "rw",
+      "readOnly": false,
+      "generation": "1",
+      "problems": 0
+    },
+    "boot2": {
+      "mounted": true,
+      "mountable": "rw",
+      "mode": "rw",
+      "readOnly": false,
+      "generation": "1",
+      "problems": 0
+    },
+    "verifyAfterReboot": {
+      "mode": "verify",
+      "ms": 67.00499999523163,
+      "ok": true,
+      "compared": 39,
+      "bytes": 623827,
+      "files": 39,
+      "wrong": [],
+      "dirsMissing": [],
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.97007,
+        "meanMs": 0.0001498750114440918,
+        "maxMs": 0.01500004529953003,
+        "distinct": [
+          [
+            0,
+            194014
+          ],
+          [
+            0.004999995231628418,
+            5463
+          ],
+          [
+            0.005000054836273193,
+            517
+          ],
+          [
+            0.009999990463256836,
+            3
+          ],
+          [
+            0.014999985694885254,
+            2
+          ],
+          [
+            0.01500004529953003,
+            1
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 1,
+      "calls": 342,
+      "replies": 342,
+      "errors": 0,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "secondCopy": {
+      "mode": "copy",
+      "ms": 2.689999997615814,
+      "ok": false,
+      "why": "open /base/bin/cat: EEXIST",
+      "errno": 20,
+      "errnoName": "EEXIST",
+      "at": "/usr/bin/cat",
+      "written": 0,
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.004999995231628418,
+        "zeroFraction": 0.96919,
+        "meanMs": 0.00015469999611377716,
+        "maxMs": 0.04500001668930054,
+        "distinct": [
+          [
+            0,
+            193838
+          ],
+          [
+            0.004999995231628418,
+            5673
+          ],
+          [
+            0.005000054836273193,
+            479
+          ],
+          [
+            0.009999990463256836,
+            2
+          ],
+          [
+            0.010000050067901611,
+            1
+          ],
+          [
+            0.014999985694885254,
+            4
+          ],
+          [
+            0.01500004529953003,
+            1
+          ],
+          [
+            0.029999971389770508,
+            1
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 1065300991,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 2,
+      "calls": 30,
+      "replies": 30,
+      "errors": 6,
+      "sinkBytes": 0,
+      "sinkSum": 2166136261,
+      "sinkWrites": 0
+    },
+    "afterReboot": {
+      "mounted": true,
+      "mountable": "rw",
+      "mode": "rw",
+      "readOnly": false,
+      "generation": "1",
+      "problems": 0
+    }
+  },
+  "errors": [],
+  "faults": [],
+  "notes": [],
+  "bootRetries": 0
+}

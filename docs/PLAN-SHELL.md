@@ -89,7 +89,9 @@ first, because without the `audit()` rule the registration does not prevent the 
 
 ## 2. The milestones
 
-Ten, M15a through M23. **23 days estimated.** This project's history runs under estimate by 2–4×
+Ten, M15a through M23, plus **M19a inserted** between M19 and M20 once the PRD's §10.1 was answered
+(D40). **23 days estimated**, and the inserted row's half-day is not in that figure. This project's
+history runs under estimate by 2–4×
 (M1 est 4 / actual 1; M2 est 8 / actual 3; M13 est 5 / actual 0.5), so the figure is an upper bound
 rather than a forecast — but the estimates are stated at the bar the earlier rows were estimated at,
 so the record stays comparable.
@@ -454,6 +456,40 @@ proportional rather than fitted, which costs R30 and nothing in P0.
 
 ---
 
+### M19a — the session is a writable copy of the read-only base · 0.5 d · DONE
+
+**AN INSERTED ROW, NOT IN THIS PLAN'S ORIGINAL ORDER.** It sits here because it answers the one
+question this plan left to a human and M20 is the row that needed the answer.
+
+**Closes.** The PRD's §10.1, and `docs/DECISIONS.md` D40 is where the answer is recorded.
+
+**§10.1 IS ANSWERED, AND NOT WITH THE REFUSAL THIS PLAN EXPECTED.** M20's row below says that if
+§10.1 is unresolved when the work starts, "Delete ships refusing by name and the refusal is
+asserted." The owner's answer removes the case instead: *"i would like all operating systems to be a
+copy of the read only base. then each session can be modified freely."* The base is copied once into
+the writable journaled volume (`src/kernel/seed.mjs`, `/Users/Default`), the session works on the
+copy, and **nothing a reader can reach is read-only** — so New folder, rename, Delete, Cut/Copy/Paste
+need **no read-only case at all**. M20's refusal-by-name fallback is not needed and must not be
+built: a branch for a world the product no longer has is a branch no check can reach.
+
+The read-only mounts are unchanged. `/usr` is still `MNT_RO` with `mutErrno: "EROFS"`, still
+reachable through `Computer` and `Programs`, and still refuses at two independent layers
+(`src/kernel/calls.mjs:297` and `src/kernel/synth.mjs:192`). What changed is that it is no longer the
+directory a reader lands in.
+
+**The gate is constraint 28 at a new door**, and constraint 306 carries it:
+`store.report.mountable === MOUNT_FRESH && store.mode === MOUNT_RW && !!store.vfs`. A second copy
+over an edited tree is the defect 28 names. `scripts/check.py --negative reseed-always` is the world
+that proves the gate holds.
+
+**What M20 inherits.** `std.sessionDir(env)` in `src/libos/std.mjs` is the one definition of where a
+program lands — `HOME_DIR` with `BASE_DIR = "/usr/share"` as the fallback and a `why` that is
+non-empty exactly when the fallback was taken. `src/bin/files.mjs` with no operand and
+`src/bin/desktop.mjs`'s folder row both read it; `DEFAULT_DIR` and `DESK_DIR` are gone. M20's verbs
+run against whatever that function returns and must not restate a path.
+
+---
+
 ### M20 — a menu a process can raise, and the mutating verbs · 3 d
 
 **Closes.** R14, R16, R17, A9.
@@ -623,6 +659,10 @@ M17 wheel   M18 keys        │
          R20 A5 A8 A12
          │
          ▼
+      M19a session = writable copy    inserted: M20's verbs need a
+         the PRD's §10.1, D40         writable directory to run in
+         │
+         ▼
       M20 menus + verbs
          R14 R16 R17 A9
          ├──────────────────┐
@@ -645,6 +685,9 @@ Read as obligations:
   the forged-event guard that M16's event needs.
 - **M18 unblocks M19, M20 and M22.** Shift+click needs an anchor and a click count; F2, Delete and F5
   need A3; R24's pinned launch and R25's dialogs need the association table.
+- **M19a unblocks M20, and it is the reason the row was inserted.** A mutating verb needs a directory
+  it can mutate, and the file manager's default was a read-only mount. It also deletes work rather
+  than adding it: with nothing a reader reaches read-only, M20's verbs need no read-only branch.
 - **M20 unblocks M21 and M22.** A Bin with no menu and no confirm is a verb with no gesture; and
   R25's shared Save As dialog needs A9's `win_menu`, and R23's tray bit is the second move of a mask
   M20 moves first.
@@ -1100,7 +1143,7 @@ run gains a dpr axis: the geometry clauses are asserted under `--force-device-sc
 | M18 | `a == 0` collides with a reader that treats an empty byte array as printable | `grep -rn keyBytesOf src/bin/` and read each caller's length guard. Ten minutes, before the ABI change. |
 | M19 | The published advance table does not match the renderer's real font closely enough to lay out a column | One page that draws all 95 printable ASCII code points at each **declared** size and asserts `measureText` against the table within 0.5 px, in **both** engines and at **both** ratios. Half a day. CLAUDE.md's own finding is the reason: a geometry derived from a measured rect survives a second engine and one derived from a constant does not — M11 and M12 each cost a milestone to that. |
 | M19 | Removing `if (!e.buttons) return;` (`src/wm/winhost.mjs:575`) floods a queue that `push` drops the newest from | Drive 500 buttonless moves and read `/proc`'s `queued:` and `coalesced:` — **not `dropped:`**, which a drained ring never moves. The tail-replacement prediction is `queued:` near the batch count and `coalesced:` near 500. Twenty minutes, and it is also the `no-hover-coalesce` control and the evidence constraint 223's amendment rests on. |
-| M20 | No writable default location is agreed, so every mutating verb is unreachable from the desktop icon | `node -e` over `src/kernel/providerfs.mjs` printing the mount's write mode; then §7.3's decision. The measurement is minutes. What Delete does on a read-only mount is not measurable and is the PRD's §10.1. |
+| M20 | No writable default location is agreed, so every mutating verb is unreachable from the desktop icon | `node -e` over `src/kernel/providerfs.mjs` printing the mount's write mode; then §7.3's decision. The measurement is minutes. What Delete does on a read-only mount is not measurable and is the PRD's §10.1. **CLOSED BY M19a**: the location is `/Users/Default`, a writable copy of the base, and §10.1 is answered by removing the read-only case rather than handling it (D40, constraint 306). |
 | M21 | A Bin sidecar does not survive a torn journal | `scripts/fsfuzz.py` — 10,000 torn journals in about three seconds, in plain node, because nothing in `src/fs/` touches OPFS. This is the cheapest measurement in the whole plan and it is why `src/fs/` purity is a standing constraint. |
 | M22 | Every Alt+Tab substitute is taken by the host in one of the two engines | `bench/m22-switch/probe.py`: log `keydown` for each candidate chord in Chrome and in Firefox over `scripts/bidi.py`. Two hours. It **prices** the PRD's §10.3; the choice among the free ones stays a human's. |
 | M23 | There is no honest site for a PNG decode: a locked-down realm has none and the kernel is not an image library | Read `src/libos/lockdown.mjs`'s `TARGETS` — the single definition of what a realm loses — and check for `createImageBitmap`. Minutes. If it is stripped, R26 ships for `.rgba` with a named fallback. |
@@ -1180,6 +1223,17 @@ not restated.
    (`src/kernel/providerfs.mjs:28-99`, `:133-145`, `:180`), M20 needs *a* writable location and not
    *that* one, and installing a program is out of the PRD's scope. Cost: `/desktop` is user data
    rather than configuration, so it is the right home for files and the wrong one for R24's pins.
+   **CORRECTED BY M19a: IT IS `/Users/Default`, AND IT IS A COPY OF THE WHOLE BASE.** This decision
+   predates D40. Once the base is copied, a home-shaped tree is expressible and a bare `/desktop` is
+   not one; the surface is Windows 7, so the shape is `C:\Users\<name>`, and the name is `Default`
+   because every process runs as uid 0 and `src/abi.mjs` has no user table — a directory named after
+   a user would be an account this system cannot name. `SEED_DEST` in `src/kernel/seed.mjs` and
+   `HOME_DIR` in `src/libos/std.mjs` are the pair, compared on every boot by `www/shell.mjs`'s
+   `seedState`. The desktop folder is `${std.sessionDir(env).dir}/Desktop`, created by the desktop
+   process rather than by the seed. The decision is kept and corrected rather than edited, the way
+   `docs/DECISIONS.md` §Corrections keeps its two. The cost sentence survives the correction intact:
+   the session's tree is the right home for files and still the wrong one for R24's pins, which is
+   the PRD's §10.2 and stays open.
 4. **A13 does not land**; R32 is served by F5 and a focus-triggered re-read. §6 carries the reason and
    the cost in full.
 5. **The breadcrumb (R28) waits for A8's metric table**, which lands in M19, two rows before M23

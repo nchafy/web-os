@@ -998,3 +998,95 @@ a new door.
 volume was seeded is present in the base and absent from their copy. That is the real behaviour of
 every installed system and is not a defect, but it IS a thing a check can assert and a reader can be
 told, so the seeded set and the base set are both readable rather than assumed equal.
+
+### What was built, in M19a
+
+`src/kernel/seed.mjs` is the whole of it, and it adds **no syscall, no errno and no record** — so
+`docs/ABI.md` is unchanged, which is the honest summary of the shape: a seed is a thing the kernel
+does to a volume before any process exists, not an interface a process can reach.
+
+**Where it lands: `/Users/Default`** (`SEED_DEST`), with the copy built under
+`/Users/.Default.partial` (`SEED_STAGING`, DERIVED from `SEED_DEST` because the two are one fact).
+Userland's own constant is `HOME_DIR` in `src/libos/std.mjs` and the two MUST agree;
+`www/shell.mjs`'s `seedState` compares them on every boot and publishes `drifted` when they do not,
+because a drift means every program opens a directory the seed did not create and the only symptom
+is an empty window.
+
+**What is copied: the WHOLE base**, not its data directory. 39 files (`USR_ENTRIES.length`) and
+4 base directories — `bin`, `include`, `lib`, `share` — plus `/Users` and the staging root, which is
+the 6 `dirs` the report publishes. The argument is content, not fidelity: `/usr/share` is three files
+and about a kilobyte, and M20's copy, paste, delete and rename need a tree with real sizes and a real
+count. Copying `bin/` gives the shell no second program directory — `/usr` stays mounted and
+`src/bin/desktop.mjs`'s start menu is still a listing of `/usr/bin`; the copy is a reader's to rename
+and delete, which is the whole of this decision.
+
+**When it runs: once, after the mount, gated on `maySeed`** — three conjuncts, one per failure world,
+and constraint 306 carries the arithmetic. `cfg.noSeed` is a declared OPT-OUT so the world D40
+removes is re-runnable from a query string without a source edit; there is deliberately **no** kernel
+hook for the UNGATED world, because a kernel that could be asked to reseed is a kernel with a reseed
+path in it. The staged copy is published by ONE rename, so a reader's tree either is the whole base
+or does not exist, and a half-copy from a killed page is reported under `SEED_STAGING` and never
+removed.
+
+**The measured cost.** Three harnesses, and they do not measure the same thing, so each is named
+beside its number.
+
+| what | harness | figure |
+| --- | --- | --- |
+| the copy, in userland, per-file `fsync` | `bench/m19a-seed/probe.py`, headless Chrome 158, 3 runs | **208–248 ms** |
+| the same copy, no per-file `fsync` | same, 3 runs | **131–164 ms** |
+| the kernel's own seed, on a product boot | `bench/m19a-seed-firefox/firefox-session.py`, Firefox 156 at dpr 1 | **442 ms**, self-timed, in `seed.ms` |
+| where the per-file cost is | `bench/m19a-seed/probe.py` over 39 files | open **0.21 ms** mean; FIRST write **2.72 ms** mean, 2.38 median, 8.39 max; later chunks **0.14 ms** |
+
+**THE PER-FILE `fsync` WAS MEASURED AND NOT SPENT, AND THAT IS THE ONE COST DECISION HERE.** It is
+95 ms of the 247 and constraint 23 does not require it: the flush points are `fsync`, snapshot and
+idle, and `closeFd` already publishes the generation. So each file is created `O_EXCL`, written and
+closed, the rename is journalled, and the boot's only flush is ONE `writeSnapshot` — which is what
+makes the next boot mount the tree from a slot rather than replaying the copy's whole journal. A seed is still
+plainly visible at boot and nothing hides it; that is stated rather than smoothed.
+
+**THE PLAIN READING OF CONSTRAINT 22 IS WRONG FOR A COPY, measured.** `openFd` on a file the same
+call just created resolves at generation 0, so `resolve` returns without an `IO_BLOB_OPEN` and no
+`createSyncAccessHandle` is taken; the handle is created by `copyUp` on the FIRST WRITE. An
+implementation that budgets 22's 495 µs to `open` mis-attributes its own slow path.
+
+**`bytes` IS NOT A CONSTANT AND MUST NOT BE ASSERTED AS ONE.** `USR_ENTRIES` maps mount names onto
+this repository's own source files, so the base's byte total is the live size of the source tree:
+623,827 at the commit the bench measured, 627,911 on the working tree an hour later, the 4,084-byte
+gap being M19a's own edits to three files that are rows of the base. `check_m19a` therefore asserts
+`files === 39` — a table LENGTH — and derives the byte and chunk totals from two independent
+readings, writing neither down.
+
+### Corrections this implementation makes to the decision, and to the plan
+
+**`docs/PLAN-SHELL.md` §7.3's writable default location was `/desktop`, and it is not that.** §7.3
+predates D40: with the whole base copied, a home-shaped tree is expressible and a bare `/desktop` is
+not one. The surface is Windows 7, so the shape is `C:\Users\<name>`, and the name is `Default`
+because there is no account database here — every process runs as uid 0 and `src/abi.mjs` has no user
+table, so a directory named after a user would be an account this system cannot name. `Default` is
+Windows 7's own name for the profile a fresh install carries. The decision is kept and corrected
+rather than edited, the way this file's §Corrections keeps its two.
+
+**The copy adds the OWNER WRITE BIT, which D40 did not anticipate having to say.** The base's modes
+are `0o555` for a program and `0o444` for a data file, so a copy that preserved them would be
+unmodifiable by its MODE where the base was unmodifiable by its MOUNT — the same refusal through a
+different door, and the whole thing this decision removes. The X bit is the source's, so a copied
+program is still a program. **The owner's bit is enough only because there is one identity:** the
+copy is owned by uid 0 and every process is spawned as uid 0, so the day a process runs as anyone
+else this has to chown to the session's uid rather than widen the mode.
+
+**THE STAGING-AND-RENAME DESIGN TURNED OUT TO BE A SECOND GUARD, and the measurement is why
+`--negative reseed-always` needs two patches.** Dropping `maySeed`'s freshness conjunct alone loses
+no data: `VFS.rename` answers ENOTEMPTY onto a non-empty directory (`src/fs/vfs.mjs:663`), so an
+ungated second seed copies 39 files, fails its rename, rolls back and leaves the reader's tree
+standing. That is a property nobody designed for and it is recorded here so a later change does not
+spend it without knowing it existed.
+
+**THE DIVERGENCE D40 PRICED IS READABLE, AS PROMISED.** `fsState().seed` publishes `base`, `dirs`,
+`files`, `bytes` and `chunks`, the boot `up` message carries it, and `www/shell.mjs` republishes it
+at `<GLOBALS>.seed`. A reader on a volume seeded before a program was added sees the base's listing
+in the start menu and their own in the file manager, and both figures are available rather than
+assumed equal.
+
+*Evidence: a product decision for the WHAT; measured for every number above. Constraints 28, 306;
+`MILESTONES.md` M19a; `bench/m19a-seed/`, `bench/m19a-seed-firefox/`.*

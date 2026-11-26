@@ -848,6 +848,40 @@ class Control:
     #: M19's fifth. Every press arms a RUBBER BAND, a row's included, so the arbitration
     #: `src/bin/files.mjs` takes once is removed and no drag session ever begins.
     BAND_FROM_ROW = "band-from-row"
+    #: M19a's first, and the ONE of its three that is a declared boot key rather than a patch.
+    #: `cfg.noSeed` skips the copy of the read-only base (src/kernel/kernel.mjs), and it is
+    #: deliberately NOT bench-gated: the world D40 removes - the file manager's own directory
+    #: read-only again - is then re-runnable from a query string with no source edit. It is an
+    #: OPT-OUT and not an opt-in, so the product keeps the seed by default.
+    NO_SEED = "no-seed"
+    #: M19a's second, and CONSTRAINT 28's DEFECT RESTORED: the seed's fresh-volume gate goes, so it
+    #: runs on every boot, and the destination is moved aside and the base installed over it. The
+    #: edit a reader made on the first boot is then at `/Users/Default.replaced` and the tree they
+    #: come back to is a pristine copy - silent data loss presented as success, which is webxp's
+    #: behaviour and the thing D40 had to be gated against.
+    #:
+    #: IT IS TWO PATCHES AND THE SECOND ONE IS NOT DECORATION, measured rather than argued.
+    #: Dropping the gate ALONE loses no data: the seed stages its copy under `SEED_STAGING` and
+    #: publishes it with ONE rename, and `VFS.rename` answers ENOTEMPTY onto a non-empty directory
+    #: (src/fs/vfs.mjs:663) - so an ungated second seed copies 39 files, fails the rename, rolls
+    #: back and leaves the reader's tree alone. The staging-and-rename design is a SECOND guard
+    #: nobody wrote it to be. A one-patch control would have turned only the two clauses that read
+    #: the report, and the clause that matters - "the edit survived" - would have been coupled to
+    #: nothing.
+    RESEED_ALWAYS = "reseed-always"
+    #: M19a's third: the seed MOVES the base instead of copying it. Having copied `/usr`, it
+    #: removes the mountpoint directory the base sits on from the volume beneath - the plausible
+    #: tidy-up once install media has been installed, and precisely the difference between a move
+    #: and a copy. `/usr` still resolves through the mount table, so the base still reads and still
+    #: refuses; what goes is constraint 238's rule, and `/usr/..` answers ENOENT again.
+    #:
+    #: WHY NOT A WRITABLE BASE, which is the world a reader would reach for first: it is not
+    #: expressible. `/usr` refuses at TWO independent layers - `mountReadOnly` at
+    #: src/kernel/calls.mjs:297 and `SynthFS`'s own `mutErrno` at src/kernel/synth.mjs:192 - and
+    #: the generated filesystem has no write path at all, so no patch makes a write to the base
+    #: land. That is recorded here because it is also why clause 3's byte and mode readings rest on
+    #: inversion: the world in which one tree answers to two names does not exist in this VFS.
+    SEED_MOVES_BASE = "seed-moves-base"
     ONCE = "once"
 
 
@@ -917,6 +951,9 @@ CONTROL_RUNS = {
     Control.NO_DIR_STAT: ("no-dir-stat",),
     Control.NO_HOVER_COALESCE: ("no-hover-coalesce",),
     Control.BAND_FROM_ROW: ("band-from-row",),
+    Control.NO_SEED: ("no-seed",),
+    Control.RESEED_ALWAYS: ("reseed-always",),
+    Control.SEED_MOVES_BASE: ("seed-moves-base",),
 }
 
 
@@ -5873,6 +5910,68 @@ def _m19_no_hover_coalesce(source: pathlib.Path) -> pathlib.Path:
 
 
 # ======================================================================================
+# M19a's two served-bytes worlds, over src/kernel/seed.mjs.
+#
+# A SERVED-BYTES FIXTURE AND NOT A BOOT KEY, for the reason M18's three and M19's fifth are:
+# `src/kernel/seed.mjs` owns both behaviours, neither has a `cfg` hook, and that file is not this
+# check's to edit. The third control, `no-seed`, IS a declared boot key and travels as a query
+# parameter - which is the cheaper shape and the one to prefer whenever the kernel already offers
+# the lever.
+#
+# `www/m19a.html` is handed NO key for either of these, deliberately. Its clauses MEASURE the
+# world - the edit's surviving length, and whether `/usr/..` still resolves - so there is nothing a
+# page-side fail-closed guard could add, and a page that could select a seed world from its own URL
+# would be a product with a reseed path in its query string (constraint 28, through the door
+# constraint 283 opens).
+# ======================================================================================
+
+#: `maySeed`'s three conjuncts, verbatim (src/kernel/seed.mjs), and the gate with the FRESHNESS
+#: CONJUNCT GONE. What is left is `mode === MOUNT_RW && vfs`, which is true on a populated volume -
+#: `bench/m19a-seed/probe.mjs --control` seeds one with the equivalent `!store.readOnly` and
+#: reports the seed over `["populated"]`.
+_MAY_SEED = """  return !!store && store.report !== null
+    && store.report.mountable === MOUNT_FRESH
+    && store.mode === MOUNT_RW
+    && !!store.vfs;"""
+_MAY_SEED_UNGATED = """  return !!store && store.mode === MOUNT_RW && !!store.vfs;"""
+
+#: The seed's ONE visible act, verbatim: the rename that publishes the staged copy.
+_SEED_PUBLISH = "    renamed = store.vfs.rename(CRED, SEED_STAGING, SEED_DEST);"
+
+#: ...and the same act after the destination has been MOVED ASIDE, so the rename lands on a free
+#: name and the reader's tree is replaced. Without this the ungated seed above dies at ENOTEMPTY
+#: and rolls back, which loses no data - see `Control.RESEED_ALWAYS`.
+_SEED_PUBLISH_REPLACING = """    if (store.vfs.exists(CRED, SEED_DEST)) {
+      await journalMeta(store, store.vfs.rename(CRED, SEED_DEST, `${SEED_DEST}.replaced`));
+    }
+    renamed = store.vfs.rename(CRED, SEED_STAGING, SEED_DEST);"""
+
+#: ...and the same act after the base's MOUNTPOINT has been removed from the volume beneath it,
+#: which is a move rather than a copy. `rmdir` succeeds because a mountpoint directory is empty -
+#: `src/kernel/kernel.mjs`'s `ensureMountpoint` creates it and nothing writes into it.
+_SEED_PUBLISH_MOVING = """    await journalMeta(store, store.vfs.rmdir(CRED, "/usr"));
+    renamed = store.vfs.rename(CRED, SEED_STAGING, SEED_DEST);"""
+
+
+def _m19a_reseed_always(source: pathlib.Path) -> pathlib.Path:
+    """The gate dropped AND the destination replaced: two patches, chained.
+
+    `_patch_tree` copies the tree it is given, so the second call patches the first's output and
+    each still self-verifies its own single occurrence. Two are needed because the behaviour this
+    world is named for is not reachable with one - the staging rename refuses ENOTEMPTY and the
+    reader's tree survives an ungated seed, which was measured and is recorded on
+    `Control.RESEED_ALWAYS`.
+    """
+    return _patch_tree(
+        _patch_tree(source, "src/kernel/seed.mjs", _MAY_SEED, _MAY_SEED_UNGATED),
+        "src/kernel/seed.mjs", _SEED_PUBLISH, _SEED_PUBLISH_REPLACING)
+
+
+def _m19a_seed_moves_base(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/kernel/seed.mjs", _SEED_PUBLISH, _SEED_PUBLISH_MOVING)
+
+
+# ======================================================================================
 # M19 — details, sort, selection, hover
 #
 # Every clause is one boolean www/m19.html publishes, paired here with the label this check
@@ -6064,6 +6163,225 @@ M19_SHAPE = {
 #: asking would have measured a list nobody touched and still produced row names.
 M19_GESTURES = 56
 
+
+# ======================================================================================
+# M19a — the session is a WRITABLE COPY of the read-only base, seeded once (D40).
+#
+# One expectation per clause the page publishes, paired here with the label this check records and
+# the evidence keys a failure prints. M17's, M18's and M19's table discipline, for their reason: a
+# label spelled in a control's declaration and a boolean spelled in the page are the two halves of
+# a control's `failed` set, and a table is where they are kept in step.
+#
+# NO GESTURE IS ASKED FOR, unlike every page since M13: every clause here is a filesystem fact
+# read back out of a PROCESS'S RESULT ROW, and a seeded tree and an unseeded one are not the same
+# picture — `ls` answers ENOENT. So this page runs to completion on its own and the check never
+# calls `drive_gestures`. What it does instead is drive THREE KERNELS against one volume, which is
+# the shape `www/m2.html` established and the only way a "it was not copied again" clause exists.
+# ======================================================================================
+
+#: How long the driver waits for www/m19a.html to reach a terminal state.
+#:
+#: WHAT IS IN IT: one OPFS wipe, three kernel boots, the 39-file copy inside the first of them
+#: (measured 180-228 ms), three snapshots, ~20 programs run to completion across the three boots,
+#: and a final wipe. MEASURED at 31 s headless on this machine for a run whose every clause holds.
+#: The margin is ~13x and deliberately so: the one thing a smaller number buys is a BROKEN run on
+#: a slower machine.
+M19A_TIMEOUT = 420.0
+
+#: Clause 1: A FRESH VOLUME IS SEEDED.
+#:
+#: THE BYTE AND CHUNK TOTALS ARE NOT LITERALS, and that is this table's one correction to the
+#: milestone's brief. It records 623,827 bytes from `bench/m19a-seed/probe.py`; the page measures
+#: 627,911, and the difference is M19a's own edits to `src/bin/files.mjs` and `src/libos/std.mjs` —
+#: which ARE rows of the base (`USR_ENTRIES`). A byte constant here goes stale on the next edit to
+#: any program in `/usr/bin`, and a harness that fails for that reason teaches a reader to lower
+#: the number. So the totals are asserted against TWO INDEPENDENT READINGS instead — a walk of the
+#: base inside a real process, and a `stat` of all 39 paths with the chunk count derived from those
+#: sizes and `MAX_INLINE` — and only the FILE COUNT is written down, because that one is
+#: `USR_ENTRIES.length` and not a measurement of content.
+_M19A_SEEDED = (
+    ("a fresh volume reported a seed that ran", "ran", ("volume", "seed")),
+    ("and it landed where userland opens", "destAgrees", ("dest", "home", "seed")),
+    ("and the kernel counted 39 files and the six directories it made", "counts", ("seed",)),
+    ("and a walk of the base inside a process agrees with those figures", "agrees",
+     ("walk", "seed")),
+    ("and the chunk count is the one MAX_INLINE implies for those files", "chunksDerived",
+     ("sizes", "seed")),
+    ("and the landing directory holds the base's four directories", "topLevel",
+     ("top", "dest")),
+    ("and every one of them really is a directory", "topLevelAreDirs", ("dirStat",)),
+    ("and they hold the base's 39 entries", "entries", ("deep", "baseDeep")),
+    ("and every copied file is byte-identical to the base", "identical", ("verify",)),
+)
+
+#: Clause 2: THE COPY IS WRITABLE. Create, read back THROUGH A REAL `read(2)`, delete, gone.
+#: Five expectations and not one, because "the copy is writable" failing says nothing about which
+#: verb a reader would find broken — and M20's verbs are exactly these.
+_M19A_WRITABLE = (
+    ("a file can be created in the copy", "created", ("made", "dest")),
+    ("and it reads back as a regular file with the owner write bit set", "readsBack",
+     ("probeStat",)),
+    ("and bytes written into it read back at their own length", "bytesBack",
+     ("wrote", "counted")),
+    ("and it can be deleted", "deleted", ("removed",)),
+    ("and after the delete it is gone", "gone", ("afterRm",)),
+)
+
+#: Clause 3: THE BASE IS UNCHANGED, which is what makes this a copy rather than a move.
+#:
+#: EACH REFUSAL SEPARATELY, because a single "it refused" passes for a filesystem that refused for
+#: the wrong reason — M3's `truncate` answered ENOENT where it owed EROFS and only the per-call
+#: assertion caught it. The mkdir's errno is asserted BY NAME out of `src/abi.mjs`'s own table:
+#: EROFS is 69 here and EEXIST is 20, so a check written against Linux's numbers fails over a
+#: correct refusal, and the first draft of this milestone's bench did exactly that.
+_M19A_BASE = (
+    ("the base's own file is unchanged after the copy was written in", "baseUnchanged",
+     ("baseBefore", "baseAfter")),
+    ("and the copy carries an owner write bit the base does not", "writeBit", ("modes",)),
+    ("and a mkdir in the base refused EROFS, by name", "mkdirErofs", ("intoBase",)),
+    ("and a create in the base refused, having created nothing", "touchRefused", ("baseTouch",)),
+    ("and a delete in the base refused, having removed nothing", "rmRefused", ("baseRm",)),
+    ("and the base's mountpoint is still a directory on the volume beneath it", "mountpoint",
+     ("mountpointStat",)),
+)
+
+#: Clause 4: A SECOND BOOT DOES NOT RE-COPY. Constraint 28's clause, and the one that matters: a
+#: re-copy discards a reader's work and reports success.
+_M19A_PERSISTS = (
+    ("a second boot of the same volume did not copy again", "noReseed", ("volume", "seed")),
+    ("and it says WHY: the volume is no longer a fresh read-write mount", "whyNotFresh",
+     ("why", "seed")),
+    ("and it copied nothing at all", "copiedNothing", ("seed",)),
+    ("and the edit made on the first boot SURVIVED", "editSurvived", ("counted",)),
+    ("and the other 38 files are still the base's bytes", "restIntact", ("verify",)),
+    ("and a second copy over the tree refuses EEXIST by name, having written nothing",
+     "secondCopyRefused", ("secondCopy",)),
+    ("and no half-copy was left on the volume", "noPartial", ("seed",)),
+)
+
+#: Clause 5: A VOLUME THAT FAILED TO MOUNT IS NOT SEEDED.
+#:
+#: `allThreeCorrupted` is the ANTI-VACUITY and is first for that reason: "it refused" says nothing
+#: about a volume whose superblock slots were fine. One or two corrupt slots is the case
+#: `src/fs/fsck.mjs` SURVIVES by falling back; three is the case constraint 28 is about.
+_M19A_REFUSED = (
+    ("all three superblock slots really were corrupted", "allThreeCorrupted", ("wrecked",)),
+    ("and the volume reports read-only", "readOnly", ("volume",)),
+    ("and it refused to mount at all", "refused", ("volume",)),
+    ("and no seed ran, and it names no destination", "noSeed", ("seed",)),
+    ("and the seed report says the volume did not mount", "saysWhy", ("seed",)),
+    ("and nothing was copied", "copiedNothing", ("seed",)),
+    ("and the volume itself was not written", "wroteNothing", ("wrecked", "after")),
+)
+
+#: proof name -> its clause table, in the order the page runs them.
+_M19A_PROOFS = (("seeded", _M19A_SEEDED), ("writable", _M19A_WRITABLE), ("base", _M19A_BASE),
+                ("persists", _M19A_PERSISTS), ("refused", _M19A_REFUSED))
+
+M19A_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the controls the page reports are the ones asked for",
+    "the page wiped the volume before it measured anything",
+) + tuple(label for _, table in _M19A_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m19a.html",
+)
+
+M19A_DOCUMENT = "/www/m19a.html?proofs=1"
+
+M19A_READY = ("(() => { const M = globalThis.M19A || {}; const s = M.state; "
+              "return (s === 'done' || s === 'aborted' || s === 'error') ? 1 : 0 })()")
+
+READ_M19A = """(() => {
+  const M = globalThis.M19A || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    cfg: M.cfg || {},
+    wiped: Number(M.wiped === undefined ? -1 : M.wiped),
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    seeded: one(P.seeded),
+    writable: one(P.writable),
+    base: one(P.base),
+    persists: one(P.persists),
+    refused: one(P.refused),
+  }
+})()"""
+
+M19A_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "cfg": dict, "wiped": (int, float),
+    "errors": list, "faults": list, "notes": list,
+    "seeded": (dict, type(None)),
+    "writable": (dict, type(None)),
+    "base": (dict, type(None)),
+    "persists": (dict, type(None)),
+    "refused": (dict, type(None)),
+}
+
+
+def _m19a_labels(proof: str, *clauses: str) -> Tuple[str, ...]:
+    """The LABELS for named clauses of one proof, looked up in that proof's own table.
+
+    A control's `failed` set is spelled as clause keys here and resolved to labels through the
+    table, so a renamed label cannot drift out of a control's declaration silently: an unknown key
+    raises at import, which `audit()` runs before anything is driven.
+    """
+    table = dict(_M19A_PROOFS)[proof]
+    byKey = {key: label for label, key, _ in table}
+    out = []
+    for clause in clauses:
+        if clause not in byKey:
+            raise RegistryError(
+                "m19a proof %r has no clause %r; it has %s"
+                % (proof, clause, ", ".join(sorted(byKey))))
+        out.append(byKey[clause])
+    return tuple(out)
+
+
+#: THE PAGE'S OWN VERDICT GOES IN EVERY ONE OF THE THREE SETS BELOW, M19's precedent: that label
+#: is `all five proofs passed`, so any control that turns one clause turns it too. `held_rest`
+#: derives the intact set and raises nothing on its own, so a control that omitted this would be
+#: scored as having broken something it claims not to touch.
+_M19A_VERDICT = ("the page's own verdict is ok",)
+
+#: `--negative no-seed`. The copy is skipped, so there is no session tree: clause 1 goes entirely,
+#: four fifths of clause 2 goes with it, the copy's write bit has nothing to read, and clause 4
+#: loses the four readings that need a tree. MEASURED, not predicted - see the control's `why`.
+_NO_SEED_FAILS = (
+    _m19a_labels("seeded", "ran", "destAgrees", "counts", "agrees", "chunksDerived",
+                 "topLevel", "topLevelAreDirs", "entries", "identical")
+    + _m19a_labels("writable", "created", "readsBack", "bytesBack", "deleted")
+    + _m19a_labels("base", "writeBit")
+    + _m19a_labels("persists", "whyNotFresh", "editSurvived", "restIntact", "secondCopyRefused")
+    + _M19A_VERDICT
+)
+
+#: `--negative reseed-always`. CONSTRAINT 28'S CLAUSE AND NOTHING ELSE: the first boot is identical
+#: (a fresh volume is seeded either way, and there is no destination to move aside yet), so clauses
+#: 1, 2 and 3 are untouched and clause 5 holds because the gate still needs a read-write mount.
+_RESEED_ALWAYS_FAILS = _m19a_labels(
+    "persists", "noReseed", "whyNotFresh", "copiedNothing", "editSurvived", "restIntact",
+) + _M19A_VERDICT
+
+#: `--negative seed-moves-base`. ONE reading, and it is the only part of the base a seed can
+#: actually damage - see `Control.SEED_MOVES_BASE` for why a writable base is not expressible.
+_SEED_MOVES_BASE_FAILS = _m19a_labels("base", "mountpoint") + _M19A_VERDICT
+
 #: What MULTIPLYING THE STABLE TERM BY THE DIRECTION must break: the tie clause, alone.
 #:
 #: THE ASCENDING LISTING IS IDENTICAL IN THIS WORLD — `dir` is +1 there, so `dir * byName` IS
@@ -6250,6 +6568,15 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "eight-row tree the five proofs read does not exist — the page refuses before it "
                 "builds a host. UNMEASURABLE rather than FAIL, because a FAIL would claim a "
                 "40-sample hover stream was sent and the kernel counted it wrongly.",
+        ), "m19a": Expect(
+            UNMEASURABLE,
+            why="the same mechanism, and for this check it takes the whole subject away: without "
+                "COOP/COEP there is no SAB, so no kernel boots, no volume is mounted, the "
+                "read-only base is never fetched and there is nothing to copy it into. The three "
+                "boots this page needs are three kernels that do not exist. UNMEASURABLE rather "
+                "than FAIL, because a FAIL would claim a volume was seeded and then re-seeded "
+                "over a reader's edit, which is the one thing this check is about and the one "
+                "thing that cannot have happened here.",
         ), "landing": Expect(
             UNMEASURABLE,
             why="the same mechanism, at the page a reader actually opens: without COOP/COEP there "
@@ -7999,6 +8326,109 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "session to read between the move and the release",
             failed=_BAND_FROM_ROW_FAILS,
             held=held_rest(M19_LABELS, _BAND_FROM_ROW_FAILS),
+        )},
+    ),
+    "no-seed": NegativeControl(
+        name="no-seed",
+        why="no_seed=1: `cfg.noSeed` skips the copy of the read-only base, so the volume carries "
+            "no session tree at all. THE WORLD D40 REMOVES, as a run: `files` falls back to "
+            "`/usr/share`, which is `MNT_RO` with `mutErrno: \"EROFS\"`, so every mutating verb "
+            "M20 is about to add is unreachable from the one directory the file manager shows.\n"
+            "A QUERY PARAMETER AND NOT A PATCH, because the kernel already offers the lever and "
+            "it is deliberately NOT bench-gated (src/kernel/kernel.mjs). It is an OPT-OUT, so the "
+            "product keeps the seed by default: a feature a page has to remember to request is a "
+            "promise kept by hand.\n"
+            "WHAT MUST BREAK: clause 1 ENTIRELY, four fifths of clause 2, the copy's write bit, "
+            "and the four readings of clause 4 that need a tree to read. That is 18 labels, and "
+            "they are named one by one rather than as 'the seed clauses' — a control satisfied by "
+            "any failure verifies nothing.\n"
+            "WHAT MUST HOLD, and this is the informative half. CLAUSE 3 SURVIVES ALMOST WHOLE: "
+            "the base is unchanged, and it still refuses a mkdir with EROFS, a create and a "
+            "delete — because the base's read-only-ness has nothing to do with the copy, which is "
+            "exactly what clause 3 claims. CLAUSE 5 SURVIVES ENTIRELY: a volume that will not "
+            "mount is not seeded whether or not the page asked for a seed. And `and after the "
+            "delete it is gone` holds, because a file that was never created is also not there — "
+            "which is why `a file can be created in the copy` is a separate expectation from it.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_seed", "1"),),
+        expects={"m19a": Expect(
+            Outcome.FAIL,
+            why="a volume with no session tree has nothing to list, nothing to write in and "
+                "nothing for a second boot to preserve",
+            failed=_NO_SEED_FAILS,
+            held=held_rest(M19A_LABELS, _NO_SEED_FAILS),
+        )},
+    ),
+    "reseed-always": NegativeControl(
+        name="reseed-always",
+        why="CONSTRAINT 28'S DEFECT RESTORED, in the SERVED copy of src/kernel/seed.mjs: "
+            "`maySeed`'s freshness conjunct goes, so the seed runs on every boot, and the "
+            "destination is moved aside to `/Users/Default.replaced` before the staged copy is "
+            "renamed onto it. The second boot's reader comes back to a pristine base and their "
+            "edit is under a name nothing points at — silent data loss presented as success, "
+            "which is webxp's behaviour and the thing D40 had to be gated against.\n"
+            "IT IS TWO PATCHES, AND THE SECOND IS NOT DECORATION. Measured: dropping the gate "
+            "ALONE loses no data. The seed stages its copy under `SEED_STAGING` and publishes it "
+            "with ONE rename, and `VFS.rename` answers ENOTEMPTY onto a non-empty directory "
+            "(src/fs/vfs.mjs:663) — so an ungated second seed copies 39 files, fails the rename, "
+            "rolls back and leaves the tree alone. The staging-and-rename design is a SECOND "
+            "guard nobody wrote it to be, and a one-patch control would have turned only the two "
+            "clauses that read the report while `and the edit made on the first boot SURVIVED` "
+            "stayed coupled to nothing. That is the finding this control is built on.\n"
+            "A SERVED-BYTES FIXTURE because src/kernel/seed.mjs owns the gate, has no `cfg` hook "
+            "for it, and is not this check's to edit — M18's three controls' shape. The page is "
+            "handed NO key: its clauses MEASURE the world, and a page that could select a seed "
+            "world from its own URL would be a product with a reseed path in its query string.\n"
+            "WHAT MUST BREAK: clause 4, and the five readings of it that a re-copy moves. WHAT "
+            "MUST HOLD: clauses 1, 2 and 3 entirely, because the FIRST boot is identical in both "
+            "worlds — a fresh volume is seeded either way and there is no destination to move "
+            "aside yet. Clause 5 holds too: the ungated gate still demands a read-write mount, so "
+            "a refusing volume is still not seeded. And `a second copy over the tree refuses "
+            "EEXIST` holds, which is the honest shape of this world: the SEED lost the data, not "
+            "the program's own O_EXCL.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m19a_reseed_always,
+        expects={"m19a": Expect(
+            Outcome.FAIL,
+            why="a seed that runs on every boot and installs over the session's tree must lose "
+                "the edit the first boot made, and must report that it ran",
+            failed=_RESEED_ALWAYS_FAILS,
+            held=held_rest(M19A_LABELS, _RESEED_ALWAYS_FAILS),
+        )},
+    ),
+    "seed-moves-base": NegativeControl(
+        name="seed-moves-base",
+        why="THE SEED MOVES THE BASE INSTEAD OF COPYING IT, in the SERVED copy of "
+            "src/kernel/seed.mjs: having copied `/usr`, it `rmdir`s the mountpoint directory the "
+            "base sits on from the volume beneath. The plausible tidy-up once install media has "
+            "been installed, and precisely the difference between a move and a copy.\n"
+            "WHAT MUST BREAK: `and the base's mountpoint is still a directory on the volume "
+            "beneath it`, ALONE. `/usr` still resolves through the mount table, so the base still "
+            "reads and still refuses; what goes is constraint 238's rule — `ls /` loses `usr` and "
+            "`cd /usr/..` answers ENOENT, which is the defect a reader reported and which the "
+            "seed is now the only code positioned to cause, because it is the only thing that "
+            "writes to the volume's root area.\n"
+            "WHY NOT A WRITABLE BASE, which is the world this control's NAME suggests and which a "
+            "reader would reach for first: IT IS NOT EXPRESSIBLE, and that was measured rather "
+            "than assumed. `/usr` refuses at TWO independent layers — `mountReadOnly` at "
+            "src/kernel/calls.mjs:297 and `SynthFS`'s own `mutErrno` at src/kernel/synth.mjs:192 "
+            "— and the generated filesystem has NO write path at all, so no patch makes a write "
+            "to the base land and no patch makes a write in the copy reach it. Clearing `MNT_RO` "
+            "alone changes nothing a clause can see, because the second layer answers EROFS too. "
+            "So clause 3's byte and mode readings rest on inversion, and that is stated here "
+            "rather than left to be discovered: the world in which one tree answers to two names "
+            "does not exist in this VFS.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m19a_seed_moves_base,
+        expects={"m19a": Expect(
+            Outcome.FAIL,
+            why="a seed that removes the base's mountpoint leaves `/usr/..` unresolvable, so the "
+                "one reading of clause 3 a control can move goes red and nothing else does",
+            failed=_SEED_MOVES_BASE_FAILS,
+            held=held_rest(M19A_LABELS, _SEED_MOVES_BASE_FAILS),
         )},
     ),
 }
@@ -15566,6 +15996,163 @@ def check_m19(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m19.html", env.served_matches_disk(env.document),
                     "the m19.html served does not match www/m19.html on disk")
+
+
+# ======================================================================================
+# m19a. The session is a writable copy of the read-only base, seeded once.
+# ======================================================================================
+
+
+def _m19a_record(env: Env, got: Dict[str, Any], proof: str,
+                 table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE PER CLAUSE AND NOT ONE PER PROOF, because all three controls name SINGLE clauses inside a
+    proof: `seed-moves-base` must turn the mountpoint reading of clause 3 and nothing else, and
+    `reseed-always` must turn five of clause 4's seven and leave `a second copy over the tree
+    refuses EEXIST` standing. A check recording "clause 3 passed" could not tell a seed that moved
+    the base from one that let a write through, and a control satisfied by any failure verifies
+    nothing.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause,
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m19a",
+    milestone="m19a",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_SEED, Control.RESEED_ALWAYS,
+              Control.SEED_MOVES_BASE),
+    labels=M19A_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M19A_DOCUMENT,
+    ready_expr=M19A_READY,
+    ready_what="globalThis.M19A reaching done/aborted/error (www/m19a.html?proofs=1)",
+    ready_timeout=M19A_TIMEOUT,
+    refusal_expr="globalThis.M19A && globalThis.M19A.state",
+    refusal_want="aborted",
+    note="THE SESSION IS A WRITABLE COPY OF THE READ-ONLY BASE, SEEDED ONCE (D40), and the whole "
+         "difficulty is constraint 28. That constraint forbids RESEEDING — a bad superblock "
+         "mounts read-only and reports, and never reseeds, because webxp reseeded and that is "
+         "silent data loss presented as success. Seeding a FRESH volume is not reseeding, so the "
+         "copy is gated on the same fresh-volume signal `src/kernel/store.mjs` already writes an "
+         "initial superblock on, and the five clauses below are that gate from five sides.\n"
+         "THE HARD PART OF THIS PAGE IS THE SECOND BOOT, and it is done the way www/m2.html does "
+         "it: the OPFS is one per ORIGIN, so the page WIPES it once and then boots THREE kernels "
+         "against the same volume in one load — fresh, populated, and one whose three superblock "
+         "slots the page has corrupted in place. The wipe is done from the PAGE and never from a "
+         "kernel, because a kernel that could wipe the volume would be a kernel with a reseed "
+         "path in it. `the page wiped the volume before it measured anything` is the clause that "
+         "says boot 1 really met an empty volume rather than whatever the previous check left.\n"
+         "AND THE PERSISTENCE CLAUSE CANNOT PASS ON A VOLUME NOBODY WROTE, which is the trap in a "
+         "two-boot proof. The edit is a DIFFERENT base file's bytes `cp`'d over a seeded one, so "
+         "the surviving length is a number the seed never writes at that path: a fresh volume's "
+         "copy of `share/readme.txt` is readme's length and the clause asserts logo.rgba's. A "
+         "clause the seed itself could satisfy would prove nothing about the second boot.\n"
+         "NO GESTURE IS ASKED FOR, unlike every page since M13, and that is not a gap: a seeded "
+         "tree and an unseeded one are not the same picture — `ls` answers ENOENT — so there is "
+         "nothing here a screenshot could be mistaken for. Every reading comes back through a "
+         "PROCESS'S RESULT ROW: `ls` returns `listed`, `stat` returns `rows`, `wc` returns "
+         "`total` read to end of file through a real `read(2)`, `rm` returns `files`, and "
+         "bench/m19a-seed/program.mjs's `verify` returns a byte-for-byte comparison of all 39 "
+         "files with its refusals' errnos BY NAME.\n"
+         "ERRNO NAMES AND NOT NUMBERS. This ABI is not Linux's — EEXIST is 20 here and EROFS is "
+         "69 — and this milestone's first bench draft asserted 17 for EEXIST and failed over a "
+         "correct refusal. Both refusal clauses here read `errnoName`.\n"
+         "WHAT THIS CHECK DOES NOT ASSERT AS A LITERAL, deliberately: the base's BYTE and CHUNK "
+         "totals. The milestone's brief records 623,827 bytes from bench/m19a-seed/probe.py and "
+         "this page measures 627,911, because M19a's own edits to src/bin/files.mjs and "
+         "src/libos/std.mjs are rows of the base. A byte constant goes stale on the next edit to "
+         "any program in /usr/bin, and a harness that fails for that reason teaches a reader to "
+         "lower the number — so both totals are asserted against two INDEPENDENT readings (a walk "
+         "of the base inside a process, and a stat of all 39 paths with the chunk count derived "
+         "from those sizes and MAX_INLINE) and only the FILE COUNT is written down, because that "
+         "is `USR_ENTRIES.length` rather than a measurement of content.\n"
+         "negative controls: --negative no-seed is the declared boot key `cfg.noSeed` and is the "
+         "world D40 removes — no session tree, so clause 1 goes entirely, four fifths of clause 2 "
+         "with it, and clause 4 loses the four readings that need a tree; clause 3 and clause 5 "
+         "survive, which is what says the base's read-only-ness and the refusing volume have "
+         "nothing to do with the copy. --negative reseed-always restores constraint 28's defect "
+         "and must turn clause 4 ALONE; it is TWO patches because dropping the gate alone loses "
+         "no data — the staging rename answers ENOTEMPTY and rolls back, a second guard nobody "
+         "wrote it to be, measured. --negative seed-moves-base removes the base's mountpoint from "
+         "the volume beneath it and must turn ONE reading of clause 3; a WRITABLE base is not "
+         "expressible at all, because /usr refuses at two independent layers and SynthFS has no "
+         "write path, which is recorded on the control. --negative no-isolation must come out "
+         "BROKEN: no SAB, no kernel, no volume, so there is nothing to copy and nothing to copy "
+         "it to.\n"
+         "MEASURED SUBSETS, one run each: 19 red / 25 intact for no-seed, 6 / 38 for "
+         "reseed-always, 2 / 42 for seed-moves-base. Each count includes `the page's own verdict "
+         "is ok`, which is `all five proofs passed` and so moves with any clause.",
+)
+def check_m19a(env: Env) -> None:
+    got = env.read(READ_M19A, M19A_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m19a.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m19a.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no kernel boots, no volume is mounted, the read-only base is never "
+            "fetched and there is nothing to copy it into.%s"
+            % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m19a.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # ~20 PROGRAMS RUN TO COMPLETION ACROSS THREE BOOTS — ls, stat, touch, cp, wc, rm and the
+    # bench program's walk/verify/copy. A process that faulted during its own init reads downstream
+    # as "the call returned nothing", and a swallowed failure is a defect (CLAUDE.md, harness
+    # honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # AND THE WORLD IS THE ONE ASKED FOR. Only `no-seed` travels as a query parameter; the other
+    # two are served-bytes fixtures over src/kernel/seed.mjs, and `_patch_tree` is what verifies
+    # those took — it raises unless it finds exactly one occurrence of its needle and the written
+    # bytes differ at exactly that offset. A page handed a key for a world it cannot select would
+    # be a page reporting a control it is not in.
+    cfg = got["cfg"] or {}
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(cfg.get("proofs"))
+        and bool(cfg.get("noSeed")) == ("no_seed=1" in env.document),
+        {"asked": cfg, "document": env.document})
+    # THE ANTI-VACUITY FOR BOOT 1. A volume a previous check left seeded is not fresh, and clause
+    # 1 against it would be measuring somebody else's copy. `wiped` is the entry count the page
+    # removed — 0 is legitimate on the first page in a fresh profile, so what this asserts is that
+    # the page REACHED the wipe and reported a number at all, which -1 says it did not.
+    env.expect_that("the page wiped the volume before it measured anything",
+                    got["wiped"] >= 0 and got["phase"] == "rendered",
+                    {"wiped": got["wiped"], "phase": got["phase"]})
+
+    for proof, table in _M19A_PROOFS:
+        _m19a_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's precedent: a diagnosis naming the one fact that
+    # explains several red clauses at once, with its address, is cheaper than a reader
+    # rediscovering it from five evidence blocks.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. A seeded tree and an unseeded one are the same picture at a
+    # glance — this page's log is the only thing on screen — and every clause above reads a
+    # process's result row rather than this PNG (constraint 40).
+    env.shoot("m19a-seed")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m19a.html", env.served_matches_disk(env.document),
+                    "the m19a.html served does not match www/m19a.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

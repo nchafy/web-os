@@ -18,6 +18,7 @@ import { Taskbar, setShellControls } from "/src/wm/taskbar.mjs";
 import { setViewControls } from "/src/wm/desktop.mjs";
 import * as aero from "/src/wm/aero.mjs";
 import { WROLE_DESKTOP } from "/src/abi.mjs";
+import { HOME_DIR } from "/src/libos/std.mjs";
 import { bootKernel, spawnProgram, until, sleep, gestureAsker } from "/www/pagekernel.mjs";
 
 /** A desktop is meant to outlive the reader, so its programs get an hour. `src/bin/term.mjs`'s own
@@ -80,7 +81,19 @@ export const PROGRAMS = Object.freeze({
   },
   files: {
     url: "/src/bin/files.mjs",
-    argv: () => ["files", "/usr/bin"],
+    /* M19a. NO DIRECTORY, SO THE PROGRAM RESOLVES ITS OWN — `std.sessionDir`, which is the session's
+     * writable copy of the base (D40) and `/usr/share` on a volume that has none. It was
+     * `/usr/bin`: a READ-ONLY provider mount, so the file manager the landing page opens for a
+     * reader was one where nothing could be renamed or deleted.
+     *
+     * THE PAGE DOES NOT PASS THE PUBLISHED `fs.seed.dest` HERE, and that is a measurement rather
+     * than a shortcut. `dest` is non-null in worlds where the tree is NOT on the volume — a seed
+     * that rolled back, a volume that predates the seed — and all of them report `ran: false`
+     * identically, so the dest alone cannot say whether the directory exists. A page cannot `stat`;
+     * the program can, and an operand a program was handed must not be second-guessed. What the
+     * page does with the report is `seedState` below: publish it, and say so when it disagrees with
+     * the name userland opens. */
+    argv: () => ["files"],
   },
   taskmgr: {
     url: "/src/bin/taskmgr.mjs",
@@ -107,7 +120,8 @@ export const DESKTOP_HELP = Object.freeze([
   "  right-click a taskbar button for its jump list; hover one for a thumbnail",
   "  hover the strip at the far right to peek, click it to minimize everything",
   "  turn the wheel over a file list or the task table: the rows move and the header stays",
-  "  type `files /usr/share`, `taskmgr` or `paint` at the prompt for more to open",
+  "  `files` opens the session's own tree — a writable copy of the read-only base, made once",
+  "  type `files /usr`, `taskmgr` or `paint` at the prompt for more to open",
 ]);
 
 /* ---- the abort gate ------------------------------------------------------------------------- */
@@ -183,6 +197,39 @@ export function applyControls(cfg = {}) {
   setViewControls({ snapToGrid: cfg.noIconGrid !== true });
 }
 
+/* ---- the session's tree (M19a, D40) --------------------------------------------------------- */
+
+/**
+ * WHAT THE KERNEL SAID ABOUT THE SESSION'S TREE, out of the boot report, and whether it agrees with
+ * the name userland opens.
+ *
+ * `up` is the kernel's `up` message. The seed report is never null once a mount has been attempted,
+ * so a null here is a kernel that did not report one at all — an older page-side transport — and is
+ * said rather than treated as "no seed".
+ *
+ * THE DISAGREEMENT IS THE POINT. `src/kernel/seed.mjs`'s `SEED_DEST` is where the copy LANDS and
+ * `src/libos/std.mjs`'s `HOME_DIR` is where every program OPENS; a process may not import kernel
+ * code, so the two cannot be one constant, and this page is the only place that holds both. If they
+ * ever drift, every program opens a directory the seed did not create and the symptom is an empty
+ * file manager with no error anywhere — so it is said, noted, and published for a driver.
+ */
+export function seedState(up, say = () => {}, report = null) {
+  const seed = (up && up.fs && up.fs.seed) || null;
+  const dest = (seed && seed.dest) || null;
+  const drifted = Boolean(dest) && dest !== HOME_DIR;
+  const why = !seed
+    ? "the kernel reported no seed at all"
+    : (drifted
+      ? `the kernel seeded ${dest} and userland opens ${HOME_DIR}: every program is pointed at a `
+        + "directory the seed did not create"
+      : "");
+  if (why) {
+    say(`SEED: ${why}`);
+    if (report && Array.isArray(report.notes)) report.notes.push(`seed: ${why}`);
+  }
+  return { seed, dest, home: HOME_DIR, drifted, why };
+}
+
 /* ---- the assembly -------------------------------------------------------------------------- */
 
 /**
@@ -212,6 +259,11 @@ export async function bootShell(opts) {
   if (!report) throw new Error("bootShell needs `report`: the page's globals object");
   if (liveClass) document.body.classList.add(liveClass);
   const k = await bootKernel({ label, bench: 1, ...cfg }, report, say);
+  /* M19a. THE SEED REPORT, READ OFF THE BOOT MESSAGE. `up` is solicited, so `kernelBoot` keeps it
+   * in `k.events` — `expect` splices out of `pending` and leaves that log alone. Published on the
+   * page's globals because the live desktop has no assertions on it and this is what a driver reads
+   * the session's tree back through; `seedState` says anything wrong with it. */
+  report.seed = seedState(k.events.find((m) => m.t === "up"), say, report);
   if (tap) k.on(tap);
   const host = new WinHost({ into, post: (m) => k.post(m) });
   k.on((m) => { host.handle(m); });
@@ -352,7 +404,7 @@ export async function stageDesktop(opts = {}) {
    * not already have: the view is a DOM widget the page built. */
   report.view = view;
   report.pids = pids;
-  if (diagnose) sayState({ say, host, shell, deskEntry, view });
+  if (diagnose) sayState({ say, host, shell, deskEntry, view, seed: report.seed || null });
   for (const line of help) say(line);
   report.phase = "live";
   report.livePid = livePid;
@@ -366,7 +418,7 @@ export async function stageDesktop(opts = {}) {
  * empty or elsewhere. Every value reaches the page through the caller's `say`, which is
  * `textContent`, so a filename on the desktop is text and never markup.
  */
-export function sayState({ say, host, shell, deskEntry = null, view = null }) {
+export function sayState({ say, host, shell, deskEntry = null, view = null, seed = null }) {
   const r = (el) => {
     if (!el) return "none";
     const b = el.getBoundingClientRect();
@@ -374,6 +426,20 @@ export function sayState({ say, host, shell, deskEntry = null, view = null }) {
       + `${Math.round(b.left)},${Math.round(b.top)}`;
   };
   say("");
+  /* THE SESSION'S TREE, PRINTED, because in a second engine the log is the only channel there is
+   * (CLAUDE.md's second-engine rule) — and a seed that was refused looks from the outside exactly
+   * like one that ran. `ran: true` WITH a `why` is a real state: the tree landed and the closing
+   * snapshot did not. */
+  if (seed && seed.seed) {
+    const s = seed.seed;
+    // A REFUSED SEED CARRIES ONLY `why` — `cfg.noSeed`'s report has no counts at all — so the two
+    // states are printed as two sentences rather than one with `undefined` in it.
+    say(`seed:     ${s.ran
+      ? `ran — ${s.files} file(s), ${s.bytes} byte(s) from ${s.base} into ${s.dest} in ${s.ms} ms`
+        + (s.why ? `; ${s.why}` : "")
+      : `did not run — ${s.why || "no reason given"}`}`
+      + (s.partial ? `; a half-copy is at ${s.partial}` : ""));
+  }
   say("desktop:  " + (deskEntry
     ? `win ${deskEntry.id}, ${deskEntry.items.length} rows published, `
       + `${view ? view.report().icons : "NO ICON VIEW"} icons drawn`
