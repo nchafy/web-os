@@ -1,18 +1,38 @@
 # The ABI
 
-**71 calls in six groups**, and the number changed with M10: the two untyped `clipboard_*` calls
-are DELETED and five typed `dataobj_*` calls replace them (constraint 240). This is the interface of
-the operating system — everything else is built on it, and a change here is a change to the
-system's contract.
+**71 DESIGNED calls in six groups, and 61 REALISED.** Both numbers are right and they answer
+different questions; this paragraph is the reconciliation M20 owed, and §Two counts below says how
+to re-run either.
+
+The **designed** table is 71: `research/gap-03.md` derived 68, and M10 deleted the two untyped
+`clipboard_*` calls and added five typed `dataobj_*` ones (constraint 240), net +3. That is the
+interface this document specifies, and a change to it is a change to the system's contract.
+
+The **realised** surface is `SYS_NAME` in `src/abi.mjs`, and it is **61** as of M20 — 59 at M10, 60
+through M19, and `SYS_win_menu: 60` made it 61. `selfTest()` asserts `SYS_NAME.length === NSYS`,
+that `INTS` declares exactly `NSYS` `SYS_` numbers, and that no two share one — so the realised
+number cannot drift from the code. It can and does drift from the prose above, which is why M21 owes
+a check that compares them (`docs/PLAN-SHELL.md` §M21, `docs/PRD-SHELL.md` §A11). **This
+document names its calls in prose rather than in one table, so no figure quoted here for the
+documented-but-absent set is re-runnable, and none is quoted.** Ten names are reproducibly on the
+wrong side of the gap, each by `SYS_NAME.includes('<name>')` → `false` against a non-zero
+`grep -c <name> docs/ABI.md`: `sigprocmask`, `fcntl`, `realpath`, `clock_gettime`, `env_get`,
+`env_set`, `notify`, `random`, `utimes`, `exec`. `utimes` and `realpath` are M21's rows; the other
+eight are recorded as owed nowhere.
+
+## Two counts
+
+```sh
+node -e "import('./src/abi.mjs').then(m => console.log(m.NSYS, m.SYS_NAME.filter(Boolean).length))"
+# → 61 61   the realised surface, and the assertion that the array is dense
+```
 
 Derived in `research/gap-03.md`, which carries the citation for every borrowed shape. This file is
 the normative statement; the research file is the evidence. Where they disagree, this one is wrong
 and should be corrected here.
 
-Option A does not implement all 71 in v1 — see `../MILESTONES.md` for the subset per milestone,
-and note that A's realised surface is **59 calls** as of M10, not the 34 of the original candidate
-design and not the ~40 `PLAN.md` §5 costed. `SYS_NAME` in `src/abi.mjs` is the list; the number here
-is derived from it and `selfTest()` asserts the two agree.
+Option A does not implement all 71 in v1 — see `../MILESTONES.md` for the subset per milestone. 61
+is neither the 34 of the original candidate design nor the ~40 `PLAN.md` §5 costed.
 
 ---
 
@@ -545,6 +565,68 @@ and `encodeAdvances` THROWS rather than returning null on a table that disagrees
 because that input is the kernel's own data and a mismatch there is a defect rather than a bad read.
 `UI_FAMILY` and `MONO_FAMILY` now have their one definition in `src/abi.mjs`; `src/wm/surface.mjs`
 and `src/wm/taskbar.mjs` still carry copies.
+
+### The menu a process raises, as M20 built it
+
+| call | args | → | errno |
+|---|---|---|---|
+| `win_menu` | a0 window fd, a1 x, a2 y, byte region = `winItemSize(n)` of item records | rows the shell opened | BADF INVAL ENOENT EHOSTGONE |
+
+**`x` AND `y` ARE SURFACE px, AND THAT IS THE WHOLE UNIT STATEMENT.** They are the unit the
+`WEV_POINTER` that asked for the menu already carried (constraint 223), so a right-click's own
+coordinates pass straight through. **DEVICE px is `win_surface`'s unit and `win_surface`'s alone** —
+a surface is not obliged to be the client box — and a program's own layout constants are CSS px.
+They are **signed**: read with `p.ctl[A1] | 0` and `p.ctl[A2] | 0`, stored the same way, so a point
+left of or above the origin arrives as a negative number rather than as 4,294,967,0-something. The
+page converts with `Surface.clientAt`, the declared inverse of the `pointAt` that produced the
+point, and clamps the popup to the viewport — the only side that knows where the frame is. Nothing
+here bounds them.
+
+**THE ROW RECORD IS `win_items`' RECORD, REUSED VERBATIM.** `decodeWinItems` is the one definition,
+so a menu row and a jump-list row cannot come to disagree, and the decode is again the validation:
+a malformed region is refused WHOLE rather than drawn as far as it parsed.
+
+**FOUR REFUSALS, FOUR ERRNOS, each asserted separately** — a single "it refused" passes for a
+refusal for the wrong reason (M3's `truncate` answered ENOENT where it owed EROFS):
+
+| errno | when |
+|---|---|
+| **-EBADF** | the fd names nothing. `winOf`'s rule, unchanged |
+| **-EINVAL** | the fd is not a window; or the region is longer than `MAX_INLINE`; or `decodeWinItems` refused it; or there are more rows than `WIN_ITEM_CAP` |
+| **-ENOENT** | no rows |
+| **-EHOSTGONE** | the window is destroyed or detached |
+
+**A ZERO-LENGTH REGION IS NOT A WITHDRAWAL HERE, which is the one place this call parts from
+`win_items`.** A menu is transient and there is nothing to withdraw, so an empty list answers
+**-ENOENT** and the caller can still tell "I built an empty list" from "my bytes were wrong". The
+empty case is not branched on in `calls.mjs`: `decodeWinItems` answers `[]` for a zero length and
+the refusal lives beside the cap it belongs with (`src/kernel/wins.mjs`), so an in-process caller
+gets the same errno as a syscall.
+
+**`WITEM_CONTEXT: 0x40` IS THE SEVENTH ITEM FLAG AND `WITEM_FLAGS_ALL` IS `0x7f`**, up from `0x3f`.
+`selfTest` asserts the mask is the OR of the declared flags, so an eighth flag that forgot the mask
+fails under node. The bit is what `WEV_ITEM`'s `c` carries, and it **selects which list the index is
+into**: `WITEM_CONTEXT` indexes the open menu's rows and everything else indexes the published
+`items`, because they are two lists and row 2 of one is not row 2 of the other. `Window.menu` holds
+the open menu separately from `Window.items` for exactly that reason.
+
+**`itemAt(ev)` → `{ index: ev.a | 0, where: ev.c >>> 0 }`, AND A DISMISSAL IS `index < 0`.**
+`decodeWinEvent` takes `a` with `getUint32`, so the kernel's `a = -1` reads back as `4294967295`
+without an accessor. `itemAt` is the ONE place that is undone — `pointerAt`'s rule and constraint
+225's record, now a standing one (constraint 307). `where` is a flag word and has no sign to
+restore, which is why only `index` is signed. **`< 0` and not `=== -1`** so a second reason to close
+a menu with nothing chosen is another negative value rather than a second comparison at every call
+site. A dismissal carries `b = 0`: there is no row, so there are no flags, and a reader must not
+find the last row's flags on a record that names none.
+
+**A DISMISSAL IS REPORTED AND NEVER SWALLOWED**, because the program is parked waiting for the
+answer: with no record it waits for a row that is never coming and Esc leaves a frozen window.
+`WinMgr.activateItem` closes the menu on a choice or a dismissal and **refuses a second report
+against a closed menu** — two dismissals for one menu would wake the program twice and the second
+record names a gesture that did not happen. New stats: `menus`, `refusedMenus`, `menuDismissals`.
+
+`src/libos/syscall.mjs` has the stub: `winMenu(fd, x, y, items = [])`, which encodes with
+`encodeWinItems` and answers -EINVAL locally on a list the codec refuses.
 
 ---
 

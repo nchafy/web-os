@@ -22,8 +22,8 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 306 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
-| 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
+| 2 | `docs/CONSTRAINTS.md` | 308 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 3 | `docs/ABI.md` | The syscall table — **71 calls designed, 61 realised**, and §Two counts is the reconciliation — plus the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
@@ -62,8 +62,8 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  306 normative constraints  ← cite these
-  ABI.md          the syscall table
+  CONSTRAINTS.md  308 normative constraints  ← cite these
+  ABI.md          the syscall table: 71 designed, 61 realised, and §Two counts reconciles them
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
   LEARNING-MODE.md  option D: learning mode, the teaching CPU, device providers
@@ -114,6 +114,17 @@ bench/
                   bare URL in Firefox with real trusted input — a file created in the session's tree,
                   read back out of the file manager's own rows, and still there after a reload.
                   `--prove-failure` takes the volume away between the boots
+  m20-verbs/      M20's six verbs and two menus. `probe.mjs` is 99 clauses under plain Node against a
+                  fake filesystem and a fake window, with `loader.mjs` — a resolve hook making
+                  `/src/abi.mjs` mean this repo's, so the probe imports THE PROGRAM THAT SHIPS rather
+                  than a rewritten copy. The fakes are not gentler than the real thing (98): `rename`
+                  CLOBBERS, `O_EXCL` refuses EEXIST, a published data object is SEALED.
+                  `firefox-verbs.py` drives the LANDING page in Firefox with real trusted input —
+                  right-click, New folder, F2, Delete, reload — and scores nine named clauses with
+                  five controls. **It maximizes the window with a caption double-click first**,
+                  because a content-fitted `files` window has NO EMPTY PAPER inside its clip
+                  (measured: client box 428x122 CSS px, viewBox `{y:22,h:74}`, last row 4 px past
+                  it), so the empty-space menu is otherwise unreachable
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -240,6 +251,13 @@ www/
                   and `wiped` is what says boot 1 really met an empty volume. `no_seed=1` is its one
                   query control. ASKS FOR NO GESTURE, because a seeded tree and an unseeded one are
                   not the same picture: `ls` answers ENOENT
+  m20.html        M20's five proofs — `menu`, `past`, `item`, `verbs`, `refusals` — 61 expectations
+                  over **30 DRIVEN GESTURES ASSERTED TO AN EXACT COUNT**, the most this suite drives
+                  for one check. `past` reads the popup's geometry against `.window-body`'s and is
+                  the page half of constraint 308; `verbs` asserts the FILESYSTEM and never the
+                  drawing; `refusals` asserts four errnos separately AND a fifth refusal that must
+                  carry no errno key at all. Four query controls: `no_menu_guard`, `silent_dismiss`,
+                  `menu_in_surface`, `paste_clobbers`. The bare URL is a live desktop
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -342,7 +360,9 @@ row below rather than restate it.
 | The GLYPH ADVANCES, and the set of sizes they are priced at | `src/kernel/advance.mjs` holds the measured table and builds the string `/dev/advance` serves; `TEXT_SIZES`, `ADVANCE_PATH`, `encodeAdvances`/`decodeAdvances`, `advanceWidth`, `advanceKey` and `ADV_CP_MIN`/`ADV_CP_MAX` are in `src/abi.mjs`. The sizes are SURFACE px — the unit `DL_TEXT`'s `a2` carries — and DERIVED from the CSS sizes programs draw at, half-UP as `Math.round` is. A size outside the set has NO ROW on purpose (constraints 302, 303). These sit beside `TEXT_SIZES` and not in `INTS`, so the device's own header is the stale-copy gate rather than `ABI_FINGERPRINT` |
 | The two font stacks | `UI_FAMILY`/`MONO_FAMILY` in `src/abi.mjs`. The renderer and the advance table MUST agree about them or the table prices a font nothing draws — which is why `bench/m19-advance/probe.py` reads the pair out of `src/wm/surface.mjs` by regex and fails loudly if either stops being a quoted const. **`src/wm/surface.mjs:26-27` and `src/wm/taskbar.mjs:95` still carry copies**; that is the import this row is waiting for |
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
-| The 306 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| A MENU A PROCESS RAISES | `SYS_win_menu` in `src/abi.mjs`, `HANDLERS.win_menu` in `src/kernel/calls.mjs` and `WinMgr.menu` in `src/kernel/wins.mjs` — and the ROW is `win_items`' row, `encodeWinItems`/`decodeWinItems`, reused verbatim so a menu row and a jump-list row cannot come to disagree. `x`/`y` are SURFACE px and SIGNED, the unit the `WEV_POINTER` that asked for the menu already carried (constraint 223) — device px is `win_surface`'s unit and `win_surface`'s alone. `Window.menu` holds the open menu SEPARATELY from the published `items`, because they are two lists and row 2 of one is not row 2 of the other. **A zero-length region answers -ENOENT and is NOT a withdrawal**, which is the one place this call parts from `win_items`: a menu is transient and there is nothing to withdraw. A process MUST NOT draw its own popup — `.window-body` is `overflow: hidden` (constraint 308) |
+| WHICH LIST AN ACTIVATION INDEXES, and what a dismissal is | `WITEM_CONTEXT` in `src/abi.mjs` (the seventh item flag; `WITEM_FLAGS_ALL` is `0x7f` and `selfTest` asserts it is the OR of the declared flags) + `itemAt(ev)`, and `WinMgr.activateItem` in `src/kernel/wins.mjs` is the one place the bit is read to pick the list. `itemAt` is the THIRD and last signed-field accessor, beside `pointerAt` and `wheelAt` — `WEV_ITEM`'s `a` is read with `getUint32`, so the kernel's `a = -1` arrives as `4294967295` to anything that does not go through it, and constraint 225 is the record of what the first one cost. **A dismissal is `index < 0`, not `=== -1`** (constraint 307), so a second reason to close a menu with nothing chosen is another negative value and not a second comparison at every call site |
+| The 308 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -409,6 +429,15 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
   `src/bin/desktop.mjs` reads the filesystem and publishes rows through `win_items`, and
   `scripts/check.py --negative no-items` is the run that tells that apart from a page drawing a
   hard-coded menu. (constraints 275, 223)
+  **M19 DELIVERED HOVER AND M20 EXTENDED THE DIVISION TO A MENU ANY PROCESS CAN RAISE, and the
+  reason narrowed to one.** Of the three things the paragraph above said a process could not draw a
+  shell with, hover is now a buttonless `WPTR_MOVE` with `c = 0` — so that leg is gone and an
+  auditor will not find it. What is left is structural and does not go away: `.window-body` is
+  `overflow: hidden`, so a popup a process paints into its own surface is CUT at the client
+  rectangle and loses exactly the rows a reader was reaching for. `win_menu` therefore hands the
+  kernel ROWS and the page draws the popup, which is `win_items`' division at a different moment —
+  the shell draws it, the process owns what it says, and `--negative menu-in-surface` is the world
+  that demonstrates it, moving 46 of `check_m20`'s 61. (constraint 308)
 - **No `fork`.** `spawn` + `pipe` + `setpgid` only. (20)
 - **Processes get fds, never paths.** Resolve a path to an inode once, in the kernel, and cache.
   `getDirectoryHandle` is 85 µs per component. (24)
@@ -611,6 +640,12 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
 - **Kill stray Chrome between control runs.** `pkill -f "showup-chrome-"`. A leftover competes for
   the renderer: a twelve-control sweep without it reported `patched-optional` BROKEN, and the same
   control passed alone.
+- **`pkill -9 -f firefox` KILLS THE SHELL THAT IS RUNNING IT, so kill Firefox in a SEPARATE
+  command and match `"Firefox.app"`.** `pkill -f` matches the whole command line, and a compound
+  command like `pkill -9 -f firefox; python3 bench/m20-verbs/firefox-verbs.py` contains the string
+  `firefox` in its own argv — so the shell kills itself and the run dies with exit 1 and **no
+  output at all**, which reads as a broken gate rather than as a signal. Two M20 runs were lost
+  that way. `pkill -9 -f "Firefox.app"` on its own line.
 - **A DRIVEN WHEEL'S DELTA IS NOT IN THE SAME UNIT IN BOTH DRIVERS, so a dispatched constant is
   not an assertable distance.** CDP's `deltaY` is DEVICE px and the `wheel` event reports
   `deltaY / devicePixelRatio`; WebDriver BiDi's `scroll` takes CSS px. Measured 12 of 12 over four
@@ -632,6 +667,12 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   honoured by Firefox 156, verified by reading `devicePixelRatio` back off the page at 1, 1.5 and 2 —
   which is how `bench/m19-advance/probe.py` covered three ratios in a second engine. `scripts/bidi.py`
   does not wrap it yet; call it directly, as that probe does.
+  **A KEY WITH NO SPELLING IN `KEYS` RAISES `BidiError`, SO CHECK BEFORE ASSUMING THE GESTURE IS
+  UNDRIVABLE.** `scripts/bidi.py`'s `KEYS` carries WebDriver's own code points, and M20's F2 rename
+  had none until that row added `"F1".."F12"` = U+E031..U+E03C — the contiguous block ending
+  immediately before the U+E03D `Meta` already used. `button: 2` needed nothing added:
+  `Firefox.click(x, y, button=2)` already existed and was verified by RUNNING, not assumed —
+  `{button: 2, trusted: True, defaultPrevented: True}` read back off the page.
 - **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
   that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
   started in Firefox at all (206) — both with every expectation green, both found by a human
@@ -779,6 +820,28 @@ scripts/check.py --negative no-seed          # the world D40 removes: no session
 scripts/check.py --negative reseed-always    # ...and constraint 28's defect restored: a seed on
                                   # every boot, installed over the tree the reader edited
 scripts/check.py --negative seed-moves-base  # ...and a seed that MOVES the base instead of copying
+scripts/check.py --only m20         # M20's 61 expectations over five driven proofs, 12.7-13.6 s, and
+                                  # 30 DRIVEN GESTURES asserted to an exact count
+node --experimental-loader ./bench/m20-verbs/loader.mjs bench/m20-verbs/probe.mjs
+                                  # ...and the six verbs under plain Node: 99 clauses against fakes
+                                  # that CLOBBER and refuse exactly as the real thing does
+node --experimental-loader ./bench/m20-verbs/loader.mjs bench/m20-verbs/probe.mjs --prove-failure
+pkill -9 -f "Firefox.app"           # IN A SEPARATE COMMAND. See the warning below the block
+python3 bench/m20-verbs/firefox-verbs.py  # CAN A READER RIGHT-CLICK AND ACTUALLY DO THINGS, AND DO
+                                  # THEY STICK? the LANDING page in Firefox with real trusted input:
+                                  # New folder from the menu, F2, Delete, then a reload
+python3 bench/m20-verbs/firefox-verbs.py --prove-failure  # ...and with the PRIMARY button, no menu
+                                  # opens: 4 of 9 clauses fire and 5 stay green
+python3 bench/m20-verbs/firefox-verbs.py --help  # ...the five controls `--control` takes. WHAT EACH
+                                  # MOVES is `CONTROLS` at the top of that file, not in the usage
+scripts/check.py --negative no-menu-guard     # the browser's own context menu, un-prevented: 2 / 59
+scripts/check.py --negative silent-dismiss    # ...and Esc swallowed, so a parked program waits for a
+                                  # row that is never coming: 3 / 58
+scripts/check.py --negative menu-in-surface   # ...and a process drawing its OWN popup into its
+                                  # surface, where `overflow: hidden` eats it: 46 / 15, the widest
+                                  # control in this suite and honestly so (constraint 308)
+scripts/check.py --negative paste-clobbers    # ...and a paste that overwrites instead of refusing
+                                  # EEXIST: 4 / 57
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end

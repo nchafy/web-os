@@ -3225,3 +3225,58 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     `EACCES` 2, `EROFS` 69. This milestone's first bench draft asserted 17 for EEXIST and FAILED
     over a correct refusal; the clause reads `errnoName` now, and so does every refusal clause of
     `check_m19a`.
+
+307. **A SIGNED FIELD IN AN UNSIGNED RECORD GETS ONE ACCESSOR THAT UNDOES IT, NEVER A SENTINEL
+    EVERY READER MUST REMEMBER.** `WEV_*` records are read with `getUint32` because a key event's
+    inline bytes, a resize's cell counts and a `where` flag word are all unsigned
+    (`decodeWinEvent`, `src/abi.mjs`). Some fields of some record types are not. The rule is that
+    each such field has exactly ONE place its sign is restored, exported from `src/abi.mjs`, and
+    that every reader goes through it. There are three, and they are the whole set:
+    `pointerAt` (a pointer's x/y — a capture keeps delivering moves after the pointer leaves the
+    surface, so a negative x is the NORMAL case and reads back as 4,294,967,289), `wheelAt` (the
+    deltas and not the position), and **`itemAt` (`WEV_ITEM`'s index and not its `where`)**.
+    **`itemAt` IS THE SECOND INSTANCE OF THE SAME BILL, AND CONSTRAINT 225 IS WHAT THE FIRST ONE
+    COST.** M8's critic found a pointer coordinate read raw; the symptom was a coordinate four
+    billion px off-surface with nothing thrown anywhere. M20's dismissal is `WEV_ITEM` with
+    `a = -1`, which reads back as `4294967295` — so the same defect, in a record type that did not
+    exist when 225 was written.
+    **THE ALTERNATIVE WAS AN UNSIGNED `0xffffffff` SENTINEL AND IT IS REFUSED**, because it asks
+    every reader to remember that `a` is unsigned on this record type and signed one type over. The
+    kernel still WRITES the sentinel — `push({type: WEV_ITEM, a: -1, …})` through a `setUint32` is
+    `0xffffffff` on the wire — so the asymmetry is real and the accessor is the only place it is
+    paid.
+    **THE TEST IS `index < 0`, NOT `index === -1`.** A second reason to close a menu with nothing
+    chosen is then another negative value rather than a second comparison at every call site.
+    **THE SELF-TEST MUST ROUND-TRIP THE SENTINEL THROUGH THE CODEC AND NOT ASSERT THE ACCESSOR ON A
+    LITERAL**, which is the trap: `itemAt({a: -1, c: 0})` returns `-1` whether or not the field is
+    unsigned, so a clause written that way is green on a build where the accessor is dead code.
+    `src/abi.mjs`'s selfTest encodes with `encodeWinEvent`, decodes with `decodeWinEvent`, asserts
+    the raw field really is `4294967295`, and only then asserts `itemAt` gives `-1`.
+
+308. **A MENU IS PAGE-SIDE CHROME, BECAUSE `overflow: hidden` CLIPS A SURFACE AND A MENU MUST
+    ESCAPE ITS WINDOW.** `.window-body` is `overflow: hidden` (`src/wm/aero.mjs:401`, `:409`), so a
+    popup a process draws into its own surface is CUT at the client rectangle: a menu raised near
+    the bottom of a frame silently loses its last rows, and the rows it loses are the ones a reader
+    was reaching for. There is no clean fix inside the surface — the clip is what keeps a scrolled
+    row from painting over its own header (constraint 294, `--negative no-clip`), so removing it to
+    make room for a menu trades one reader-visible defect for another.
+    So `win_menu` hands the kernel ROWS and the page draws the popup, which is `win_items`' division
+    (D39, constraint 275) at a different moment: **the shell draws it and the process owns what it
+    says.** Activation comes back as `WEV_ITEM` on the fd the caller is parked on, the kernel
+    validates the index against the list IT is holding, and the page decides nothing (constraint
+    226).
+    **`scripts/check.py --negative menu-in-surface` IS THE WORLD THAT DEMONSTRATES IT, AND IT IS THE
+    WIDEST CONTROL IN THIS SUITE**: `src/bin/files.mjs --menu-in-surface` draws its own popup into
+    its surface instead, and 46 of `check_m20`'s 61 expectations turn, 15 intact. It is wide because
+    a program drawing its own menu raises no `win_menu` at all, so every clause downstream of the
+    call has nothing to read — which is the honest shape of the failure and is why the failing set
+    is named one by one in `_MENU_IN_SURFACE_FAILS` rather than left as "most of them".
+    **THE CLAUSE THAT CARRIES IT ASSERTS THE POPUP EXTENDS PAST `.window-body`'s RECTANGLE,
+    DOWNWARDS, AS A GEOMETRY READ** — not that a popup exists. A popup that exists and fits proves
+    nothing about the clip.
+    **THE CLIP IS NOW THE WHOLE ARGUMENT, AND IT DID NOT USED TO BE.** `CLAUDE.md` listed three
+    things a process could not draw a shell with: hover, a menu that outlives a button press, and a
+    rubber band. **M19 DELIVERED HOVER** — a buttonless `WPTR_MOVE` with `c = 0` (constraint 223,
+    reversed on a measurement) — so that leg is gone, and a reader auditing this constraint will not
+    find it. What remains is the clip, which is structural, plus the fact that a menu must survive
+    the release of the button that raised it while `win_menu`'s caller is parked on one reply.

@@ -882,6 +882,28 @@ class Control:
     #: land. That is recorded here because it is also why clause 3's byte and mode readings rest on
     #: inversion: the world in which one tree answers to two names does not exist in this VFS.
     SEED_MOVES_BASE = "seed-moves-base"
+    #: M20's first: `src/wm/winhost.mjs`'s `contextmenu` handler no longer calls `preventDefault`,
+    #: so the browser's own menu is NOT refused. A `win_menu` still reaches the kernel and the
+    #: shell still draws the popup, so what moves is the one clause that reads `defaultPrevented`
+    #: back off the event. `docs/PLAN-SHELL.md` §M20's first control.
+    NO_MENU_GUARD = "no-menu-guard"
+    #: M20's second: `WinHost.activateItem` returns before reporting a negative index from a
+    #: context menu, which is the plausible mistake — a dismissal looks like nothing happened. The
+    #: program is PARKED in `poll` on the fd it raised the menu on, so a swallowed dismissal is a
+    #: window that never wakes, and the kernel is left holding a menu it will validate the next
+    #: index against. `docs/PLAN-SHELL.md` §M20's second control.
+    SILENT_DISMISS = "silent-dismiss"
+    #: M20's third: `src/bin/files.mjs` DRAWS the context menu into its own surface instead of
+    #: calling `win_menu`. `.window-body` is `overflow: hidden` (`src/wm/aero.mjs`), so a popup a
+    #: process paints is clipped at the client edge and the clause reading how far the menu
+    #: extends PAST that rectangle must fail. `docs/PLAN-SHELL.md` §M20's third control.
+    MENU_IN_SURFACE = "menu-in-surface"
+    #: M20's fourth, and the page's own rather than the plan's: a Paste REPLACES a name the
+    #: destination already holds. It drops the move's destination pre-check AND the copy's
+    #: `O_EXCL`, which is one control over one behaviour expressed at two layers — so the EEXIST
+    #: the kernel owes a second paste never arrives and a reader's own file is overwritten by a
+    #: paste that reports success.
+    PASTE_CLOBBERS = "paste-clobbers"
     ONCE = "once"
 
 
@@ -954,6 +976,10 @@ CONTROL_RUNS = {
     Control.NO_SEED: ("no-seed",),
     Control.RESEED_ALWAYS: ("reseed-always",),
     Control.SEED_MOVES_BASE: ("seed-moves-base",),
+    Control.NO_MENU_GUARD: ("no-menu-guard",),
+    Control.SILENT_DISMISS: ("silent-dismiss",),
+    Control.MENU_IN_SURFACE: ("menu-in-surface",),
+    Control.PASTE_CLOBBERS: ("paste-clobbers",),
 }
 
 
@@ -6459,6 +6485,393 @@ _BAND_FROM_ROW_FAILS = (
 )
 
 
+# ======================================================================================
+# M20 — a menu a process raises, and the six mutating verbs
+#
+# Every clause is one boolean `www/m20.html` publishes, paired here with the label this check
+# records and the evidence keys a failure prints. M17's, M18's and M19's table discipline, for
+# their reason: a label spelled in a control's declaration and a boolean spelled in the page are
+# the two sides of one fact, and only a table stops them drifting.
+#
+# ALL FOUR CONTROLS ARRIVE THROUGH THE PAGE'S OWN QUERY STRING and none of them is a served-bytes
+# fixture, which is the structural difference from M18's three and M19's fifth. Two are
+# `src/bin/files.mjs`'s declared argv flags (`--menu-in-surface`, `--paste-clobbers`) and two are
+# `src/wm/winhost.mjs`'s `hostControls` keys, which the page sets through the module's own
+# `setHostControls`. So every world here is re-runnable from the command line with no source edit
+# at all.
+#
+# THE PAGE REPORTS `controlsInForce` AND THE CHECK READS IT BACK, because the two host keys are
+# MODULE state: a page that set three of five would leave the other two holding whatever the last
+# page in this realm asked for, and a control a check believed was on and was not is a green run
+# over an unmodified world.
+# ======================================================================================
+
+#: How long the driver waits for www/m20.html to reach a terminal state.
+#:
+#: WHAT IS IN IT: a kernel boot, the shell, a nine-row fixture built by seven real programs, two
+#: `files` processes, THIRTY driven gestures — eight of which wait only on a 600 ms `settle`
+#: because a refused verb repaints nothing — and nineteen `ls`/`stat`/`wc`/`grep` processes run to
+#: completion for the filesystem readings. MEASURED by `scripts/check.py --only m20` at 12.67 s
+#: headless at dpr 2 on Chrome 158, for a run whose every clause holds. The margin is ~24x and
+#: deliberately so: the one thing a smaller number buys is a BROKEN run on a slower machine.
+M20_TIMEOUT = 300.0
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the menu itself.
+#:
+#: FOUR READINGS OF ONE GESTURE AND THEY ARE FOUR CLAUSES — the KERNEL's raise count, the WINDOW's
+#: open-menu row count, the HOST's conversion and the LABELS the shell drew. A clause resting on
+#: the host's count alone would pass for a page that posted nothing to the kernel, and a clause
+#: resting on the kernel's would pass for a menu no reader can see.
+_M20_MENU = (
+    # THE FIXTURE CLAUSES FIRST: every reading below is vacuous without the tree this page built
+    # and a list that does not scroll — every rectangle it aims at is located at offset 0.
+    ("the tree the proofs mutate is the fixture", "theTreeIsTheFixture", ("account",)),
+    ("and the listing does not scroll", "theListDoesNotScroll", ("account",)),
+    ("the right press carried the secondary button", "thePressCarriedTheSecondaryButton",
+     ("rightPresses", "contextmenus")),
+    ("and the browser's own menu was refused", "theBrowsersOwnMenuWasRefused",
+     ("lastContextMenu",)),
+    # THE UNIT ROUND TRIP, and the one thing on this page a ratio error would break silently:
+    # `Surface.pointAt` out, `Surface.clientAt` back, with the program's own CSS-px reasoning in
+    # between. M16's bill was twenty times the tolerance this clause allows.
+    ("and the menu opened under the pointer that asked for it", "theMenuOpenedUnderThePointer",
+     ("pointDelta", "lastMenu")),
+    ("a win_menu reached the kernel", "aWinMenuReachedTheKernel", ("emptyMenu",)),
+    ("and the kernel is holding the rows", "theKernelHeldTheMenu", ("emptyMenu",)),
+    ("and a row menu is a second, different list", "theRowMenuIsADifferentList", ("rowMenu",)),
+    ("the shell drew the rows the program published", "theShellDrewTheProgramsRows",
+     ("emptyMenu", "rowMenu")),
+    ("and the program names the same rows", "theProgramNamedTheSameRows", ("rowMenu", "account")),
+    # WINDOWS 7'S OWN RULE FOR AN INAPPLICABLE COMMAND, and this project's for a caption button: a
+    # live-looking row that silently does nothing is the defect. Both edges, because `disabled`
+    # asserted on its own is satisfied by a menu whose Paste is disabled forever.
+    ("Paste is disabled with an empty clipboard", "pasteIsDisabledWithAnEmptyClipboard",
+     ("pasteBefore",)),
+    ("and enabled once something is copied", "pasteIsEnabledOnceSomethingIsCopied", ("account",)),
+    ("and no menu went unrendered", "everyMenuWasDrawn", ("rowMenu",)),
+)
+
+#: Proof 2: the geometry that makes the popup the SHELL's. Read as a RECTANGLE and not as a
+#: screenshot — an inert popup and a working one are the same picture (constraint 40).
+_M20_PAST = (
+    ("there is a popup over the window", "thereIsAPopupOverTheWindow",
+     ("popupBox", "anchorBody")),
+    ("and it extends past the client area, downwards", "theMenuExtendsPastTheClientArea",
+     ("popupBox", "anchorBody", "pastBody")),
+    ("and the process drew no popup of its own", "theProcessDrewNoPopup",
+     ("inSurfaceAt", "menuInSurface")),
+)
+
+#: Proof 3: the answer, both ways. THE ACTIVATION IS READ FOUR TIMES and the four are not one
+#: clause: the index the shell reported, the index the kernel ACCEPTED, the verb the program ran,
+#: and the filesystem — which is proof 4's.
+_M20_ITEM = (
+    ("every aim named the row it looks like", "everyAimNamedTheRowItLooksLike",
+     ("aims", "menuIndex")),
+    ("and the last report named the row and the list", "theReportNamedTheRowAndTheList",
+     ("lastMenuReport", "menuIndex")),
+    ("the kernel accepted every choice and threw none out", "theKernelAcceptedEveryChoice",
+     ("end",)),
+    ("and the shell and the host agree about how many", "theShellAndTheHostAgree", ("end",)),
+    ("and the program ran the verbs those rows name", "theProgramRanTheVerbsInOrder",
+     ("chosen", "verbs")),
+    ("Esc dismissed the menu", "escDismissedTheMenu", ("dismissal",)),
+    # THE GESTURE AND THE REPORT ARE TWO NUMBERS, which is the whole of `silent-dismiss`: the
+    # shell counts the Esc either way and only the report stops arriving.
+    ("and the dismissal was reported, down to the program", "theDismissalWasReported",
+     ("dismissal",)),
+    ("and the kernel let go of the menu with it", "theKernelClosedTheMenu", ("dismissal",)),
+    ("and nothing was chosen by accident", "theDismissalRanNoVerb", ("account",)),
+)
+
+#: Proof 4: the verbs, ASSERTED ON THE FILESYSTEM. Every reading comes out of a separate process —
+#: `ls`, `stat`, `wc`, `grep` — so none of them is the program's belief about its own call.
+_M20_VERBS = (
+    ("the created folder is in a fresh readdir", "theCreatedFolderIsInAFreshReaddir",
+     ("before", "afterCreate")),
+    ("and stat says it is a directory", "theCreatedFolderIsADirectory", ("after",)),
+    ("and the end listing is exactly what the verbs left", "theEndListingIsWhatTheVerbsLeft",
+     ("before", "after")),
+    ("and the program named the folder it made", "theProgramNamedTheFolderItMade",
+     ("account", "stem")),
+    # THE INODE IS THE WHOLE OF THE RENAME CLAUSE. Equal names after the call are satisfied by a
+    # copy-and-delete, which is a different operation with a different cost on a large file.
+    ("the rename moved the inode", "theRenameMovedTheInode", ("before", "after")),
+    ("and the old name is gone", "theOldNameIsGone", ("after",)),
+    ("and the program named the rename", "theProgramNamedTheRename", ("account",)),
+    ("the pasted bytes count the same as the source's", "theByteCountsAgree", ("after",)),
+    ("and every line of both is the marker", "everyLineOfBothIsTheMarker", ("after",)),
+    # THE COMPARISON'S OWN NEGATIVE CONTROL, inside the page: the same three readings over a file
+    # whose bytes are NOT the marker's. A grep that matched everything would satisfy the clause
+    # above over any two files at all.
+    ("and the comparison fails on different bytes", "theComparisonFailsOnDifferentBytes",
+     ("after",)),
+    ("and the program calls it a copy and not a move", "theProgramNamedThePasteAsACopy",
+     ("account",)),
+    ("the delete removed the file it named", "theDeleteRemovedTheFile", ("after", "account")),
+    ("and the refused delete left the folder and its child", "theRefusedDeleteLeftTheFolder",
+     ("after",)),
+)
+
+#: Proof 5: EACH REFUSAL'S ERRNO, SEPARATELY. Four refusals, three with an errno and one WITHOUT —
+#: and the fourth is what makes the other three mean anything, because a clause that merely
+#: checked for a truthy `errno` would pass for a program that defaulted it. A single "it refused"
+#: passes for a filesystem that refused for the wrong reason: M3's `truncate` answered ENOENT
+#: where it owed EROFS, and only the per-call assertion caught it.
+_M20_REFUSALS = (
+    ("a rename onto an occupied name says EEXIST", "theOccupiedNameSaysEEXIST",
+     ("writable", "refusalWhy")),
+    ("and the field held what was typed before it was committed", "theFieldHeldWhatWasTyped",
+     ("writable",)),
+    ("and the refused rename left the row under its old name", "theRefusedRenameLeftTheRow",
+     ("writable",)),
+    # THE TWO EEXISTs ARRIVE FROM OPPOSITE SIDES: a copy opens with `O_CREAT | O_EXCL` and the
+    # KERNEL answers, a rename has no such flag and the program's `lstat` is the only test. Same
+    # errno, two mechanisms, and `paste-clobbers` removes exactly one of them.
+    ("a paste onto a name the destination holds says EEXIST",
+     "thePasteOntoAnOccupiedNameSaysEEXIST", ("writable", "refusalWhy")),
+    ("and the refused paste landed nothing and left the bytes alone",
+     "theRefusedPasteLandedNothing", ("writable",)),
+    ("a non-empty folder says ENOTEMPTY", "theFullFolderSaysENOTEMPTY",
+     ("writable", "refusalWhy")),
+    ("a read-only mount says EROFS", "theReadOnlyMountSaysEROFS",
+     ("readOnly", "readOnlyWhy", "readOnlyDir")),
+    ("and it still raised a menu, so the refusal is the verb's", "theReadOnlyMountStillRaisedAMenu",
+     ("readOnly", "readOnlyMenus")),
+    ("and nothing landed on it", "theReadOnlyMountIsUnchanged", ("readOnly",)),
+    # `'errno' in entry` AND NOT `entry.errno`: a falsy value and an absent key are the two
+    # readings this clause exists to separate.
+    ("the program's own refusal carries no errno at all", "theProgramsOwnRefusalHasNoErrno",
+     ("writable", "refusalWhy")),
+    ("and the header raised no menu", "theHeaderRaisedNoMenu", ("writable",)),
+    ("and the set of refusals is exactly these four and one", "nothingElseWasRefused",
+     ("writable", "readOnly")),
+)
+
+#: proof name -> its clause table, in the order the page runs them. Read by the body and by the
+#: label inventory, so a clause added to one reaches the other.
+_M20_PROOFS = (("menu", _M20_MENU), ("past", _M20_PAST), ("item", _M20_ITEM),
+               ("verbs", _M20_VERBS), ("refusals", _M20_REFUSALS))
+
+M20_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+) + tuple(label for _, table in _M20_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m20.html",
+)
+
+M20_DOCUMENT = "/www/m20.html?proofs=1"
+
+M20_READY = ("(() => { const M = globalThis.M20 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M20 = """(() => {
+  const M = globalThis.M20 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    tree: M.tree || {},
+    notDriven: (M.notDriven || []).map(String),
+    short: String((M.run && M.run.short) || ''),
+    menu: one(P.menu),
+    past: one(P.past),
+    item: one(P.item),
+    verbs: one(P.verbs),
+    refusals: one(P.refusals),
+  }
+})()"""
+
+M20_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list, "tree": dict,
+    "notDriven": list, "short": str,
+    "menu": (dict, type(None)),
+    "past": (dict, type(None)),
+    "item": (dict, type(None)),
+    "verbs": (dict, type(None)),
+    "refusals": (dict, type(None)),
+}
+
+#: How many gestures www/m20.html asks for, asserted rather than counted loosely. TWENTY-EIGHT in
+#: `drive` — 10 right presses, 8 popup-row clicks, 1 left click to aim the keyboard, 1 double
+#: click into `sub`, 2 Backspace-runs clearing the rename field, 2 typed names, 2 Enters, 1 Esc and
+#: 1 Backspace for Back — then TWO more in `driveReadOnly`, which is a second `files` process on
+#: `/usr/share` and the only reason this page opens a second window.
+M20_GESTURES = 30
+
+#: And how many it asks for under `menu-in-surface`, where the drive declares its own stopping
+#: point: the two right presses whose raise clauses that control turns, and the Esc between them.
+#: A SEPARATE CONSTANT AND NOT A FLOOR, so the one world where this page stops early still says
+#: exactly how far it got — a `>=` here would be green for a drive that died at gesture 4.
+M20_GESTURES_IN_SURFACE = 3
+
+
+#: What REMOVING THE `contextmenu` GUARD must break: the clause that reads `defaultPrevented` back
+#: off the event, and nothing else.
+#:
+#: THE RECORD IS KEPT EITHER WAY, which is what makes this a reading of the REFUSAL rather than of
+#: an absence. `WinHost` counts every right press in `contextmenus` whether or not it called
+#: `preventDefault`, so this world reports `defaultPrevented: false` on a real event — an event
+#: that never fired and a refusal that did not happen are not the same world.
+#:
+#: AND EVERYTHING ELSE HOLDS, including all five proofs' verbs: the guard is the browser's menu and
+#: not the system's, so a `win_menu` still reaches the kernel, the shell still draws the popup and
+#: every row of it is still clickable. That is the whole point of the clause being separate from
+#: `a win_menu reached the kernel` — M16/R8's reported defect was a foreign menu over pixels a
+#: process drew, which is this world, and it is invisible to a check that only counts raises.
+_NO_MENU_GUARD_FAILS = (
+    "and the browser's own menu was refused",
+    "the page's own verdict is ok",
+)
+
+#: What SWALLOWING THE DISMISSAL REPORT must break: the report, at every layer below the gesture.
+#:
+#: TWO CLAUSES AND NOT ONE, and the second is the informative half. `theDismissalWasReported` is
+#: the host, the kernel and the PROGRAM's own count — the program is parked in `poll` on the fd it
+#: raised the menu on, so its count going to 0 is the window that never wakes. And
+#: `theKernelClosedTheMenu` moves with it because the kernel never hears the gesture at all: it is
+#: left holding seven rows it will validate the NEXT index against, which is the stale-menu case
+#: `badItems` exists for.
+#:
+#: `Esc dismissed the menu` HOLDS, deliberately, and it is the clause that says the gesture really
+#: happened: the SHELL closes its own popup and counts the dismissal page-side, and only the report
+#: crossing into the kernel stops. The gap between those two numbers IS this control.
+_SILENT_DISMISS_FAILS = (
+    "and the dismissal was reported, down to the program",
+    "and the kernel let go of the menu with it",
+    "the page's own verdict is ok",
+)
+
+#: What a PROCESS DRAWING ITS OWN POPUP must break: proof 2 entirely, and the raise clauses of
+#: proof 1 — which is the subset `docs/PLAN-SHELL.md` §M20 names.
+#:
+#: `overflow: hidden` ON `.window-body` IS THE WHOLE MECHANISM (`src/wm/aero.mjs`). A popup a
+#: process paints into its surface is CLIPPED at the client edge, so `pastBody` reads 0 — and the
+#: ANCHOR clause is what stops that zero being mistaken for a popup that happened to fit, because
+#: in this world there is no popup element at all.
+#:
+#: AND THE RUN STOPS AFTER PROOF 2, WHICH THE PAGE DECLARES. A popup a process paints HAS NO HIT
+#: TEST — `src/bin/files.mjs` draws it in `paint` and reads it in no press branch — so no row of it
+#: can be picked, and every verb below is driven by picking one. The keyboard route is undrivable
+#: too: `scripts/cdp.py`'s `KEYS` table has no virtual key code for `F2`, `Delete` or a bare
+#: letter, so Ctrl+N/X/C/V and the two keysyms cannot be sent. Running the whole sequence in this
+#: world turned EVERY clause on the page, and a control satisfied by any failure verifies nothing
+#: (CLAUDE.md) — so `www/m20.html` reports proofs 3, 4 and 5 as `not driven` with the reason, and
+#: the clauses of those three are listed here one by one rather than as "the rest".
+#:
+#: `the page was really driven` HOLDS, and that is not slack: this check asserts
+#: `M20_GESTURES_IN_SURFACE` exactly in this world, so a drive that stopped anywhere else is red.
+#:
+#: AND `and no menu went unrendered` HOLDS VACUOUSLY HERE, which is a FINDING about that clause
+#: rather than about this control, recorded rather than worked around. `www/m20.html` reads it as
+#: `menusUnrendered === 0 && host.menus === shell.contextOpens`, and in this world no `win_menu`
+#: reaches the kernel at all — so all three counters are 0 and the equality holds over nothing.
+#: The clause is still coupled to its own subject: a host with NO SHELL counts `menusUnrendered`
+#: and that is the world it is written for, which is every page from M7 to M13 and not this one.
+#: It is kept out of the tuple because it really does not move, and a declaration that claimed it
+#: did would be red for a reason the control is not named for. Closing the vacuity needs a
+#: non-zero floor on `shell.contextOpens` in the page, and `www/m20.html` is not this check's to
+#: edit.
+_MENU_IN_SURFACE_FAILS = (
+    # Proof 1's raise clauses. The press itself holds — it is a real right press either way — and
+    # so does the browser-menu refusal, which is the guard and not the raise.
+    "and the menu opened under the pointer that asked for it",
+    "a win_menu reached the kernel",
+    "and the kernel is holding the rows",
+    "and a row menu is a second, different list",
+    "the shell drew the rows the program published",
+    "and the program names the same rows",
+    "Paste is disabled with an empty clipboard",
+    "and enabled once something is copied",
+    # Proof 2, entirely: there is no popup, so there is no rectangle and nothing past the body.
+    "there is a popup over the window",
+    "and it extends past the client area, downwards",
+    "and the process drew no popup of its own",
+    # Proofs 3, 4 and 5: NOT DRIVEN, declared by the page with the reason above.
+    "every aim named the row it looks like",
+    "and the last report named the row and the list",
+    "the kernel accepted every choice and threw none out",
+    "and the shell and the host agree about how many",
+    "and the program ran the verbs those rows name",
+    "Esc dismissed the menu",
+    "and the dismissal was reported, down to the program",
+    "and the kernel let go of the menu with it",
+    "and nothing was chosen by accident",
+    "the created folder is in a fresh readdir",
+    "and stat says it is a directory",
+    "and the end listing is exactly what the verbs left",
+    "and the program named the folder it made",
+    "the rename moved the inode",
+    "and the old name is gone",
+    "and the program named the rename",
+    "the pasted bytes count the same as the source's",
+    "and every line of both is the marker",
+    "and the comparison fails on different bytes",
+    "and the program calls it a copy and not a move",
+    "the delete removed the file it named",
+    "and the refused delete left the folder and its child",
+    "a rename onto an occupied name says EEXIST",
+    "and the field held what was typed before it was committed",
+    "and the refused rename left the row under its old name",
+    "a paste onto a name the destination holds says EEXIST",
+    "and the refused paste landed nothing and left the bytes alone",
+    "a non-empty folder says ENOTEMPTY",
+    "a read-only mount says EROFS",
+    "and it still raised a menu, so the refusal is the verb's",
+    "and nothing landed on it",
+    "the program's own refusal carries no errno at all",
+    "and the header raised no menu",
+    "and the set of refusals is exactly these four and one",
+    "the page's own verdict is ok",
+)
+
+#: What LETTING A PASTE REPLACE AN OCCUPIED NAME must break: the KERNEL's EEXIST, what the refused
+#: paste left behind, and the count that says the refusal set is exactly the one the run provoked.
+#:
+#: IT NEEDED A SECOND PASTE TO HAVE A WORLD AT ALL, which the page records where it drives one. The
+#: control drops the move's destination pre-check and the copy's `O_EXCL`, so it only shows in a
+#: paste onto a name the destination ALREADY holds — a paste back into the directory the file came
+#: from is refused one branch earlier by `to === from`, with no errno at all.
+#:
+#: `and the program calls it a copy and not a move` HOLDS. `account.pasted[0]` is still the FIRST
+#: paste and `pastes` is still 2, so the Copy-against-Cut reading is untouched — which is why that
+#: clause carries the intent and `theRefusedPasteLandedNothing` carries how many landed.
+#:
+#: AND SO DOES `the pasted bytes count the same as the source's`: the clobbering paste writes the
+#: same source over the same destination, so the bytes are right for the wrong reason. That is
+#: exactly why `theRefusedPasteLandedNothing` reads `account.pasted.length` and not only the size.
+_PASTE_CLOBBERS_FAILS = (
+    "a paste onto a name the destination holds says EEXIST",
+    "and the refused paste landed nothing and left the bytes alone",
+    "and the set of refusals is exactly these four and one",
+    "the page's own verdict is ok",
+)
+
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -6568,6 +6981,17 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "eight-row tree the five proofs read does not exist — the page refuses before it "
                 "builds a host. UNMEASURABLE rather than FAIL, because a FAIL would claim a "
                 "40-sample hover stream was sent and the kernel counted it wrongly.",
+        ), "m20": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and nothing receives a right press. There is "
+                "also no FILESYSTEM, so `/tmp/m20` is never built and the nine rows the verbs "
+                "create, rename, paste and delete do not exist — the page refuses before it "
+                "builds a host or a shell. THE SHELL IS THE SHARPEST CASE HERE: its popup is "
+                "plain DOM, so a page with no kernel at all could draw a convincing context menu "
+                "with the right labels in it and satisfy every geometry clause on proof 2 "
+                "(constraint 40). UNMEASURABLE rather than FAIL, because a FAIL would claim a "
+                "verb was run and the filesystem came back wrong.",
         ), "m19a": Expect(
             UNMEASURABLE,
             why="the same mechanism, and for this check it takes the whole subject away: without "
@@ -8429,6 +8853,142 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "one reading of clause 3 a control can move goes red and nothing else does",
             failed=_SEED_MOVES_BASE_FAILS,
             held=held_rest(M19A_LABELS, _SEED_MOVES_BASE_FAILS),
+        )},
+    ),
+    "no-menu-guard": NegativeControl(
+        name="no-menu-guard",
+        why="no_menu_guard=1: `src/wm/winhost.mjs`'s `contextmenu` handler no longer calls "
+            "`preventDefault`, so the BROWSER's own menu is not refused. "
+            "`docs/PLAN-SHELL.md` §M20's first control.\n"
+            "IT IS A HOST CONTROL AND NOT A PATCH, because `setHostControls` is the module's own "
+            "declared interface and `www/m20.html` calls it on BOTH paths with all five keys "
+            "spelled out. A page that set three of five would leave the other two holding "
+            "whatever the last page in this realm asked for, which is why the check reads "
+            "`controlsInForce` back.\n"
+            "WHAT MUST BREAK: the `defaultPrevented` clause, ALONE. The record is kept either "
+            "way — `contextmenus` counts every right press whether or not the guard fired — so "
+            "this world reports `defaultPrevented: false` on a real event rather than an absence, "
+            "and those are not the same world.\n"
+            "WHAT MUST HOLD: everything else, including all five proofs. The guard is about the "
+            "BROWSER's menu and not the system's, so a `win_menu` still reaches the kernel, the "
+            "shell still draws the popup and every row of it is still clickable. That separation "
+            "is the whole reason the clause is not folded into `a win_menu reached the kernel`: "
+            "M16/R8's reported defect was a foreign menu over pixels a process drew, which is "
+            "exactly this world, and a check that only counted raises could not see it.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_menu_guard", "1"),),
+        expects={"m20": Expect(
+            Outcome.FAIL,
+            why="a right press whose default was not prevented leaves the browser's own menu "
+                "licensed over a process's pixels, and `defaultPrevented` reads false on the "
+                "event the host recorded",
+            failed=_NO_MENU_GUARD_FAILS,
+            held=held_rest(M20_LABELS, _NO_MENU_GUARD_FAILS),
+        )},
+    ),
+    "silent-dismiss": NegativeControl(
+        name="silent-dismiss",
+        why="silent_dismiss=1: `WinHost.activateItem` returns before reporting a negative index "
+            "from a context menu, so a dismissal reaches nothing. `docs/PLAN-SHELL.md` §M20's "
+            "second control, and it sits in the ONE place both Esc and a click away go through — "
+            "two gestures must not be two code paths that can disagree.\n"
+            "WHAT MUST BREAK: the REPORT, at every layer below the gesture, and the menu the "
+            "kernel is left holding. TWO clauses. `theDismissalWasReported` is the host, the "
+            "kernel and the PROGRAM's own count, and the program's is the one that matters: it is "
+            "parked in `poll` on the fd it raised the menu on, so a swallowed dismissal is a "
+            "window that never wakes. `theKernelClosedTheMenu` moves with it because the kernel "
+            "never hears the gesture at all — it keeps seven rows it will validate the NEXT index "
+            "against, which is the stale-menu case `badItems` exists for.\n"
+            "WHAT MUST HOLD, and this is the half that says the gesture really happened: `Esc "
+            "dismissed the menu`. The SHELL closes its own popup and counts the dismissal "
+            "page-side either way, and the GAP between that number and the host's report IS this "
+            "control. A clause counting both would go red here AND for anything that stopped the "
+            "Esc arriving, and would separate nothing — `the kernel accepted every choice and "
+            "threw none out` is kept out of the choice count for the same reason, and holds.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("silent_dismiss", "1"),),
+        expects={"m20": Expect(
+            Outcome.FAIL,
+            why="a dismissal nobody reports leaves the program parked on the fd it raised the "
+                "menu on and the kernel holding a menu that is over",
+            failed=_SILENT_DISMISS_FAILS,
+            held=held_rest(M20_LABELS, _SILENT_DISMISS_FAILS),
+        )},
+    ),
+    "menu-in-surface": NegativeControl(
+        name="menu-in-surface",
+        why="menu_in_surface=1: `src/bin/files.mjs` DRAWS the context menu into its own surface "
+            "instead of calling `win_menu`, through that program's own declared "
+            "`--menu-in-surface` flag. `docs/PLAN-SHELL.md` §M20's third control, and the reason "
+            "a process may not draw one: `.window-body` is `overflow: hidden` "
+            "(`src/wm/aero.mjs`), so the popup is CLIPPED at the client edge.\n"
+            "WHAT MUST BREAK: proof 2 entirely, and proof 1's raise clauses. `pastBody` reads 0 — "
+            "and the ANCHOR clause is what stops that zero being mistaken for a popup that "
+            "happened to fit, because in this world there is no popup element at all.\n"
+            "AND THE RUN STOPS AFTER PROOF 2, WHICH THE PAGE DECLARES WITH THE REASON. A popup a "
+            "process paints HAS NO HIT TEST — it is drawn in `paint` and read in no press branch "
+            "— so no row of it can be picked, and every verb below is driven by picking one. The "
+            "keyboard route is undrivable too: `scripts/cdp.py`'s `KEYS` table carries no virtual "
+            "key code for `F2`, `Delete` or a bare letter, so Ctrl+N/X/C/V and the two keysyms "
+            "cannot be sent either. Running the whole sequence here turned EVERY clause on the "
+            "page, and a control satisfied by any failure verifies nothing (CLAUDE.md) — so "
+            "proofs 3, 4 and 5 come back `not driven` and their clauses are named in this "
+            "control's declaration one by one rather than as 'the rest'.\n"
+            "`the page was really driven` HOLDS, AND THAT IS NOT SLACK. This check asserts "
+            "`M20_GESTURES_IN_SURFACE` EXACTLY in this world, so a drive that stopped at any "
+            "other gesture is red — which is what keeps 'not driven' from being a world in which "
+            "the page simply crashed.\n"
+            "AND `and no menu went unrendered` HOLDS VACUOUSLY, recorded rather than worked "
+            "around: no `win_menu` reaches the kernel here, so `menusUnrendered`, `host.menus` "
+            "and `shell.contextOpens` are all 0 and the equality holds over nothing. That clause's "
+            "own world is a host with NO SHELL — every page from M7 to M13 — and closing the "
+            "vacuity needs a non-zero floor on `contextOpens` in www/m20.html, which this check "
+            "does not own.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("menu_in_surface", "1"),),
+        expects={"m20": Expect(
+            Outcome.FAIL,
+            why="a popup a process paints into its surface is clipped at the client edge, so no "
+                "menu extends past `.window-body` and no row of one can be picked",
+            failed=_MENU_IN_SURFACE_FAILS,
+            held=held_rest(M20_LABELS, _MENU_IN_SURFACE_FAILS),
+        )},
+    ),
+    "paste-clobbers": NegativeControl(
+        name="paste-clobbers",
+        why="paste_clobbers=1: a Paste REPLACES a name the destination already holds, through "
+            "`src/bin/files.mjs`'s own declared `--paste-clobbers` flag. It drops the move's "
+            "destination pre-check AND the copy's `O_EXCL` — one control over one behaviour "
+            "expressed at two layers, because a reader's file is destroyed by either.\n"
+            "THIS IS THE PAGE'S OWN CONTROL AND NOT THE PLAN'S, and it needed a SECOND PASTE to "
+            "have a world at all. The flag only shows in a paste onto a name the destination "
+            "already holds; a paste back into the directory the file came from is refused one "
+            "branch earlier by `to === from`, with no errno. Before those two gestures existed "
+            "the run's only EEXIST was the RENAME's, which this flag does not touch, and the "
+            "control turned nothing — which must be rescoped rather than reported (CLAUDE.md).\n"
+            "WHAT MUST BREAK: the KERNEL's EEXIST, what the refused paste left behind, and the "
+            "count that says the refusal set is exactly the one the run provoked. The two EEXISTs "
+            "on this page arrive from OPPOSITE SIDES — a copy opens `O_CREAT | O_EXCL` and the "
+            "kernel answers; a rename has no such flag, because `rename(2)` replaces its "
+            "destination by contract, so the program's own `lstat` is the only test — and this "
+            "control removes exactly one of them. The RENAME's EEXIST holds, which is what says "
+            "the two are really two.\n"
+            "AND `the pasted bytes count the same as the source's` HOLDS: the clobbering paste "
+            "writes the same source over the same destination, so the bytes are right for the "
+            "wrong reason. That is precisely why `theRefusedPasteLandedNothing` reads "
+            "`account.pasted.length` and not only the size.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("paste_clobbers", "1"),),
+        expects={"m20": Expect(
+            Outcome.FAIL,
+            why="a paste that clobbers answers no EEXIST, lands a second file and shrinks the "
+                "run's refusal set by one",
+            failed=_PASTE_CLOBBERS_FAILS,
+            held=held_rest(M20_LABELS, _PASTE_CLOBBERS_FAILS),
         )},
     ),
 }
@@ -16153,6 +16713,210 @@ def check_m19a(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m19a.html", env.served_matches_disk(env.document),
                     "the m19a.html served does not match www/m19a.html on disk")
+
+
+# ======================================================================================
+# m20. A menu a process raises, and the six mutating verbs.
+# ======================================================================================
+
+
+def _m20_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE PER CLAUSE AND NOT ONE PER PROOF, because three of the four controls name SINGLE clauses
+    inside a proof: `no-menu-guard` must turn the `defaultPrevented` reading of proof 1 and
+    nothing else, and `silent-dismiss` must turn two of proof 3's nine and leave `Esc dismissed
+    the menu` standing. A check recording "proof 1 passed" could not tell a refused browser menu
+    from a `win_menu` that reached the kernel, and a control satisfied by any failure verifies
+    nothing.
+
+    A NOT-DRIVEN PROOF SCORES EVERY ONE OF ITS CLAUSES RED, deliberately, and the alternative was
+    worse. `menu-in-surface` is the one world where the drive stops early — the page says so with
+    the reason — and the three proofs below it come back null. Recording nothing for them would
+    leave 34 labels unrecorded, which `score` reports against every control's derived `held` set:
+    a label a run did not record cannot be said to have held. So they are recorded as failures and
+    named one by one in `_MENU_IN_SURFACE_FAILS`, which is what keeps that control a NAMED subset
+    rather than "whatever it happened to reach".
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause,
+                         "notDriven": got["notDriven"], "short": got["short"],
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m20",
+    milestone="m20",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_MENU_GUARD, Control.SILENT_DISMISS,
+              Control.MENU_IN_SURFACE, Control.PASTE_CLOBBERS),
+    labels=M20_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M20_DOCUMENT,
+    ready_expr=M20_READY,
+    ready_what="globalThis.M20 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m20.html?proofs=1)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M20 && globalThis.M20.state",
+    refusal_want="aborted",
+    note="A MENU A PROCESS RAISES, AND THE SIX MUTATING VERBS — five driven proofs over one "
+         "`files` window plus a second one opened on a READ-ONLY MOUNT, and the first check in "
+         "this suite whose subject is a popup the SHELL draws from rows a PROCESS published. "
+         "`win_menu` is syscall 60; `WITEM_CONTEXT` is the seventh item flag; a dismissal is a "
+         "NEGATIVE INDEX, which is why `itemAt` exists beside `pointerAt` (docs/PLAN-SHELL.md "
+         "§M20).\n"
+         "NO NEW GESTURE KIND WAS OWED, unlike M17's `wheel`. The page asks for `rightclick`, "
+         "`click`, `dblclick`, `key` (Escape, Backspace, Enter — all three in `scripts/cdp.py`'s "
+         "`KEYS`) and `type`, and `_perform_gesture` already performs all five. `rightclick` "
+         "picks the SECONDARY button there, which `the right press carried the secondary button` "
+         "is the clause for: constraint 279's own recorded defect was a driver sending a LEFT "
+         "button for a gesture named `rightclick`, and the jump-list proof found a window list on "
+         "screen with the shell's counter reading 0.\n"
+         "EVERY VERB IS ASSERTED ON THE FILESYSTEM AND NEVER ON THE DRAWING, which is the plan's "
+         "own wording. Nineteen `ls`/`stat`/`wc`/`grep` processes answer in RESULT ROWS, because "
+         "the page holds no fd and makes no syscall — and the rename's reading is `st_ino` before "
+         "and after with the old name gone beside it, since equal names alone are satisfied by a "
+         "copy-and-delete. The paste's byte equality is three readings and an arithmetic: a file "
+         "of MARKER.length + 1 bytes whose every line matches MARKER and which has exactly one "
+         "line IS `MARKER\\n`, and the same three readings over a DIFFERENT file are what show "
+         "the comparison capable of failing.\n"
+         "EACH REFUSAL'S ERRNO IS A SEPARATE EXPECTATION, and the kernel answers four different "
+         "ones: EEXIST from a rename onto an occupied name (the PROGRAM's `lstat`, because "
+         "`rename(2)` replaces its destination by contract), EEXIST from a paste onto one (the "
+         "KERNEL's `O_EXCL`, which is why `paste-clobbers` moves one and not the other), "
+         "ENOTEMPTY from `rmdir` on a folder with a child, EROFS from a verb on `/usr/share` — "
+         "and a FOURTH refusal that is the program's OWN and carries no errno key at all, read as "
+         "`'errno' in entry` and not as a truthy test. A single 'it refused' passes for a "
+         "filesystem that refused for the wrong reason: M3's `truncate` answered ENOENT where it "
+         "owed EROFS.\n"
+         "THE PROOFS PATH STAGES A TASKBAR, which M19's did not, and it is not scenery: "
+         "`WinHost.#menu` hands its rows to `this.shell.openContextMenu`, and a host with no "
+         "shell reports the DISMISSAL and counts `menusUnrendered`. So the shell is the renderer "
+         "under test, and `and no menu went unrendered` is the clause that says a page without "
+         "one would have been measuring a world in which no menu is ever drawn.\n"
+         "ALL FOUR CONTROLS ARE QUERY PARAMETERS AND NONE IS A SERVED-BYTES FIXTURE. Two are "
+         "`src/bin/files.mjs`'s argv flags and two are `src/wm/winhost.mjs`'s `hostControls`, set "
+         "through that module's own `setHostControls` — so every world is re-runnable from the "
+         "command line with no source edit. `controlsInForce` is read BACK, because those two "
+         "host keys are MODULE state and a control a check believed was on and was not is a green "
+         "run over an unmodified world.\n"
+         "negative controls: --negative no-menu-guard drops the `preventDefault`, so the browser "
+         "keeps its own menu over a process's pixels and the `defaultPrevented` clause goes red "
+         "ALONE — every verb still runs, which is what makes M16/R8's defect invisible to a check "
+         "that only counts raises. --negative silent-dismiss swallows the report and turns TWO: "
+         "the report down to the program, and the menu the kernel is left holding; `Esc dismissed "
+         "the menu` HOLDS, and the gap between the shell's gesture count and the host's report IS "
+         "the control. --negative menu-in-surface makes the PROGRAM paint the popup, which "
+         "`overflow: hidden` clips — proof 2 goes entirely, proof 1's raise clauses with it, and "
+         "the drive DECLARES its own stopping point because a popup a process paints has no hit "
+         "test and `scripts/cdp.py` has no key code for F2, Delete or a Ctrl chord; running the "
+         "whole sequence there turned every clause, which verifies nothing. --negative "
+         "paste-clobbers lets a paste replace an occupied name and turns the kernel's EEXIST, "
+         "what the refused paste left, and the refusal count; it is the PAGE's own control rather "
+         "than the plan's, and it turned nothing until the run drove a SECOND paste into `sub`. "
+         "--negative no-isolation must come out BROKEN: no SAB, no kernel, no filesystem, so not "
+         "even the fixture tree exists.\n"
+         "MEASURED SUBSETS, one run each at dpr 2: 2 red / 59 intact for no-menu-guard, 3 / 58 "
+         "for silent-dismiss, 4 / 57 for paste-clobbers, and 46 / 15 for menu-in-surface — the "
+         "last is large because that world removes the gesture every proof below it is driven by, "
+         "and its 46 are named one by one in the declaration.",
+)
+def check_m20(env: Env) -> None:
+    performed = drive_gestures(env, "M20", timeout=M20_TIMEOUT)
+    got = env.read(READ_M20, M20_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m20.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m20.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed, no filesystem is mounted "
+            "and the nine-row tree the five proofs mutate is never built.%s"
+            % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m20.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE FIXTURE IS BUILT BY REAL PROGRAMS — `rm -r`, two `mkdir -p`, two `touch`, two `echo`
+    # through a shell redirection — and read back by nineteen more. A process that faulted during
+    # its own init reads downstream as "a pid appeared", because `/proc` carries the row either way
+    # until it is reaped. A swallowed failure is a defect (CLAUDE.md, harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because every aim on this page is a VIEWPORT point computed from a CSS-px
+    # rectangle, and proof 1's `theMenuOpenedUnderThePointer` is a four-conversion round trip
+    # through SURFACE px and back. A figure labelled with a ratio it was not taken at is what cost
+    # M11, M12 and M16 a milestone each (constraints 264, 297).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, TO THE EXACT COUNT. Every right press, popup click, key and typed
+    # name below is input this driver dispatched; a page that finished without asking would have
+    # measured a listing nobody touched and still produced row names.
+    #
+    # TWO CONSTANTS AND NOT A FLOOR. `menu-in-surface` is the one world where the drive declares
+    # its own stopping point, and a `>=` here would be green for a drive that died at gesture 4 —
+    # which is the failure that world is otherwise indistinguishable from.
+    want = (M20_GESTURES_IN_SURFACE if "menu_in_surface=1" in env.document else M20_GESTURES)
+    env.expect_that("the page was really driven",
+                    performed == want and got["gestures"] == performed,
+                    {"performed": performed, "want": want,
+                     "pageLogged": got["gestures"], "phase": got["phase"],
+                     "notDriven": got["notDriven"], "short": got["short"]})
+    # AND THE WORLD IS THE ONE ASKED FOR, from BOTH sides. The two program flags travel on argv
+    # into a process and nothing page-side holds them, so they are checked against the DOCUMENT;
+    # the two HOST keys are module state in src/wm/winhost.mjs, so `controlsInForce` is the host's
+    # own report of what it is actually running under and is checked against the same document.
+    # `host.report().controls` also carries M16's and M17's three keys, and those must be entirely
+    # off: a page-side switch another page in this realm left holding is a world nobody asked for.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    asked_menu_guard = "no_menu_guard=1" in env.document
+    asked_silent = "silent_dismiss=1" in env.document
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(live) and bool(cfg.get("proofs"))
+        and bool(live.get("noMenuGuard")) == asked_menu_guard
+        and bool(live.get("silentDismiss")) == asked_silent
+        and not [key for key, value in live.items()
+                 if value and key not in ("noMenuGuard", "silentDismiss")]
+        and bool(cfg.get("noMenuGuard")) == asked_menu_guard
+        and bool(cfg.get("silentDismiss")) == asked_silent
+        and bool(cfg.get("menuInSurface")) == ("menu_in_surface=1" in env.document)
+        and bool(cfg.get("pasteClobbers")) == ("paste_clobbers=1" in env.document),
+        {"asked": cfg, "inForce": live, "document": env.document, "tree": got["tree"]})
+
+    for proof, table in _M20_PROOFS:
+        _m20_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's and M19's precedent: a diagnosis that names the
+    # one fact explaining several red clauses at once, with the address, is cheaper than a reader
+    # rediscovering it from five separate evidence blocks. The verdict is the EXACT string, so the
+    # `; not driven: ...` suffix `menu-in-surface` adds is a failure here rather than a pass with a
+    # footnote — a proof nobody drove is not a proof that held.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notDriven": got["notDriven"],
+                     "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. An inert popup and a working one are the same picture, and
+    # a menu drawn by the process and one drawn by the shell differ by a clipped edge — every
+    # clause above reads a rectangle, a counter or a process's result row rather than this PNG
+    # (constraint 40).
+    env.shoot("m20-menu")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m20.html", env.served_matches_disk(env.document),
+                    "the m20.html served does not match www/m20.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

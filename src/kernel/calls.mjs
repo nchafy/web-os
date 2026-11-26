@@ -1182,6 +1182,40 @@ HANDLERS.win_items = (p, k) => {
   return k.wins.items(d.win, rows);
 };
 
+/**
+ * win_menu(fd, x, y, item bytes) -> how many rows the menu the shell opened has.
+ *
+ * `x`/`y` ARE SURFACE px — the unit the `WEV_POINTER` that asked for the menu already carried
+ * (constraint 223), which is what makes a right-click's own coordinates passable straight through.
+ * NOT device px: that is `win_surface`'s unit and a surface is not obliged to be the client box.
+ * The page converts with `Surface.clientAt`, the declared inverse of the `pointAt` that produced
+ * the point, so neither side restates the ratio.
+ *
+ * THE SAME CODEC AS `win_items`, deliberately: `decodeWinItems` is the one definition of a row, so
+ * a menu row and a jump-list row cannot come to disagree about the record, and the decode is again
+ * the validation — a malformed region is refused WHOLE rather than drawn as far as it parsed.
+ *
+ * A ZERO-LENGTH REGION IS NOT A WITHDRAWAL HERE, which is the one place this call parts from
+ * `win_items`: a menu is transient and there is nothing to withdraw, so `wins.menu` answers -ENOENT
+ * and the distinction between "my list was empty" and "my bytes were wrong" survives to the caller.
+ * The empty case is NOT branched on here — `decodeWinItems` answers `[]` for a zero length and the
+ * one refusal lives beside the cap it belongs with (`src/kernel/wins.mjs`), so an in-process caller
+ * gets the same errno as a syscall.
+ */
+HANDLERS.win_menu = (p, k) => {
+  const d = winOf(p, p.ctl[A0]);
+  if (typeof d === "number") return d;
+  if (d.win.destroyed) return -EHOSTGONE;
+  const length = Atomics.load(p.ctl, LEN_I32);
+  if (length < 0 || length > MAX_INLINE) return -EINVAL;
+  // A COPY, for `win_items`' measured reason: `TextDecoder.decode` REFUSES a view onto a
+  // SharedArrayBuffer, and the throw reaches `handle()` as a kernel PANIC.
+  const region = new Uint8Array(p.bytes.subarray(DATA_OFF, DATA_OFF + length));
+  const rows = decodeWinItems(region, length);
+  if (rows === null) return -EINVAL;
+  return k.wins.menu(d.win, p.ctl[A1] | 0, p.ctl[A2] | 0, rows);
+};
+
 /* ----------------------------------------------------------------------------------------------
    M10: the typed data object. FIVE CALLS — create, set, get, offer, open — and the two gestures a
    desktop is made of are both built from them: the clipboard is `offer` to one destination and

@@ -66,6 +66,20 @@ KEYS = {
     "ArrowLeft": "\ue012", "ArrowUp": "\ue013", "ArrowRight": "\ue014", "ArrowDown": "\ue015",
     "Insert": "\ue016", "Delete": "\ue017",
     "Alt": "\ue00a", "Control": "\ue009", "Shift": "\ue008", "Meta": "\ue03d",
+    #: THE FUNCTION KEYS, WHICH M18 MADE REACHABLE AND NOTHING COULD SEND. `WKEY_F1..WKEY_F12` are
+    #: keysyms in `src/abi.mjs` and `KEYSYM_BY_KEY` in `src/wm/winhost.mjs` maps every one of them,
+    #: but this table stopped at Delete — so F2, which is `files`' rename, had no spelling on
+    #: this wire at all. U+E031..U+E03C is WebDriver's own contiguous block, immediately before the
+    #: U+E03D that `Meta` above already carries, which is what makes the reading checkable rather
+    #: than copied.
+    #:
+    #: F10 AND F11 ARE THE BROWSER'S OWN and are listed anyway, because the self-test is what says
+    #: whether they arrive — measured, all twelve do, trusted and under a held Alt. A table that
+    #: omitted a key the page can in fact read would leave `press` refusing it for ever, which is
+    #: loud but wrong.
+    "F1": "\ue031", "F2": "\ue032", "F3": "\ue033", "F4": "\ue034", "F5": "\ue035",
+    "F6": "\ue036", "F7": "\ue037", "F8": "\ue038", "F9": "\ue039", "F10": "\ue03a",
+    "F11": "\ue03b", "F12": "\ue03c",
 }
 
 

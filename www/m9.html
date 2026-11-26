@@ -168,7 +168,7 @@ async function pStacking (boot) {
     ev.strangerWin = stranger.id
     ev.strangerPid = other.pid
 
-    const { pid } = await spawnProgram(s.k, EDITOR, ['editor'])
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor', '-p'])
     ev.pid = pid
     await until(() => !!frameByTitle(s.host, 'tools'), 20000)
     const editor = frameByTitle(s.host, 'notes')
@@ -490,7 +490,7 @@ async function pRefuse (boot) {
   const s = await bootHost(boot)
   const ev = {}
   try {
-    const { pid } = await spawnProgram(s.k, EDITOR, ['editor'])
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor', '-p'])
     ev.pid = pid
     await until(() => !!frameByTitle(s.host, 'notes'), 20000)
     const editor = frameByTitle(s.host, 'notes')
@@ -557,7 +557,7 @@ async function pScope (boot) {
   const s = await bootHost(boot)
   const ev = {}
   try {
-    const { pid } = await spawnProgram(s.k, EDITOR, ['editor', '-a'])
+    const { pid } = await spawnProgram(s.k, EDITOR, ['editor', '-a', '-p'])
     ev.pid = pid
     await until(() => !!frameByTitle(s.host, 'scratch'), 20000)
     const editor = frameByTitle(s.host, 'notes')

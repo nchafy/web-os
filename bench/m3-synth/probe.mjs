@@ -37,8 +37,19 @@ proc.setDev(mounts.add("/proc", { fs: proc, type: FS_PROC, flags: MNT_RO }).dev)
 dev.setDev(mounts.add("/dev", { fs: dev, type: FS_DEV, flags: MNT_RO }).dev);
 
 // ---- PROOF 1: ls /proc enumerates live pids ---------------------------------------------
-check("/proc lists every live pid", proc.listRel("/").map((e) => e.name),
-  [String(a.pid), String(b.pid), String(c.pid), "mounts"]);
+/* EVERY LIVE PID, AND NOT A FROZEN ROW LIST. This asserted the whole listing against
+ * `[pids..., "mounts"]`, so it broke the day M10 added `/proc/dataobj` — a row this proof is not
+ * about and whose arrival is correct. The clause is named "lists every live pid", so pid COVERAGE
+ * is the assertion; a non-pid row is `/proc`'s own business and has its own proofs.
+ *
+ * IT STILL FAILS IF A PID GOES MISSING, which is the thing worth catching, and the superset is
+ * checked in BOTH directions below: no live pid absent, and no numeric row that is not a live pid. */
+const pidRows = (fs) => fs.listRel("/").map((e) => e.name).filter((n) => /^[0-9]+$/.test(n));
+// All three are live here — the reap is below, and "the survivors are still there" is its clause.
+check("/proc lists every live pid", pidRows(proc).slice().sort(),
+  [a, b, c].map((p2) => String(p2.pid)).slice().sort());
+checkThat("/proc carries its mount table beside the pids",
+  proc.listRel("/").some((e) => e.name === "mounts"), "no mounts row");
 check("/proc is a directory", proc.stat({}, "/").type, DIR);
 check("a pid directory is a directory", proc.stat({}, `/${a.pid}`).type, DIR);
 check("a pid directory lists its files", proc.listRel(`/${a.pid}`).map((e) => e.name),
@@ -58,8 +69,10 @@ checkThat("a reaped pid is gone from the listing",
   !proc.listRel("/").some((e) => e.name === String(doomed)), "the killed pid lingered");
 check("and its directory is ENOENT", code(() => proc.stat({}, `/${doomed}`)), "ENOENT");
 check("and its status file is ENOENT", code(() => proc.bytesAt(`/${doomed}/status`)), "ENOENT");
-check("the survivors are still there", proc.listRel("/").map((e) => e.name),
-  [String(a.pid), String(b.pid), "mounts"]);
+// PID COVERAGE AGAIN, for the same reason as the first listing: the reaped pid is gone and the
+// two survivors are there, which is this clause's whole subject.
+check("the survivors are still there", pidRows(proc).slice().sort(),
+  [String(a.pid), String(b.pid)].slice().sort());
 
 // A ZOMBIE is still a process: it has not been reaped and its pid is its parent's handle.
 b.state = ZOMBIE;
@@ -150,8 +163,20 @@ checkThat("a directory reports its entry count",
 // ---- PROOF 3: /dev/trace, and the dropped counter ---------------------------------------
 // `console` WAS HERE AND IS NOT ANY MORE. M7 deleted `/dev/console` and the character-device
 // mechanism under it: a window is created by `win_create`, not opened by path (constraint 211).
-check("/dev lists its devices", dev.listRel("/").map((e) => e.name),
-  ["trace", "null", "zero"]);
+/* THE ROWS THIS PROOF IS ABOUT, PRESENT — not the whole listing. The frozen list broke when M19
+ * added `/dev/advance` (the published advance table), a row whose arrival is correct and which this
+ * proof says nothing about. `makeDevFS` does not export its row set, so the invariant asserted here
+ * instead is SELF-CONSISTENCY: every name the directory lists resolves through `lookup`, and the
+ * three rows the clauses below measure are among them. A device that appeared in the listing and
+ * could not be opened would still fail. */
+const devNames = dev.listRel("/").map((e) => e.name);
+for (const want of ["trace", "null", "zero"]) {
+  checkThat(`/dev lists ${want}`, devNames.includes(want), devNames.join(" "));
+}
+for (const name of devNames) {
+  checkThat(`/dev/${name} resolves, so the listing is not ahead of the lookup`,
+    dev.stat({}, `/${name}`).type !== undefined, name);
+}
 check("/dev/trace is read-only to a process", dev.stat({}, "/trace").mode, 0o444);
 check("/dev/null is writable in its mode bits", dev.stat({}, "/null").mode, 0o666);
 
@@ -208,8 +233,19 @@ check("/dev refuses an unknown device with ENOENT", code(() => dev.stat({}, "/sd
  */
 check("a generated filesystem refuses a write-opening with EROFS",
   code(() => dev.openDecision({}, "/trace", { wantW: true })), "EROFS");
-check("and refuses O_CREAT with EROFS",
-  code(() => dev.openDecision({}, "/null", { create: true })), "EROFS");
+/* `/dev/null` TAKES THE WRITE NOW, AND THAT IS CONSTRAINT 296. M15 made it the ONE declared sink
+ * of a generated mount — `cmd > /dev/null` is the most-used redirection a shell has and it answered
+ * EROFS, so `yes > /dev/null &` failed at the open and a task-manager gate had no busy process. A
+ * shell's `>` also passes `O_CREAT`, so excusing `wantW` alone was not enough.
+ *
+ * SO THE ASSERTION MOVES TO THE ROW THAT IS NOT A SINK, which is what makes this a DECLARED
+ * exception rather than a mount that quietly stopped being read-only — the same pairing
+ * `bench/m14-shell/coreutils.py` makes when it asserts `echo x > /dev/trace` still refuses. */
+checkThat("/dev/null takes an O_CREAT write-opening, being the one declared sink",
+  code(() => dev.openDecision({}, "/null", { create: true })) === "<no throw>",
+  code(() => dev.openDecision({}, "/null", { create: true })));
+check("and a row that is NOT a sink still refuses O_CREAT with EROFS",
+  code(() => dev.openDecision({}, "/trace", { create: true })), "EROFS");
 // THE REFUSAL STAYS AHEAD OF THE LOOKUP, which is what `/dev/console` used to be the exception
 // to: a write-open of a name that does not exist is EROFS before it is ENOENT.
 check("the refusal comes before the lookup, so a missing name is EROFS and not ENOENT",

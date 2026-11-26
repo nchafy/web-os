@@ -16,6 +16,13 @@
 // process cannot DRAW a desktop, and the page cannot read a filesystem. The row is the seam:
 // `docs/DECISIONS.md` D39.
 //
+// M20: THE RIGHT-CLICK MENU OVER BARE DESKTOP IS THIS PROGRAM'S TOO, raised with `win_menu` and
+// drawn by the shell. It is the same division one moment later — the rows are the item record
+// `encodeWinItems` already defines, the page draws the popup because `.window-body` is
+// `overflow: hidden` and a menu must extend past the frame, and the choice comes back as a
+// `WEV_ITEM` carrying `WITEM_CONTEXT`. A DISMISSAL comes back too, as a negative index read by
+// `itemAt`: a program that raised a menu and was never told it closed holds a mode for ever.
+//
 // WHAT IT DOES NOT DO, stated here rather than discovered: it does not watch the filesystem. There
 // is no inotify in this ABI, so the desktop is re-read when a reader asks for it — the `Refresh`
 // row in the start menu — and not when something changes underneath.
@@ -25,6 +32,7 @@ import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_STATE, WEV_ITEM,
   WROLE_DESKTOP, WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_CONTAINER, WITEM_SEPARATOR,
+  WITEM_CONTEXT, WPTR_DOWN, pointerAt, itemAt,
   WICON_COMPUTER, WICON_FOLDER, WICON_TERMINAL,
   DT_DIR,
 } from "/src/abi.mjs";
@@ -82,6 +90,20 @@ const OPENS_OWN_WINDOW = new Set([
  *  menu that disagreed with the filesystem. */
 const HIDDEN_FROM_MENU = new Set([NAME]);
 
+/**
+ * THE SECONDARY MOUSE BUTTON, as a `WEV_POINTER`'s `c` carries it.
+ *
+ * `c` is the browser's own `event.buttons` mask (`src/wm/winhost.mjs` puts it there verbatim) and
+ * there is NO `WPTR_*` bit for a button — the record already carries the mask, and a second
+ * spelling of it in `mods` would be two fields that can disagree. So the bit is the platform's
+ * numbering rather than this ABI's, which is why it is named in the program that reads it.
+ */
+const PTR_SECONDARY = 0x2;
+
+/** The last component of a path, for the one row and one menu row that are labelled with the
+ *  session directory's own name. `/` for the root, which has no last component. */
+const leafOf = (dir) => String(dir).split("/").filter((s) => s.length).pop() || "/";
+
 /** How long one `poll` waits before the loop looks at its own clock. */
 const POLL_MS = 250;
 
@@ -126,6 +148,12 @@ export function run(env) {
   const account = {
     program: NAME, win: 0, fd: 0, role: 0, items: 0, publishes: 0,
     activations: 0, launched: [], refusals: [], states: [], why: "",
+    /* M20. THE MENU'S THREE COUNTS, SEPARATE FROM `activations`. A context menu's rows are not the
+     * published list (`win_menu` validates an index against its own), so one counter over both
+     * would make a check unable to tell a row picked from a menu from an icon double-clicked —
+     * which is the only difference between the two routes a reader has. `menuDismissals` is the
+     * one that must be non-zero for Esc to be reported rather than swallowed. */
+    menus: 0, menuChoices: 0, menuDismissals: 0,
     /* M19a. BOTH DIRECTORIES AND THE REASON, because a driver reading `deskDir` alone cannot tell a
      * desktop folder inside the session's tree from one under the read-only base (D40).
      * `sessionWhy` is "" exactly when the tree is there. */
@@ -227,7 +255,7 @@ export function run(env) {
     rows.push({
       icon: WICON_FOLDER,
       flags: WITEM_DESKTOP | WITEM_CONTAINER,
-      label: session.dir.split("/").filter((s) => s.length).pop() || "/",
+      label: leafOf(session.dir),
       run: () => ["files", session.dir],
     });
     rows.push({
@@ -338,6 +366,86 @@ export function run(env) {
     return sent;
   };
 
+  /**
+   * M20. THE DESKTOP'S OWN CONTEXT MENU, as rows of exactly the shape `publish` builds — a label,
+   * an icon, `WITEM_*` flags, and what the row MEANS as a function this process runs.
+   *
+   * IT IS RAISED AND NOT DRAWN (`win_menu`), and that is what decides the contents: an activation
+   * comes back as a `WEV_ITEM` on this window's fd, so a row whose effect lived in the page could
+   * not be carried out from the event at all. Every row here is one of this program's own verbs,
+   * which is the rule the published rows already follow — a row that opened nothing would be the
+   * live-looking-button defect with a label on it.
+   *
+   * ONE MENU AND NOT THE VIEW'S TWO. Windows 7 raises a second menu whose subject is the icon
+   * under the pointer, and the ask this program receives cannot name one: a `WEV_POINTER` carries
+   * x, y and the button mask, and WHERE an icon sits is the view's own fact — the positions are a
+   * property of the display and not of this process (`src/wm/desktop.mjs`). So this is the menu
+   * over bare desktop, and the icon's menu stays with the selection it acts on.
+   *
+   * THE SESSION DIRECTORY IS RESOLVED PER RAISE, for `publish`'s reason: it is a `stat`, and a
+   * cached copy is the kind of fact that goes stale between two right-clicks.
+   */
+  const contextRows = () => {
+    const session = env.std.sessionDir(env);
+    return [
+      {
+        icon: WICON_TERMINAL,
+        flags: WITEM_CONTEXT,
+        label: "Open a terminal",
+        run: () => ["term", "--ceiling", String(ceiling)],
+      },
+      {
+        icon: WICON_FOLDER,
+        flags: WITEM_CONTEXT,
+        label: "Refresh the desktop",
+        run: null,
+        refresh: true,
+      },
+      { icon: 0, flags: WITEM_CONTEXT | WITEM_SEPARATOR, label: "", run: null },
+      {
+        icon: WICON_COMPUTER,
+        flags: WITEM_CONTEXT,
+        label: "Computer",
+        run: () => ["files", "/"],
+      },
+      {
+        icon: WICON_FOLDER,
+        flags: WITEM_CONTEXT,
+        label: "Programs",
+        run: () => ["files", BIN_DIR],
+      },
+      {
+        icon: WICON_FOLDER,
+        flags: WITEM_CONTEXT,
+        label: leafOf(session.dir),
+        run: () => ["files", session.dir],
+      },
+    ];
+  };
+
+  /** The rows of the menu the kernel is HOLDING, and this process's own array of what they mean.
+   *  A `WEV_ITEM` carrying `WITEM_CONTEXT` reports an index into THIS list and not into
+   *  `published` — they are two lists, and row 2 of one is not row 2 of the other. */
+  let openMenu = [];
+
+  /** Raise the menu at a point in the window's own unit. Returns the row count, or the errno. */
+  const raiseMenu = (x, y) => {
+    const rows = contextRows();
+    const n = env.win.menu(made.fd, x, y, rows.map((row) => ({
+      icon: row.icon, flags: row.flags, label: label(row.label),
+    })));
+    if (n < 0) {
+      account.refusals.push(`win_menu at ${x},${y}: ${env.std.errnoName(n)}`);
+      return n;
+    }
+    // COMMITTED ONLY ONCE THE KERNEL HOLDS THE LIST, which is `publish`'s rule at a second door: a
+    // refused raise that had already replaced this array would leave the kernel validating an
+    // index against the previous menu and this process looking it up in the new one.
+    openMenu = rows;
+    account.menus += 1;
+    return n;
+  };
+
   /** Run one row. `spawn` AND NOT A SHELL: the path is this program's, the argv is this program's,
    *  and there is no string for a shell to re-parse. */
   const launch = (row) => {
@@ -387,7 +495,20 @@ export function run(env) {
     }
     let done = false;
     for (const ev of evs) {
-      if (ev.type === WEV_RESIZE || ev.type === WEV_FOCUS || ev.type === WEV_POINTER) continue;
+      if (ev.type === WEV_RESIZE || ev.type === WEV_FOCUS) continue;
+      if (ev.type === WEV_POINTER) {
+        /* M20. A RIGHT PRESS IS THE ASK FOR THE MENU, and the only pointer record this program
+         * acts on. `pointerAt` and not `ev.a`/`ev.b`: the coordinates are signed and the record
+         * reads them unsigned, so one place undoes that (constraint 225).
+         *
+         * THE POINT GOES BACK OUT UNCHANGED. `win_menu` takes the unit the event arrived in, and
+         * the page converts it with the declared inverse of the conversion that produced it — so
+         * the menu opens under the pointer that asked for it and this program does no arithmetic
+         * on a number whose unit it cannot see. */
+        const at = pointerAt(ev);
+        if ((ev.mods & WPTR_DOWN) && (at.buttons & PTR_SECONDARY)) raiseMenu(at.x, at.y);
+        continue;
+      }
       if (ev.type === WEV_STATE) {
         // THE DESKTOP HAS NO SHOW STATE — the kernel refuses one (`WinMgr.setState`) — so an event
         // here would mean the two sides disagree. Recorded rather than ignored.
@@ -395,13 +516,39 @@ export function run(env) {
         continue;
       }
       if (ev.type === WEV_ITEM) {
-        account.activations += 1;
-        const row = published[ev.a];
-        if (!row) {
-          account.refusals.push(`item ${ev.a} is not a row this process published`);
+        /* `itemAt` AND NOT `ev.a`, because a DISMISSAL is a negative index and the field is read
+         * unsigned: `-1` arrives as 4,294,967,295, which `published[...]` answers undefined for
+         * and would be recorded as a row nothing published rather than as Esc. */
+        const { index, where } = itemAt(ev);
+        if (where & WITEM_CONTEXT) {
+          /* THE MENU IS GONE EITHER WAY. The kernel closes it on the first report, choice or
+           * dismissal (`WinMgr.activateItem`), so holding the rows past this point would let a
+           * second report launch a row out of a menu nothing is showing. */
+          const rows = openMenu;
+          openMenu = [];
+          if (index < 0) {
+            /* ESC, OR A CLICK AWAY. Counted and not acted on: the record exists so a program that
+             * raised a menu is not left holding a mode for ever, and this program's mode is the
+             * `openMenu` array it just dropped. */
+            account.menuDismissals += 1;
+            continue;
+          }
+          const picked = rows[index];
+          if (!picked) {
+            account.refusals.push(`menu item ${index} is not a row this process raised`);
+            continue;
+          }
+          account.menuChoices += 1;
+          env.std.say(env, `${NAME}: ${picked.label} (menu row ${index}) -> ${launch(picked)}\n`);
           continue;
         }
-        env.std.say(env, `${NAME}: ${row.label} (row ${ev.a}) -> ${launch(row)}\n`);
+        account.activations += 1;
+        const row = published[index];
+        if (!row) {
+          account.refusals.push(`item ${index} is not a row this process published`);
+          continue;
+        }
+        env.std.say(env, `${NAME}: ${row.label} (row ${index}) -> ${launch(row)}\n`);
         continue;
       }
       if (ev.type === WEV_KEY) continue;
@@ -425,6 +572,7 @@ export function run(env) {
   env.win.items(made.fd, []);
   env.win.destroy(made.fd);
   env.std.say(env, `${NAME}: ${account.why}. ${account.activations} activations, `
-    + `${account.launched.length} launched\n`);
+    + `${account.launched.length} launched, ${account.menus} menus `
+    + `(${account.menuChoices} picked, ${account.menuDismissals} dismissed)\n`);
   return { exit: 0, ...account };
 }

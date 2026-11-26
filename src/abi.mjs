@@ -174,7 +174,19 @@ const INTS = {
   // label length, and a label the page sets as TEXT. Activation comes back as `WEV_ITEM` on the
   // window's own fd, which is the readiness the process is already parked on.
   SYS_win_items: 59,
-  NSYS: 60,
+  // M20. A CONTEXT MENU A PROCESS RAISED, at a point in ITS OWN unit: `x`/`y` are SURFACE px, the
+  // unit the `WEV_POINTER` that asked for the menu already carries (constraint 223). NOT device px
+  // — that is `win_surface`'s unit and a surface is not obliged to be the client box — and the page
+  // converts with `Surface.clientAt`, the declared inverse of the `pointAt` that produced the
+  // point.
+  //
+  // WHY THE SHELL DRAWS IT AND NOT THE PROCESS. A menu has to leave the window: `.window-body` is
+  // `overflow: hidden`, so a popup a process painted into its own surface is clipped at the frame
+  // and a menu raised near the bottom edge loses its last rows. The rows travel as the item record
+  // `win_items` already defines, so there is one definition of a row and one of its flags, and
+  // activation comes back as `WEV_ITEM` on the fd the process is already parked on.
+  SYS_win_menu: 60,
+  NSYS: 61,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -457,6 +469,12 @@ const INTS = {
   //: shell renders labels and returns a position, and what that position MEANS is the publisher's
   //: own array. The kernel validates the index against the list it is holding, so a page cannot
   //: name a row that does not exist.
+  //:
+  //: M20. A NEGATIVE `a` IS A DISMISSAL: the menu this window raised closed with nothing chosen.
+  //: `itemAt` is what makes it arrive as one, because the field is read with `getUint32`. It is an
+  //: EVENT and not a silence, because a program that raised a menu is parked waiting for the
+  //: answer: with no dismissal record it waits for a row that is never coming, and a reader who
+  //: pressed Esc has a frozen window.
   WEV_ITEM: 12,
   //: M16. THE CLIENT CONTENT BOX CHANGED, in DEVICE pixels — the unit `win_surface` takes and the
   //: unit `SURFACE_MAX_PX` is sized in. `a` = width, `b` = height, `c` = the device-pixel ratio in
@@ -908,7 +926,12 @@ const INTS = {
   //: this project already follows for the caption buttons: a live-looking row that does nothing is
   //: the defect.
   WITEM_DISABLED: 0x20,
-  WITEM_FLAGS_ALL: 0x3f,
+  //: M20. This row was shown in a CONTEXT MENU — the fourth place, after the desktop, the start
+  //: menu and a jump list. It is a `WITEM_*` bit for their reason: a row belongs in a context menu
+  //: and in a jump list both, and `WEV_ITEM`'s `c` reports WHICH place it was picked from, so a
+  //: publisher that shows one row in two places can still tell the two gestures apart.
+  WITEM_CONTEXT: 0x40,
+  WITEM_FLAGS_ALL: 0x7f,
 
   /**
    * THE ICON SET, as a closed dense table the PAGE draws and a PROGRAM chooses from.
@@ -1079,7 +1102,7 @@ export const {
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw,
   SYS_win_raise,
   SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
-  SYS_win_items,
+  SYS_win_items, SYS_win_menu,
   NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
@@ -1124,7 +1147,7 @@ export const {
   WITEM_HEADER, WIT_ICON, WIT_FLAGS, WIT_LEN, WIT_RESERVED,
   WIN_ITEM_CAP, WITEM_LABEL_MAX,
   WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER, WITEM_DISABLED,
-  WITEM_FLAGS_ALL,
+  WITEM_CONTEXT, WITEM_FLAGS_ALL,
   WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM, WICON_TERMINAL,
   WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH, WICON_LIMIT,
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_FMT_MAX,
@@ -1211,7 +1234,7 @@ export const SYS_NAME = Object.freeze([
   "chdir",
   "win_create", "win_destroy", "win_set", "win_surface", "win_draw", "win_raise",
   "dataobj_create", "dataobj_set", "dataobj_get", "dataobj_offer", "dataobj_open",
-  "win_items",
+  "win_items", "win_menu",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -1644,6 +1667,24 @@ export function decodeWinEvent(dv, off) {
  */
 export function pointerAt(ev) {
   return { x: ev.a | 0, y: ev.b | 0, buttons: ev.c >>> 0 };
+}
+
+/**
+ * An ITEM event's row index and the place it was picked from. The index is SIGN-EXTENDED, because a
+ * DISMISSAL is index -1 — a reader closed the menu without choosing — and `decodeWinEvent` reads
+ * `a` with `getUint32`, which turns that into 4,294,967,295.
+ *
+ * THE ONE PLACE THAT IS UNDONE, and an accessor rather than an unsigned `0xffffffff` sentinel for
+ * constraint 225's reason: a sentinel asks every reader to remember that `a` is unsigned on this
+ * record and signed one record type over, and the reader that forgets gets `index > rows.length`
+ * and acts on a row nothing published. `where` is a `WITEM_*` bit, which is a flag word and has no
+ * sign to restore.
+ *
+ * A DISMISSAL IS `index < 0` AND NOT `index === -1`, so a future second reason to close a menu with
+ * nothing chosen is another negative value and not a second comparison at every call site.
+ */
+export function itemAt(ev) {
+  return { index: ev.a | 0, where: ev.c >>> 0 };
 }
 
 /**
@@ -2420,6 +2461,32 @@ export function selfTest() {
   if (nextCallId(CALLID_WRAP) !== 1 || nextCallId(0) !== 1) fail("CALLID does not wrap to 1");
   if (SAB_BYTES % 4 !== 0 || GLOBAL_BYTES % 4 !== 0) fail("a SAB size is not i32-aligned");
   if (SYS_NAME.length !== NSYS) fail(`SYS_NAME has ${SYS_NAME.length} names for ${NSYS} calls`);
+  /* THE SYSCALL NUMBERS ARE ONE DENSE NAMESPACE, AND IT IS CHECKED AS ONE — the `mods` clause's
+   * shape and for its reason. `buildCalls` indexes `SYS_NAME` by number and `INTS` is where a
+   * caller reads it, so two names on one number means one of the two dispatches to the other's
+   * handler: a `win_menu` sharing 59 with `win_items` would publish a list where it meant to raise
+   * a menu, with nothing thrown. `SYS_NAME.length === NSYS` above cannot catch it — a duplicate
+   * number leaves the array the right length.
+   *
+   * DERIVED FROM `INTS` BY PREFIX, so adding the next call is adding data. 15 is a documented hole
+   * (`SYS_perform`'s slot is 15 and is named), so the range is asserted rather than the density. */
+  const sysNums = Object.keys(INTS)
+    .filter((k) => k.startsWith("SYS_"))
+    .map((k) => [k, INTS[k]]);
+  if (sysNums.length !== NSYS) {
+    fail(`INTS declares ${sysNums.length} SYS_ numbers for ${NSYS} calls`);
+  }
+  for (const [name, nr] of sysNums) {
+    if (!Number.isInteger(nr) || nr < 0 || nr >= NSYS) fail(`${name} is ${nr}, outside 0..NSYS-1`);
+    if (!SYS_NAME[nr]) fail(`${name} is ${nr}, which SYS_NAME does not name`);
+    if (`SYS_${SYS_NAME[nr]}` !== name) {
+      fail(`${name} is ${nr}, which SYS_NAME calls ${SYS_NAME[nr]}`);
+    }
+  }
+  if (new Set(sysNums.map(([, nr]) => nr)).size !== sysNums.length) {
+    fail("two syscall numbers collide: one call would dispatch to the other's handler");
+  }
+  if (SYS_win_menu !== SYS_NAME.indexOf("win_menu")) fail("SYS_win_menu is not win_menu's number");
   if (ERRNO_NAMES.length !== 77) fail(`errno table has ${ERRNO_NAMES.length} rows, not 77`);
   if (new Set(ERRNO_NAMES).size !== 77) fail("errno names are not unique");
   if (ERRNO_NAMES.some((n) => !n)) fail("errno table has a hole");
@@ -2642,6 +2709,26 @@ export function selfTest() {
   if (at.x !== -7 || at.y !== 3 || at.buttons !== 1) {
     fail(`pointerAt gave ${JSON.stringify(at)}`);
   }
+  /* M20. A DISMISSAL SURVIVES THE u32 FIELD, which it does not without `itemAt`: the kernel writes
+   * index -1 and the record reads back as 4,294,967,295, which every `index < rows.length` test
+   * passes. The raw read is asserted to BE the wrong number first, so this clause cannot pass by
+   * the field having quietly become signed — that would make `itemAt` dead code tested green. */
+  const iprobe = new DataView(new ArrayBuffer(WEV_BYTES));
+  encodeWinEvent(iprobe, 0, { type: WEV_ITEM, mods: 0, a: -1, b: 0, c: WITEM_CONTEXT });
+  const iround = decodeWinEvent(iprobe, 0);
+  if (iround.a !== 4294967295) fail(`a dismissal's \`a\` reads back as ${iround.a}, not u32 -1`);
+  const dismissal = itemAt(iround);
+  if (dismissal.index !== -1) fail(`itemAt gave index ${dismissal.index} for a dismissal`);
+  if (dismissal.index >= 0) fail("a dismissal is not negative: `index < 0` would miss it");
+  if (dismissal.where !== WITEM_CONTEXT) fail(`itemAt gave where ${dismissal.where}`);
+  // AND A REAL ACTIVATION IS UNTOUCHED BY THE SIGN RESTORE: row 0 is the one an `| 0` could not
+  // distinguish from a dismissal if the sentinel were 0 instead of -1.
+  encodeWinEvent(iprobe, 0, { type: WEV_ITEM, mods: 0, a: 0, b: WITEM_DISABLED, c: WITEM_MENU });
+  const act = itemAt(decodeWinEvent(iprobe, 0));
+  if (act.index !== 0 || act.where !== WITEM_MENU) {
+    fail(`itemAt gave ${JSON.stringify(act)} for row 0 of a start-menu list`);
+  }
+
   const kb = keyBytesOf(eround);
   if (new TextDecoder().decode(kb) !== "é") fail(`the inline key bytes decode as ${kb}`);
   // The two guards that make a corrupt record refuse rather than clamp.
@@ -3205,7 +3292,7 @@ export function selfTest() {
   if (WIT_RESERVED + 2 !== WITEM_HEADER) fail(`an item header is not ${WITEM_HEADER} bytes`);
   if (WITEM_HEADER % 4 !== 0) fail("an item header that is not 4-byte aligned unaligns the next");
   const itemFlags = [WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER,
-    WITEM_DISABLED];
+    WITEM_DISABLED, WITEM_CONTEXT];
   if (new Set(itemFlags).size !== itemFlags.length) fail("two item flags collide");
   for (const bit of itemFlags) {
     if (bit === 0 || (bit & (bit - 1)) !== 0) fail(`item flag ${bit} is not a single bit`);
@@ -3213,6 +3300,18 @@ export function selfTest() {
   }
   if (itemFlags.reduce((m, b) => m | b, 0) !== WITEM_FLAGS_ALL) {
     fail("WITEM_FLAGS_ALL is not the OR of the flags: an unknown bit would be accepted");
+  }
+  /* AND THE LIST ABOVE IS NOT STALE. It is hand-written — the `WITEM_` prefix also names the header
+   * size, the label cap and the mask itself, so it cannot be derived the way the `mods` namespace
+   * is.
+   *
+   * THE ONE WORLD THE THREE CLAUSES ABOVE MISS, measured rather than assumed: a flag dropped from
+   * the list AND from `WITEM_FLAGS_ALL` together, with the constant left exported. The OR still
+   * matches, every listed bit is still inside the mask, and `encodeWinItems` then refuses every row
+   * carrying that flag — which is a feature that stops working with nothing thrown. A control that
+   * narrows the mask to 0x3f and drops `WITEM_CONTEXT` fires this clause and only this clause. */
+  if (itemFlags.length !== 7) {
+    fail(`the item-flag list has ${itemFlags.length} rows, expected 7`);
   }
   const icons = [WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
     WICON_TERMINAL, WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH];

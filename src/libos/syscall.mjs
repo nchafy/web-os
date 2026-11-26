@@ -21,7 +21,7 @@ import {
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
   SYS_win_create, SYS_win_destroy, SYS_win_set, SYS_win_surface, SYS_win_draw, SYS_win_raise,
-  SYS_win_items,
+  SYS_win_items, SYS_win_menu,
   SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_F_APPEND, fmtBit,
   WEV_BYTES, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
@@ -696,6 +696,24 @@ export function winItems(fd, items = []) {
   const bytes = encodeWinItems(items);
   if (bytes === null) return -EINVAL;
   return syscall(SYS_win_items, fd, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+/**
+ * M20. Raise a context menu on this window at `x`, `y`. Returns the row count, or a negative errno.
+ *
+ * `x`/`y` ARE SURFACE px — the unit the `WEV_POINTER` that asked for the menu already carried
+ * (constraint 223), not the device px `winSurface` takes. Neither is bounded here or kernel-side:
+ * the page converts with `Surface.clientAt` and clamps the popup, because it is the only side that
+ * knows where the frame is.
+ *
+ * THE SAME CODEC AS `winItems`, so a menu row and a jump-list row are one record — and a list this
+ * ABI cannot carry is -EINVAL from this side rather than a round trip that fails. An EMPTY list is
+ * NOT a withdrawal the way `winItems`' is: a menu is transient, so the kernel answers -ENOENT.
+ */
+export function winMenu(fd, x, y, items = []) {
+  const bytes = encodeWinItems(items);
+  if (bytes === null) return -EINVAL;
+  return syscall(SYS_win_menu, fd, x | 0, y | 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
 }
 
 /** Ask the kernel for a surface of `w` x `h` DEVICE PIXELS on this window, or get an errno. The

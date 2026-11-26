@@ -17,7 +17,7 @@ import {
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
   winCreate, winDestroy, winSetTitle, winSetBox, winRead, winSurface, winDraw,
-  winSetModal, winRaise, winSetState, winSetRole, winItems,
+  winSetModal, winRaise, winSetState, winSetRole, winItems, winMenu,
   dataobjCreate, dataobjSet, dataobjGet, dataobjToClipboard, dataobjDrag, dataobjOpen,
 } from "./syscall.mjs";
 /** The two libraries a program in `/usr/bin` is handed, imported here so a program never has to.
@@ -67,6 +67,10 @@ const WIN = Object.freeze({
    * publishes for a desktop, a start menu or a jump list. `setState` answers the state it
    * REACHED — restoring a minimized window gives back what it was. */
   setState: winSetState, setRole: winSetRole, items: winItems,
+  /* M20. The menu a process RAISES, at a point, as against the rows it PUBLISHES for the shell to
+   * keep. `menu` is transient and `items` is standing, which is why they are two calls over one
+   * record: a popup a program could withdraw would be a popup nobody had chosen from yet. */
+  menu: winMenu,
 });
 
 /**

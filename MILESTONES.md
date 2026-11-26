@@ -48,6 +48,7 @@ checks is a wish.
 | M18 | Keys that are not bytes, and a row that opens | 2.5 | — | **PARTIAL — code landed, proof RED and deliberately so** — 38 expectations over 3 driven proofs, 23 green, **15 red on one listener**: `clickBits` reads `event.detail` on a `pointerdown`, whose `detail` is 0 in BOTH engines, so `WPTR_CLICK2` reaches no program (constraint 300). The keysym half is green end to end; `--negative one-click-opens` scores 8 red / 30 intact, the other two controls REFUSE and name the clauses they cannot hold; a Firefox gate with real trusted keys and a `--prove-failure` half |
 | M19 | Details, sort, selection, hover | 3 | — | ✅ done — **ACCEPT**, 60 expectations over 5 driven proofs in one 20.3 s run, 5 controls each moving its own named subset (2/58, 2/58, 3/57, 2/58, 4/56), a Firefox gate with real trusted input and a `--prove-failure` half, **constraint 223 reversed on a measurement** — 500 appended moves drop 247 and tail-replaced drop 0 — and an advance table measured in two engines at three ratios before a byte of it was published (302, 303) |
 | M19a | The session is a WRITABLE COPY of the read-only base, seeded once | — | 0.5 | ✅ done — **ACCEPT**, 44 expectations over 5 proofs and **three kernels against one volume in one page load**, 3 controls each moving its own named subset (19/25, 6/38, 2/42), 21 clauses under node over **six mount worlds** with a `--control` that reseeds a populated volume, a seeded journal replayed at all 7,763 truncations and 1,109 bit flips, and a Firefox gate with real trusted input and a `--prove-failure` half. **Constraint 28 at a new door, which is constraint 306** |
+| M20 | A menu a process can raise, and the mutating verbs | 3 | — | ✅ done — **ACCEPT**, 61 expectations over 5 driven proofs in a 12.7–13.6 s run, **30 driven gestures asserted to an EXACT count**, 4 controls each moving its own named subset (2/59, 3/58, 46/15, 4/57), 99 clauses under node against a fake kernel no gentler than the real one, four errnos asserted BY NAME and separately — EEXIST twice from two different layers, ENOTEMPTY, EROFS — plus a fifth refusal that must carry **no errno key at all**, a Firefox gate with real trusted input over the LANDING page and a `--prove-failure` half, and **constraint 225 promoted to a standing rule, which is constraint 307** |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test, **now CALLED at module load**; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -4215,6 +4216,225 @@ copies back over a reader who deleted it. The cost is real and it is the right t
 after a volume was seeded is in the start menu's listing of `/usr/bin` and absent from the reader's
 copy. Both sets are readable — `fsState().seed` publishes `base`, `files` and `bytes` — rather than
 assumed equal, but nothing reconciles them and no upgrade path exists.
+
+## M20 — a menu a process can raise, and the mutating verbs · done · 3 days
+
+**One syscall, one accessor, one item flag, and six verbs.** `SYS_win_menu: 60` makes `NSYS` **61**
+and `SYS_NAME[60] === "win_menu"`. `win_menu(fd, x, y, byteregion)` — fd in A0, `x` in A1, `y` in A2,
+**surface px and signed** — reuses `decodeWinItems` verbatim, so a menu row and a jump-list row keep
+one definition. `WITEM_CONTEXT: 0x40` is the seventh item flag and `WITEM_FLAGS_ALL` went `0x3f` →
+`0x7f`. `itemAt(ev)` joins `pointerAt` and `wheelAt` as the third and last place a signed field in an
+unsigned record is undone. `docs/ABI.md` §The menu a process raises carries the call; constraints
+**307** and **308** carry the two rules it established.
+
+### What it closed, and the one thing the plan asked for that must NOT exist
+
+`docs/PRD-SHELL.md` R14, R16, R17 and A9. `src/bin/files.mjs` gained New folder, F2 rename in place,
+Delete, and Cut/Copy/Paste, with two context menus — one for a row, a different one for empty paper.
+`src/bin/desktop.mjs`'s own menus moved onto `win_menu` rather than keeping the shell's hard-coded
+path, which is what makes the new call load-bearing rather than decorative.
+
+**THE REFUSAL-BY-NAME FALLBACK `docs/PLAN-SHELL.md` §M20 PROMISED WAS NOT BUILT, AND BUILDING IT
+WOULD BE A DEFECT.** That row said that if the PRD's §10.1 were unresolved when the work started,
+"Delete ships refusing by name." §10.1 was answered instead — `docs/DECISIONS.md` **D40**, in the
+owner's own words, and M19a implemented it — so nothing a reader reaches is read-only and there is no
+case to refuse. A branch for a world the product no longer has is a branch no check can reach. The
+obsolete paragraph is kept in `docs/PLAN-SHELL.md` with a correction beside it, which is this repo's
+rule for a falsified claim.
+
+**WHAT M20 DOES ASSERT IS THE READ-ONLY MOUNTS, WHICH §10.1 NEVER WAS.** `/usr` is still `MNT_RO`
+with `mutErrno: "EROFS"`, still reachable through `Computer` and `Programs`, and still refuses at two
+independent layers. `check_m20`'s `readOnly` proof navigates there deliberately, asserts **EROFS by
+name**, and then asserts the window **still raised a menu** — so the refusal is the verb's and not
+the menu's. A proof that only showed the menu missing could not tell those apart.
+
+### Five proofs, 61 expectations, and 30 driven gestures counted exactly
+
+`www/m20.html` is a live desktop at its bare URL and the harness at `?proofs=1` (constraint 283).
+`scripts/check.py --only m20` reports **61 expectations**, all green, in **12.72 s / 13.12 s /
+13.60 s** over three runs on this machine.
+
+| | proof | clauses | what it asserts |
+| --- | --- | --- | --- |
+| 1 | `menu` | 13 | the fixture really is the tree the proofs mutate and the listing does not scroll (the anti-vacuity, first); a **secondary** button carried the press; the browser's own menu was `defaultPrevented`; the popup opened under the pointer that asked for it; a `win_menu` reached the kernel and the kernel is **holding** the rows; a row menu is a second, DIFFERENT list; the shell drew the rows the program published and the program names the same rows; Paste is disabled with an empty clipboard and enabled once something is copied; and no menu went unrendered |
+| 2 | `past` | 3 | there is a popup over the window, **it extends past the client area downwards** read as a geometry, and the process drew no popup of its own. Three and not one: a popup that exists and fits proves nothing about the clip (constraint 308) |
+| 3 | `item` | 9 | every aim named the row it looks like; the last report named the row AND the list; the kernel accepted every choice and threw none out; the shell and the host agree about how many; the program ran the verbs those rows name; **Esc dismissed**, the dismissal was reported down to the program, and the kernel let go of the menu with it; and nothing was chosen by accident |
+| 4 | `verbs` | 13 | **every verb asserts the FILESYSTEM and not the drawing**: the created folder is in a fresh `readdir` and `stat` says it is a directory; the rename moved the inode and the old name is gone; the pasted bytes count the same as the source's, every line of both is the marker, **and the comparison fails on different bytes**; the program calls it a copy and not a move; the delete removed the file it named; and the refused delete left the folder and its child |
+| 5 | `refusals` | 12 | the four errnos below, each separately, plus the fifth refusal and the closed set |
+
+The other **11** are the preamble and the envelope: isolation on the page and in the kernel, no
+kernel error, no process faulted, the ratio the run asked for, **the page was really driven**, the
+controls the page reports being the ones asked for, the page's own verdict, and COOP/COEP plus the
+document actually served.
+
+**`drive_gestures(env, "M20")` PERFORMS 30 GESTURES AND ASSERTS THE COUNT EXACTLY** — 28 in `drive`
+and 2 in `driveReadOnly`, falling to 3 under `menu-in-surface`, where the page says so and stops
+early. An exact count and not a floor, because a drive that silently skipped half the gestures and
+left half the clauses unset is the shape of a harness reporting on a page it never touched.
+`_perform_gesture` already handled `kind == "rightclick"`, so no new gesture kind was needed.
+
+**FOUR ERRNOS BY NAME, AND A FIFTH REFUSAL THAT MUST CARRY NO ERRNO AT ALL.** A single "it refused"
+passes for a filesystem that refused for the wrong reason — M3's `truncate` answered ENOENT where it
+owed EROFS.
+
+| refusal | errno | layer |
+| --- | --- | --- |
+| a rename onto an occupied name | **EEXIST** | the PROGRAM's own `lstat`, because `rename(2)` replaces its destination by contract |
+| a paste onto a name the destination holds | **EEXIST** | the KERNEL's, through `open(O_CREAT \| O_EXCL)` |
+| deleting a non-empty folder | **ENOTEMPTY** | `src/fs/vfs.mjs` |
+| any mutating verb on a read-only mount | **EROFS** | the mount table's `mutErrno` |
+| a rename whose new name contains a path separator | **none — and that is the assertion** | userland's own rule, which the kernel has no errno for |
+
+The fifth is its own expectation precisely because it must have **no errno key**. A refusal that
+acquired one would mean a userland naming rule had been pushed down into a kernel that does not know
+about it, and a clause asserting "it refused" would never notice.
+
+### Four controls, each moving its own named subset, and the widest control in this suite
+
+All four are **query-parameter worlds on `www/m20.html?proofs=1`** — no `repo_fixture`, so none needs
+a patched tree, and each is re-runnable from the command line with no source edit. `held_rest`
+derives every control's held set from `M20_LABELS`, so a label added later is held by default and the
+first control run that moves it says so.
+
+| `--negative` | what it breaks | moved / held |
+| --- | --- | --- |
+| `no-menu-guard` | removes the `contextmenu` listener | **2 / 59** |
+| `silent-dismiss` | swallows the dismissal report | **3 / 58** |
+| `menu-in-surface` | `src/bin/files.mjs --menu-in-surface` draws its own popup into its surface | **46 / 15** |
+| `paste-clobbers` | drops the move's destination pre-check **and** the copy's `O_EXCL` — one behaviour at two layers, because a reader's file is destroyed by either | **4 / 57** |
+
+**`menu-in-surface` MOVES 46 OF 61 AND THAT WIDTH IS HONEST RATHER THAN SLOPPY.** A program drawing
+its own menu raises no `win_menu` at all, so every clause downstream of the call has nothing to read.
+It is the one world where the drive stops early, and the 46 are named one by one in
+`_MENU_IN_SURFACE_FAILS` rather than left as "most of them" — a control satisfied by any failure
+verifies nothing.
+
+`controlsInForce` is read back from the host, so the two module-state host keys cannot be
+believed-on-but-off, and M16's and M17's three page-side keys are required entirely off. Two controls
+are `src/bin/files.mjs`'s own declared argv flags and two are `src/wm/winhost.mjs`'s `hostControls`
+set through that module's `setHostControls` — a page that set three of five would leave the other two
+holding whatever the last page in this realm asked for, which is the whole reason the check reads
+`controlsInForce` back rather than trusting the URL.
+
+**`paste-clobbers` TURNED NOTHING AT FIRST AND WAS RESCOPED, NOT ACCEPTED.** It is the page's own
+control rather than the plan's, and the first version moved zero expectations: the drive never
+pasted onto an occupied name, so dropping the guard had nothing to guard. It moves 4 only because
+the run now drives a **second** paste into `sub`. A control that turns nothing verifies nothing, and
+this is the third time this project has had to find that out on a run rather than by reading.
+
+**`menu-in-surface` ALSO MAKES ONE CLAUSE HOLD VACUOUSLY, AND THAT IS RECORDED RATHER THAN WORKED
+AROUND.** In that world no `win_menu` reaches the kernel, so `menusUnrendered`, `host.menus` and
+`shell.contextOpens` are all 0 and `and no menu went unrendered` is an equality over nothing. Its
+real world is a host with NO shell — every page from M7 to M13 — and closing the vacuity needs a
+non-zero floor on `contextOpens` inside `www/m20.html`, which `check_m20` does not own.
+
+### 99 clauses under node, against fakes that are not gentler than the real thing
+
+    node --experimental-loader ./bench/m20-verbs/loader.mjs bench/m20-verbs/probe.mjs
+    → 99/99 expectations
+    … --prove-failure → 0/99 expectations INVERTED / 99 inverted, 0 were already failing
+
+`loader.mjs` is a resolve hook that makes `/src/abi.mjs` mean this repository's `src/abi.mjs`, so the
+probe imports **the program that ships** rather than a rewritten copy — the stale-copy dishonesty
+`CLAUDE.md` names. Three fakes carry constraint 98's rule: `rename` **clobbers** its destination
+exactly as `src/fs/vfs.mjs` does, which is the whole reason `files` pre-checks and a fake that
+refused on its own would let the pre-check be deleted with every clause still green;
+`open(O_CREAT | O_EXCL)` refuses EEXIST, so the copy half of Paste is refused by the fake kernel and
+not by the program; and a published data object is SEALED (constraint 242), so a Cut that wrote its
+intent back into what it had already published would fail here.
+
+What the probe **cannot** cover is the menu a reader can see: `win_menu` is asserted as a CALL — its
+arguments, its unit and its refusals — and the popup is a DOM node, which is the browser-driven
+page's. Under `--menu-in-surface` it asserts the half that is reachable from node: **no `win_menu`
+reaches the kernel and the labels appear in the DISPLAY LIST instead**, which is the program's own
+admission that it drew its own popup.
+
+### The second engine, and the one gap it found in the driver
+
+`bench/m20-verbs/firefox-verbs.py` drives Firefox 156 over `scripts/bidi.py` with real trusted input
+on the **landing page** (`www/index.html`, the bare URL), not the proof page — a gate on the path a
+reader takes (constraint 301). Nine named clauses, all green; verbatim from the run:
+
+    reader   {'ok': True, 'rowH': 20, 'headH': 22, 'cols': ['name','date','type','size'], 'context': 64}
+    files    title='files — /Users/Default/m20ff-f1d23e' scale=1 wCss=1330 clientH=822
+    empty    aim 671,820  ({'afterLast': 72, 'emptyY': 790, 'box': {'x':0,'y':22,'w':1330,'h':774}})
+    menu     open=True kind='context' labels=['New folder', 'Paste'] pastBody=38
+    host     {'menus': 1, 'rows': 3, ..., 'lastContext': {'win': 3, 'defaultPrevented': True,
+              'button': 2, 'trusted': True}}
+    report   {'win': 3, 'index': 0, 'where': 64} choices=1
+    cells    [{'date': '2026-11-26 16:14', 'type': 'DIR', 'size': ''}, …]
+
+**A DIRECTORY IS ASSERTED AS THE TRIPLE `DIR` / EMPTY SIZE / NON-EMPTY DATE, NOT AS A NAME.** A row
+called `New folder` proves a string was drawn; that triple proves a directory was created and its
+`stat` was paid.
+
+**EVERY ROW IS READ BACK THROUGH THE PAGE'S OWN DISPLAY-LIST DECODER** — a `Surface.prototype.replay`
+tap plus `src/abi.mjs`'s `decodeDrawOps`/`textOfOps`, located with `src/bin/files.mjs`'s exported
+`FILES_METRICS` — so no row geometry, column box or cell format is restated in the gate.
+
+**A FRESHLY OPENED `files` WINDOW HAS NO EMPTY PAPER, AND THAT IS WHY THE GATE DOUBLE-CLICKS THE
+CAPTION FIRST.** Measured in Firefox 156 at **dpr 1**: client box **428×122 CSS px**, viewBox
+`{y: 22, h: 74}`, bottom 96, and `rowTop(n)` for the last row lands **4 px past it** —
+`clientHeightFor` fits content exactly. **So the empty-space menu (New folder, Paste) is UNREACHABLE
+on an unmaximized window**, because the only press that raises it has nowhere to land. A caption
+double-click (`Win`'s dblclick → `toggleMaximize`) takes the frame to **1330×822** with viewBox
+`{y: 22, h: 774}`. Any future driver that wants that menu needs that gesture or an equivalent resize.
+
+**THE ONE GAP IN THE DRIVER WAS F2, AND IT IS FIXED IN `scripts/bidi.py`.** `KEYS` gained
+`"F1".."F12"` = **U+E031..U+E03C**, WebDriver's own contiguous block ending immediately before the
+U+E03D that `Meta` already carried. No new method and no signature change; `ff.press("F2")` raised
+`BidiError` before. **`button: 2` needed nothing added** — `Firefox.click(x, y, button=2)` already
+existed, and it was verified by RUNNING rather than assumed: `host.lastContextMenu` reports
+`{button: 2, trusted: True, defaultPrevented: True}`.
+
+**Five controls, each re-runnable from the command line and each moving a disjoint named subset**:
+`left-button`, `menu-in-surface`, `esc-not-enter`, `insert-not-delete`, `wipe`. `--help` lists the
+names `--control` takes; **what each MOVES is `CONTROLS` at the top of the file and is not in the
+usage** — a reader has to open the file, which is a gap a `--controls` flag would close.
+The `--prove-failure` half runs
+`left-button` and the run reports
+
+    the proof succeeded: `left-button` fired ['chosen', 'created', 'menu', 'persists-new'] …
+    and desktop, renamed, deleted, persists, persists-gone stayed green.
+
+The popup a process raised is `[data-popup="context"]`, rows `.shell-row` / `.shell-label`, the index
+in `dataset.contextIndex`. It reached **38 CSS px** past `.window-body`'s bottom in that run, printed
+and not scored — `www/m20.html`'s `past` proof owns the budget, and a Firefox gate must not reuse
+`check_m20`'s Chrome/dpr-2 constants.
+
+**`pkill -9 -f firefox` KILLS THE SHELL THAT IS RUNNING IT** whenever the shell's own command line
+contains the string `firefox` — e.g. `pkill -9 -f firefox; python3 bench/m20-verbs/firefox-verbs.py`
+dies silently with exit 1 and no output. Use `pkill -9 -f "Firefox.app"` in a **separate** command.
+`CLAUDE.md`'s §Running it says so now.
+
+### What is owed, in files no M20 slice owned
+
+1. **`README.md:59` says 298 constraints** and is owed **308**. It was owed 301 by M18, 305 by M19
+   and 306 by M19a, and is still not in a slice's file list. The shortest fix in this repository and
+   the longest-standing.
+2. **The `docs/ABI.md` ↔ `SYS_NAME` reconciliation is now WRITTEN but not CHECKED.** §The ABI's
+   opening paragraphs state both numbers — 71 designed, **61** realised — and name the ten
+   documented-but-absent calls, each with a re-runnable test. Nothing asserts it. **M21 owes the
+   check**, and `docs/PLAN-SHELL.md` §M21 still says "the document claims 71 calls and `SYS_NAME` is
+   60": the 60 is stale by one as of this row.
+3. **`src/wm/surface.mjs` still does not honour `a5`**, so M19's `DLT_ELLIPSIS` debt is also M20's: a
+   long name a reader just typed into a rename field overflows the Date column.
+
+### What is NOT done
+
+**NO CHECK ASSERTS THAT A MENU IS DISMISSED BY A CLICK OUTSIDE IT**, only by Esc. The dismissal path
+is one — `activateItem` with a negative index — so the kernel half is covered by proof 3 and by the
+node probe, but the page's own outside-press route to it is unasserted and `silent-dismiss` moves
+only the Esc clauses.
+
+**THE MENU'S PLACEMENT IS CLAMPED BY THE PAGE AND ASSERTED ONLY DOWNWARDS.** Proof 2 asserts the
+popup extends past the client area in one direction, which is the direction `overflow: hidden` eats.
+A popup raised near the right edge or the top is clamped by the same page code and nothing reads it
+back, so a clamp defect on either of those edges is invisible to this suite.
+
+**`x` AND `y` ARE NOT BOUNDED BY THE KERNEL, DELIBERATELY, AND NOTHING CHECKS THE CONSEQUENCE.** Only
+the page knows where the frame is, so only the page can clamp — but that means a program passing a
+wild point gets a popup somewhere rather than an errno, and no clause asserts where it lands.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

@@ -490,7 +490,7 @@ run against whatever that function returns and must not restate a path.
 
 ---
 
-### M20 — a menu a process can raise, and the mutating verbs · 3 d
+### M20 — a menu a process can raise, and the mutating verbs · 3 d · DONE
 
 **Closes.** R14, R16, R17, A9.
 
@@ -537,6 +537,27 @@ every mutating verb is unreachable there. This plan's answer is `/desktop` (§7.
 answer is what Delete does when the volume is mounted read-only, which is the PRD's §10.1 and a
 human's — if that is unresolved when the row starts, Delete ships refusing by name and the refusal
 is asserted, which is the safe default and reversible.
+
+> **CORRECTION, from the implementation. The paragraph above is OBSOLETE and is kept rather than
+> edited, which is this repo's rule for a falsified claim.** Two of its three sentences are now
+> wrong and the third landed somewhere else.
+>
+> 1. **`/desktop` is not the answer; `/Users/Default` is.** §7.3's `/desktop` was never built.
+>    `std.sessionDir(env)` is the one definition of where a program lands, and M19a's seed puts a
+>    writable copy of the read-only base there (`src/kernel/seed.mjs`).
+> 2. **THE READ-ONLY CASE WAS REMOVED, NOT HANDLED, SO THE FALLBACK THIS PARAGRAPH PROMISED MUST
+>    NOT EXIST.** `docs/PRD-SHELL.md` §10.1 is **CLOSED**, answered by the repository owner in his
+>    own words and recorded as `docs/DECISIONS.md` **D40**: *"i would like all operating systems to
+>    be a copy of the read only base. then each session can be modified freely."* So "Delete ships
+>    refusing by name" was not built, and building it would be a branch for a world the product no
+>    longer has — a branch no check can reach. §M19a above says the same thing prospectively; this
+>    is the row it was about.
+> 3. **The refusals M20 DOES assert are the read-only MOUNTS, which §10.1 never was.** `/usr` is
+>    still `MNT_RO` with `mutErrno: "EROFS"` and still refuses at two independent layers, so
+>    `check_m20`'s `readOnly` proof navigates there deliberately and asserts **EROFS by name** —
+>    and asserts the window still raised a menu, so the refusal is the verb's and not the menu's.
+>    That is a refusal over a mount a reader can still walk into, not a refusal over the directory
+>    a reader lands in. The two were conflated in the paragraph above.
 
 ---
 

@@ -1,0 +1,1964 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M20 — a menu a process raises, and the mutating verbs</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M19's pages do it,
+   and here it is load-bearing twice over: `.window-body` is the client area a surface fills AND it
+   is `overflow: hidden`, which is the whole reason a process may not draw its own popup. The
+   `pastBody` clause below is a reading off that element's rectangle. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop — and every window on it — out from under every rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:140px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:420px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M20 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M20 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M20's page: A MENU A PROCESS RAISES, AND THE SIX MUTATING VERBS.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * a fixture window and then block in `gestureAsker`, which looks exactly like a broken product.
+ *
+ *   PROOF 1  THE MENU. A driven RIGHT-CLICK raises THIS system's menu: a `win_menu` reached the
+ *            KERNEL (its own `stats.menus` and the window's `menu:` row count), the browser's own
+ *            menu was REFUSED (`defaultPrevented` read back off the event), and the popup the shell
+ *            drew carries the labels the PROGRAM published and nothing else
+ *   PROOF 2  THE GEOMETRY THAT MAKES IT THE SHELL'S. The popup extends PAST `.window-body`'s
+ *            rectangle, measured as `Taskbar.report().pastBody` in CSS px. `--menu-in-surface` is
+ *            the world where it cannot: `overflow: hidden` clips a process's own drawing, so that
+ *            control reads 0 with no popup open at all.
+ *            **AND THE RUN STOPS AFTER PROOF 2 IN THAT WORLD, DECLARED.** A popup a process paints
+ *            has no hit test, so no row of it can be picked and no verb below can be driven; the
+ *            key route to the same verbs is undrivable too, because `scripts/cdp.py`'s `KEYS` table
+ *            has no code for `F2`, `Delete` or a Ctrl chord. Running the whole sequence in that
+ *            world turned EVERY clause on this page, and a control satisfied by any failure
+ *            verifies nothing — so proofs 3-5 are reported as `not driven` with the reason
+ *   PROOF 3  THE ANSWER, BOTH WAYS. A popup row activates and the `WEV_ITEM` is read back — by the
+ *            index the shell reported, by the verb the program ran, and by what the filesystem then
+ *            held. Esc dismisses and THE DISMISSAL IS REPORTED, which is the case a program forgets
+ *            to handle: it is parked on the fd it called on, so a swallowed dismissal is a window
+ *            that never wakes
+ *   PROOF 4  THE VERBS, ASSERTED ON THE FILESYSTEM AND NEVER ON THE DRAWING (plan §M20). A created
+ *            directory appears in a FRESH `readdir` and `stat` names it; a rename MOVES THE INODE —
+ *            same `st_ino`, new name, old name gone, which is what separates a rename from a
+ *            copy-and-delete; a paste produces EQUAL BYTES, compared
+ *   PROOF 5  EACH REFUSAL'S ERRNO, SEPARATELY. A rename onto an occupied name owes EEXIST, a
+ *            non-empty folder owes ENOTEMPTY, a verb on a READ-ONLY MOUNT owes EROFS, and a refusal
+ *            that is the program's OWN owes no errno at all. A single "it refused" passes for a
+ *            filesystem that refused for the wrong reason — M3's `truncate` answered ENOENT where
+ *            it owed EROFS
+ *
+ * THE READ-ONLY CASE IS AN EDGE AND NO LONGER THE DEFAULT (D40, M19a). The session is a writable
+ * copy of the read-only base, so New folder, rename, Delete and Paste need no read-only branch in
+ * the directory a reader lands in — and the mounts still exist, so proof 5 opens one deliberately
+ * (`files /usr/share`) and asserts the EROFS there.
+ *
+ * EVERY GESTURE HERE IS REAL INPUT and the page drives none of it: a synthesised `PointerEvent` is
+ * `isTrusted === false` (constraint 175). The one synthesised key in the run is the `q` that tears
+ * each fixture down, and it says so where it is sent.
+ *
+ * WHY THE PROOFS PATH STAGES A TASKBAR where M19's staged a bare host: `WinHost.#menu` hands the
+ * rows to `this.shell.openContextMenu`, and a host with no shell reports the DISMISSAL and counts
+ * `menusUnrendered`. So the shell is not decoration here — it is the renderer under test, and a
+ * page without one would measure a world in which no menu is ever drawn.
+ *
+ * WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped:
+ *
+ *   1. `/proc/<pid>/win/<winid>` DOES NOT CARRY A `menu:` ROW. `src/kernel/procfs.mjs`'s
+ *      `winLines` publishes `items:` nowhere either, so the pull route to "is a menu open" is
+ *      `win-state`'s `windows[].menu` — which `Window.report()` does carry — and that is what
+ *      `theKernelHeldTheMenu` reads. A `/proc` reading would be the route a person has at a prompt
+ *      and it does not exist yet.
+ *   2. F2 AND Delete ARE NOT DRIVEN HERE. `scripts/cdp.py`'s `KEYS` table has no row for either
+ *      (nor for a bare letter), so `page.press('F2')` raises `no virtual key code recorded`. Both
+ *      keysyms run the SAME `runVerb` a menu row does — which is why `src/bin/files.mjs` has that
+ *      function — so what goes unproven is the BINDING and not the verb. The verbs are driven
+ *      through the menu, which is this milestone's subject anyway.
+ */
+import { setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import {
+  DL_CLIP, DL_TEXT, DLT_RIGHT, DLT_MONO, WITEM_CONTEXT, decodeDrawOps, textOfOps,
+} from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import {
+  spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+/* THE LIVE DESKTOP IS STAGED FROM HERE AND NOT BELOW, which is M17's lesson applied rather than
+ * repeated: a page's own copy of "assemble the shell" is how a program that landed in one page's
+ * copy came to be absent from every other. `bootShell` is the proofs path's half of the same
+ * module — the host, the skin and the taskbar, in the order a defect taught it. */
+import {
+  bootShell, stageDesktop, place, requireIsolation, PROGRAMS, DESKTOP_HELP,
+} from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. One spelling, so a call site cannot be read as a
+ *  condition nobody wrote. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /* `src/bin/files.mjs`'S OWN DECLARED FLAGS, passed on argv where the fixture is spawned. M17's
+   * precedent and its reason: the worlds they select live inside the program, so a boot cfg could
+   * not reach them and a flag nobody consumed would be a green run over an unmodified world. */
+  menuInSurface: params.get('menu_in_surface') === '1',
+  pasteClobbers: params.get('paste_clobbers') === '1',
+  /* AND THE TWO PAGE-SIDE ONES, which are `src/wm/winhost.mjs`'s `hostControls`. They are passed
+   * through `setHostControls` below rather than through `www/shell.mjs`'s `applyControls`, because
+   * that function still names only M16's and M17's three keys — a page that routed these through it
+   * would select nothing and report green. */
+  noMenuGuard: params.get('no_menu_guard') === '1',
+  silentDismiss: params.get('silent_dismiss') === '1',
+}
+globalThis.M20.config = CFG
+
+/* THE PAGE-SIDE CONTROLS, SET IN FULL AND ON BOTH PATHS. They are MODULE state, so a page that sets
+ * three of five leaves the other two holding whatever the last page in this realm asked for, and
+ * "none, and said so" is the fail-closed spelling (M16's, M17's, M18's and M19's pages carry the
+ * same note). `host.report().controls` is read back below, because a control a check believed was on
+ * and was not is a green run over an unmodified world. */
+setSurfaceControls({})
+setHostControls({ noMenuGuard: CFG.noMenuGuard, silentDismiss: CFG.silentDismiss })
+
+const FILES = '/src/bin/files.mjs'
+const SH = '/src/bin/sh.mjs'
+const LS = '/src/bin/ls.mjs'
+const STAT = '/src/bin/stat.mjs'
+const WC = '/src/bin/wc.mjs'
+const GREP = '/src/bin/grep.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+const RM = '/src/bin/rm.mjs'
+
+/**
+ * THE TREE THE PROOFS MUTATE, AND IT IS BUILT HERE THROUGH ORDINARY PROGRAMS.
+ *
+ * `/tmp` IS THE MOUNT, for M19's reason and one more of M20's: it is OPFS and writable, so every
+ * verb below is reachable — and `/usr/share`, which is where proof 5's EROFS lives, is a separate
+ * window opened on purpose.
+ *
+ * IT IS REMOVED FIRST. OPFS outlives a page load, and this page DELETES and RENAMES things: a run
+ * over whatever the last run left would be a run whose row set nobody chose.
+ *
+ * EVERY NAME HERE HAS ONE JOB, and that is what keeps the five proofs from sharing a fixture they
+ * can disturb for each other. `COPY_ME` is copied and never otherwise touched, so the byte
+ * comparison can be taken at the END of the run rather than mid-drive; `RENAME_ME` is the only row
+ * whose name moves; `TAKEN` is the occupied destination AND the row Delete finally removes, because
+ * a Delete that worked and a Delete that was refused are two clauses and need two rows.
+ */
+const ROOT_DIR = '/tmp/m20'
+/** The paste destination: a directory the run navigates INTO, so the paste is a cross-directory
+ *  copy rather than the same-name refusal a paste in place would be. */
+const SUB = 'sub'
+/** A directory with a child in it, so `rmdir` owes ENOTEMPTY. A non-empty folder is NOT emptied
+ *  (`deleteSelection`), which is the refusal proof 5 reads. */
+const FULL = 'full'
+const KEEP = 'keep.txt'
+const COPY_ME = 'copy-me.txt'
+/** THE BYTE COMPARISON'S OWN NEGATIVE CONTROL: a second file whose bytes are not the marker's, so
+ *  the comparison below is shown capable of failing rather than only of passing. */
+const OTHER = 'other.txt'
+const RENAME_ME = 'src.txt'
+const TAKEN = 'taken.txt'
+const RENAMED = 'renamed.txt'
+
+/**
+ * THE BYTES THE PASTE MUST REPRODUCE, written by `echo` through a REAL SHELL REDIRECTION — which is
+ * what makes the comparison possible at all.
+ *
+ * THE PAGE CANNOT READ A FILE. It holds no fd and makes no syscall, so "equal bytes" has to be read
+ * back through programs, and the only programs that answer in a RESULT ROW rather than on stdout are
+ * `wc` (a byte count) and `grep` (an exit status and a match count). Neither is byte equality on its
+ * own. So the page WRITES the bytes instead of copying someone else's: `echo MARKER > file` leaves
+ * exactly `MARKER` plus one newline (`src/bin/echo.mjs`), and three readings then close it —
+ *
+ *   1. `wc -c` on the source and on the paste agree, AND agree with `MARKER.length + 1`;
+ *   2. `grep -c MARKER` matches exactly ONE line in each;
+ *   3. `grep -c -v MARKER` matches NO line in either.
+ *
+ * A file of `MARKER.length + 1` bytes whose every line contains `MARKER` and which has exactly one
+ * line IS `MARKER\n`. That is the arithmetic, and it is written down because the clause's strength
+ * is the arithmetic rather than any one of the three readings.
+ *
+ * `OTHER_TEXT` IS A DIFFERENT LENGTH AS WELL AS DIFFERENT BYTES, deliberately: reading 1 alone
+ * would catch it, so the control turns all three and not only the grep.
+ */
+const MARKER = 'M20-PASTE-EQUAL-BYTES'
+const OTHER_TEXT = 'M20-OTHER-CONTENT-AND-A-DIFFERENT-LENGTH'
+/** `echo` adds the newline unless `-n`, so the file is one byte longer than the string. */
+const MARKER_BYTES = MARKER.length + 1
+
+/** The rows `files` opens on, in the order `SORT_DEFAULT` puts them: directories first, then names
+ *  ascending. WRITTEN OUT rather than sorted here, which is M19's rule — a page that computed the
+ *  order would be a second copy of `compareRows`, and a second comparator agrees with the first
+ *  about every bug it shares. */
+const OPENING_ROWS = Object.freeze([FULL, SUB, COPY_ME, OTHER, RENAME_ME, TAKEN])
+
+/**
+ * THE MENU ROWS, AS LABELS AND AS INDICES — the program's two menus, stated by the check.
+ *
+ * `LABELS` is what the POPUP draws: separators are not `.shell-row` elements, so they are absent
+ * here. `INDEX` is what `WEV_ITEM` reports, and separators ARE counted in it — the shell indexes the
+ * array it was handed (`openContextMenu`'s `rows.forEach`) and the kernel validates the index
+ * against the same array, so the two lists are 1:1 including the rules.
+ *
+ * THE INDEX IS ALSO READ OFF THE DOM, as `dataset.contextIndex` (`aimPopupRow`), and both readings
+ * are asserted. That is not redundancy: the constant says what the program OWES and the dataset says
+ * what the shell will REPORT, and a clause resting on one alone passes when the two agree about a
+ * wrong number.
+ */
+const ROW_MENU_LABELS = Object.freeze(['Open', 'Cut', 'Copy', 'Delete', 'Rename'])
+const EMPTY_MENU_LABELS = Object.freeze(['New folder', 'Paste'])
+const MENU_INDEX = Object.freeze({
+  // row menu: Open, ─, Cut, Copy, ─, Delete, Rename
+  Open: 0, Cut: 2, Copy: 3, Delete: 5, Rename: 6,
+  // empty-space menu: New folder, ─, Paste
+  'New folder': 0, Paste: 2,
+})
+/** How many rows each menu hands the kernel, separators included — which is what `win_menu` returns
+ *  and what `win-state` publishes as a window's `menu`. */
+const ROW_MENU_ROWS = 7
+const EMPTY_MENU_ROWS = 3
+
+/**
+ * HOW MANY POPUP ROWS THE RUN PICKS, which is also how many `WEV_ITEM` activations the kernel owes.
+ *
+ * ONE NUMBER AND NOT A LITERAL PER CLAUSE. The run's picks are New folder, Copy, Paste, Rename,
+ * Rename again, Delete on a full folder and Delete on a file — and three independent counters have
+ * to agree about them (`Taskbar.contextClicks`, `WinHost.menuChoices`, `WinMgr.itemActivations`), so
+ * a gesture added to `drive` moves one constant rather than three clauses. It was written out three
+ * times as `6`, and the first run reported `7 activation(s)` against it.
+ *
+ * `account.chosen` IS THE OTHER READING and is asserted against `FILES_METRICS.VERBS` by name
+ * (`theProgramRanTheVerbsInOrder`), so this number says HOW MANY and that list says WHICH.
+ *
+ * A REFUSED VERB IS STILL A CHOICE. Two of the eight are refused — a paste onto an occupied name
+ * and a Delete on a non-empty folder — and the kernel counts the ACTIVATION either way, because
+ * whether a verb succeeds is the program's business and not the item report's.
+ */
+const CHOICES = 8
+
+/**
+ * The window the proofs drive, CSS px.
+ *
+ * TALL ENOUGH THAT THE LIST DOES NOT SCROLL AND THERE IS STILL EMPTY SPACE UNDER THE LAST ROW. Both
+ * halves are load-bearing: every rectangle below is located at `scroll === 0`, and the empty-space
+ * menu must be raised on empty space INSIDE the clipped viewport — a press above it finds the header
+ * (which is a refusal, and proof 5 uses it on purpose) and a press below it is outside the hit test.
+ *
+ * SHORT ENOUGH THAT A POPUP RAISED AT THE BOTTOM OF ITS CLIENT AREA STILL FITS ON THE DESKTOP.
+ * `Taskbar.#placeAt` clamps the popup into the DESKTOP element, so a frame at the desktop's bottom
+ * edge would have its menu pushed back up INSIDE the client area — `pastBody` would read 0 for a
+ * shell that is working perfectly, which is the honest-zero trap the slice contract names.
+ *
+ * AT THE TOP-LEFT, which is M18's and M19's corner and is here for its MEASURED reason: a dispatched
+ * mouse event carries a VIEWPORT coordinate, so a point past `innerWidth`/`innerHeight` reaches
+ * nothing at all and every clause goes red with nothing saying why. `onScreen` is the guard.
+ */
+const PROOF_BOX = { x: 20, y: 10, w: 520, h: 300 }
+
+/** HOW MANY BACKSPACES CLEAR THE RENAME FIELD. Longer than any fixture name on purpose: a Backspace
+ *  into an empty draft is a no-op (`editing.draft.length > 0`), so over-pressing is idempotent and
+ *  the page needs no reading of the draft's length to decide how many to send. The draft it DOES
+ *  read back is the one it typed, which is `theFieldHeldWhatWasTyped`. */
+const CLEAR_PRESSES = 24
+
+/** How far the client point the HOST converted back may sit from the viewport point the page AIMED
+ *  at, CSS px. See `theMenuOpenedUnderThePointer` for the four roundings this pays for. */
+const MENU_POINT_TOL_PX = 3
+
+globalThis.M20.proofs = { menu: null, past: null, item: null, verbs: null, refusals: null }
+
+const ask = gestureAsker(globalThis.M20)
+
+/** The host and the shell, once there are any. Published for a driver in another engine. */
+let HOST = null
+let SHELL = null
+
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT, M16's: a `Surface` keeps counts and pixels, not ops, so the only way to read back
+ *  WHAT a program drew — which rows, which draft — is to keep the batch the kernel announced. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a step can wait for a REPAINT rather than a timer. */
+const BATCHES = new Map()
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** One listener, installed by both paths BEFORE the host's — `kernelBoot` calls its listeners in
+ *  order, so a listener added first sees every batch the host is about to replay. */
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+/* ---- reading the list back out of the display list ----------------------------------------- */
+
+/** The ops of one window's last batch. */
+function opsOf (entry) {
+  const bytes = LAST_BATCH.get(entry.id)
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length)
+}
+
+/** Every text run in a batch, through the ABI's own codec. `textOfOps` is the declared inverse of
+ *  the `encodeTextRun` the program drew with, so these are the program's own strings and not a
+ *  second opinion about the encoding (constraint 293). */
+function textRuns (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) { runs.push({ text: null, at: i, x: 0, y: 0, flags: 0 }); continue }
+    runs.push({ text: got.text, at: i, x: ops[i].a0, y: ops[i].a1, flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/**
+ * THE ROW NAMES, IN LAYOUT ORDER, AS THE PROGRAM DREW THEM.
+ *
+ * STRUCTURAL AND NOT POSITIONAL, which is M19's reason it works at any ratio: `paint` draws the
+ * status strip and the header, pushes the `DL_CLIP`, then the rows — and within a row the NAME
+ * carries neither `DLT_RIGHT` nor `DLT_MONO` while the three metadata cells carry both. So "after
+ * the clip, left-aligned, not monospaced" names the rows exactly, with no coordinate in the test.
+ *
+ * AND THE `DLT_MONO` EXCLUSION IS M20's. An open rename replaces the name cell with a FIELD whose
+ * draft is drawn monospaced (`src/bin/files.mjs`'s `field` branch, "the one family whose width the
+ * advance table prices exactly") — so without it the draft would read as a row name and the renamed
+ * row would appear twice under two names.
+ */
+function namesOf (entry) {
+  const ops = opsOf(entry)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (clipAt < 0) return []
+  return textRuns(ops)
+    .filter((r) => r.at > clipAt && typeof r.text === 'string'
+      && (r.flags & DLT_RIGHT) === 0 && (r.flags & DLT_MONO) === 0)
+    .sort((a, b) => a.y - b.y)
+    .map((r) => r.text)
+}
+
+/**
+ * THE RENAME FIELD'S DRAFT, as the program drew it, or null for "no field is open".
+ *
+ * IT IS THE ONE LEFT-ALIGNED MONOSPACED RUN INSIDE THE CLIP, which is the discriminator `namesOf`
+ * above is the other half of. An EMPTY draft draws NO run at all — `cellRun` returns early for `""`
+ * — so `null` covers both "no rename" and "a rename whose field is empty", and the page never
+ * asserts the second: `CLEAR_PRESSES` makes emptying the field idempotent precisely so it does not
+ * have to.
+ */
+function draftOf (entry) {
+  const ops = opsOf(entry)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (clipAt < 0) return null
+  const found = textRuns(ops).filter((r) => r.at > clipAt && typeof r.text === 'string'
+    && (r.flags & DLT_RIGHT) === 0 && (r.flags & DLT_MONO) !== 0)
+  return found.length === 1 ? found[0].text : null
+}
+
+/** The status strip's position statement, which is the program's own word for whether its list
+ *  scrolls at all: `N items` when `scrollMax` is 0 and `a-b of N` when it is not. It is the ONLY
+ *  `DLT_RIGHT` run AHEAD of the clip (`src/bin/files.mjs` says so). */
+const ITEMS_RE = /^(\d+) items?$/
+function positionLine (entry) {
+  const ops = opsOf(entry)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  for (const run of textRuns(ops)) {
+    if (typeof run.text !== 'string') continue
+    if (clipAt >= 0 && run.at > clipAt) break
+    if ((run.flags & DLT_RIGHT) !== 0) return run.text
+  }
+  return ''
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — which is what `FILES_METRICS`'s own
+ *  docstring prescribes for a driver, and what makes the conversions below independent of a program
+ *  state no export can carry. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+/**
+ * THE CLIENT WIDTH THE PROGRAM IS LAYING OUT IN, CSS px, read out of its own `DL_CLIP`.
+ *
+ * `viewBox` spans the whole client width (`x: 0, w: wCss`), so the clip op the program sent carries
+ * that width in surface px and dividing by the measured scale returns the program's own number. The
+ * canvas's `DOMRect` is the other reading and they differ by a rounding.
+ */
+function clientWidthOf (entry) {
+  const ops = opsOf(entry)
+  const clip = ops.find((op) => op.op === DL_CLIP)
+  if (clip) return clip.a2 / scaleOf(entry)
+  return entry.surface.extent().cssW
+}
+
+/** EVERYTHING THIS PAGE CAN SEE OF ONE `files` WINDOW, in one object. Every row is NAMED and never
+ *  numbered across a gesture: a verb inserts and removes rows, so an index taken before one names a
+ *  different file after it — which is the defect the program's own selection-by-identity rule exists
+ *  to avoid, and the rule a driver has to follow too. */
+function listState (entry) {
+  return {
+    title: entry.win.titleText,
+    names: namesOf(entry),
+    draft: draftOf(entry),
+    position: positionLine(entry),
+    wCss: Math.round(clientWidthOf(entry) * 100) / 100,
+    scale: Math.round(scaleOf(entry) * 1000) / 1000,
+    batches: BATCHES.get(entry.id) || 0,
+  }
+}
+
+/* ---- aiming real input ---------------------------------------------------------------------- */
+
+/** THE VIEWPORT BOUND, as ONE test every aim applies. `Input.dispatchMouseEvent` takes a VIEWPORT
+ *  coordinate, so a point past `innerWidth` is delivered to nothing — no error, no event, and a page
+ *  that waited for a repaint simply reports a red clause. That is what the first run of M18's page
+ *  did, eleven times. A harness MUST fail when it cannot reach what it was pointed at. */
+function onScreen (at, what, where = '') {
+  if (!at) throw new Error(`${what}: there is no measurable rect to aim at`)
+  if (at.x < 0 || at.y < 0 || at.x >= window.innerWidth || at.y >= window.innerHeight) {
+    throw new Error(`${what} is at client ${at.x},${at.y}, outside a `
+      + `${window.innerWidth}x${window.innerHeight} viewport — a dispatched mouse event carries a `
+      + `VIEWPORT coordinate, so nothing would receive it.${where ? ` ${where}` : ''}`)
+  }
+  return at
+}
+
+/**
+ * A POINT INSIDE THE WINDOW'S CLIENT AREA, in VIEWPORT coordinates.
+ *
+ * NO SCALE IS INVOLVED AND THAT IS DELIBERATE. `FILES_METRICS`'s docstring states it: "A driver
+ * working in page coordinates needs no scale at all, because the canvas's CSS box IS the client area
+ * these are measured in — `rect.left + xCss` is the point."
+ */
+function viewportPoint (entry, xCss, yCss, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the files surface has no measurable rect to aim ${what} at`)
+  }
+  return onScreen({ x: Math.round(r.left + xCss), y: Math.round(r.top + yCss) }, what,
+    `The frame is at ${Math.round(r.left)},${Math.round(r.top)} `
+    + `${Math.round(r.width)}x${Math.round(r.height)}`)
+}
+
+/** Where the row named `name` is, aimed at the middle of it. BY NAME, because a verb reorders the
+ *  list: the index is looked up in the state the page has just read, and a name that is not in it is
+ *  a THROW rather than an aim at row -1. */
+function pointAtRow (entry, state, name) {
+  const i = state.names.indexOf(name)
+  if (i < 0) throw new Error(`no row named ${name} in [${state.names.join(' ')}]`)
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, FILES_METRICS.rowMid(i, 0), `row ${name}`)
+}
+
+/**
+ * A POINT ON EMPTY SPACE AT THE BOTTOM OF THE CLIPPED VIEWPORT — LOW, and that is proof 2's whole
+ * fixture rather than a taste.
+ *
+ * A menu raised in the MIDDLE of a tall client area opens and closes entirely inside it, so
+ * `pastBody` reads 0 while the shell is working perfectly — the honest-zero the slice contract warns
+ * about. Aimed `MENU_INSET` CSS px above the viewport's bottom edge, a three-row popup's bottom is
+ * necessarily below the client area's.
+ *
+ * BOTH BOUNDS ARE THE PROGRAM'S OWN. `rowTop(n)` is past the last row and `viewBox` is the rectangle
+ * the hit test is bounded by (`inViewport`), so a point between them finds no row AND is inside the
+ * viewport — which is exactly the arbitration's "press that found none", and the only press that
+ * raises the empty-space menu.
+ */
+const MENU_INSET = 6
+function pointLowOnEmptySpace (entry, state, what) {
+  const box = FILES_METRICS.viewBox(state.wCss, entry.surface.extent().cssH)
+  const afterLast = FILES_METRICS.rowTop(state.names.length, 0)
+  const yCss = box.y + box.h - MENU_INSET
+  if (!(afterLast <= yCss)) {
+    throw new Error(`there is no empty space at the bottom of the viewport: row `
+      + `${state.names.length} would start at ${afterLast} CSS px and the aim is ${yCss}. The `
+      + 'window is too short, so the menu would be raised on a ROW and proof 2 would be reading '
+      + 'the wrong popup')
+  }
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, yCss, what)
+}
+
+/** A POINT ON THE HEADER, which `files` refuses to raise a menu on — by name and with no errno,
+ *  because the refusal is the program's own. Above `VIEW_TOP` is the whole of the test the program
+ *  makes (`inViewport`). */
+function pointOnHeader (entry, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, FILES_METRICS.VIEW_TOP / 2, what)
+}
+
+/**
+ * AIM AT ONE ROW OF THE SHELL'S POPUP, BY ITS LABEL — and read back the index the shell will report.
+ *
+ * `dataset.contextIndex` is `Taskbar.openContextMenu`'s own statement of which row this button is
+ * (`data: { contextIndex: index }`), so the page aims by the thing a reader sees and asserts against
+ * the number the shell will send. A page that computed the index itself would be a second copy of
+ * that `forEach`, separators and all.
+ *
+ * A LABEL THAT IS NOT THERE EXACTLY ONCE IS A THROW, with the whole popup printed. A driver that
+ * clicked whichever row came first would run a verb nobody chose, and "Delete" against "Delete 3
+ * items" is precisely the pair that differs by a selection.
+ */
+function aimPopupRow (shell, label, what) {
+  const rows = [...shell.popup.querySelectorAll('.shell-row')]
+  const labels = rows.map((el) => (el.querySelector('.shell-label') || {}).textContent || '')
+  const hits = rows.filter((el, i) => labels[i] === label)
+  if (hits.length !== 1) {
+    throw new Error(`the popup has ${hits.length} row(s) labelled ${JSON.stringify(label)} among `
+      + `[${labels.join(' | ')}] — ${what}`)
+  }
+  const el = hits[0]
+  const r = el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the popup row ${JSON.stringify(label)} has no measurable rect — ${what}`)
+  }
+  return {
+    label,
+    index: Number(el.dataset.contextIndex),
+    disabled: el.disabled === true,
+    at: onScreen({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) },
+      `the popup row ${JSON.stringify(label)}`),
+  }
+}
+
+/** WHAT HOLDS THE KEYBOARD, as a word rather than an element — an element cannot cross a
+ *  `returnByValue` boundary, and a driver in another engine reads this. */
+function keyboardAt (entry) {
+  const el = entry.surface ? entry.surface.el : null
+  const active = document.activeElement
+  if (!el) return 'no-surface'
+  if (active === el) return 'surface'
+  if (!active) return 'none'
+  return active.tagName.toLowerCase() + (active.className ? `.${String(active.className)}` : '')
+}
+
+/* ---- driving ------------------------------------------------------------------------------- */
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR WHAT IT WAS FOR.
+ *
+ * `wait` IS THE GESTURE'S OWN CONSEQUENCE AND NOT A TIMEOUT NOBODY TUNED, which is M19's rule with
+ * one more case in it. Four kinds, and each call states which it is:
+ *
+ *   'repaint'  a new display-list batch. Every verb that CHANGED something repaints, because each
+ *              one ends in `reread`.
+ *   'menu'     the shell's popup is a CONTEXT menu with rows in it. A menu raise repaints only
+ *              incidentally — `raiseMenu` answers false outside `--menu-in-surface` — so waiting for
+ *              a batch here would be waiting for a side effect.
+ *   'settle'   nothing observable is owed: a REFUSED verb draws nothing, and the record still has to
+ *              cross the kernel and be drained by a program parked in `poll` with a 200 ms period.
+ *   a function a predicate of the page's own.
+ */
+async function gesture (entry, spec, { wait = 'repaint', ms = 6000 } = {}) {
+  const had = BATCHES.get(entry.id) || 0
+  await ask(spec)
+  if (wait === 'settle') { await pause(600); return -1 }
+  if (wait === 'repaint') {
+    return Math.round(await until(() => (BATCHES.get(entry.id) || 0) > had, ms))
+  }
+  if (wait === 'menu') {
+    return Math.round(await until(() => {
+      const r = SHELL.report()
+      return r.popupKind === 'context' && r.popupRows.length > 0
+    }, ms))
+  }
+  return Math.round(await until(wait, ms))
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window as the KERNEL holds it, by winid — among its rows `menu`, which is this ABI's only
+ *  pull route to "a menu is open on this window" (see this page's header, note 1). */
+async function kernelWin (k, id) {
+  const st = await winState(k)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/** The kernel's own menu arithmetic, as one row: raises, refusals, dismissals, activations and the
+ *  reports it threw out. `badItems` is the one that must NOT move — a second report against a menu
+ *  the kernel has already closed lands there. */
+async function kernelMenus (k) {
+  const st = await winState(k)
+  const w = st.wins || {}
+  return {
+    menus: w.menus | 0, refusedMenus: w.refusedMenus | 0, menuDismissals: w.menuDismissals | 0,
+    itemActivations: w.itemActivations | 0, badItems: w.badItems | 0, droppedItems: w.droppedItems | 0,
+  }
+}
+
+/** The host counters M20 reads, as one row. `rightPresses` is a subset of `pointers` and
+ *  `contextmenus` counts every right press whether or not the guard fired, which is what lets
+ *  `no-menu-guard` be read as `defaultPrevented: false` rather than as an absence. */
+function hostCounts (host) {
+  const r = host.report()
+  return {
+    pointers: r.pointers | 0, rightPresses: r.rightPresses | 0, contextmenus: r.contextmenus | 0,
+    menus: r.menus | 0, menuRows: r.menuRows | 0, menuChoices: r.menuChoices | 0,
+    menuDismisses: r.menuDismisses | 0, menusUnrendered: r.menusUnrendered | 0,
+    itemAsks: r.itemAsks | 0, unknown: r.unknown | 0,
+  }
+}
+
+/** The shell's own, beside them. `contextDismissals` counts the GESTURE where the host's
+ *  `menuDismisses` counts the REPORT, and the GAP between the two IS the `silent-dismiss` control. */
+function shellCounts (shell) {
+  const r = shell.report()
+  return {
+    contextOpens: r.contextOpens | 0, contextClicks: r.contextClicks | 0,
+    contextDismissals: r.contextDismissals | 0,
+    popupKind: r.popupKind, popupRows: [...r.popupRows],
+    popupBox: r.popupBox, anchorBody: r.anchorBody, pastBody: r.pastBody,
+  }
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer gesture is delivered by DOM hit-testing
+ *  and a frame above it would take it. The kernel owns the order (constraint 226), so this asks
+ *  rather than restyling. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/** WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY. A `win-geom` arriving mid-sequence would
+ *  resurface the window under the aim, and `Surface.pointAt` differences a stale box into every
+ *  point it posts. `geoms` is the host's own count of posts, so this reads the subject. */
+async function geomsSettled (host, quietMs = 300, ms = 8000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = host.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await pause(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/** Wait for a window with a SURFACE and at least one batch in it: an entry with no surface is a
+ *  frame whose canvas has not been built, and reading its ops would read nothing. */
+async function surfaced (host, title, skip = null, ms = 20000) {
+  const find = () => {
+    for (const entry of host.frames.values()) {
+      if (skip && skip.has(entry.id)) continue
+      if (entry.win.titleText.includes(title)) return entry
+    }
+    return null
+  }
+  const got = await until(() => {
+    const e = find()
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : find()
+}
+
+/* ---- the fixture ---------------------------------------------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 20000)) }
+}
+
+/** One `/proc`-free reading of a path: `stat`'s own row, or a row that says it is not there. The
+ *  INODE is the whole reason this is used rather than a listing — "the rename moved the inode" has
+ *  no other reading, and `src/bin/stat.mjs` is the one program that publishes `st_ino`. */
+async function statOf (k, path) {
+  const row = await runProgram(k, STAT, ['stat', path])
+  const got = (row.rows || [])[0] || null
+  return { path, exit: row.exit, ino: got ? got.ino : '', type: got ? got.type : '' }
+}
+
+/** `ls` as a FRESH `readdir`, by its own count. `listed` is the number of entries the call returned,
+ *  which is the reading "a created directory appears in a fresh readdir" asks for — and it comes out
+ *  of a SECOND PROCESS, so it cannot be this program's belief about its own `mkdir`. */
+async function listCount (k, path) {
+  const row = await runProgram(k, LS, ['ls', path])
+  return { path, exit: row.exit, listed: row.listed | 0 }
+}
+
+/** `wc -c` on one path: the byte count the filesystem holds. */
+async function byteCount (k, path) {
+  const row = await runProgram(k, WC, ['wc', '-c', path])
+  return { path, exit: row.exit, bytes: ((row.total || {}).bytes) | 0 }
+}
+
+/** `grep -c <fixed string>` and its INVERSE on one path, as the exit status and the match count.
+ *  The pattern is a FIXED string (constraint 138) and the status is the reading: `grep` answers 1
+ *  for a file it read and did not match. */
+async function grepBoth (k, path, needle) {
+  const hit = await runProgram(k, GREP, ['grep', '-c', needle, path])
+  const miss = await runProgram(k, GREP, ['grep', '-c', '-v', needle, path])
+  return {
+    path, needle,
+    matched: hit.matched | 0, matchExit: hit.exit,
+    unmatched: miss.matched | 0, missExit: miss.exit,
+  }
+}
+
+/** Write one line into a file through a REAL SHELL REDIRECTION. See `MARKER` for why the page writes
+ *  the bytes rather than copying someone else's. The path carries no glob character, so `expandOne`
+ *  does no matching and the target is the word (`src/bin/sh.mjs`). */
+async function writeLine (k, path, text) {
+  const row = await runProgram(k, SH, ['sh', '-c', `echo ${text} > ${path}`])
+  return { path, text, exit: row.exit }
+}
+
+/** Build the tree, through five ordinary programs and nothing privileged. `rm -r -f` goes first for
+ *  the reason stated at `ROOT_DIR`: OPFS persists, and this page deletes and renames. */
+async function makeTree (k) {
+  const gone = await runProgram(k, RM, ['rm', '-r', '-f', ROOT_DIR])
+  const md = await runProgram(k, MKDIR, ['mkdir', '-p',
+    ROOT_DIR, `${ROOT_DIR}/${SUB}`, `${ROOT_DIR}/${FULL}`])
+  const kept = await runProgram(k, TOUCH, ['touch', `${ROOT_DIR}/${FULL}/${KEEP}`])
+  const empty = await runProgram(k, TOUCH, ['touch',
+    `${ROOT_DIR}/${RENAME_ME}`, `${ROOT_DIR}/${TAKEN}`])
+  const marked = await writeLine(k, `${ROOT_DIR}/${COPY_ME}`, MARKER)
+  const other = await writeLine(k, `${ROOT_DIR}/${OTHER}`, OTHER_TEXT)
+  return {
+    dir: ROOT_DIR,
+    rm: gone.exit, mkdir: md.exit, keep: kept.exit, touch: empty.exit,
+    marked: marked.exit, other: other.exit,
+    rows: OPENING_ROWS.length,
+  }
+}
+
+/** Quit a program by giving its window a synthesised `q`, and collect the account it returns.
+ *
+ *  A SYNTHESISED KEY AND IT SAYS SO. This is the page tearing its own fixture down, not a gesture
+ *  under test: `q` is how `src/bin/files.mjs` exits, and `WinHost` counts synthetic keys apart from
+ *  trusted ones for exactly this reason — so nothing here can be mistaken for the input the clauses
+ *  rest on. */
+async function quitAndReport (k, entry, pid) {
+  entry.surface.el.focus()
+  typeSynthetic(entry.surface.el, 'q')
+  return resultOf(k, pid, 20000)
+}
+
+/** THE M20 FIELDS OF A `files` ACCOUNT, with a shape for a program that never reached them. A
+ *  refusal path returns an account too, and defaulting rather than letting a clause dereference
+ *  `undefined` is what makes such a run report FAILED CLAUSES over a stated exit code instead of a
+ *  thrown page — the difference between a proof that failed and a harness that broke. */
+function accountOf (row) {
+  return {
+    exit: row.exit,
+    why: row.why || '',
+    dir: String(row.dir || ''),
+    rows: (row.rows || []).map((r) => ({ name: String(r.name), dir: r.dir === true })),
+    menus: row.menus | 0,
+    refusedMenus: row.refusedMenus | 0,
+    dismissals: row.dismissals | 0,
+    chosen: [...(row.chosen || [])],
+    menuRows: [...(row.menuRows || [])],
+    menuTarget: row.menuTarget === undefined ? -2 : row.menuTarget | 0,
+    menuInSurfaceAt: row.menuInSurfaceAt || null,
+    created: [...(row.created || [])],
+    renamed: (row.renamed || []).map((r) => ({ from: String(r.from), to: String(r.to) })),
+    renames: row.renames | 0,
+    deleted: [...(row.deleted || [])],
+    pasted: (row.pasted || []).map((r) => ({ name: String(r.name), moved: r.moved === true })),
+    pastes: row.pastes | 0,
+    copies: row.copies | 0,
+    cuts: row.cuts | 0,
+    clipboard: row.clipboard || null,
+    renaming: row.renaming || null,
+    /* THE REFUSALS, WHOLE. `errno` is PRESENT ONLY WHERE THE KERNEL NAMED ONE, so the entries are
+     * copied rather than normalised: a defaulted `errno: ''` would make "it refused with an errno"
+     * pass for a refusal that had none, which is the distinction proof 5 rests on. */
+    refusals: (row.refusals || []).map((r) => ({ ...r })),
+    refused: row.refused | 0,
+    refusalWhy: String(row.refusalWhy || ''),
+    relists: row.relists | 0,
+    backs: row.backs | 0,
+    selects: row.selects | 0,
+    scroll: Number(row.scroll || 0),
+    scrollMax: Number(row.scrollMax || 0),
+    dpr: Number(row.dpr || 1),
+    controls: { ...(row.controls || {}) },
+  }
+}
+
+const sameSet = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
+/** A refusal entry by what it was asked about. The whole LIST is kept in the evidence, so a clause
+ *  that fails is diagnosed from the refusals the program really recorded. */
+const refusalFor = (account, what) =>
+  (account.refusals || []).find((r) => r.what === what) || null
+
+/* ---- the driven sequence -------------------------------------------------------------------- */
+
+/**
+ * ONE WINDOW, ONE SEQUENCE — because the filesystem carries.
+ *
+ * The verbs over this window are claims about ONE run and not four runs: Paste needs a Copy, the
+ * EEXIST rename needs a name something else already holds, and the Delete that is refused and the
+ * Delete that works are two rows of one listing. Staging each claim its own window would mean four
+ * windows whose trees were built by verbs no clause reads.
+ *
+ * EVERY STEP RECORDS WHAT THE PAGE, THE HOST, THE SHELL AND THE KERNEL ALL SAID AFTER IT, so a
+ * failed clause is diagnosed from the state at the moment rather than from the end state. The four
+ * are kept apart on purpose: the popup the shell drew, the record the host converted, the menu the
+ * kernel holds and the verb the program ran are four things to get wrong.
+ */
+async function drive (k, host, shell) {
+  const files = await surfaced(host, 'files')
+  if (!files) throw new Error('the files window never surfaced')
+  const pid = globalThis.M20.pids.files
+  await raise(k, files)
+  const staged = BATCHES.get(files.id) || 0
+  place(files, PROOF_BOX)
+  await until(() => (BATCHES.get(files.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+
+  const steps = []
+  let now = null
+  const record = async (name, extra = {}) => {
+    now = listState(files)
+    const row = {
+      name, ...now,
+      host: hostCounts(host), shell: shellCounts(shell),
+      kernel: await kernelMenus(k),
+      win: await kernelWin(k, files.id),
+      keyboard: keyboardAt(files),
+      /* THE LAST ITEM REPORT, RECORDED AT EVERY STEP AND NOT READ AT PROOF TIME. `WinHost` keeps
+       * ONE `lastMenuReport`, so the read-only window's own choice overwrites this window's — and a
+       * clause that read it at the end asserted a report from a different window about a different
+       * menu. It did, and the clause failed for exactly that reason. */
+      lastMenuReport: host.report().lastMenuReport,
+      lastMenu: host.report().lastMenu,
+      lastContextMenu: host.report().lastContextMenu,
+      ...extra,
+    }
+    steps.push(row)
+    return row
+  }
+
+  /** WHAT THE KEYBOARD COST, counted rather than quietly worked around.
+   *
+   *  A popup row is a `<button>` and clicking one may take the focus off the window's canvas; when
+   *  the popup is then torn down (`closePopup` empties it) the focus falls to whatever is left. The
+   *  rename field reads the KEYBOARD, so the next typed character would go nowhere — which is a
+   *  statement about the SHELL and not about this page, so the page measures it, says what it found
+   *  and restores the focus the way `WinHost.#surface` restores it after a resurface. `reclaims`
+   *  being non-zero is a finding, which is why it is published rather than hidden in a conditional. */
+  const reclaims = []
+  const reclaimKeyboard = (what) => {
+    const was = keyboardAt(files)
+    if (was === 'surface') { reclaims.push({ what, was, restored: false }); return was }
+    files.surface.el.focus()
+    reclaims.push({ what, was, restored: true, now: keyboardAt(files) })
+    return was
+  }
+
+  const start = await record('before-any-gesture')
+
+  /* ---- G1. A RIGHT PRESS ON EMPTY SPACE, LOW IN THE FRAME ----------------------------------
+     The empty-space menu, and the one the `pastBody` clause is read off. Paste is DISABLED here:
+     nothing has been copied yet, and a live-and-silent row is the defect Windows 7's own rule for
+     an inapplicable command avoids. */
+  const emptyAt = pointLowOnEmptySpace(files, start, 'the empty-space menu')
+  await gesture(files, { kind: 'rightclick', name: 'right-click-empty-space', at: emptyAt },
+    { wait: CFG.menuInSurface ? 'repaint' : 'menu' })
+  const emptyMenu = await record('with-the-empty-space-menu-open', { at: emptyAt })
+  /* THE AIMS ARE TAKEN WHILE THE POPUP IS OPEN, because it is gone the moment a row is clicked.
+     Under `--menu-in-surface` there is no popup at all, which is what that control is: the aim
+     throws, so it is taken only where there is one to take. */
+  const newFolderRow = CFG.menuInSurface ? null
+    : aimPopupRow(shell, 'New folder', 'the empty-space menu')
+  const pasteBefore = CFG.menuInSurface ? null
+    : aimPopupRow(shell, 'Paste', 'the empty-space menu, before anything was copied')
+
+  /* ---- G2. NEW FOLDER, FROM THE MENU ------------------------------------------------------- */
+  if (newFolderRow) {
+    await gesture(files, { kind: 'click', name: 'click-new-folder', at: newFolderRow.at })
+  }
+  /* THE FRESH `readdir` IS TAKEN HERE AND NOT AT THE END, which is the clause's own wording: "a
+   * created directory appears in a FRESH readdir". The end-state count is NOT that reading — this
+   * run also DELETES a row, so the two cancel and a before/after comparison reads 6 against 6 over
+   * a folder that was really created. It did, and the clause failed for exactly that reason. */
+  const created = await record('after-new-folder', { at: newFolderRow && newFolderRow.at,
+    list: await listCount(k, ROOT_DIR) })
+
+  /* ---- G3/G4. A ROW MENU, AND Esc ---------------------------------------------------------
+     The dismissal is the case a program forgets: it is parked in `poll` on the fd it raised the
+     menu on, so a swallowed answer is a window that never wakes. `silent-dismiss` is that world. */
+  const copyRowAt = pointAtRow(files, created, COPY_ME)
+  await gesture(files, { kind: 'rightclick', name: `right-click-${COPY_ME}`, at: copyRowAt },
+    { wait: CFG.menuInSurface ? 'repaint' : 'menu' })
+  const rowMenu = await record('with-the-row-menu-open', { at: copyRowAt })
+  const rowAims = CFG.menuInSurface ? null : {
+    open: aimPopupRow(shell, 'Open', 'the row menu'),
+    cut: aimPopupRow(shell, 'Cut', 'the row menu'),
+    copy: aimPopupRow(shell, 'Copy', 'the row menu'),
+    del: aimPopupRow(shell, 'Delete', 'the row menu'),
+    rename: aimPopupRow(shell, 'Rename', 'the row menu'),
+  }
+  await gesture(files, { kind: 'key', name: 'press-escape-to-dismiss', key: 'Escape' },
+    { wait: 'settle' })
+  const dismissed = await record('after-escape')
+
+  /**
+   * AND UNDER `--menu-in-surface` THE RUN STOPS HERE, DECLARED.
+   *
+   * THE CONTROL'S SUBJECT IS THE DRAWING AND NOTHING THAT FOLLOWS IS REACHABLE IN THAT WORLD. A
+   * popup a process paints into its own surface HAS NO HIT TEST — `src/bin/files.mjs` draws it in
+   * `paint` and reads it in no press branch — so no row of it can be picked, and every verb below
+   * is driven by picking one. The only other route to a verb is the key chords, and
+   * `scripts/cdp.py`'s `KEYS` table has no virtual key code for `F2`, `Delete` or a bare letter, so
+   * Ctrl+N/X/C/V and the two keysyms cannot be driven either.
+   *
+   * SO THE PROOFS BELOW ARE NOT DRIVEN AND SAY SO, rather than going red for the absence of a
+   * gesture nobody could perform. A control satisfied by ANY failure verifies nothing (CLAUDE.md) —
+   * running the whole sequence in this world turned every clause on the page, which is exactly that.
+   * `main` reports them as `not driven` with this reason, and what the control DOES turn is proof 2
+   * and the raise clauses of proof 1, which is the subset the plan names.
+   */
+  if (CFG.menuInSurface) {
+    const account2 = accountOf(await quitAndReport(k, files, pid))
+    return {
+      pid, win: files.id, dpr: dpr(), box: { ...PROOF_BOX }, steps, reclaims,
+      extent: files.surface ? { ...files.surface.extent() } : null,
+      short: 'the program drew the menu into its own surface, where it has no hit test, so no row '
+        + 'can be picked — and scripts/cdp.py has no virtual key code for F2, Delete or a Ctrl '
+        + 'chord, so the keyboard route to the same verbs cannot be driven either',
+      aims: { newFolder: null, pasteBefore: null, pasteAfter: null, pasteTwice: null, row: null,
+        rename: null, renameAgain: null, deleteFull: null, deleteTaken: null,
+        empty: emptyAt, sub: null, header: null },
+      at: { start, emptyMenu, created, rowMenu, dismissed, deleted: dismissed },
+      account: account2,
+    }
+  }
+
+  /* ---- G5/G6. THE SAME ROW MENU, AND Copy -------------------------------------------------- */
+  await gesture(files, { kind: 'rightclick', name: `right-click-${COPY_ME}-again`, at: copyRowAt },
+    { wait: 'menu' })
+  await record('with-the-row-menu-open-again', { at: copyRowAt })
+  await gesture(files, { kind: 'click', name: 'click-copy', at: rowAims.copy.at })
+  const copied = await record('after-copy')
+
+  /* ---- G7. INTO THE DESTINATION DIRECTORY --------------------------------------------------
+     A double-click RE-LISTS in this window (M18), which is what makes the paste a cross-directory
+     copy rather than the same-name refusal a paste in place would be. */
+  const subAt = pointAtRow(files, copied, SUB)
+  await gesture(files, { kind: 'dblclick', name: `open-${SUB}`, at: subAt })
+  const inSub = await record(`inside-${SUB}`, { at: subAt })
+
+  /* ---- G8/G9. PASTE, WHERE THE CLIPBOARD NOW HAS SOMETHING TO OFFER ------------------------ */
+  const subEmptyAt = pointLowOnEmptySpace(files, inSub, `the empty-space menu in ${SUB}`)
+  await gesture(files, { kind: 'rightclick', name: `right-click-empty-space-in-${SUB}`,
+    at: subEmptyAt }, { wait: 'menu' })
+  const pasteMenu = await record(`with-the-${SUB}-menu-open`, { at: subEmptyAt })
+  const pasteAfter = aimPopupRow(shell, 'Paste', `the ${SUB} menu, after a copy`)
+  await gesture(files, { kind: 'click', name: 'click-paste', at: pasteAfter.at })
+  const pasted = await record('after-paste')
+
+  /* ---- G10/G11. THE SAME PASTE AGAIN, WHICH OWES EEXIST ------------------------------------
+     THE SECOND PASTE IS WHAT GIVES `--paste-clobbers` A WORLD. That control drops the copy's
+     `O_EXCL` and the move's destination pre-check, so it only shows in a paste onto a name the
+     destination ALREADY holds — and a paste into the directory the file came FROM is refused one
+     branch earlier, by `to === from`, with no errno at all. So the clause the control turns has to
+     be a SECOND paste into `SUB`, where the first one landed.
+
+     A control that turns nothing must be rescoped or replaced (CLAUDE.md), and this one turned
+     nothing until these two gestures existed: the run's only EEXIST was the RENAME's, which
+     `--paste-clobbers` does not touch. */
+  const pasteAgainAt = pointLowOnEmptySpace(files, pasted, `the ${SUB} menu, a second time`)
+  await gesture(files, { kind: 'rightclick', name: `right-click-empty-space-in-${SUB}-again`,
+    at: pasteAgainAt }, { wait: 'menu' })
+  await record(`with-the-${SUB}-menu-open-again`, { at: pasteAgainAt })
+  const pasteTwice = aimPopupRow(shell, 'Paste', `the ${SUB} menu, onto a name it already holds`)
+  await gesture(files, { kind: 'click', name: 'click-paste-onto-an-occupied-name',
+    at: pasteTwice.at }, { wait: 'settle' })
+  const pastedTwice = await record('after-the-second-paste',
+    { bytes: await byteCount(k, `${ROOT_DIR}/${SUB}/${COPY_ME}`) })
+
+  /* ---- G12/G13. BACK, WITH THE KEYBOARD AIMED BY A REAL CLICK -----------------------------
+     A left press on empty space focuses the canvas through the same `el.focus()` a reader's click
+     goes through (`#wirePointer`'s `pointerdown`), and finds no row — so it arms a band nobody
+     moves and cannot disturb a selection clause. Then Backspace is Back (M18). */
+  const refocusAt = pointLowOnEmptySpace(files, pastedTwice, 'the keyboard aim')
+  await gesture(files, { kind: 'click', name: 'click-empty-space-to-aim-the-keyboard',
+    at: refocusAt }, { wait: 'settle' })
+  const aimed = await record('after-aiming-the-keyboard', { at: refocusAt })
+  await gesture(files, { kind: 'key', name: 'press-backspace-to-go-back', key: 'Backspace' })
+  const back = await record('after-going-back')
+
+  /* ---- G12..G16. A RENAME ONTO AN OCCUPIED NAME, WHICH OWES EEXIST ------------------------- */
+  const renameAt = pointAtRow(files, back, RENAME_ME)
+  await gesture(files, { kind: 'rightclick', name: `right-click-${RENAME_ME}`, at: renameAt },
+    { wait: 'menu' })
+  await record('with-the-rename-menu-open', { at: renameAt })
+  const renameAim = aimPopupRow(shell, 'Rename', `the row menu on ${RENAME_ME}`)
+  await gesture(files, { kind: 'click', name: 'click-rename', at: renameAim.at })
+  const editing = await record('with-the-rename-field-open',
+    { keyboardBeforeReclaim: reclaimKeyboard('after clicking Rename') })
+  await gesture(files, { kind: 'key', name: 'clear-the-field', key: 'Backspace',
+    times: CLEAR_PRESSES }, { wait: 'settle' })
+  await gesture(files, { kind: 'type', name: `type-${TAKEN}`, text: TAKEN }, { wait: 'settle' })
+  const typedTaken = await record('with-an-occupied-name-typed')
+  await gesture(files, { kind: 'key', name: 'commit-the-occupied-name', key: 'Enter' },
+    { wait: 'settle' })
+  const refusedRename = await record('after-the-occupied-name-was-refused')
+
+  /* ---- G17..G21. AND THE RENAME THAT LANDS ------------------------------------------------- */
+  const renameAgainAt = pointAtRow(files, refusedRename, RENAME_ME)
+  await gesture(files, { kind: 'rightclick', name: `right-click-${RENAME_ME}-again`,
+    at: renameAgainAt }, { wait: 'menu' })
+  await record('with-the-rename-menu-open-again', { at: renameAgainAt })
+  const renameAim2 = aimPopupRow(shell, 'Rename', `the row menu on ${RENAME_ME}, the second time`)
+  await gesture(files, { kind: 'click', name: 'click-rename-again', at: renameAim2.at })
+  await record('with-the-rename-field-open-again',
+    { keyboardBeforeReclaim: reclaimKeyboard('after clicking Rename the second time') })
+  await gesture(files, { kind: 'key', name: 'clear-the-field-again', key: 'Backspace',
+    times: CLEAR_PRESSES }, { wait: 'settle' })
+  await gesture(files, { kind: 'type', name: `type-${RENAMED}`, text: RENAMED },
+    { wait: 'settle' })
+  const typedNew = await record('with-the-new-name-typed')
+  await gesture(files, { kind: 'key', name: 'commit-the-rename', key: 'Enter' },
+    { wait: 'settle' })
+  const renamed = await record('after-the-rename')
+
+  /* ---- G22. A RIGHT PRESS ON THE HEADER, WHICH RAISES NOTHING ------------------------------
+     The program's OWN refusal, so it carries no errno — which is the reading that stops "it refused
+     with an errno" passing for a refusal that had none. And no `win_menu` reaches the kernel, so the
+     raise count stands still: a menu on a header is a menu over a row a reader cannot point at. */
+  const headerAt = pointOnHeader(files, 'the header')
+  await gesture(files, { kind: 'rightclick', name: 'right-click-the-header', at: headerAt },
+    { wait: 'settle' })
+  const header = await record('after-right-clicking-the-header', { at: headerAt })
+
+  /* ---- G23/G24. DELETE A NON-EMPTY FOLDER, WHICH OWES ENOTEMPTY ----------------------------
+     A non-empty directory is REFUSED and not emptied: recursing on a folder somebody selected by
+     accident is the worst outcome available, and `rmdir`'s own answer is the one the reader gets. */
+  const fullAt = pointAtRow(files, header, FULL)
+  await gesture(files, { kind: 'rightclick', name: `right-click-${FULL}`, at: fullAt },
+    { wait: 'menu' })
+  const fullMenu = await record('with-the-folder-menu-open', { at: fullAt })
+  const deleteFull = aimPopupRow(shell, 'Delete', `the row menu on ${FULL}`)
+  await gesture(files, { kind: 'click', name: 'click-delete-on-a-full-folder',
+    at: deleteFull.at })
+  const refusedDelete = await record('after-the-full-folder-was-refused')
+
+  /* ---- G25/G26. AND A DELETE THAT LANDS ---------------------------------------------------- */
+  const takenAt = pointAtRow(files, refusedDelete, TAKEN)
+  await gesture(files, { kind: 'rightclick', name: `right-click-${TAKEN}`, at: takenAt },
+    { wait: 'menu' })
+  await record('with-the-delete-menu-open', { at: takenAt })
+  const deleteTaken = aimPopupRow(shell, 'Delete', `the row menu on ${TAKEN}`)
+  await gesture(files, { kind: 'click', name: 'click-delete', at: deleteTaken.at })
+  const deleted = await record('after-the-delete')
+
+  const account = accountOf(await quitAndReport(k, files, pid))
+
+  return {
+    pid,
+    win: files.id,
+    dpr: dpr(),
+    box: { ...PROOF_BOX },
+    extent: files.surface ? { ...files.surface.extent() } : null,
+    steps,
+    reclaims,
+    short: '',
+    aims: {
+      newFolder: newFolderRow, pasteBefore, pasteAfter, pasteTwice, row: rowAims,
+      rename: renameAim, renameAgain: renameAim2, deleteFull, deleteTaken,
+      empty: emptyAt, sub: subEmptyAt, header: headerAt,
+    },
+    at: { start, emptyMenu, created, rowMenu, dismissed, copied, inSub, pasteMenu, pasted,
+      pastedTwice, aimed, back, editing, typedTaken, refusedRename, typedNew, renamed, header,
+      fullMenu, refusedDelete, deleted },
+    account,
+  }
+}
+
+/**
+ * THE READ-ONLY MOUNT, IN ITS OWN WINDOW — the edge case D40 left standing.
+ *
+ * M19a made the session a writable copy of the read-only base, so there is no read-only case in the
+ * directory a reader lands in and a branch for one would be a branch no check can reach. The MOUNTS
+ * are unchanged: `/usr/share` is still `MNT_RO` with `mutErrno: "EROFS"` and a reader browsing
+ * `Computer` still reaches it, so a verb attempted THERE must refuse by name with the kernel's own
+ * errno. That is what this stages, and it is the only reason this page opens a second window.
+ *
+ * THE FIRST WINDOW IS GONE BY NOW, and this one takes its box. A page that kept both would need a
+ * second region of desktop, and every aim in it would have to clear the taskbar's strip and the
+ * other frame — for a clause that is about an errno.
+ */
+async function driveReadOnly (k, host, shell) {
+  const known = new Set(host.frames.keys())
+  const argv = ['files', ...programFlags(), '/usr/share']
+  const spawned = await spawnProgram(k, FILES, argv)
+  const entry = await surfaced(host, 'files', known)
+  if (!entry) throw new Error('the read-only files window never surfaced')
+  await raise(k, entry)
+  const staged = BATCHES.get(entry.id) || 0
+  place(entry, PROOF_BOX)
+  await until(() => (BATCHES.get(entry.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+
+  const before = listState(entry)
+  const at = pointLowOnEmptySpace(entry, before, 'the read-only mount\'s menu')
+  await gesture(entry, { kind: 'rightclick', name: 'right-click-a-read-only-mount', at },
+    { wait: 'menu' })
+  const open = {
+    list: listState(entry), shell: shellCounts(shell), host: hostCounts(host),
+    win: await kernelWin(k, entry.id),
+  }
+  const aim = CFG.menuInSurface ? null
+    : aimPopupRow(shell, 'New folder', 'the read-only mount\'s menu')
+  if (aim) {
+    /* NOTHING REPAINTS. `newFolder` answers false for a refused `mkdir`, so the surface is left
+     * exactly as it was and the refusal is readable only in the program's own account — which is
+     * the point of its being NAMED there. */
+    await gesture(entry, { kind: 'click', name: 'click-new-folder-on-a-read-only-mount',
+      at: aim.at }, { wait: 'settle' })
+  }
+  const after = listState(entry)
+  const account = accountOf(await quitAndReport(k, entry, spawned.pid))
+  return { pid: spawned.pid, win: entry.id, argv, dir: '/usr/share', at, aim, before, open, after,
+    account }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: THE MENU — a driven right-click raises THIS system's menu.
+
+   `docs/PLAN-SHELL.md` §M20: "A driven right-click raises THIS system's menu — a `win_menu` reached
+   the kernel and `defaultPrevented` is true on the browser event."
+
+   BOTH HALVES OR NEITHER, and they are separate clauses because they are separate failures. A
+   `win_menu` that reached the kernel with the browser's own menu still showing is M16/R8's reported
+   defect — a foreign menu over pixels a process drew — and a refused browser menu with no
+   `win_menu` is a right-click that does nothing at all, which is what this file did before M20.
+
+   FOUR READINGS OF ONE GESTURE, kept apart for `frameBlocked`'s reason: the KERNEL's raise count,
+   the WINDOW's open-menu row count, the HOST's conversion, and the LABELS the shell drew. A clause
+   resting on the host's count alone would pass for a page that posted nothing to the kernel.
+   -------------------------------------------------------------------------------------------- */
+function proofMenu (run) {
+  const { at, account } = run
+  const open = at.emptyMenu
+  const rowOpen = at.rowMenu
+  const menu = {
+    rightPresses: open.host.rightPresses,
+    contextmenus: open.host.contextmenus,
+    /* RECORDED AT THE STEP AND NOT READ AT PROOF TIME. `WinHost` keeps ONE of each of these, so the
+     * read-only window's own right press would overwrite this window's — a clause reading them at
+     * the end would be asserting about a different window's gesture, and would still be green. */
+    lastContextMenu: open.lastContextMenu,
+    lastMenu: open.lastMenu,
+    emptyMenu: {
+      kernel: open.kernel, win: open.win && { id: open.win.id, menu: open.win.menu },
+      host: open.host, shell: open.shell,
+    },
+    rowMenu: {
+      kernel: rowOpen.kernel, win: rowOpen.win && { id: rowOpen.win.id, menu: rowOpen.win.menu },
+      host: rowOpen.host, shell: rowOpen.shell,
+    },
+    pasteBefore: run.aims.pasteBefore,
+    account,
+  }
+
+  /* THE FIXTURE CLAUSES FIRST, because every clause below is vacuous without them: the tree this
+   * page built, and a list that does not scroll — every rectangle above is located at offset 0. */
+  menu.theTreeIsTheFixture = sameSet(at.start.names, OPENING_ROWS)
+  menu.theListDoesNotScroll = ITEMS_RE.test(at.start.position) && account.scroll === 0
+    && account.scrollMax === 0
+
+  /* THE RIGHT PRESS WAS A RIGHT PRESS. `rightPresses` counts the DOWN records whose `event.buttons`
+   * carried the secondary bit, which is the only route a program has to the gesture — there is no
+   * `WPTR_*` bit for a button. A driver that sent a LEFT button for a gesture named `rightclick` is
+   * constraint 279's own recorded defect, and this is the clause that catches it. */
+  menu.thePressCarriedTheSecondaryButton = open.host.rightPresses === 1
+    && open.host.contextmenus === 1
+
+  /* AND THE BROWSER'S OWN MENU WAS REFUSED, read back OFF THE EVENT. `no-menu-guard` is this
+   * clause's world and it keeps the record, so that control reads `defaultPrevented: false` rather
+   * than an absence — an event that never fired and a refusal that did not happen are not the same
+   * world. */
+  const cm = menu.lastContextMenu
+  menu.theBrowsersOwnMenuWasRefused = Boolean(cm) && cm.defaultPrevented === true
+    && cm.button === 2 && cm.trusted === true
+
+  /**
+   * AND THE MENU OPENED UNDER THE POINTER THAT ASKED FOR IT, which is the UNIT ROUND TRIP and the
+   * one thing on this page that a ratio error would break silently.
+   *
+   * FOUR CONVERSIONS AND THEY ARE DECLARED INVERSES IN PAIRS. `Surface.pointAt` turns the press into
+   * SURFACE px; the program divides by `S` to reason in CSS px and multiplies back in `px()`;
+   * `WinHost.#clientPointAt` calls `Surface.clientAt`, which is `pointAt`'s inverse. Each step
+   * rounds at most one surface pixel — `1 / dpr` CSS px — and `clientAt` aims at the CENTRE of one,
+   * so `MENU_POINT_TOL_PX` is the slack four roundings and a half-pixel cost. A ratio applied once
+   * too often would miss by the WHOLE offset, which is M16's bill and twenty times this.
+   *
+   * THE DELTA IS PUBLISHED BESIDE THE VERDICT, because a tolerance nobody can see the real figure
+   * under is a tolerance nobody can tighten.
+   */
+  const aim = run.aims.empty
+  menu.pointDelta = open.lastMenu
+    ? { dx: open.lastMenu.clientX - aim.x, dy: open.lastMenu.clientY - aim.y }
+    : null
+  menu.theMenuOpenedUnderThePointer = Boolean(menu.pointDelta)
+    && Math.abs(menu.pointDelta.dx) <= MENU_POINT_TOL_PX
+    && Math.abs(menu.pointDelta.dy) <= MENU_POINT_TOL_PX
+    && open.lastMenu.win === run.win && open.lastMenu.rows === EMPTY_MENU_ROWS
+    && open.lastMenu.drawn === true
+
+  /* A `win_menu` REACHED THE KERNEL — its own raise count, and the WINDOW holding the rows. The
+   * second is not the first: the count says a call was made and `win.menu` says the kernel is
+   * holding a list to validate an index against, which is what an activation needs. */
+  menu.aWinMenuReachedTheKernel = open.kernel.menus === 1 && open.kernel.refusedMenus === 0
+  menu.theKernelHeldTheMenu = Boolean(open.win) && open.win.menu === EMPTY_MENU_ROWS
+  menu.theRowMenuIsADifferentList = rowOpen.kernel.menus === 2
+    && Boolean(rowOpen.win) && rowOpen.win.menu === ROW_MENU_ROWS
+
+  /* AND THE SHELL DREW WHAT THE PROGRAM PUBLISHED. The labels, both menus, and NOTHING ELSE: a
+   * popup carrying the shell's own window commands would be a menu whose rows no process owns. */
+  menu.theShellDrewTheProgramsRows = open.shell.popupKind === 'context'
+    && sameSet(open.shell.popupRows, EMPTY_MENU_LABELS)
+    && rowOpen.shell.popupKind === 'context'
+    && sameSet(rowOpen.shell.popupRows, ROW_MENU_LABELS)
+  /* AND THE SHELL AND THE PROGRAM AGREE ABOUT THE LIST. `account.menuRows` is the program's own
+   * statement of the open menu's labels, so this compares two independent readings rather than one
+   * reading against a constant of this page's. It is the LAST menu the program held, which is the
+   * one `TAKEN`'s Delete was chosen from. */
+  menu.theProgramNamedTheSameRows = sameSet(rowOpen.shell.popupRows, ROW_MENU_LABELS)
+    && rowOpen.shell.popupRows.every((label) => ROW_MENU_LABELS.includes(label))
+
+  /* PASTE IS DRAWN AND DISABLED BEFORE ANYTHING IS COPIED. Windows 7's own rule for an inapplicable
+   * command, and this project's for a caption button: a live-looking row that silently does nothing
+   * is the defect. It is `WITEM_DISABLED` on the program's side and `button.disabled` on the
+   * shell's, so this reads the second. */
+  menu.pasteIsDisabledWithAnEmptyClipboard = Boolean(run.aims.pasteBefore)
+    && run.aims.pasteBefore.disabled === true
+  menu.pasteIsEnabledOnceSomethingIsCopied = Boolean(run.aims.pasteAfter)
+    && run.aims.pasteAfter.disabled === false
+
+  /* AND NOTHING WENT UNRENDERED. `menusUnrendered` is the host counting a menu no shell could draw
+   * — which is the state every M7..M13 page is in — so a non-zero here means the clauses above were
+   * read off a world with no popup in it. */
+  menu.everyMenuWasDrawn = at.deleted.host.menusUnrendered === 0
+    && at.deleted.host.menus === at.deleted.shell.contextOpens
+
+  menu.ok = menu.theTreeIsTheFixture && menu.theListDoesNotScroll
+    && menu.thePressCarriedTheSecondaryButton && menu.theBrowsersOwnMenuWasRefused
+    && menu.theMenuOpenedUnderThePointer
+    && menu.aWinMenuReachedTheKernel && menu.theKernelHeldTheMenu
+    && menu.theRowMenuIsADifferentList && menu.theShellDrewTheProgramsRows
+    && menu.theProgramNamedTheSameRows && menu.pasteIsDisabledWithAnEmptyClipboard
+    && menu.pasteIsEnabledOnceSomethingIsCopied && menu.everyMenuWasDrawn
+  globalThis.M20.proofs.menu = { ok: menu.ok, evidence: menu }
+  say((menu.ok ? 'ok  ' : 'BAD ') + 'menu: a right press raised ' + open.kernel.menus
+    + ' kernel menu(s), the window held ' + (open.win ? open.win.menu : 'NO') + ' row(s), '
+    + 'defaultPrevented ' + String(cm && cm.defaultPrevented) + ', the point came back '
+    + (menu.pointDelta ? `${menu.pointDelta.dx},${menu.pointDelta.dy}` : 'NOWHERE')
+    + ' CSS px from the aim, popup ['
+    + open.shell.popupRows.join(' | ') + '] then [' + rowOpen.shell.popupRows.join(' | ') + ']')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE GEOMETRY THAT MAKES IT THE SHELL'S — the popup extends PAST the client area.
+
+   `docs/PLAN-SHELL.md` §M20's `menu-in-surface` control: "the clause asserting the menu extends
+   PAST `.window-body`'s rectangle MUST fail — `overflow: hidden` (`src/wm/aero.mjs`) is why a
+   process must not draw one."
+
+   READ AS A RECTANGLE AND NOT AS A SCREENSHOT. An inert popup and a working one are the same
+   picture (constraint 40), and the number here is the one the control moves: `pastBody` is the
+   maximum over the four edges by which the popup escapes the anchor window's `.window-body`, in CSS
+   px. Under `--menu-in-surface` no popup opens at all, so it is 0 — and the ANCHOR clause below is
+   what stops that zero being mistaken for "a popup that happened to fit".
+
+   THE AIM IS WHY THE NUMBER IS HONEST. A menu raised in the middle of a tall client area opens and
+   closes inside it; `pointLowOnEmptySpace` aims `MENU_INSET` px above the viewport's bottom edge, so
+   a popup that stayed inside the body would have to be shorter than that.
+   -------------------------------------------------------------------------------------------- */
+function proofPast (run) {
+  const { at } = run
+  const open = at.emptyMenu.shell
+  const past = {
+    aim: run.aims.empty,
+    popupBox: open.popupBox,
+    anchorBody: open.anchorBody,
+    pastBody: open.pastBody,
+    inSurfaceAt: run.account.menuInSurfaceAt,
+    rowMenuPastBody: at.rowMenu.shell.pastBody,
+    menuInSurface: CFG.menuInSurface,
+  }
+
+  /* THERE IS A POPUP AND IT IS ANCHORED TO THIS WINDOW'S CLIENT AREA. Both rects, because
+   * `pastBody` is a difference between them and a difference between two nulls is 0 — the exact
+   * reading `--menu-in-surface` would otherwise satisfy by accident. */
+  past.thereIsAPopupOverTheWindow = Boolean(open.popupBox) && Boolean(open.anchorBody)
+    && open.popupBox.h > 0 && open.anchorBody.h > 0
+
+  /* AND IT REACHES PAST THE CLIENT AREA, DOWNWARDS. The sign is named rather than left to the
+   * maximum: a popup clamped UP by `#placeAt` would escape at the TOP and satisfy a bare
+   * `pastBody > 0` while sitting over the window's own caption, which is not what this clause is
+   * about. */
+  past.theMenuExtendsPastTheClientArea = past.thereIsAPopupOverTheWindow
+    && open.pastBody > 0
+    && open.popupBox.bottom > open.anchorBody.bottom
+
+  /* AND THE PROCESS DREW NOTHING. `menuInSurfaceAt` is non-null ONLY under the control, so this is
+   * the program's own statement that it called `win_menu` rather than painting a popup — the other
+   * half of "the shell draws it", read on the process's side. */
+  past.theProcessDrewNoPopup = run.account.menuInSurfaceAt === null
+
+  past.ok = past.thereIsAPopupOverTheWindow && past.theMenuExtendsPastTheClientArea
+    && past.theProcessDrewNoPopup
+  globalThis.M20.proofs.past = { ok: past.ok, evidence: past }
+  say((past.ok ? 'ok  ' : 'BAD ') + 'past: the popup is '
+    + (open.popupBox ? `${Math.round(open.popupBox.w)}x${Math.round(open.popupBox.h)} at `
+      + `${Math.round(open.popupBox.x)},${Math.round(open.popupBox.y)}` : 'NOT OPEN')
+    + ' against a body ending at '
+    + (open.anchorBody ? Math.round(open.anchorBody.bottom) : 'NONE')
+    + ', past it by ' + Math.round(open.pastBody) + ' CSS px')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: THE ANSWER, BOTH WAYS — a row activates, and Esc is REPORTED.
+
+   `docs/PLAN-SHELL.md` §M20: "A row activates and the `WEV_ITEM` is read back. Esc dismisses and the
+   dismissal is reported."
+
+   THE ACTIVATION IS READ FOUR TIMES AND THE FOUR ARE NOT ONE CLAUSE: the INDEX the shell reported,
+   the index the kernel ACCEPTED (`itemActivations` against `badItems`), the VERB the program ran
+   (`account.chosen`, against `FILES_METRICS.VERBS` and never against a literal of this page's), and
+   the FILESYSTEM — which is proof 4's. An index asserted alone passes for a report the kernel threw
+   out; a verb asserted alone passes for a program that ran it off a key.
+
+   THE DISMISSAL IS THE CASE A PROGRAM FORGETS. `files` is parked in `poll` on the fd it raised the
+   menu on, so a dismissal nobody reports is a window that never wakes — and `silent-dismiss` drops
+   the report in `WinHost.activateItem`, which is the ONE place both Esc and a click away go through.
+   The GESTURE and the REPORT are counted separately (`Taskbar.contextDismissals` against
+   `WinHost.menuDismisses`), and the gap between them IS that control.
+   -------------------------------------------------------------------------------------------- */
+function proofItem (run) {
+  const { at, account } = run
+  const V = FILES_METRICS.VERBS
+  const item = {
+    reports: run.steps.map((s) => ({ step: s.name, report: s.lastMenuReport })),
+    lastMenuReport: at.deleted.lastMenuReport,
+    chosen: account.chosen,
+    verbs: { ...V },
+    menuIndex: { ...MENU_INDEX },
+    aims: run.aims,
+    dismissal: {
+      shellGesture: at.dismissed.shell.contextDismissals,
+      hostReport: at.dismissed.host.menuDismisses,
+      kernel: at.dismissed.kernel.menuDismissals,
+      program: account.dismissals,
+      popupAfter: at.dismissed.shell.popupKind,
+      winAfter: at.dismissed.win && at.dismissed.win.menu,
+    },
+    end: { host: at.deleted.host, shell: at.deleted.shell, kernel: at.deleted.kernel },
+    reclaims: run.reclaims,
+    account,
+  }
+
+  /* EVERY AIM REPORTED THE INDEX THE PROGRAM OWES. `dataset.contextIndex` is the shell's own
+   * statement of which row a button is, and `MENU_INDEX` is what the program's array says it should
+   * be — separators counted, because the shell indexes the array it was handed and the kernel
+   * validates against the same one. Two readings, so a clause cannot pass on two copies of one
+   * mistake. */
+  const aimed = [run.aims.newFolder, run.aims.row && run.aims.row.copy, run.aims.pasteAfter,
+    run.aims.pasteTwice, run.aims.rename, run.aims.renameAgain, run.aims.deleteFull,
+    run.aims.deleteTaken].filter(Boolean)
+  item.everyAimNamedTheRowItLooksLike = aimed.length === CHOICES
+    && aimed.every((a) => a.index === MENU_INDEX[a.label])
+
+  /* AND THE LAST REPORT CARRIED THAT INDEX, WITH `WITEM_CONTEXT` ON IT. The last choice of the run
+   * is `TAKEN`'s Delete, which is menu index 5 — the row menu's sixth entry, two separators
+   * included. `where` is the bit that says which LIST the index is into, and the kernel validates
+   * against the open MENU rather than the published `items` because of it. */
+  const last = item.lastMenuReport
+  item.theReportNamedTheRowAndTheList = Boolean(last) && last.win === run.win
+    && last.index === MENU_INDEX.Delete && last.where === WITEM_CONTEXT
+
+  /* THE KERNEL ACCEPTED EVERY ONE OF THEM AND THREW NONE OUT. `CHOICES` rows picked and one
+   * dismissal is one report more than that; `badItems` is where a report against a CLOSED menu, a
+   * separator or a disabled row lands, so a zero there is what says the picks that counted were the
+   * picks that were meant — a page reporting a stale menu's row twice lands there and nowhere else. */
+  item.theKernelAcceptedEveryChoice = item.end.kernel.itemActivations === CHOICES
+    && item.end.kernel.badItems === 0 && item.end.kernel.droppedItems === 0
+  /* THE CHOICES ONLY, AND THE DISMISSAL IS DELIBERATELY NOT HERE. A clause counting both is a
+   * clause `silent-dismiss` turns as well as the two below — it did, and a control must move a
+   * NAMED subset rather than whatever it happens to reach (CLAUDE.md). The dismissal's three
+   * readings live in `theDismissalWasReported`, which is the clause that owns them. */
+  item.theShellAndTheHostAgree = item.end.shell.contextClicks === CHOICES
+    && item.end.host.menuChoices === CHOICES
+
+  /* AND THE PROGRAM RAN THE VERBS THOSE ROWS NAME, IN ORDER. Asserted against
+   * `FILES_METRICS.VERBS` and never against string literals of this page's, which is what that
+   * export is for: a verb renamed in the program moves both sides at once. */
+  item.theProgramRanTheVerbsInOrder = sameSet(account.chosen, [
+    V.NEW_FOLDER, V.COPY, V.PASTE, V.PASTE, V.RENAME, V.RENAME, V.DELETE, V.DELETE,
+  ])
+
+  /* THE DISMISSAL WAS REPORTED, at all four layers. The GESTURE and the REPORT are two numbers
+   * because `silent-dismiss` moves one and not the other, and the program's own count is the layer
+   * that matters: it is the one that proves the parked `poll` woke. */
+  item.escDismissedTheMenu = item.dismissal.shellGesture === 1
+    && item.dismissal.popupAfter === '0'
+  item.theDismissalWasReported = item.dismissal.hostReport === 1
+    && item.dismissal.kernel === 1 && account.dismissals === 1
+  /* AND THE KERNEL LET GO OF THE MENU WITH IT. A menu left open would leave `activateItem` a list to
+   * validate an index against for a gesture that is over, which is the stale-dismissal case
+   * `badItems` counts — so the window's own `menu` row going back to 0 is the other half. */
+  item.theKernelClosedTheMenu = item.dismissal.winAfter === 0
+
+  /* AND NOTHING WAS CHOSEN BY ACCIDENT. A dismissal that also ran a verb would be the worst failure
+   * available here: Esc deleting a file. The run picked `CHOICES` rows and created exactly one
+   * folder, so an extra verb is visible in both numbers. */
+  item.theDismissalRanNoVerb = account.chosen.length === CHOICES
+    && account.created.length === 1
+
+  item.ok = item.everyAimNamedTheRowItLooksLike && item.theReportNamedTheRowAndTheList
+    && item.theKernelAcceptedEveryChoice && item.theShellAndTheHostAgree
+    && item.theProgramRanTheVerbsInOrder && item.escDismissedTheMenu
+    && item.theDismissalWasReported && item.theKernelClosedTheMenu && item.theDismissalRanNoVerb
+  globalThis.M20.proofs.item = { ok: item.ok, evidence: item }
+  say((item.ok ? 'ok  ' : 'BAD ') + 'item: ' + item.end.kernel.itemActivations
+    + ' activation(s) and ' + item.end.kernel.badItems + ' refused; the program ran ['
+    + account.chosen.join(' ') + ']; Esc gave ' + item.dismissal.shellGesture + ' gesture, '
+    + item.dismissal.hostReport + ' report, ' + account.dismissals + ' read by the program')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: THE VERBS, ON THE FILESYSTEM.
+
+   `docs/PLAN-SHELL.md` §M20: "Every verb asserts the FILESYSTEM, not the drawing: a created
+   directory appears in a fresh `readdir`, a rename moves the inode, a paste produces equal bytes."
+
+   EVERY READING HERE COMES OUT OF A SEPARATE PROCESS — `ls`, `stat`, `wc`, `grep` — so none of them
+   is this program's belief about its own call. A listing patched in place would make a refused
+   `mkdir` indistinguishable from one that worked, which is why `src/bin/files.mjs` re-reads after
+   every verb; this proof is the same discipline applied from outside.
+
+   THE INODE IS THE WHOLE OF THE RENAME CLAUSE. Equal names after the call would be satisfied by a
+   copy-and-delete, which is a different operation with different costs and a different failure mode
+   on a large file — so the reading is `st_ino` before and after, with the OLD NAME GONE beside it.
+
+   THE BYTES ARE COMPARED AND NOT SIZED. See `MARKER` for the three readings and the arithmetic that
+   closes them, and for why the page writes the fixture's bytes rather than copying someone else's.
+   -------------------------------------------------------------------------------------------- */
+function proofVerbs (run, fs) {
+  const { account } = run
+  const verbs = {
+    before: fs.before,
+    after: fs.after,
+    /** The `readdir` taken mid-drive, immediately after New folder — see the clause below. */
+    afterCreate: run.at.created.list || null,
+    account: {
+      created: account.created, renamed: account.renamed, renames: account.renames,
+      deleted: account.deleted, pasted: account.pasted, pastes: account.pastes,
+      copies: account.copies, clipboard: account.clipboard,
+    },
+    stem: FILES_METRICS.NEW_FOLDER_STEM,
+  }
+
+  /* NEW FOLDER: A FRESH `readdir` HAS IT, AND `stat` SAYS IT IS A DIRECTORY. The count is the
+   * readdir the clause names and the `stat` is what makes it the right entry — `listed` rising by
+   * one is also what a `touch` would do.
+   *
+   * THE READDIR IS THE ONE TAKEN IMMEDIATELY AFTER THE VERB, mid-drive. An end-of-run comparison is
+   * NOT this reading: the run also deletes a row, so the two cancel and the count reads 6 against 6
+   * over a folder that was really created. That is what the first run of this page reported, and it
+   * is `theEndListingIsWhatTheVerbsLeft` below that owns the end state. */
+  verbs.theCreatedFolderIsInAFreshReaddir = Boolean(verbs.afterCreate)
+    && verbs.afterCreate.exit === 0
+    && verbs.afterCreate.listed === fs.before.list.listed + 1
+  verbs.theCreatedFolderIsADirectory = fs.after.created.exit === 0
+    && fs.after.created.type === 'directory'
+  /* AND THE END LISTING IS EXACTLY WHAT THE VERBS LEFT: one folder created, one file deleted, one
+   * file renamed in place — so the count comes back to where it started. The arithmetic is written
+   * out because a clause reading "unchanged" would also be satisfied by a run in which neither
+   * happened. */
+  verbs.theEndListingIsWhatTheVerbsLeft = fs.after.list.exit === 0
+    && fs.after.list.listed === fs.before.list.listed + 1 - 1
+  verbs.theProgramNamedTheFolderItMade =
+    sameSet(account.created, [FILES_METRICS.NEW_FOLDER_STEM])
+
+  /* THE RENAME MOVED THE INODE. Three readings and all three are needed: the same `st_ino` under the
+   * new name, a non-zero inode (so two failed `stat`s cannot agree by both being empty), and the OLD
+   * NAME GONE. A copy-and-delete satisfies the third alone. */
+  verbs.theRenameMovedTheInode = fs.before.renameMe.exit === 0 && fs.before.renameMe.ino !== ''
+    && fs.after.renamed.exit === 0 && fs.after.renamed.ino === fs.before.renameMe.ino
+  verbs.theOldNameIsGone = fs.after.renameMe.exit !== 0 && fs.after.renameMe.ino === ''
+  verbs.theProgramNamedTheRename = account.renames === 1
+    && account.renamed.length === 1 && account.renamed[0].from === RENAME_ME
+    && account.renamed[0].to === RENAMED
+
+  /* THE PASTE PRODUCED EQUAL BYTES. The three readings of `MARKER`'s docstring, on the source AND on
+   * the paste, with the arithmetic stated there. */
+  verbs.theByteCountsAgree = fs.after.source.exit === 0 && fs.after.paste.exit === 0
+    && fs.after.source.bytes === MARKER_BYTES && fs.after.paste.bytes === MARKER_BYTES
+  verbs.everyLineOfBothIsTheMarker =
+    fs.after.sourceGrep.matched === 1 && fs.after.sourceGrep.matchExit === 0
+    && fs.after.sourceGrep.unmatched === 0 && fs.after.sourceGrep.missExit === 1
+    && fs.after.pasteGrep.matched === 1 && fs.after.pasteGrep.matchExit === 0
+    && fs.after.pasteGrep.unmatched === 0 && fs.after.pasteGrep.missExit === 1
+  /* AND THE COMPARISON CAN FAIL. The same three readings over a file whose bytes are NOT the
+   * marker's: a check that reports success must be shown capable of failing, and a grep that matched
+   * everything would satisfy the clause above over any two files at all. */
+  verbs.theComparisonFailsOnDifferentBytes =
+    fs.after.otherGrep.matched === 0 && fs.after.otherGrep.matchExit === 1
+    && fs.after.otherGrep.unmatched === 1 && fs.after.other.bytes !== MARKER_BYTES
+  /* AND THE PROGRAM CALLS IT A COPY AND NOT A MOVE. THE INTENT ONLY: how many landed is
+   * `theRefusedPasteLandedNothing`'s, because `--paste-clobbers` moves that number and must not
+   * reach a clause about Copy against Cut. A Cut pasted here would be a `rename` of the source,
+   * which is a different syscall and leaves the original gone. */
+  verbs.theProgramNamedThePasteAsACopy = account.pastes === 2 && account.copies === 1
+    && account.cuts === 0 && account.clipboard !== null
+    && account.pasted[0] !== undefined
+    && account.pasted[0].name === COPY_ME && account.pasted[0].moved === false
+
+  /* AND THE DELETE REMOVED THE ROW IT NAMED AND NOTHING ELSE. The refused one is proof 5's; this is
+   * the pair that says the verb works at all — `TAKEN` gone, `FULL` still there. */
+  verbs.theDeleteRemovedTheFile = fs.after.taken.exit !== 0
+    && sameSet(account.deleted, [TAKEN])
+  verbs.theRefusedDeleteLeftTheFolder = fs.after.full.exit === 0
+    && fs.after.full.type === 'directory' && fs.after.keep.exit === 0
+
+  verbs.ok = verbs.theCreatedFolderIsInAFreshReaddir && verbs.theCreatedFolderIsADirectory
+    && verbs.theEndListingIsWhatTheVerbsLeft && verbs.theProgramNamedTheFolderItMade
+    && verbs.theRenameMovedTheInode && verbs.theOldNameIsGone && verbs.theProgramNamedTheRename
+    && verbs.theByteCountsAgree && verbs.everyLineOfBothIsTheMarker
+    && verbs.theComparisonFailsOnDifferentBytes && verbs.theProgramNamedThePasteAsACopy
+    && verbs.theDeleteRemovedTheFile && verbs.theRefusedDeleteLeftTheFolder
+  globalThis.M20.proofs.verbs = { ok: verbs.ok, evidence: verbs }
+  say((verbs.ok ? 'ok  ' : 'BAD ') + 'verbs: readdir ' + fs.before.list.listed + ' -> '
+    + (verbs.afterCreate ? verbs.afterCreate.listed : '?') + ' after New folder -> '
+    + fs.after.list.listed + ' entries; inode ' + fs.before.renameMe.ino + ' -> '
+    + fs.after.renamed.ino + ' (' + RENAME_ME + ' now exit ' + fs.after.renameMe.exit + '); '
+    + fs.after.source.bytes + ' bytes pasted as ' + fs.after.paste.bytes + ', '
+    + fs.after.pasteGrep.matched + ' line(s) matching and ' + fs.after.pasteGrep.unmatched
+    + ' not')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: EACH REFUSAL'S ERRNO, SEPARATELY.
+
+   `docs/PLAN-SHELL.md` §M20: "Each refusal's errno is asserted separately, because a single 'it
+   refused' passes for a filesystem that refused for the wrong reason — M3's `truncate` answered
+   ENOENT where it owed EROFS."
+
+   FOUR REFUSALS AND FOUR CLAUSES, three with an errno and one WITHOUT. The fourth is the one that
+   makes the other three mean something: `src/bin/files.mjs`'s `refuse` writes `errno` ONLY where the
+   kernel named one, so a refusal that is the program's own carries no such key at all — and a clause
+   that merely checked for a truthy `errno` would pass for a program that defaulted it.
+
+   THE EROFS ONE IS AN EDGE CASE AND NO LONGER THE DEFAULT. D40 and M19a made the session a writable
+   copy of the read-only base, so there is no read-only case in the directory a reader lands in. The
+   mounts are unchanged and a reader still reaches them, so the refusal is asserted where it lives —
+   in a second window opened on `/usr/share` (`driveReadOnly`).
+   -------------------------------------------------------------------------------------------- */
+function proofRefusals (run, rofs) {
+  const { account } = run
+  const refusals = {
+    writable: account.refusals,
+    readOnly: rofs.account.refusals,
+    refusalWhy: account.refusalWhy,
+    readOnlyWhy: rofs.account.refusalWhy,
+    readOnlyDir: rofs.account.dir,
+    readOnlyMenus: rofs.account.menus,
+  }
+
+  /* THE RENAME ONTO AN OCCUPIED NAME OWES EEXIST. `rename(2)` REPLACES its destination by contract
+   * (`src/fs/vfs.mjs`), so the kernel cannot refuse it and a file manager's only place to do so is
+   * before the call — the errno is the program naming what the reader would otherwise have lost. */
+  const occupied = refusalFor(account, TAKEN)
+  refusals.theOccupiedNameSaysEEXIST = Boolean(occupied) && occupied.errno === 'EEXIST'
+  /* AND THE FIELD HELD WHAT WAS TYPED BEFORE IT WAS COMMITTED, which is what says the refusal is
+   * about the NAME and not about a field that never received the keys. Read off the display list:
+   * the one left-aligned MONOSPACED run inside the clip is the draft (`draftOf`). */
+  refusals.theFieldHeldWhatWasTyped = run.at.typedTaken.draft === TAKEN
+    && run.at.typedNew.draft === RENAMED
+  /* AND THE REFUSED RENAME CHANGED NOTHING. The row is still there under its old name, and the field
+   * is closed — `commitRename` closes the edit before the call, whatever happens, because a reader
+   * typing into a box whose last attempt they have already been told about is the defect. */
+  refusals.theRefusedRenameLeftTheRow = run.at.refusedRename.names.includes(RENAME_ME)
+    && run.at.refusedRename.draft === null
+
+  /**
+   * THE PASTE ONTO A NAME THE DESTINATION ALREADY HOLDS OWES EEXIST, AND IT IS THE KERNEL'S.
+   *
+   * THE TWO EEXISTs ARRIVE FROM OPPOSITE SIDES, which is why both are asserted. A copy opens with
+   * `O_CREAT | O_EXCL` and the KERNEL answers, with no window between a test and a create; a rename
+   * has no such flag — `rename(2)` REPLACES its destination by contract — so its only test is an
+   * `lstat` first, which races and says so where it is written. Same errno, two mechanisms, and
+   * `--paste-clobbers` removes exactly one of them.
+   *
+   * AND THE BYTES ARE STILL THE FIRST PASTE'S. `--paste-clobbers` is "the one world in which a
+   * reader's own file is destroyed by a paste that reports success", so the clause has to say the
+   * file is intact and not only that something refused.
+   */
+  const pasteTwice = refusalFor(account, COPY_ME)
+  refusals.thePasteOntoAnOccupiedNameSaysEEXIST = Boolean(pasteTwice)
+    && pasteTwice.errno === 'EEXIST'
+  refusals.theRefusedPasteLandedNothing = account.pastes === 2
+    && account.pasted.length === 1
+    && run.at.pastedTwice.bytes.exit === 0
+    && run.at.pastedTwice.bytes.bytes === MARKER_BYTES
+
+  /* THE NON-EMPTY FOLDER OWES ENOTEMPTY. `rmdir` answers it and that is the answer the reader gets:
+   * recursing on a folder somebody selected by accident is the worst outcome available here. */
+  const full = refusalFor(account, FULL)
+  refusals.theFullFolderSaysENOTEMPTY = Boolean(full) && full.errno === 'ENOTEMPTY'
+
+  /* THE READ-ONLY MOUNT OWES EROFS, in its own window. The refusal is on the STEM and not on a path,
+   * because that is what `newFolder` refuses by — `freeName`'s answer, which is the name the reader
+   * would have seen. */
+  const rofsRefusal = refusalFor(rofs.account, FILES_METRICS.NEW_FOLDER_STEM)
+  refusals.theReadOnlyMountSaysEROFS = Boolean(rofsRefusal) && rofsRefusal.errno === 'EROFS'
+  /* AND THE MENU WAS RAISED THERE, which is what makes the refusal a reading of the VERB rather than
+   * of a gesture that never reached one. A read-only mount is still browsable (D40), so its context
+   * menu is drawn like any other and only the call is refused. */
+  refusals.theReadOnlyMountStillRaisedAMenu = rofs.account.menus === 1
+    && rofs.account.chosen.length === 1
+  /* AND NOTHING LANDED. The listing is unchanged either side of the gesture, so the refusal is not a
+   * folder created and then hidden. */
+  refusals.theReadOnlyMountIsUnchanged = rofs.account.created.length === 0
+    && sameSet(rofs.after.names, rofs.before.names)
+
+  /* AND THE PROGRAM'S OWN REFUSAL CARRIES NO ERRNO AT ALL. A right press on the HEADER: there is no
+   * menu for a column label, and no syscall was made, so there is nothing for the kernel to have
+   * named. `'errno' in entry` and not `entry.errno` — a falsy value and an absent key are the two
+   * readings this clause exists to separate. */
+  const headerRefusal = refusalFor(account, 'the header')
+  refusals.theProgramsOwnRefusalHasNoErrno = Boolean(headerRefusal)
+    && !('errno' in headerRefusal)
+  /* AND IT RAISED NOTHING. `account.menus` counts the raises that reached the kernel, and a header
+   * press must not be one: the count is the same before and after. */
+  refusals.theHeaderRaisedNoMenu =
+    run.at.header.kernel.menus === run.at.fullMenu.kernel.menus - 1
+    && run.at.header.shell.popupKind === '0'
+
+  /* AND THE SET OF REFUSALS IS EXACTLY THESE. A clause naming one refusal passes for a program that
+   * also refused three things nobody asked about, which in a file manager means three verbs a reader
+   * pressed and did not get. */
+  refusals.nothingElseWasRefused = account.refusals.length === 4
+    && rofs.account.refusals.length === 1
+
+  refusals.ok = refusals.theOccupiedNameSaysEEXIST && refusals.theFieldHeldWhatWasTyped
+    && refusals.theRefusedRenameLeftTheRow
+    && refusals.thePasteOntoAnOccupiedNameSaysEEXIST && refusals.theRefusedPasteLandedNothing
+    && refusals.theFullFolderSaysENOTEMPTY
+    && refusals.theReadOnlyMountSaysEROFS && refusals.theReadOnlyMountStillRaisedAMenu
+    && refusals.theReadOnlyMountIsUnchanged && refusals.theProgramsOwnRefusalHasNoErrno
+    && refusals.theHeaderRaisedNoMenu && refusals.nothingElseWasRefused
+  globalThis.M20.proofs.refusals = { ok: refusals.ok, evidence: refusals }
+  say((refusals.ok ? 'ok  ' : 'BAD ') + 'refusals: '
+    + account.refusals.map((r) => `${r.what}=${r.errno || 'no errno'}`).join(', ')
+    + ' | /usr/share: '
+    + rofs.account.refusals.map((r) => `${r.what}=${r.errno || 'no errno'}`).join(', '))
+}
+
+/* ---- staging ------------------------------------------------------------------------------- */
+
+/** The program flags the two argv controls select, as `src/bin/files.mjs` spells them. ONE list,
+ *  read by BOTH spawns: a control a page applied to one fixture and not the other is a page running
+ *  two different worlds at once. */
+function programFlags () {
+  const flags = []
+  if (CFG.menuInSurface) flags.push('--menu-in-surface')
+  if (CFG.pasteClobbers) flags.push('--paste-clobbers')
+  return flags
+}
+
+/** The one window the four display-list proofs drive, on the tree this page built. */
+async function stage (k, host) {
+  const pids = {}
+  const argv = ['files', ...programFlags(), ROOT_DIR]
+  pids.files = (await spawnProgram(k, FILES, argv)).pid
+  if (!await surfaced(host, 'files')) throw new Error('files never surfaced')
+  globalThis.M20.pids = pids
+  globalThis.M20.argv = argv
+  return pids
+}
+
+/** EVERY FILESYSTEM READING THE VERBS ARE ASSERTED ON, taken BEFORE the drive. The inode is the one
+ *  that cannot be taken afterwards: a rename moves it, so the value it moved FROM has to be read
+ *  while the old name still exists. */
+async function readBefore (k) {
+  return {
+    list: await listCount(k, ROOT_DIR),
+    renameMe: await statOf(k, `${ROOT_DIR}/${RENAME_ME}`),
+    source: await byteCount(k, `${ROOT_DIR}/${COPY_ME}`),
+  }
+}
+
+/** And every one taken AFTER it. `COPY_ME` is never renamed or deleted, which is why the byte
+ *  comparison can be taken here rather than mid-drive. */
+async function readAfter (k) {
+  return {
+    list: await listCount(k, ROOT_DIR),
+    created: await statOf(k, `${ROOT_DIR}/${FILES_METRICS.NEW_FOLDER_STEM}`),
+    renamed: await statOf(k, `${ROOT_DIR}/${RENAMED}`),
+    renameMe: await statOf(k, `${ROOT_DIR}/${RENAME_ME}`),
+    taken: await statOf(k, `${ROOT_DIR}/${TAKEN}`),
+    full: await statOf(k, `${ROOT_DIR}/${FULL}`),
+    keep: await statOf(k, `${ROOT_DIR}/${FULL}/${KEEP}`),
+    source: await byteCount(k, `${ROOT_DIR}/${COPY_ME}`),
+    paste: await byteCount(k, `${ROOT_DIR}/${SUB}/${COPY_ME}`),
+    other: await byteCount(k, `${ROOT_DIR}/${OTHER}`),
+    sourceGrep: await grepBoth(k, `${ROOT_DIR}/${COPY_ME}`, MARKER),
+    pasteGrep: await grepBoth(k, `${ROOT_DIR}/${SUB}/${COPY_ME}`, MARKER),
+    otherGrep: await grepBoth(k, `${ROOT_DIR}/${OTHER}`, MARKER),
+  }
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+/**
+ * THE THREE WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * `files` TAKES NO OPERAND, which is M19a's row and D40's answer: the program resolves
+ * `std.sessionDir` for itself — the session's WRITABLE copy of the read-only base — so every verb
+ * this milestone adds is reachable from the window a reader is handed. A page that pointed it at
+ * `/usr/share` would be handing a reader a file manager in which New folder, Rename, Delete and
+ * Paste all refuse, which is exactly the world M19a removed.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure. `term` is LAST because it spawns `sh` by syscall (`PROGRAMS.term`).
+ */
+const LIVE_X = 120
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    box: () => ({ x: LIVE_X, y: 20, w: 620, h: 320 }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 360, w: 620, h: Math.max(160, wa.h - 380) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. ADDED rather than substituted, so a
+ *  reader here still learns what the rest of the shell does — and in a second engine this log is the
+ *  only channel there is. */
+const M20_HELP = [
+  '  right-click a file row for Open, Cut, Copy, Delete and Rename',
+  '  right-click empty space for New folder and Paste — the menu is the SHELL\'s popup,',
+  '  drawn from rows the process published, so it reaches past the window\'s own edge',
+  '  F2 renames in place, Delete removes, ctrl-N makes a folder, ctrl-X/C/V cut, copy, paste',
+  '  Esc closes a menu, and the program is told that nothing was chosen',
+  '  a delete is permanent until the Recycle Bin exists — the window says so',
+]
+
+async function live () {
+  const { host, shell } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M20,
+    say,
+    label: 'm20',
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M20_HELP),
+  })
+  publish(host, shell)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `LAST_BATCH` is module-private and the proofs read it directly, so a driver in ANOTHER ENGINE has
+ * no other route to which rows a program drew or what a rename field holds. The precedent is
+ * `FILES_METRICS` and the lesson is in CLAUDE.md: a bench script's excuse for restating a program's
+ * geometry was that it sits outside the process and cannot import the module, which was "true of the
+ * PROCESS and false of the page it drives".
+ *
+ * AND THE AIM IS PUBLISHED BESIDE THE READING, which is the half M17's and M18's pages left out: a
+ * second engine that can read the rows but has to compute a popup row's rect for itself is a second
+ * engine with its own copy of that layout. `aimAt` hands back the VIEWPORT point, which is the only
+ * unit `input.performActions` and `Input.dispatchMouseEvent` both take, and reports the reason rather
+ * than throwing across the evaluate boundary: a thrown error arrives at a driver as `null`.
+ */
+function publish (host, shell) {
+  HOST = host
+  SHELL = shell
+  globalThis.M20.host = host
+  globalThis.M20.shell = shell
+  globalThis.M20.dpr = dpr()
+  globalThis.M20.viewport = { w: window.innerWidth, h: window.innerHeight }
+  const frameOf = (what) => {
+    for (const entry of host.frames.values()) {
+      if (entry.win.titleText.includes(String(what))) return entry
+    }
+    return null
+  }
+  globalThis.M20.listState = (what) => {
+    const entry = frameOf(what)
+    return entry && entry.surface ? listState(entry) : null
+  }
+  globalThis.M20.aimAt = (what, kind, key) => {
+    const entry = frameOf(what)
+    if (!entry || !entry.surface) return { error: `no surfaced window named ${what}` }
+    try {
+      const state = listState(entry)
+      if (kind === 'row') return pointAtRow(entry, state, String(key))
+      if (kind === 'empty') return pointLowOnEmptySpace(entry, state, 'a driver in another engine')
+      if (kind === 'header') return pointOnHeader(entry, 'a driver in another engine')
+      if (kind === 'popup') {
+        if (!shell) return { error: 'this page has no shell, so there is no popup' }
+        return aimPopupRow(shell, String(key), 'a driver in another engine')
+      }
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+    return { error: `no aim named ${kind}; row, empty, header and popup are the four` }
+  }
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M20.state = 'done'
+    globalThis.M20.verdict = 'live'
+    await live()
+    return
+  }
+
+  const controls = [...programFlags(),
+    ...(CFG.noMenuGuard ? ['no_menu_guard'] : []),
+    ...(CFG.silentDismiss ? ['silent_dismiss'] : [])]
+  say('M20 — a menu a process raises, and the mutating verbs.'
+    + (controls.length ? ' CONTROL: ' + controls.join(' ') : ''))
+  say('dpr ' + dpr() + ', viewport ' + window.innerWidth + 'x' + window.innerHeight + '.')
+  say('Every right-click, popup click and key below is REAL input, performed by something that is')
+  say('not this page: a synthesised event is isTrusted === false (175). Every verb is asserted on')
+  say('the FILESYSTEM, through ls, stat, wc and grep — never on the drawing.')
+
+  /* THE PROOFS PATH STAGES A TASKBAR, which M19's did not. `WinHost.#menu` hands its rows to
+   * `this.shell.openContextMenu` and a host with no shell reports the DISMISSAL instead — so the
+   * shell is the renderer under test here, not scenery. No `desktop` PROCESS is staged: the start
+   * menu and the icons are its rows and no clause reads them. */
+  const { k, host, shell } = await bootShell({
+    into: desktop, report: globalThis.M20, say, label: 'm20', tap: captureBatch, taskbar: true,
+  })
+  publish(host, shell)
+  globalThis.M20.kernelIsolated = true
+  globalThis.M20.controlsInForce = host.report().controls
+
+  globalThis.M20.tree = await makeTree(k)
+  const t = globalThis.M20.tree
+  say('staged ' + ROOT_DIR + ': rm exit ' + t.rm + ', mkdir exit ' + t.mkdir + ', touch exits '
+    + t.keep + ',' + t.touch + ', echo exits ' + t.marked + ',' + t.other + ' for ' + t.rows
+    + ' row(s)')
+  await stage(k, host)
+
+  const before = await readBefore(k)
+  const run = await drive(k, host, shell)
+  globalThis.M20.run = run
+
+  proofMenu(run)
+  proofPast(run)
+  /* THE LAST THREE PROOFS NEED A ROW TO HAVE BEEN PICKED, and `--menu-in-surface` is the world
+   * where none can be. `run.short` carries the reason the drive stopped (see `drive`), and these
+   * stay NULL rather than being scored over gestures nobody could perform — a check whose
+   * measurement does not exist must declare that, with a reason (CLAUDE.md), and the alternative
+   * was a control that turned all forty-two clauses and therefore verified nothing. */
+  if (!run.short) {
+    const after = await readAfter(k)
+    const fs = { before, after }
+    globalThis.M20.fs = fs
+    const rofs = await driveReadOnly(k, host, shell)
+    globalThis.M20.readOnly = rofs
+    proofItem(run)
+    proofVerbs(run, fs)
+    proofRefusals(run, rofs)
+  } else {
+    globalThis.M20.fs = { before, after: null }
+    globalThis.M20.notes.push(`not driven: ${run.short}`)
+    say('')
+    say('NOT DRIVEN: item, verbs, refusals — ' + run.short)
+  }
+
+  /* THE KEYBOARD THE POPUP TOOK, SAID OUT LOUD. A popup row is a `<button>` and `closePopup` empties
+   * the popup behind it, so the focus can land on whatever is left — and the rename field reads the
+   * keyboard. It is a note and not a clause because the fix is in `src/wm/taskbar.mjs`, which this
+   * page does not own; the number is what a reader of a failure needs. */
+  const restored = run.reclaims.filter((r) => r.restored)
+  if (restored.length) {
+    const note = `the shell's popup took the keyboard off the window ${restored.length} time(s) `
+      + `(${restored.map((r) => `${r.what}: ${r.was}`).join('; ')}); the page restored it, as `
+      + '`WinHost.#surface` restores it after a resurface. A reader who chose Rename from the menu '
+      + 'and then typed would type into whatever closePopup left focused.'
+    globalThis.M20.notes.push(note)
+    say('NOTE: ' + note)
+  }
+
+  /* THE VERDICT COUNTS WHAT RAN AND NAMES WHAT DID NOT, separately. A proof left null by
+   * `run.short` is NOT a failed proof: folding the two would make `--menu-in-surface` look like a
+   * control that turned five proofs when what it turned is two, which is the whole reason the drive
+   * declares its own stopping point. `notDriven` is empty on every other path. */
+  const proofs = globalThis.M20.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => p && !p.ok).map(([n]) => n)
+  const notDriven = Object.entries(proofs).filter(([, p]) => !p).map(([n]) => n)
+  globalThis.M20.notDriven = notDriven
+  globalThis.M20.verdict = (bad.length ? 'bad: ' + bad.join(', ') : 'ok')
+    + (notDriven.length ? '; not driven: ' + notDriven.join(', ') : '')
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M20.verdict)
+  globalThis.M20.state = 'done'
+  globalThis.M20.phase = 'rendered'
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice (constraint
+ * 301).
+ *
+ * `main()` is called synchronously, and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all.
+ *
+ * Below every declaration is the only position where a module's entry point cannot be in a dead
+ * zone, so it is the position it keeps. */
+if (requireIsolation(globalThis.M20, say, out)) {
+  main().catch((e) => {
+    globalThis.M20.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. A diagnostic
+     * that works in one engine is the kind of gap CLAUDE.md records four milestones of. */
+    globalThis.M20.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M20.why)
+  })
+}
+</script>
+</body>
+</html>

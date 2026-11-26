@@ -35,7 +35,7 @@
 
 import {
   WST_NORMAL, WST_MIN, WST_MAX, WITEM_DESKTOP, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR,
-  WITEM_DISABLED, WROLE_DESKTOP, WICON_PROGRAM,
+  WITEM_DISABLED, WITEM_CONTEXT, WROLE_DESKTOP, WICON_PROGRAM,
 } from "../abi.mjs";
 // `progName` AND `iconForProgram` ARE THE ICON MODULE'S, because a window's CAPTION needs the
 // same answer this bar does — see `iconForProgram`'s own note.
@@ -94,6 +94,14 @@ const THUMB_LEAD = 7;
 const THUMB_COLS = 62;
 const THUMB_UI_FONT = '"Segoe UI", system-ui, -apple-system, sans-serif';
 
+/** An element's box in client CSS px, as plain numbers. A `DOMRect` survives neither
+ *  `JSON.stringify` nor a CDP `returnByValue`, so a report that handed one back would hand back
+ *  `{}` — which reads as "measured, and empty". */
+function rectOf(el) {
+  const r = el.getBoundingClientRect();
+  return { x: r.left, y: r.top, w: r.width, h: r.height, right: r.right, bottom: r.bottom };
+}
+
 export class Taskbar {
   /**
    * `spec.into` is the desktop element and `spec.host` the `WinHost` whose frames this shell
@@ -118,6 +126,13 @@ export class Taskbar {
       syncs: 0, buttonClicks: 0, raises: 0, minimizes: 0, restores: 0,
       jumpOpens: 0, jumpClicks: 0, menuOpens: 0, windowMenus: 0, launches: 0, thumbOpens: 0,
       peeks: 0, showDesktops: 0, closes: 0,
+      // M20: context menus a PROCESS raised, rows clicked in them, and menus closed without a
+      // choice. `contextDismissals` counts the GESTURE and `WinHost`'s `menuDismisses` counts the
+      // REPORT, which is why they are two numbers: under `silentDismiss` this one still rises and
+      // that one does not, and the gap IS the control — a reader who pressed Esc and a program
+      // that was told are two facts, and the defect is exactly the case where only the first is
+      // true. Measured: 3 opens here against 2 reports there.
+      contextOpens: 0, contextClicks: 0, contextDismissals: 0,
     };
     this.#build();
     /* THE STRIP IS RESERVED BEFORE THE FIRST SYNC, so the work area is right from the first frame:
@@ -404,16 +419,27 @@ export class Taskbar {
 
   /* ---- the popups ---------------------------------------------------------------------------- */
 
+  /**
+   * M20. A CLOSE THAT CHOSE NOTHING IS AN ANSWER, and it is reported from here because closing is
+   * the one thing Esc, a click away and opening something else all do. The `onDismiss` is taken off
+   * `this.open` BEFORE the popup is torn down, so a handler that opens another popup — which is
+   * exactly what a second right-click does — cannot be fired twice by the reentrant close.
+   *
+   * It is a no-op for every popup but a context menu: a jump list nobody picked from owes a program
+   * nothing, because no program is waiting on one.
+   */
   closePopup() {
     // BOTH TIMERS GO WITH IT. A pending open would re-create the panel after it was closed, and a
     // pending close would fire against whatever is open next.
     clearTimeout(this.hoverTimer);
     clearTimeout(this.closeTimer);
     this.closeTimer = 0;
+    const was = this.open;
+    this.open = null;
     this.popup.hidden = true;
     this.popup.textContent = "";
     this.popup.dataset.popup = "0";
-    this.open = null;
+    if (was && typeof was.onDismiss === "function") was.onDismiss();
   }
 
   /** Put the popup above a button, kept inside the desktop. A menu that opened off the edge of the
@@ -427,6 +453,31 @@ export class Taskbar {
     this.popup.style.left = `${Math.round(x)}px`;
     this.popup.style.bottom = `${TASKBAR_H + 6}px`;
     this.popup.style.top = "auto";
+  }
+
+  /**
+   * Put the popup AT A POINT in client (viewport) CSS px, kept inside the desktop.
+   *
+   * THE CLAMP IS THE WHOLE REASON THIS IS A METHOD. The kernel bounds neither coordinate a process
+   * passed to `win_menu` (`src/kernel/wins.mjs`) — only the page knows where the frame is and how
+   * big the popup turned out — so a menu raised near an edge would run off the desktop and lose its
+   * last rows, which is the same defect as drawing it inside the surface. `4` is the margin
+   * `#placeAbove` keeps, and both are clamped against the DESKTOP and not the viewport, because a
+   * popup is a child of the desktop element.
+   *
+   * It must be measured UNHIDDEN: a `display: none` element has a zero rect, so the clamp would
+   * have nothing to subtract and every menu would sit at the point it was asked for.
+   */
+  #placeAt(at) {
+    this.popup.hidden = false;
+    const desk = this.into.getBoundingClientRect();
+    const box = this.popup.getBoundingClientRect();
+    const x = Math.min(Math.max(at.x - desk.left, 4), Math.max(desk.width - box.width - 4, 4));
+    const y = Math.min(Math.max(at.y - desk.top, 4), Math.max(desk.height - box.height - 4, 4));
+    this.popup.style.left = `${Math.round(x)}px`;
+    this.popup.style.top = `${Math.round(y)}px`;
+    this.popup.style.bottom = "auto";
+    return { x: Math.round(x), y: Math.round(y) };
   }
 
   /** One row of a popup: an icon, a label, and what to do. Returns the button so a caller can mark
@@ -693,15 +744,73 @@ export class Taskbar {
     this.open = { kind: "window", win: entry.id };
     // AT THE POINTER, which is where a context menu belongs — and inside the desktop, because a
     // menu that opened off the edge is a menu with rows nobody can reach.
-    this.popup.hidden = false;
-    const desk = this.into.getBoundingClientRect();
-    const box = this.popup.getBoundingClientRect();
-    const x = Math.min(Math.max(at.x - desk.left, 4), Math.max(desk.width - box.width - 4, 4));
-    const y = Math.min(Math.max(at.y - desk.top, 4), Math.max(desk.height - box.height - 4, 4));
-    this.popup.style.left = `${Math.round(x)}px`;
-    this.popup.style.top = `${Math.round(y)}px`;
-    this.popup.style.bottom = "auto";
+    this.#placeAt(at);
     return this.open;
+  }
+
+  /**
+   * M20. THE MENU A PROCESS RAISED: `win_menu`'s rows, drawn at the point the process named.
+   *
+   * IT IS THE SAME POPUP AND THE SAME ROWS AS THE START MENU AND A JUMP LIST — `#row`, `#separator`
+   * and `#placeAt`, reused rather than a second menu renderer, because one fact gets one renderer
+   * and a menu's rows are the item record `encodeWinItems` already defines. What differs is only
+   * where the rows came from and where the answer goes: `WITEM_CONTEXT` indexes the OPEN MENU's
+   * rows and not the published `items`, which are two lists in the kernel.
+   *
+   * `at` IS CLIENT CSS PX, converted by `WinHost` from the window's own unit. This file does no
+   * unit arithmetic: it has no way to know whether the window is surfaced.
+   *
+   * EVERY EXIT REPORTS EXACTLY ONE THING. A click reports its row and clears the dismissal first,
+   * so `closePopup` does not then report a dismissal for the same menu — the kernel closes the menu
+   * on the first report and counts a second against the same one as `badItems`, which is precisely
+   * the double-report this ordering prevents.
+   */
+  openContextMenu(entry, rows, at) {
+    /* A SECOND MENU ON THE SAME WINDOW IS NOT A DISMISSAL OF THE FIRST. The kernel has already
+     * replaced `win.menu` by the time this runs, so reporting the old menu's dismissal would close
+     * the NEW one and leave its rows unanswerable. */
+    if (this.open && this.open.kind === "context" && this.open.win === entry.id) {
+      this.open.onDismiss = null;
+    }
+    this.closePopup();
+    this.stats.contextOpens += 1;
+    this.popup.className = "shell-popup";
+    this.popup.dataset.popup = "context";
+    let answered = false;
+    const open = {
+      kind: "context",
+      win: entry.id,
+      rows: rows.length,
+      onDismiss: () => {
+        if (answered) return;
+        answered = true;
+        this.stats.contextDismissals += 1;
+        this.host.activateItem(entry.id, -1, WITEM_CONTEXT);
+      },
+    };
+    rows.forEach((row, index) => {
+      if (row.flags & WITEM_SEPARATOR) {
+        this.#separator(this.popup);
+        return;
+      }
+      this.#row(this.popup, {
+        // `row.icon` RAW and not `row.icon || null`: `WICON_GENERIC` is 0 (src/abi.mjs), so a
+        // falsy test drops the one icon a program gets by publishing nothing in particular.
+        icon: row.icon,
+        label: row.label,
+        disabled: (row.flags & WITEM_DISABLED) !== 0,
+        data: { contextIndex: index },
+        onClick: () => {
+          answered = true;
+          this.stats.contextClicks += 1;
+          this.host.activateItem(entry.id, index, WITEM_CONTEXT);
+          this.closePopup();
+        },
+      });
+    });
+    this.open = open;
+    this.#placeAt(at);
+    return open;
   }
 
   /**
@@ -876,6 +985,28 @@ export class Taskbar {
 
   /* ---- for a check, and for a reader of a failure ------------------------------------------- */
 
+  /** The client area of the window the open popup belongs to, or null. */
+  #openBodyEl() {
+    if (!this.open || !this.open.win) return null;
+    const entry = this.host.get(this.open.win);
+    return entry ? entry.win.bodyEl : null;
+  }
+
+  /**
+   * HOW FAR THE OPEN POPUP REACHES PAST ITS WINDOW'S CLIENT AREA, in CSS px, 0 for none.
+   *
+   * The MAXIMUM over the four edges, because a menu raised near the top of a frame escapes upwards
+   * and one raised near the bottom escapes downwards — a single edge would make the clause depend
+   * on where the check happened to click.
+   */
+  #pastBody() {
+    const body = this.#openBodyEl();
+    if (!body || this.popup.hidden) return 0;
+    const p = this.popup.getBoundingClientRect();
+    const b = body.getBoundingClientRect();
+    return Math.max(0, b.top - p.top, p.bottom - b.bottom, b.left - p.left, p.right - b.right);
+  }
+
   report() {
     const groups = this.groups().map((g) => ({
       key: g.key,
@@ -892,8 +1023,19 @@ export class Taskbar {
       buttons: this.band.children.length,
       groups,
       topmost: this.topmost(),
-      open: this.open ? { ...this.open } : null,
+      // THE CALLBACK IS NOT PART OF THE REPORT. `onDismiss` is a function, which `JSON.stringify`
+      // drops silently — so a reader of the serialized report would see a key that is sometimes
+      // absent for no stated reason. Named here instead.
+      open: this.open ? { ...this.open, onDismiss: undefined } : null,
       popupKind: this.popup.dataset.popup || "0",
+      /* M20. WHERE THE POPUP IS AND WHERE THE ANCHOR WINDOW'S CLIENT AREA IS, both in client CSS
+       * px, and how far the popup reaches past the bottom of that client area. A menu drawn into a
+       * surface cannot have `pastBody > 0`: `.window-body` is `overflow: hidden`, so the clause
+       * `menu-in-surface` breaks is read HERE and not off a screenshot. Null when nothing is open,
+       * because a zero rect and no popup are not the same reading. */
+      popupBox: this.popup.hidden ? null : rectOf(this.popup),
+      anchorBody: this.#openBodyEl() ? rectOf(this.#openBodyEl()) : null,
+      pastBody: this.#pastBody(),
       popupRows: [...this.popup.querySelectorAll(".shell-row")].map(
         (row) => row.querySelector(".shell-label")?.textContent || ""),
       thumbs: [...this.popup.querySelectorAll("[data-thumb-win]")].map((cell) => ({

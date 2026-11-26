@@ -122,6 +122,57 @@
 //   different ink, so "which row is lit" and "which row is selected" stay two readings — the
 //   selection is the only thing that changes a name's colour.
 //
+// M20: IT MUTATES THE FILESYSTEM, AND IT RAISES A MENU IT DOES NOT DRAW. Six verbs and two menus.
+//
+//   THE SIX VERBS ARE REAL SYSCALLS AND NOTHING ELSE. New folder is `mkdir`, rename is `rename`,
+//   Delete is `unlink` for a file and `rmdir` for a directory, Copy and Cut publish a `DOBJ_PATHS`
+//   object to the ONE clipboard, and Paste reads it back and either copies the bytes or `rename`s
+//   the inode. Each one is followed by a fresh `readdir` (`reread`), so what the window shows is
+//   what the filesystem now holds rather than what this program believes it did — a listing patched
+//   in place would make a refused `mkdir` indistinguishable from one that worked.
+//
+//   THE DESTINATION IS CHECKED BEFORE A MOVE AND NOT BEFORE A COPY, and the asymmetry is the two
+//   calls' own contracts. `rename(2)` REPLACES an occupied destination (`src/fs/vfs.mjs`), so the
+//   only place a file manager can refuse that is here, before the call; a copy opens with
+//   `O_CREAT | O_EXCL` and the KERNEL answers EEXIST, which has no race in it. The pre-check does,
+//   and says so where it is written.
+//
+//   THERE IS NO READ-ONLY CASE IN THE DIRECTORY A READER LANDS IN. D40 and M19a made the session a
+//   writable copy of the read-only base, so a branch for "the default directory refuses" would be a
+//   branch no check can reach. THE READ-ONLY MOUNTS STILL EXIST — `files /usr/share` opens one, and
+//   a reader browsing `Computer` reaches it — so every verb REFUSES BY NAME THERE with the errno the
+//   kernel gave it, which is `refuse`'s third argument and is asserted per verb rather than as one
+//   "it refused" (M3's `truncate` answered ENOENT where it owed EROFS).
+//
+//   CUT/COPY/PASTE USE THE SYSTEM CLIPBOARD AND NOT A SLOT OF THEIR OWN. `src/kernel/dataobj.mjs`
+//   owns the one slot and refcounts the payload (constraints 240-242), so a Copy here is a Paste in
+//   `clip`, and a Cut survives this process exiting. WHAT DOES NOT CROSS IS THE INTENT: a published
+//   object is SEALED and `dataobj_set` on it answers -EPERM by design, and the record carries no
+//   "this was a cut" field — so the move/copy intent is THIS PROCESS'S state, and a Cut in one
+//   `files` window pasted in another is a COPY. That is a limit of the ABI and it is stated rather
+//   than worked around; a second clipboard here would be the drift.
+//
+//   THE MENU IS RAISED AND NOT DRAWN. `win_menu` hands the kernel the rows `encodeWinItems` already
+//   defines and the page draws the popup, because `.window-body` is `overflow: hidden`
+//   (`src/wm/aero.mjs`) — a menu a process painted into its own surface loses every row past the
+//   frame's edge, and a context menu near the bottom of a window is exactly that case.
+//   `--menu-in-surface` is that world, kept as a control.
+//
+//   TWO MENUS, AND WHICH ONE IS DECIDED BY `rowUnder` AT THE PRESS — the same arbitration the drag
+//   and the band already take there, for the same reason: a gesture that re-decided downstream is a
+//   gesture that deletes a file the reader never pointed at. A right press on a row that is NOT
+//   selected selects it first, and one on a row that IS keeps the whole selection, which is what
+//   makes "Delete" mean the rows a reader can see highlighted.
+//
+//   A RIGHT PRESS IS `event.buttons`' SECONDARY BIT, carried in a `WEV_POINTER`'s `c`
+//   (`pointerAt`'s `buttons`). There is no `WPTR_*` bit for a button: the record already carries
+//   the browser's mask, and a second spelling of it in `mods` would be two fields to disagree.
+//
+//   CTRL+X/C/V AND CTRL+N ARRIVE AS BYTES, NOT KEYSYMS. `bytesForKey` turns a Ctrl chord into its
+//   C0 byte (`src/wm/terminal.mjs`), so Ctrl+X is 24, Ctrl+C is 3, Ctrl+V is 22 and Ctrl+N is 14 —
+//   and `keysymOf` answers 0 for every one of them. A program that waited for a keysym here would
+//   wait for ever. F2 and Delete ARE keysyms, because no byte spells them.
+//
 // WHAT THIS PROGRAM DOES NOT DO WITH `/dev/advance`: it does not read it. A column's width here is
 // a CSS-px constant, and the table is indexed in SURFACE px — so a column fitted to its widest cell
 // would be a width that moved with the display's ratio, which is the ratio-shaped defect that cost
@@ -138,7 +189,7 @@
 // is the clause the proof asserts. The precedent for a shipped flag whose only job is to put the
 // system into a state a check needs is `cfg.blurBudgetPx` and `scripts/serve.py --no-isolation`.
 //
-// SEVEN FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
+// NINE FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
 // mutations nobody re-runs (the precedent is `scripts/serve.py --no-isolation`):
 //
 //   --no-resurface      ignore `WEV_CLIENT` entirely. The pre-M16 program exactly: a backing store
@@ -166,21 +217,34 @@
 //   --band-from-row     start a RUBBER BAND from a press on a row. The arbitration removed: the
 //                       drag never begins, and dragging across rows selects them instead of
 //                       publishing the pressed one.
+//   --menu-in-surface   DRAW the context menu into this window's own surface instead of calling
+//                       `win_menu`. M20's third control, and the world constraint-226's division
+//                       exists to prevent: `.window-body` is `overflow: hidden`, so the popup
+//                       cannot extend past the frame and a menu raised near the bottom edge loses
+//                       its last rows. No `win_menu` reaches the kernel either, so `menus` stays 0.
+//   --paste-clobbers    let a Paste REPLACE a name that is already here: the move's destination
+//                       pre-check goes and the copy drops `O_EXCL`. The clause asserting the EEXIST
+//                       refusal MUST fail, and this is the one world in which a reader's own file is
+//                       destroyed by a paste that reports success.
 //
 // None belongs on a prompt. A reader who passes one gets the bug the milestone removed.
 
 import {
-  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE, DT_DIR,
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EEXIST, EHOSTGONE, DT_DIR,
+  NAME_MAX,
   WEV_KEY, WEV_POINTER, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_DRAG_DONE,
-  WEV_CLIENT, WPTR_DOWN, WPTR_UP, WPTR_CLICK2, WPTR_LEAVE,
-  clientBoxAt, keyBytesOf, keysymOf,
+  WEV_CLIENT, WEV_ITEM, WPTR_DOWN, WPTR_UP, WPTR_CLICK2, WPTR_LEAVE,
+  clientBoxAt, keyBytesOf, keysymOf, itemAt,
   WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN,
+  WKEY_F2, WKEY_DELETE,
   WMOD_ALT, WMOD_CTRL, WMOD_SHIFT,
+  WITEM_CONTEXT, WITEM_SEPARATOR, WITEM_DISABLED, WITEM_CONTAINER,
+  WICON_GENERIC, WICON_FOLDER, WICON_TRASH,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED, wheelAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP, DL_MAX_OPS,
   DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_ELLIPSIS, encodeTextRun,
-  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
-  O_RDONLY, fmtName, fmtsOf,
+  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY, DOBJ_WHERE_CLIPBOARD,
+  O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, S_IFMT, S_IFDIR, fmtName, fmtsOf,
 } from "/src/abi.mjs";
 
 const NAME = "files";
@@ -196,6 +260,28 @@ const BIN_DIR = "/usr/bin";
  * program that waited for a keysym here would wait for ever. */
 const KEY_ENTER = 10;
 const KEY_BACKSPACE = 127;
+
+/* M20's BYTE KEYS, AND THEY ARE BYTES FOR THE SAME REASON. `bytesForKey` turns a Ctrl chord into
+ * its C0 byte (`src/wm/terminal.mjs`) and gives Escape 27, and `KEYSYM_BY_KEY` has a row for none
+ * of them — so `keysymOf` answers 0 and a program that waited for a keysym here would wait for
+ * ever. The letter is recoverable from the byte: Ctrl+A is 1, so Ctrl+N is 14, Ctrl+C is 3, Ctrl+V
+ * is 22 and Ctrl+X is 24. */
+const KEY_ESCAPE = 27;
+const KEY_CTRL_C = 3;
+const KEY_CTRL_N = 14;
+const KEY_CTRL_V = 22;
+const KEY_CTRL_X = 24;
+
+/** The SECONDARY button in a `WEV_POINTER`'s `c`, which carries the browser's `event.buttons` mask
+ *  verbatim (`pointerAt`). Named here because the ABI has no `WPTR_*` bit for a button: the mask is
+ *  already in the record and a second spelling of it would be two fields that can disagree. */
+const BTN_RIGHT = 2;
+
+/** The last printable byte this program accepts into a rename field, and the first. A key outside
+ *  the range is ignored rather than typed: a C0 byte in a filename is a filename no reader can
+ *  retype, and `nameFault` refuses a NUL on the way out as well. */
+const PRINTABLE_LO = 0x20;
+const PRINTABLE_HI = 0x7e;
 
 const POLL_MS = 200;
 const CEILING_MS = 300000;
@@ -566,6 +652,77 @@ const compareRows = (a, b, { key, dir }, { foldersLast = false, stableSortOff = 
   return stableSortOff ? byName * dir : byName;
 };
 
+/* ---- M20: THE SIX VERBS, THE TWO MENUS AND WHAT A NAME MAY BE ----------------------------- */
+
+/**
+ * THE VERBS, AS NAMES. A menu row carries one of these and `WEV_ITEM` reports an INDEX into the
+ * rows this program published — so the index becomes a verb HERE and the page never learns what a
+ * row does, which is `win_items`' division at a different moment (`src/bin/desktop.mjs`).
+ *
+ * STRINGS AND NOT SMALL INTEGERS, because they leave the process: `account.chosen` is what a check
+ * reads to say which verb a driven click ran, and `2` in that array would need a table beside it.
+ */
+const V_OPEN = "open";
+const V_NEW_FOLDER = "new-folder";
+const V_RENAME = "rename";
+const V_DELETE = "delete";
+const V_CUT = "cut";
+const V_COPY = "copy";
+const V_PASTE = "paste";
+
+/** A separator row. The label is ignored (`WITEM_SEPARATOR`) and `verb` is empty, so a report
+ *  against one is refused by `runVerb` as well as by the kernel — two refusals over one fact, and
+ *  the kernel's is the one that counts because the flags are enforced on its side. */
+const MENU_RULE = Object.freeze({
+  verb: "", icon: WICON_GENERIC, label: "", flags: WITEM_SEPARATOR,
+});
+
+/** What a newly created folder is called, and the stem `freeName` numbers from. Explorer's own
+ *  wording, because a reader who has made one before knows what to look for. */
+const NEW_FOLDER_STEM = "New folder";
+
+/** `NAME_MAX` IS A BYTE COUNT (`src/abi.mjs`), so a length test has to encode. One encoder, built
+ *  once: `nameFault` runs on every commit and `new TextEncoder()` per keystroke is an allocation
+ *  per keystroke. `env.std.bytes` is the same encoder behind a function this module cannot reach
+ *  from module scope, which is the only reason this is a second one. */
+const NAME_ENC = new TextEncoder();
+
+/**
+ * WHY A NAME CANNOT BE USED, or `""`. The reasons are this program's and the filesystem's both: an
+ * empty name and a name with a `/` in it are refused HERE because `rename` would otherwise be asked
+ * to move a file to a path the reader did not type — `a/b` under a rename box is a MOVE, and a
+ * rename field that silently moved a file into a subdirectory is the defect.
+ *
+ * `.` AND `..` ARE REFUSED BY NAME rather than left to the kernel's EEXIST/EINVAL, because what the
+ * reader needs to be told is that those two are the directory itself and its parent.
+ *
+ * MEASURED IN BYTES AND NOT IN CHARACTERS: `NAME_MAX` is a byte count in `src/abi.mjs` and a
+ * two-byte character would otherwise pass a length test and be refused by the kernel.
+ */
+const nameFault = (name) => {
+  if (name === "") return "a name cannot be empty";
+  if (name === "." || name === "..") return "that name is this directory or its parent";
+  if (name.includes("/")) return "a name cannot contain a slash; this field renames, it does not move";
+  if (name.includes("\0")) return "a name cannot contain a NUL";
+  if (NAME_ENC.encode(name).length > NAME_MAX) return `a name is at most ${NAME_MAX} bytes`;
+  return "";
+};
+
+/** The last component of a path — what a pasted file is called in its new directory. A trailing
+ *  slash is dropped first, so pasting `/tmp/dir/` lands on `dir` and not on `""`. */
+const baseNameOf = (path) => {
+  const trimmed = String(path).replace(/\/+$/, "");
+  const cut = trimmed.lastIndexOf("/");
+  return cut < 0 ? trimmed : trimmed.slice(cut + 1);
+};
+
+/** THE IN-SURFACE MENU'S GEOMETRY, CSS px, and it exists ONLY for `--menu-in-surface`. The real
+ *  menu is the page's popup and its metrics are the shell's; these are what the control draws with,
+ *  exported so a check can predict the rectangle rather than restate it. */
+const MENU_ROW_H = 20;
+const MENU_W = 148;
+const MENU_PAD = 4;
+
 /**
  * THIS PROGRAM'S ROW GEOMETRY, EXPORTED — because things outside the process need it and each copy
  * is a copy that drifts.
@@ -619,6 +776,16 @@ export const FILES_METRICS = Object.freeze({
   COLUMNS, SORT_DEFAULT, DATE_W, TYPE_W, SIZE_W, NAME_MIN_W, UNKNOWN_CELL,
   rowTop, rowMid, rowAt, toSurface, viewBox, scrollMax, rowsThatFit, clientHeightFor, focusBox,
   columnBoxes, columnAt, dateText, sizeText, bandBox, bandRows,
+  /* M20. THE VERB NAMES, so a check asserts `account.chosen` against this table rather than against
+   * string literals of its own, and `nameFault` so a driver can predict which names this program
+   * will refuse. `MENU_*` are the `--menu-in-surface` control's drawing only — the real menu is the
+   * PAGE's popup and its metrics belong to the shell. */
+  VERBS: Object.freeze({
+    OPEN: V_OPEN, NEW_FOLDER: V_NEW_FOLDER, RENAME: V_RENAME, DELETE: V_DELETE,
+    CUT: V_CUT, COPY: V_COPY, PASTE: V_PASTE,
+  }),
+  NEW_FOLDER_STEM, nameFault, baseNameOf,
+  MENU_ROW_H, MENU_W, MENU_PAD,
 });
 
 const PAPER = 0x12161cff;
@@ -714,6 +881,8 @@ export function run(env) {
   let foldersLast = false;
   let noDirStat = false;
   let bandFromRow = false;
+  let menuInSurface = false;
+  let pasteClobbers = false;
   let noDrainMs = 0;
   const rest = [];
   let endOfOptions = false;
@@ -729,6 +898,8 @@ export function run(env) {
       if (arg === "--folders-last") { foldersLast = true; continue; }
       if (arg === "--no-dir-stat") { noDirStat = true; continue; }
       if (arg === "--band-from-row") { bandFromRow = true; continue; }
+      if (arg === "--menu-in-surface") { menuInSurface = true; continue; }
+      if (arg === "--paste-clobbers") { pasteClobbers = true; continue; }
       if (arg === "--no-drain") {
         // Refused, not silently defaulted — `--ceiling`'s rule in src/bin/term.mjs: `Number(x) || d`
         // accepts both `0` and `abc`, and a fixture that silently did not hold is a check that
@@ -820,9 +991,30 @@ export function run(env) {
     bands: 0, bandSelected: 0,
     hovers: 0, leaves: 0, lit: -1,
     stats: 0, dirStats: 0, cappedRows: 0,
+    /* M20. THE MENUS, THE VERBS AND WHAT EACH ONE DID TO THE FILESYSTEM.
+     *
+     * `menus` against `refusedMenus` and `dismissals` is the menu's own arithmetic: a raise, a
+     * refused raise and a close with nothing chosen are three outcomes and a single counter passes
+     * for the wrong one. `menuRows` is the LABELS of the open menu, so a check can assert that a
+     * right-click on a row and one on empty space produce two different lists without reading the
+     * page's popup; `menuTarget` is the row it was raised on, `-1` for empty space.
+     *
+     * `created`/`renamed`/`deleted`/`pasted` ARE WHAT THE FILESYSTEM NOW HOLDS, by name, and
+     * `rows` beside them is a fresh `readdir` of the same directory — so "the directory appears in
+     * a fresh listing" is an assertion over two independent readings and not over this program's
+     * belief about its own `mkdir`.
+     *
+     * `clipboard` IS THE INTENT AND THE PATHS, and it is this process's own record for the reason
+     * in this file's header: the published object is sealed and carries no cut/copy field. */
+    menus: 0, refusedMenus: 0, dismissals: 0, chosen: [],
+    menuRows: [], menuTarget: -1, menuInSurfaceAt: null,
+    created: [], renamed: [], deleted: [], pasted: [],
+    clipboard: null, copies: 0, cuts: 0, pastes: 0,
+    renaming: null, renames: 0,
     controls: {
       frozenSurface, cssPxSurface, unclampedScroll,
       stableSortOff, foldersLast, noDirStat, bandFromRow,
+      menuInSurface, pasteClobbers,
     },
     // A FIXTURE AND NOT A CONTROL (see this file's header), so it is reported apart from them.
     noDrainMs, heldMs: 0,
@@ -1009,6 +1201,40 @@ export function run(env) {
     sel = i >= 0 ? new Set([i]) : new Set();
     anchor = i;
     reportSelection();
+  };
+
+  /* ---- M20's STATE: THE OPEN MENU, THE RENAME EDIT AND THIS PROCESS'S CLIPBOARD INTENT ----- */
+
+  /** THE MENU THE KERNEL IS HOLDING FOR THIS WINDOW, or null: `{ rows, target }` where `rows` are
+   *  this program's own records in the order they were published and `target` is the row the menu
+   *  was raised on (`-1` for empty space). A `WEV_ITEM` carries an index into `rows` and nothing
+   *  else, so this array is the only route from that index back to a verb — and it is cleared the
+   *  moment an activation or a dismissal arrives, because the kernel closes the menu on either. */
+  let menu = null;
+  /** THE RENAME EDIT, or null: `{ row, was, draft }`. `was` is the name on screen when F2 was
+   *  pressed and is what a commit compares against, so a reader who retypes the same name pays no
+   *  `rename` at all. `row` is an INDEX and the edit is cancelled by anything that reorders the
+   *  list, for `relist`'s reason: an index into a listing that is gone renames the wrong file. */
+  let editing = null;
+  /** WHAT THIS PROCESS PUT ON THE CLIPBOARD, and the INTENT it put it there with. The intent lives
+   *  here and nowhere else because the published object is sealed and the record carries no field
+   *  for it (this file's header): a Cut pasted in a DIFFERENT `files` window is a copy, stated. */
+  let clip = null;
+
+  /**
+   * FORGET AN OPEN MENU, because the list its rows index is about to be replaced.
+   *
+   * THE KERNEL'S SIDE IS NOT CLOSED BY THIS, and it must not be: there is no "withdraw a menu"
+   * call, and inventing one would be an ABI change for a case the ABI already handles — a pick
+   * against a menu this program has forgotten arrives, finds no record, and is REFUSED BY NAME.
+   * The alternative is acting on `open.target` as an index into a listing that has gone, which is
+   * the wrong-file class of defect `relist` resets everything else to avoid.
+   */
+  const forgetMenu = () => {
+    menu = null;
+    account.menuRows = [];
+    account.menuTarget = -1;
+    account.menuInSurfaceAt = null;
   };
 
   /* ---- THE SCROLL OFFSET, WHICH IS WHAT M17 ADDED ------------------------------------------ */
@@ -1386,17 +1612,49 @@ export function run(env) {
       }
       const kind = row.dir ? BAND_DIR : (BAND[row.format] || BAND_UNKNOWN);
       glyph(rowOps, row, PAD + 2, top + 2, selected ? INK_SELECTED : kind);
+      /* M20. A CUT ROW IS DIMMED, which is Explorer's own statement that a move is pending — and
+       * the only one available: the clipboard cannot be asked "is this row's path on you" per
+       * frame, so the membership set `toClipboard` kept is what this reads. It changes the NAME's
+       * ink only, so "cut" and "selected" stay two readings the way "lit" and "selected" do. */
+      const cutOut = !!clip && clip.intent === V_CUT && clip.marked.has(row.path);
       /* THE CELLS, ONE PER COLUMN AND IN COLUMN ORDER. `cellOf` decides every string and
        * `columnBoxes` every rectangle, so the column a cell lands in is the column its header names.
        * The NAME is drawn at the row's own size and the three metadata columns one pixel smaller and
        * monospace, which is what makes a column of dates and sizes line its digits up. */
+      /* M20. AN OPEN RENAME REPLACES THE NAME CELL WITH A FIELD, and only for the row being
+       * renamed: the other three columns still describe the file, which is what tells a reader
+       * which row they are editing. */
+      const field = editing && editing.row === i ? cols[0] : null;
       for (const box of cols) {
+        if (field && box.key === "name") continue;
         cellRun(rowOps, box, cellOf(row, box.key), {
           y: top + TEXT_DY,
           size: box.key === "name" ? TEXT_PX : TEXT_PX - 1,
-          rgba: selected ? INK_SELECTED : (box.key === "name" ? INK : INK_DIM),
+          rgba: selected ? INK_SELECTED
+            : (box.key === "name" ? (cutOut ? INK_DIM : INK) : INK_DIM),
           mono: box.mono,
         });
+      }
+      if (field) {
+        /* THE FIELD, AND THE CARET IS AT ITS RIGHT EDGE AND NOT AFTER THE TEXT. A program cannot
+         * measure a string — the renderer has the font and a sum of published advances is only an
+         * upper bound for a proportional run (`advanceWidth` in src/abi.mjs) — so a caret drawn
+         * where the text is thought to end would sit in the wrong place at every size. The field's
+         * edge is a position both sides agree on.
+         *
+         * MONOSPACED, which is the one family whose width the advance table prices exactly, so a
+         * driver outside the process can predict where the draft's glyphs are. */
+        // FROM THE NAME'S TEXT ORIGIN AND NOT FROM THE COLUMN'S LEFT EDGE, so the row's glyph stays
+        // visible beside the field: the file being renamed is still the file, and hiding its icon
+        // under the box loses the one mark that says whether it is a folder.
+        const fx = field.textX - 2;
+        const fw = Math.max(1, field.right - fx);
+        fill(rowOps, fx, top, fw, ROW_H, PAPER);
+        stroke(rowOps, fx, top, fw, ROW_H, FOCUS_RING);
+        cellRun(rowOps, field, editing.draft, {
+          y: top + TEXT_DY, size: TEXT_PX, rgba: INK, mono: true,
+        });
+        fill(rowOps, field.right - PAD, top + 2, 1, ROW_H - 4, FOCUS_RING);
       }
       if (selected) {
         stroke(rowOps, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
@@ -1431,6 +1689,31 @@ export function run(env) {
       const r = bandBox(band);
       fill(ops, r.x, r.y - scroll, r.w, r.h, BAND_WASH);
       stroke(ops, r.x, r.y - scroll, r.w, r.h, BAND_EDGE);
+    }
+
+    /* `--menu-in-surface`: THE MENU A PROCESS DRAWS ITSELF, which is the control and not the
+     * product. It is drawn here, last and INSIDE the clip, because that is where a program's
+     * drawing can go — and that is the whole demonstration: the popup is cut by the viewport
+     * rectangle and then again by `.window-body`'s `overflow: hidden`, so a menu raised near the
+     * bottom edge of a frame loses the rows a reader was about to pick from. `win_menu` exists
+     * because neither cut is avoidable from in here. */
+    if (menuInSurface && menu) {
+      const h = MENU_PAD * 2 + menu.rows.length * MENU_ROW_H;
+      fill(ops, menu.at.x, menu.at.y, MENU_W, h, PAPER);
+      stroke(ops, menu.at.x, menu.at.y, MENU_W, h, OUTLINE);
+      menu.rows.forEach((r, n) => {
+        const y = menu.at.y + MENU_PAD + n * MENU_ROW_H;
+        if ((r.flags | 0) & WITEM_SEPARATOR) {
+          fill(ops, menu.at.x + MENU_PAD, y + MENU_ROW_H / 2, MENU_W - MENU_PAD * 2, 1, HEAD_RULE);
+          return;
+        }
+        text(ops, r.label, {
+          x: menu.at.x + MENU_PAD * 2,
+          y: y + TEXT_DY,
+          size: TEXT_PX,
+          rgba: ((r.flags | 0) & WITEM_DISABLED) ? INK_DIM : INK,
+        });
+      });
     }
     return env.win.draw(made.fd, ops);
   };
@@ -1513,9 +1796,17 @@ export function run(env) {
    * `refusals` carries what was asked for beside why it was declined, and a check reads the entry
    * rather than the number.
    */
-  const refuse = (what, why) => {
+  /* M20: AND THE ERRNO IS A SEPARATE FIELD, NOT PART OF `why`. Every mutating verb refuses for a
+   * reason the KERNEL named — EROFS on a read-only mount, ENOTEMPTY on a folder with things in it,
+   * EEXIST on an occupied name — and a check that matched a sentence could not tell those apart.
+   * `errno` is the name and not the number, because the number is the ABI's and the name is what a
+   * reader and a check both read. Absent (rather than `""`) when the refusal is this program's own,
+   * so a clause asserting "it refused with an errno" cannot pass for one that had none. */
+  const refuse = (what, why, errno = 0) => {
     account.refused += 1;
-    account.refusals.push({ what: String(what), why });
+    const entry = { what: String(what), why };
+    if (errno) entry.errno = env.std.errnoName(errno);
+    account.refusals.push(entry);
     account.refusalWhy = `${what}: ${why}`;
     env.std.say(env, `${NAME}: ${what}: ${why}\n`);
     return false;
@@ -1613,6 +1904,7 @@ export function run(env) {
     band = null;
     press = null;
     dragging = false;
+    forgetMenu();
     env.std.say(env, `${NAME}: sorted by ${key} `
       + `${sort.dir > 0 ? "ascending" : "descending"}\n`);
     return true;
@@ -1646,6 +1938,13 @@ export function run(env) {
     band = null;
     press = null;
     dragging = false;
+    forgetMenu();
+    /* M20. AND AN OPEN RENAME GOES WITH THEM, for this function's own stated reason: `editing.row`
+     * is an index into the listing being replaced, so a commit afterwards renames whatever landed
+     * in that slot. Cleared here rather than guarded at the commit, because a rebuild should be
+     * handed a clean slate. */
+    editing = null;
+    account.renaming = null;
     setFocus(-1);
     // THE TITLE NAMES WHERE THE WINDOW IS, which is the only text outside the surface a reader has
     // and the one thing a driver outside the process can read without decoding a display list.
@@ -1704,12 +2003,486 @@ export function run(env) {
     return false;
   };
 
+  /* ---- M20: THE SIX VERBS, EVERY ONE OF THEM A SYSCALL ------------------------------------- */
+
+  /** A child of the open directory, by name. `dir` with exactly one trailing slash, which is
+   *  `buildRows`' own rule: the root must not produce `//name`. */
+  const childPath = (name) => `${dir.endsWith("/") ? dir : `${dir}/`}${name}`;
+
+  /**
+   * RE-READ THIS DIRECTORY, KEEPING THE SORT AND THE READER'S PLACE IN IT.
+   *
+   * NOT `relist`, AND THE DIFFERENCE IS WHICH THING CHANGED. `relist` ENTERS a directory, so the
+   * sort, the offset, the selection and the cursor all named a listing that is gone and are reset.
+   * Here the directory is the same and its CONTENTS moved: the sort stays, the offset stays
+   * (re-clamped against the new row count) and the selection is restored BY NAME.
+   *
+   * BY NAME AND NOT BY INDEX, because index order is exactly what a mutation moves — a `mkdir`
+   * inserts a row above every selected one, and a restored index would highlight the wrong file.
+   * `sortBy` carries the cursor by identity for the same reason.
+   *
+   * THE LISTING IS BUILT BEFORE ANYTHING IS COMMITTED, like `relist`'s: a directory that cannot be
+   * re-read leaves the window exactly as it was, with the refusal named.
+   */
+  const reread = (select = []) => {
+    const built = buildRows(dir, sort);
+    if (typeof built === "number") return refuse(dir, env.std.errnoName(built), built);
+    rows = built;
+    account.rows = reportRows();
+    const wanted = new Set(select);
+    sel = new Set();
+    rows.forEach((r, i) => { if (wanted.has(r.name)) sel.add(i); });
+    anchor = sel.size > 0 ? Math.min(...sel) : -1;
+    reportSelection();
+    setFocus(anchor);
+    setLit(-1);
+    band = null;
+    press = null;
+    dragging = false;
+    /* AN EDIT DOES NOT SURVIVE A RE-READ. `editing.row` is an index into the listing that was just
+     * replaced, so committing afterwards would rename whatever landed in that slot. */
+    editing = null;
+    account.renaming = null;
+    forgetMenu();
+    const limit = maxScroll();
+    // `--unclamped-scroll` REACHES HERE for `relayout`'s reason: this is the same end clamp at a
+    // different moment, and gating only one of the three leaves a control a verb silently undoes.
+    if (scroll > limit && !unclampedScroll) scroll = limit;
+    account.scroll = scroll;
+    account.scrollMax = limit;
+    if (anchor >= 0) revealRow(anchor);
+    return true;
+  };
+
+  /**
+   * THE ROWS A VERB ACTS ON, in LAYOUT order: the selection if there is one, else the cursor's row,
+   * else nothing.
+   *
+   * ONE DEFINITION, because Delete, Cut and Copy must take the same set. A Copy that read the
+   * selection and a Delete that read the cursor would remove a file the reader had not copied, and
+   * the two gestures look identical from outside.
+   */
+  const targetRows = () => {
+    if (sel.size > 0) return [...sel].sort((a, b) => a - b).filter((i) => i < rows.length);
+    return focus >= 0 && focus < rows.length ? [focus] : [];
+  };
+
+  /** A name nothing in this listing has. `New folder`, then `New folder (2)` — Explorer's own
+   *  numbering. THE SET IS THIS LISTING'S, so a name created under the window since the last read is
+   *  not seen and `mkdir` answers EEXIST: a guess from a stale listing must be refused by name
+   *  rather than retried, because the retry loop cannot tell a collision from a full disk. */
+  const freeName = (stem) => {
+    const taken = new Set(rows.map((r) => r.name));
+    if (!taken.has(stem)) return stem;
+    for (let n = 2; n <= 1000; n += 1) {
+      const candidate = `${stem} (${n})`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    return null;
+  };
+
+  /** NEW FOLDER: one `mkdir`, then a fresh `readdir` — so the row a reader sees came back out of
+   *  the filesystem and not out of this program's belief about its own call. The created row is
+   *  selected and focused and is NOT put straight into a rename box: the two verbs stay separate so
+   *  each can be driven without the other, and F2 is the next gesture. */
+  const newFolder = () => {
+    const name = freeName(NEW_FOLDER_STEM);
+    if (name === null) {
+      return refuse(NEW_FOLDER_STEM, "there are already 1000 folders of this name here");
+    }
+    const rc = env.fs.mkdir(childPath(name));
+    if (rc < 0) return refuse(name, `mkdir: ${env.std.errnoName(rc)}`, rc);
+    account.created.push(name);
+    env.std.say(env, `${NAME}: mkdir ${childPath(name)}\n`);
+    reread([name]);
+    return true;
+  };
+
+  /** BEGIN A RENAME ON ROW `i`. The draft opens holding the name that is there, which is what makes
+   *  a one-character correction one keystroke rather than a retype. */
+  const beginRename = (i) => {
+    if (i < 0 || i >= rows.length) {
+      return refuse("no row is focused", "press a row or use the arrow keys first");
+    }
+    if (editing) return refuse(rows[i].name, "a rename is already open on this list");
+    editing = { row: i, was: rows[i].name, draft: rows[i].name };
+    account.renaming = { row: i, was: editing.was, draft: editing.draft };
+    env.std.say(env, `${NAME}: renaming ${editing.was}; Enter commits, Esc cancels\n`);
+    return revealRow(i) || true;
+  };
+
+  /** ABANDON THE EDIT. The file is untouched and the refusal is NOT counted: a reader who changed
+   *  their mind asked for nothing and was declined nothing. */
+  const cancelRename = () => {
+    if (!editing) return false;
+    env.std.say(env, `${NAME}: rename of ${editing.was} cancelled\n`);
+    editing = null;
+    account.renaming = null;
+    return true;
+  };
+
+  /**
+   * COMMIT THE EDIT: one `rename`, then a fresh `readdir` with the new name selected.
+   *
+   * THE EDIT IS CLOSED BEFORE THE CALL, whatever happens. A refused rename that left the box open
+   * would leave a reader typing into a field whose last attempt they have already been told about,
+   * and the refusal names the file either way.
+   *
+   * AN UNCHANGED NAME PAYS NO CALL. `rename(a, a)` is a no-op in POSIX and in this VFS, but it also
+   * journals an op and stamps a time, and a reader who opened the box and pressed Enter changed
+   * nothing.
+   *
+   * THE DESTINATION IS CHECKED HERE AND THE RACE IS STATED. `rename(2)` REPLACES an occupied
+   * destination by contract (`src/fs/vfs.mjs`), so there is no flag that makes the kernel refuse —
+   * which means a file manager's only place to refuse is before the call, and between the `lstat`
+   * and the `rename` another process may create the name. The alternative is silently destroying a
+   * reader's file, so the race is the lesser fault and is written down rather than hidden.
+   */
+  const commitRename = () => {
+    if (!editing) return false;
+    const { was, draft } = editing;
+    editing = null;
+    account.renaming = null;
+    if (draft === was) {
+      env.std.say(env, `${NAME}: ${was} is unchanged\n`);
+      return true;
+    }
+    const fault = nameFault(draft);
+    if (fault) return refuse(draft, fault) || true;
+    const to = childPath(draft);
+    if (typeof env.fs.lstat(to) !== "number") {
+      refuse(draft, "is already here; a rename does not replace a file", EEXIST);
+      return true;
+    }
+    const rc = env.fs.rename(childPath(was), to);
+    if (rc < 0) {
+      refuse(was, `rename: ${env.std.errnoName(rc)}`, rc);
+      return true;
+    }
+    account.renamed.push({ from: was, to: draft });
+    account.renames += 1;
+    env.std.say(env, `${NAME}: ${was} -> ${draft}\n`);
+    reread([draft]);
+    return true;
+  };
+
+  /**
+   * DELETE: `unlink` for a file, `rmdir` for a directory, one call per target row.
+   *
+   * A NON-EMPTY DIRECTORY IS REFUSED AND NOT EMPTIED. `rmdir` answers ENOTEMPTY and that is the
+   * answer the reader gets: recursing on a folder somebody selected by accident is the worst
+   * outcome available here, and a recursive delete is a different verb with a different
+   * confirmation. M21's Recycle Bin is where "where did it go" gets an answer; until then this is
+   * final, and the message says so.
+   *
+   * THE WHOLE SET IS ATTEMPTED AND EVERY OUTCOME IS NAMED, rather than stopping at the first
+   * refusal: five selected files of which one is a non-empty folder must delete four and say which
+   * one they would not.
+   */
+  const deleteSelection = () => {
+    const targets = targetRows();
+    if (targets.length === 0) {
+      return refuse("no row is selected", "press a row or use the arrow keys first");
+    }
+    let gone = 0;
+    for (const i of targets) {
+      const row = rows[i];
+      const rc = row.dir ? env.fs.rmdir(row.path) : env.fs.unlink(row.path);
+      if (rc < 0) {
+        refuse(row.name, `${row.dir ? "rmdir" : "unlink"}: ${env.std.errnoName(rc)}`, rc);
+        continue;
+      }
+      gone += 1;
+      account.deleted.push(row.name);
+    }
+    env.std.say(env, `${NAME}: deleted ${gone} of ${targets.length}, permanently\n`);
+    reread([]);
+    return true;
+  };
+
+  /**
+   * PUBLISH THE TARGET ROWS' PATHS TO THE ONE CLIPBOARD, as `DOBJ_PATHS`.
+   *
+   * NUL-SEPARATED AND ABSOLUTE, which is the format's own definition in `src/abi.mjs` and what
+   * `src/bin/clip.mjs` already writes — so `clip paste` reads back what this put there and neither
+   * side carries a second encoding. A row's `path` is absolute already: `buildRows` built it from
+   * the directory it listed.
+   *
+   * THE FD IS CLOSED AT ONCE AND THE OBJECT STAYS. The clipboard holds the kernel's own reference,
+   * which is the whole of "copy, close the window, paste" (constraint 241).
+   *
+   * WHAT THE KERNEL GRANTED IS WHAT IS WRITTEN, never what was asked for: `dataobj_create` settles
+   * the offer and may narrow it, and a program writing from its own list would be refused -ENOTSUP
+   * for a format it never held (`src/bin/clip.mjs` states the same rule).
+   *
+   * THE INTENT IS NOT WRITTEN INTO THE OBJECT, and cannot be: a published object is SEALED and
+   * `dataobj_set` answers -EPERM by design (constraint 242), and the record carries no cut/copy
+   * field. So a Cut records its intent in `clip` and a Cut pasted by another process is a copy.
+   */
+  const toClipboard = (intent) => {
+    const targets = targetRows();
+    if (targets.length === 0) {
+      return refuse("no row is selected", "press a row or use the arrow keys first");
+    }
+    const paths = targets.map((i) => rows[i].path);
+    const object = env.data.create([DOBJ_PATHS]);
+    if (typeof object === "number") {
+      return refuse(intent, `dataobj_create: ${env.std.errnoName(object)}`, object);
+    }
+    try {
+      const granted = fmtsOf(object.offer);
+      if (!granted.includes(DOBJ_PATHS)) {
+        return refuse(intent, `the kernel granted only ${granted.map(fmtName).join(", ")}, `
+          + "and a file list has nowhere to go");
+      }
+      const list = env.std.bytes(paths.join("\0"));
+      const set = env.data.set(object.fd, DOBJ_PATHS, list);
+      if (set < 0) return refuse(intent, `dataobj_set paths: ${env.std.errnoName(set)}`, set);
+      const put = env.data.toClipboard(object.fd);
+      if (put < 0) return refuse(intent, `dataobj_offer: ${env.std.errnoName(put)}`, put);
+      // THE SET IS WHAT `paint` READS to dim a cut row, kept beside the array so the drawing is a
+      // membership test rather than a scan per row per frame.
+      clip = { intent, paths, marked: new Set(paths) };
+      account.clipboard = { intent, paths: [...paths] };
+      if (intent === V_CUT) account.cuts += 1; else account.copies += 1;
+      env.std.say(env, `${NAME}: ${intent} ${paths.length} path(s) to the clipboard\n`);
+      return true;
+    } finally {
+      env.fs.close(object.fd);
+    }
+  };
+
+  /**
+   * PASTE: read the clipboard's path list and bring each entry here — `rename` for a cut, bytes for
+   * a copy.
+   *
+   * THE PATHS COME OUT OF THE KERNEL'S OBJECT AND NOT OUT OF `clip`. The local record says only what
+   * the INTENT was; reading the list from this program's own copy would paste a stale selection
+   * after another process replaced the clipboard, and `clip copy /some/file` at a prompt must paste
+   * here.
+   *
+   * AN OCCUPIED NAME IS REFUSED, AND THE TWO HALVES REFUSE DIFFERENTLY. A copy opens with
+   * `O_CREAT | O_EXCL` and the KERNEL answers EEXIST, with no window between a test and a create. A
+   * move cannot be written that way — `rename(2)` replaces its destination by contract — so its
+   * only test is an `lstat` first, which races; `commitRename` states the same trade.
+   *
+   * A DIRECTORY IS MOVED AND NOT COPIED. `rename` relocates a whole subtree in one call; copying
+   * one needs a recursive walk, which is a verb of its own — and a directory copied as an empty
+   * directory is worse than a refusal, so the refusal is by name.
+   *
+   * THE MODE TRAVELS WITH A COPY. `/usr/bin` holds 32 executables and a pasted program that lost
+   * its execute bit is a program that no longer runs, which nothing on screen would explain.
+   *
+   * A CUT IS SPENT BY THE PASTE THAT MOVES IT. The source is gone, so a second paste of the same
+   * list would refuse ENOENT once per row; clearing the intent leaves the clipboard holding paths
+   * that name nothing, which is the state `clip list` already reports honestly.
+   */
+  const paste = () => {
+    const opened = env.data.open(DOBJ_WHERE_CLIPBOARD);
+    if (typeof opened === "number") {
+      return refuse("the clipboard", `dataobj_open: ${env.std.errnoName(opened)}`, opened);
+    }
+    let list = [];
+    try {
+      const offered = fmtsOf(opened.offer);
+      if (!offered.includes(DOBJ_PATHS)) {
+        return refuse("the clipboard",
+          `holds ${offered.map(fmtName).join(", ")} and no path list`);
+      }
+      const got = env.data.get(opened.fd, DOBJ_PATHS);
+      if (typeof got === "number") {
+        return refuse("the clipboard", `dataobj_get paths: ${env.std.errnoName(got)}`, got);
+      }
+      list = env.std.text(got).split("\0").filter((p) => p !== "");
+    } finally {
+      env.fs.close(opened.fd);
+    }
+    if (list.length === 0) return refuse("the clipboard", "holds an empty path list");
+    const moving = !!clip && clip.intent === V_CUT;
+    const landed = [];
+    for (const from of list) {
+      const name = baseNameOf(from);
+      const to = childPath(name);
+      if (to === from) {
+        refuse(name, "is already in this directory");
+        continue;
+      }
+      /* `--paste-clobbers` REMOVES THIS AND THE `O_EXCL` BELOW, which is one control over one
+       * decision: whether a paste may destroy a file the reader can see. */
+      if (!pasteClobbers && typeof env.fs.lstat(to) !== "number") {
+        refuse(name, "is already here; a paste does not replace a file", EEXIST);
+        continue;
+      }
+      const st = env.fs.lstat(from);
+      if (typeof st === "number") {
+        refuse(name, `lstat: ${env.std.errnoName(st)}`, st);
+        continue;
+      }
+      if (moving) {
+        const rc = env.fs.rename(from, to);
+        if (rc < 0) {
+          refuse(name, `rename: ${env.std.errnoName(rc)}`, rc);
+          continue;
+        }
+        landed.push(name);
+        continue;
+      }
+      if ((st.mode & S_IFMT) === S_IFDIR) {
+        refuse(name, "is a directory, and copying one is not a verb this window has; cut it to move it");
+        continue;
+      }
+      const body = readFile(env, from);
+      if (typeof body === "number") {
+        refuse(name, `read: ${env.std.errnoName(body)}`, body);
+        continue;
+      }
+      const flags = O_WRONLY | O_CREAT | (pasteClobbers ? 0 : O_EXCL);
+      const fd = env.fs.open(to, flags, st.mode & 0o777);
+      if (fd < 0) {
+        refuse(name, `open: ${env.std.errnoName(fd)}`, fd);
+        continue;
+      }
+      // `env.fs.write` IS LAYER 2 AND CONSUMES SHORT COUNTS (`src/libos/syscall.mjs`), so a 300 KiB
+      // file is one call here and several on the channel.
+      const wrote = env.fs.write(fd, body);
+      env.fs.close(fd);
+      if (wrote < 0) {
+        refuse(name, `write: ${env.std.errnoName(wrote)}`, wrote);
+        continue;
+      }
+      landed.push(name);
+    }
+    account.pastes += 1;
+    for (const name of landed) account.pasted.push({ name, moved: moving });
+    env.std.say(env, `${NAME}: pasted ${landed.length} of ${list.length} `
+      + `as a ${moving ? "move" : "copy"}\n`);
+    if (moving && landed.length > 0) {
+      clip = null;
+      account.clipboard = null;
+    }
+    reread(landed);
+    return true;
+  };
+
+  /** ONE VERB, BY NAME. The ONE place a menu row and a key chord meet: a context menu's Delete and
+   *  the Delete key must do the same thing, and two call sites is how they come to differ. */
+  const runVerb = (verb, target) => {
+    if (verb === V_OPEN) return activate(target);
+    if (verb === V_NEW_FOLDER) return newFolder();
+    if (verb === V_RENAME) return beginRename(target);
+    if (verb === V_DELETE) return deleteSelection();
+    if (verb === V_CUT) return toClipboard(V_CUT);
+    if (verb === V_COPY) return toClipboard(V_COPY);
+    if (verb === V_PASTE) return paste();
+    return refuse(String(verb) || "a separator", "is not a verb this window has");
+  };
+
+  /* ---- M20: THE TWO MENUS -------------------------------------------------------------------- */
+
+  /** Whether the clipboard has anything to paste, so Paste can be drawn DISABLED rather than
+   *  live-and-silent — Windows 7's own rule for an inapplicable command, and this project's for a
+   *  caption button. It costs one `dataobj_open` per right-click, which is what asking the one
+   *  authority rather than trusting a local flag costs: another process may have replaced the
+   *  clipboard since this one wrote it. */
+  const clipboardHasPaths = () => {
+    const opened = env.data.open(DOBJ_WHERE_CLIPBOARD);
+    if (typeof opened === "number") return false;
+    const has = fmtsOf(opened.offer).includes(DOBJ_PATHS);
+    env.fs.close(opened.fd);
+    return has;
+  };
+
+  /**
+   * THE TWO MENUS, AS ROWS. One for a row and one for empty space, and which is built is decided by
+   * `rowUnder` at the press — the same arbitration the drag and the band already take there, taken
+   * once (this file's header).
+   *
+   * EVERY ROW CARRIES `WITEM_CONTEXT`, which the kernel does not require: `WEV_ITEM`'s `c` reports
+   * where the pick came from independently. It is set because the flags are the publisher's
+   * statement about its own rows, and a row that said nothing about where it belongs would be a row
+   * `/proc` could not describe.
+   */
+  const rowMenuFor = (i) => {
+    const row = rows[i];
+    const count = sel.size > 0 ? sel.size : 1;
+    return [
+      /* THE ROW'S OWN ICON COMES FROM `std.iconForPath`, which is userland's ONE table of which
+       * picture a file gets (`src/libos/std.mjs`) — the same one the desktop's rows read, so a
+       * `.txt` in this menu and a `.txt` on the desktop are the same drawing. */
+      { verb: V_OPEN,
+        icon: env.std.iconForPath(row.path, { isDir: row.dir, isProgram: row.exec }),
+        label: "Open",
+        flags: row.dir ? WITEM_CONTAINER : 0 },
+      MENU_RULE,
+      { verb: V_CUT, icon: WICON_GENERIC, label: "Cut" },
+      { verb: V_COPY, icon: WICON_GENERIC, label: "Copy" },
+      MENU_RULE,
+      { verb: V_DELETE, icon: WICON_TRASH,
+        label: count > 1 ? `Delete ${count} items` : "Delete" },
+      /* RENAME IS DISABLED FOR A MULTIPLE SELECTION, because there is one text box and `rename`
+       * takes one pair of paths. A live row that renamed only the first of five is the defect. */
+      { verb: V_RENAME, icon: WICON_GENERIC, label: "Rename",
+        flags: count > 1 ? WITEM_DISABLED : 0 },
+    ];
+  };
+
+  const emptyMenuRows = () => [
+    { verb: V_NEW_FOLDER, icon: WICON_FOLDER, label: "New folder" },
+    MENU_RULE,
+    { verb: V_PASTE, icon: WICON_GENERIC, label: "Paste",
+      flags: clipboardHasPaths() ? 0 : WITEM_DISABLED },
+  ];
+
+  /**
+   * RAISE A MENU AT A CSS-PX POINT. `win_menu` takes SURFACE px, so `px` converts — the one
+   * multiplication by `S` in this program, used here exactly as the display list uses it. The
+   * KERNEL bounds neither coordinate and must not: the page converts with `Surface.clientAt` and
+   * clamps the popup, because only it knows where the frame sits on the desktop.
+   *
+   * THE ROWS SENT ARE THE ABI'S THREE FIELDS AND NOT THIS PROGRAM'S RECORDS. `verb` stays here: the
+   * kernel carries a label and an icon id and knows nothing about what a row means, which is the
+   * same division `win_items` makes.
+   *
+   * IT ANSWERS WHETHER A REPAINT IS OWED, which is true only under `--menu-in-surface`. The real
+   * menu is a popup in the page's DOM and this program draws nothing for it, so a successful raise
+   * changes no pixel of the surface.
+   */
+  const raiseMenu = (built, atCss, target) => {
+    const rows2 = built.map((r) => ({
+      icon: r.icon | 0, flags: (r.flags | 0) | WITEM_CONTEXT, label: String(r.label),
+    }));
+    if (menuInSurface) {
+      /* `--menu-in-surface`: THE WORLD WHERE A PROCESS DRAWS ITS OWN POPUP. No `win_menu` reaches
+       * the kernel, so `account.menus` stays 0 — and the drawing is bounded by `.window-body`'s
+       * `overflow: hidden`, which is the clause this control is here to break. */
+      menu = { rows: built, target, at: atCss };
+      account.menuInSurfaceAt = { x: atCss.x, y: atCss.y };
+      account.menuRows = built.map((r) => r.label);
+      account.menuTarget = target;
+      return true;
+    }
+    const rc = env.win.menu(made.fd, px(atCss.x), px(atCss.y), rows2);
+    if (rc < 0) {
+      account.refusedMenus += 1;
+      return refuse("a context menu", `win_menu: ${env.std.errnoName(rc)}`, rc);
+    }
+    menu = { rows: built, target, at: atCss };
+    account.menus += 1;
+    account.menuRows = built.map((r) => r.label);
+    account.menuTarget = target;
+    env.std.say(env, `${NAME}: a ${rc}-row menu on `
+      + `${target < 0 ? "empty space" : rows[target].name}\n`);
+    return false;
+  };
+
   env.std.say(env, `${NAME}: win ${made.win}, ${rows.length} row(s) in ${dir}\n`);
   rows.forEach((r, i) => env.std.say(env, `  row ${i + 1}  ${r.name}\t${kindOf(r)}\n`));
   env.std.say(env, "press a row and drag it onto another window. the wheel scrolls. "
     + "arrows move, Enter or a double-click opens, Backspace goes back. q quits.\n");
   env.std.say(env, "click a column header to sort, again to reverse. shift or ctrl extend the "
     + "selection; drag from empty space to band-select.\n");
+  env.std.say(env, "right-click for a menu. F2 renames, Delete removes, ctrl-N makes a folder, "
+    + "ctrl-X/C/V cut, copy and paste. a delete is permanent until the Bin exists.\n");
 
   /** Publish one row as a drag. The object's fd is CLOSED immediately and on purpose: the session
    *  holds the kernel's own reference, so the payload outlives this program's handle on it — and
@@ -1900,6 +2673,50 @@ export function run(env) {
         const at = env.std.cssPointAt(ev, S);
         if (ev.mods & WPTR_DOWN) {
           const i = rowUnder(at.y);
+          /* M20. A PRESS OF ANY BUTTON CLOSES AN OPEN RENAME, AND IS SPENT DOING IT.
+           *
+           * CANCELLED AND NOT COMMITTED, which is a decision and not a shortcut: a commit renames a
+           * file, and a press somewhere else in the list is not a reader saying "rename it to
+           * this" — Enter is. The press does nothing else either, because a gesture that both
+           * abandoned an edit and selected a different row would make one click two actions. */
+          if (editing) {
+            if (cancelRename()) repaint = true;
+            // AND IT ARMS NOTHING. A press that is spent closing an edit must not leave a drag
+            // threshold or a band behind it for the next move to pick up.
+            press = null;
+            band = null;
+            dragging = false;
+            continue;
+          }
+          /* M20. A RIGHT PRESS RAISES A MENU AND DOES NOTHING ELSE — no selection replaced by it, no
+           * drag armed, no band. `c` carries `event.buttons` and bit 1 is the secondary button
+           * (`pointerAt`'s `buttons`); there is no `WPTR_*` bit for a button, because a second
+           * spelling of a mask the record already holds is two fields to disagree.
+           *
+           * A ROW THAT IS NOT SELECTED IS SELECTED FIRST AND ONE THAT IS KEEPS THE WHOLE SELECTION,
+           * which is Windows' rule and is what makes "Delete 3 items" mean the three rows a reader
+           * can see highlighted. */
+          if (at.buttons & BTN_RIGHT) {
+            // IT ARMS NOTHING, which is the half of "and does nothing else" that is state rather
+            // than behaviour: a drag threshold or a band left over from an earlier press would be
+            // picked up by the next move and publish a file the reader never dragged.
+            press = null;
+            band = null;
+            dragging = false;
+            if (!inViewport(at.y)) {
+              refuse("the header", "has no context menu");
+              continue;
+            }
+            if (i >= 0) {
+              if (!sel.has(i)) { selectOnly(i); repaint = true; }
+              if (i !== focus) { setFocus(i); repaint = true; }
+              if (raiseMenu(rowMenuFor(i), at, i)) repaint = true;
+              continue;
+            }
+            if (sel.size > 0 || anchor >= 0) { selectOnly(-1); repaint = true; }
+            if (raiseMenu(emptyMenuRows(), at, -1)) repaint = true;
+            continue;
+          }
           /* THE ARBITRATION, TAKEN HERE AND NOWHERE ELSE. A press that found a row arms the DRAG
            * threshold; a press inside the viewport that found none arms a BAND. Nothing downstream
            * re-decides it, because a gesture that could become either depending on how far the hand
@@ -2042,13 +2859,104 @@ export function run(env) {
         env.win.setTitle(made.fd, `${NAME} — ${dir}`);
         continue;
       }
+      /**
+       * M20. A ROW OF THE MENU WAS PICKED, OR THE MENU WAS CLOSED WITH NOTHING PICKED.
+       *
+       * `itemAt` IS WHAT MAKES A DISMISSAL ARRIVE AS ONE. `a` is read with `getUint32`, so the
+       * kernel's `-1` reads back as 4,294,967,295 without it — and the test is `index < 0` rather
+       * than `=== -1`, so a second reason to close a menu is another negative value and not a
+       * second comparison here (`src/abi.mjs`).
+       *
+       * THE OPEN MENU IS DROPPED BEFORE THE VERB RUNS, whichever outcome this is. The kernel has
+       * already closed its side on either report, so a `menu` left in hand would be a popup this
+       * program believed was on screen — and `beginRename`'s "a rename is already open" check is
+       * the kind of thing that then refuses for a reason that is not true.
+       *
+       * `where` IS TESTED AND NOT ASSUMED. This program publishes no `win_items`, so a `WEV_ITEM`
+       * without `WITEM_CONTEXT` indexes a list it never sent; acting on it would be acting on an
+       * index into the menu's rows that came from somewhere else entirely.
+       */
+      if (ev.type === WEV_ITEM) {
+        const picked = itemAt(ev);
+        const open = menu;
+        menu = null;
+        account.menuRows = [];
+        account.menuTarget = -1;
+        account.menuInSurfaceAt = null;
+        if (!(picked.where & WITEM_CONTEXT)) {
+          refuse(`item ${picked.index}`, "did not come from a context menu, and this window "
+            + "publishes no other list");
+          continue;
+        }
+        if (picked.index < 0) {
+          account.dismissals += 1;
+          env.std.say(env, `${NAME}: the menu was dismissed\n`);
+          // A REPAINT ONLY WHERE THERE WAS SOMETHING TO ERASE, which is the in-surface control: the
+          // page's own popup is the page's to remove.
+          if (menuInSurface) repaint = true;
+          continue;
+        }
+        const row = open ? open.rows[picked.index] : null;
+        if (!row) {
+          refuse(`menu row ${picked.index}`, "is not a row this process published");
+          continue;
+        }
+        account.chosen.push(row.verb);
+        if (runVerb(row.verb, open.target)) repaint = true;
+        else if (menuInSurface) repaint = true;
+        continue;
+      }
       if (ev.type === WEV_KEY) {
         /* A KEYSYM AND A KEY'S BYTES ARE DISJOINT AND EXHAUSTIVE (`src/abi.mjs`'s `keysymOf`), so
          * the keysym is tested first and the byte reader below it never sees an arrow. Reading the
          * bytes first would be reading an empty array for every navigation key. */
         const sym = keysymOf(ev);
+        /* M20. AN OPEN RENAME TAKES THE KEYBOARD FIRST, AND IT TAKES ALL OF IT. Enter commits, Esc
+         * abandons, Backspace deletes a character and a printable byte is typed; everything else —
+         * every keysym, every other chord — is SWALLOWED rather than passed through. A Delete key
+         * that reached the list while a rename box was open would delete the file being renamed,
+         * and a Down arrow would move the cursor out from under the field. */
+        if (editing) {
+          if (sym !== 0) { account.keysyms += 1; continue; }
+          const typed = keyBytesOf(ev);
+          if (typed.length !== 1) continue;
+          const b = typed[0];
+          if (b === KEY_ENTER) { if (commitRename()) repaint = true; continue; }
+          if (b === KEY_ESCAPE) { if (cancelRename()) repaint = true; continue; }
+          if (b === KEY_BACKSPACE) {
+            if (editing.draft.length > 0) {
+              editing.draft = editing.draft.slice(0, -1);
+              account.renaming = { row: editing.row, was: editing.was, draft: editing.draft };
+              repaint = true;
+            }
+            continue;
+          }
+          if (b >= PRINTABLE_LO && b <= PRINTABLE_HI) {
+            /* BOUNDED BY `NAME_MAX` HERE AS WELL AS IN `nameFault`, so a reader cannot type past
+             * the limit and then be told the whole name is wrong — the field stops accepting
+             * instead. The byte count is what `NAME_MAX` is in, and these bytes are all one each. */
+            if (editing.draft.length < NAME_MAX) {
+              editing.draft += String.fromCharCode(b);
+              account.renaming = { row: editing.row, was: editing.was, draft: editing.draft };
+              repaint = true;
+            }
+            continue;
+          }
+          continue;
+        }
         if (sym !== 0) {
           account.keysyms += 1;
+          /* M20's TWO KEYSYMS. F2 opens a rename on the cursor's row and Delete removes the target
+           * set — the same two functions a context menu row runs, through `runVerb`, so a key and a
+           * menu cannot come to mean different things. */
+          if (sym === WKEY_F2) {
+            if (runVerb(V_RENAME, focus)) repaint = true;
+            continue;
+          }
+          if (sym === WKEY_DELETE) {
+            if (runVerb(V_DELETE, focus)) repaint = true;
+            continue;
+          }
           /* ALT+LEFT IS BACK, AND IT IS TESTED BEFORE THE BARE KEYSYM. The modifier changes the
            * verb and not the key, so a plain Left — which this list has no use for, having no
            * horizontal overflow — must not fall into it. */
@@ -2079,6 +2987,16 @@ export function run(env) {
           }
           if (bytes[0] === KEY_BACKSPACE) {
             if (goBack()) repaint = true;
+            continue;
+          }
+          /* M20's FOUR CHORDS, AS BYTES. Each one runs the SAME `runVerb` a menu row does, which is
+           * the whole reason that function exists: Ctrl+C and a Copy row must publish the same
+           * paths, and two call sites is how they come to publish different ones. */
+          if (bytes[0] === KEY_CTRL_X) { if (runVerb(V_CUT, focus)) repaint = true; continue; }
+          if (bytes[0] === KEY_CTRL_C) { if (runVerb(V_COPY, focus)) repaint = true; continue; }
+          if (bytes[0] === KEY_CTRL_V) { if (runVerb(V_PASTE, focus)) repaint = true; continue; }
+          if (bytes[0] === KEY_CTRL_N) {
+            if (runVerb(V_NEW_FOLDER, focus)) repaint = true;
             continue;
           }
           if (String.fromCharCode(bytes[0]) === "q") {
@@ -2135,5 +3053,15 @@ export function run(env) {
     + `${account.anchor < 0 ? "none" : account.anchor + 1}, `
     + `${account.bands} band(s), ${account.hovers} hover(s) and ${account.leaves} leave(s), `
     + `${account.stats} lstat(s) of which ${account.dirStats} on directories\n`);
+  /* M20: THE MENUS AND THE VERBS, ON THEIR OWN LINE. `menus` against `refusedMenus` and
+   * `dismissals` is the popup's whole arithmetic, and the four name lists beside it are what the
+   * filesystem gained and lost — a reader whose Delete did nothing needs the count and the last
+   * refusal in the same place, which is `refusalWhy` on the line above. */
+  env.std.say(env, `${NAME}: ${account.menus} menu(s) raised`
+    + `${account.refusedMenus ? `, ${account.refusedMenus} refused` : ""}`
+    + `, ${account.chosen.length} row(s) chosen and ${account.dismissals} dismissed; `
+    + `${account.created.length} created, ${account.renames} renamed, `
+    + `${account.deleted.length} deleted, ${account.copies} copy and ${account.cuts} cut to the `
+    + `clipboard, ${account.pastes} paste(s) landing ${account.pasted.length} file(s)\n`);
   return { exit: 0, ...account };
 }

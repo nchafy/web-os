@@ -22,6 +22,16 @@
 // The dialog is a TEXT window and not a surface: a question is words, and a window with no surface
 // shows what a process writes to it (M7). That is why M9 needs no text op.
 //
+// TWO FLAGS, AND NEITHER BELONGS ON A PROMPT. Both open an extra window that exists to show a rule
+// rather than to be useful, so the PRODUCT path — `editor <path>`, which is what the file
+// association runs for a `.txt` or `.md` — opens exactly ONE window:
+//
+//   -a   a second window of this process, so an APP-modal dialog can be seen blocking it where a
+//        WINDOW-modal one does not. That difference is the whole reason there are two axes.
+//   -p   the tool PALETTE: owned, RENDER_ABOVE, blocking nothing. It is the only thing that shows
+//        the owner CHAIN apart from modality. It was unconditional until a reader pointed out that
+//        opening a text file put a second window on their desktop; `www/m9.html` passes it now.
+//
 // M16: EVERY WINDOW THIS PROGRAM OPENS IS A TEXT WINDOW, so it answers no `WEV_CLIENT` and calls
 // none of `src/libos/std.mjs`'s re-surface helpers. The `WEV_CLIENT` branch below states
 // what asking for a surface here would cost, because a reader diffing M16 across the other four
@@ -59,12 +69,15 @@ function unInterrupted(call) {
 
 export function run(env) {
   const argv = (env.argv || []).map(String);
-  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "a");
+  const { flags, bad, why: badWhy } = env.std.getopt(argv.slice(1), "ap");
   if (bad) return env.std.complain(env, NAME, bad, badWhy, env.std.EXIT_USAGE);
   /** `-a` makes the dialog APP-modal rather than window-modal, which blocks EVERY window of the
    *  owner's process rather than just the one it belongs to. The difference is only visible with a
    *  second window, which this program opens under `-a` so there is something to block. */
   const appModal = flags.a === true;
+  /* `-p`: open the tool PALETTE. A fixture for M9's owner-chain proof and not a product feature —
+   * see the palette's own block below for what leaving it unconditional cost a reader. */
+  const wantPalette = flags.p === true;
   const t0 = performance.now();
   const account = {
     program: NAME, win: 0, fd: 0, second: 0, dialog: 0, palette: 0,
@@ -136,9 +149,21 @@ export function run(env) {
    * `MILESTONES.md`'s ordering correction is the reason both exist: `Passive` vs `RenderAbove` vs
    * `Blocking` are three different things an owned window can be, and a design with only "modal"
    * cannot tell a tool palette from a save dialog.
+   *
+   * IT IS BEHIND `-p` NOW, AND IT USED TO BE UNCONDITIONAL. That made it part of the PRODUCT: the
+   * file association opens `editor <path>` for a `.txt` or `.md` (`src/libos/std.mjs`'s
+   * `OPENS_FILES`), so double-clicking a text file put TWO windows on the desktop — the document
+   * and a 150x90 palette reading "tools / above the editor, and blocks nothing". A reader asked for
+   * it to stop, and they were right: a tool palette nothing in this program uses is a demonstration,
+   * not a feature, and M9's own page is where a demonstration belongs.
+   *
+   * SO IT IS A FIXTURE, on the same footing as `-a`'s scratch window above it and as
+   * `files --no-drain`: a shipped flag whose only job is to put the system in a state a check
+   * needs. `www/m9.html` passes it, which is what keeps M9's owner-chain proof measuring a real
+   * chain rather than an empty one.
    */
   let palette = null;
-  {
+  if (wantPalette) {
     const pal = env.win.create({
       title: `${NAME} — tools`, owner: made.win, w: 150, h: 90, x: 520, y: 200,
     });

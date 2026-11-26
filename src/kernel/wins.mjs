@@ -29,7 +29,7 @@ import {
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
   WCUR_DEFAULT, WCUR_MAX,
-  WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED,
+  WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED, WITEM_CONTEXT,
   encodeWinEvent, decodeWinEvent, dprFixed,
 } from "../abi.mjs";
 import { ByteRing } from "../fs/ring.mjs";
@@ -263,6 +263,19 @@ export class Window {
      *  `WIN_ITEM_CAP`. The kernel carries them and bounds them; what a row MEANS is the
      *  publisher's, which is why `WEV_ITEM` reports an INDEX. */
     this.items = [];
+    /**
+     * M20. The CONTEXT MENU this window currently has open, or null: `{x, y, rows}` with `x`/`y` in
+     * SURFACE px, the unit the `WEV_POINTER` that asked for it carried (constraint 223).
+     *
+     * SEPARATE FROM `items`, and the separation is what makes an activation checkable. A menu's rows
+     * are the ones `win_menu` was handed and have nothing to do with the desktop icons and jump-list
+     * entries in `items` — so an index reported with `WITEM_CONTEXT` is validated against THIS list.
+     * One list for both would let a page name row 7 of a 3-row menu and have it land on an icon.
+     *
+     * AT MOST ONE AT A TIME, because a reader has one pointer: raising a second replaces the first,
+     * which is also what makes a stale dismissal harmless.
+     */
+    this.menu = null;
     /** Where the page put it, as the page reports it — never as this side computed it. */
     this.box = {
       x: spec.x | 0, y: spec.y | 0,
@@ -713,6 +726,11 @@ export class Window {
      * console grew `staleMs` against a window that no longer existed and captioned a frame that
      * was gone, which is the regression `bench/m7-win/probe.mjs` keeps a section for. */
     this.unreadSince = 0;
+    /* THE OPEN MENU GOES, EVEN THOUGH THE QUEUE DOES NOT, and for the reason the clock stops: a
+     * queued event is one a reader is still owed, and an open menu is live chrome whose frame the
+     * page has already taken down. Kept, it would hold its rows for the whole ~2 s quarantine and
+     * leave `activateItem` a list to validate an index against for a window that is gone. */
+    this.menu = null;
     this.destroyed = true;
     this.attached = false;
     const answered = this.waitingReaders.length;
@@ -790,6 +808,10 @@ export class Window {
       restore: this.restore ? { ...this.restore } : null,
       beforeMin: this.beforeMin,
       items: this.items.length,
+      // M20. The rows in the context menu this window has open, 0 for none. A COUNT and not the
+      // rows, for `items`' reason above — and it is the only pull route to the fact that a menu is
+      // open at all, which a check driving a right-click has no other way to read.
+      menu: this.menu ? this.menu.rows.length : 0,
       attached: this.attached,
       destroyed: this.destroyed,
       opens: this.opens,
@@ -875,6 +897,11 @@ export class WinMgr {
       desktopRaises: 0,
       itemPublishes: 0, itemActivations: 0, refusedItems: 0, badItems: 0,
       droppedItems: 0,
+      // M20's context menu. The raises, the refusals and the DISMISSALS, which are counted apart
+      // from `itemActivations` because they are the opposite outcome: a menu that was closed
+      // without a choice is the case a program forgets to handle, and a number that cannot be seen
+      // to move is a case nobody can prove is served.
+      menus: 0, refusedMenus: 0, menuDismissals: 0,
       // Window events the PAGE tried to post that only the kernel may produce. See `feed`.
       forgedKernelEvents: 0,
       // M16: device-pixel ratios refused. See `setDpr` — a refusal nobody can count is a display
@@ -1348,6 +1375,62 @@ export class WinMgr {
   }
 
   /**
+   * M20. Raise a context menu on a window. Returns the row count, or a negative errno.
+   *
+   * THE SHELL DRAWS IT AND THE PROCESS OWNS WHAT IT SAYS, which is `win_items`' division at a
+   * different moment: the rows are the item record `encodeWinItems` already defines, the page
+   * renders labels as TEXT, and activation comes back as `WEV_ITEM` on the fd the caller is parked
+   * on. A process cannot draw its own popup — `.window-body` is `overflow: hidden`, so a menu
+   * raised near the bottom of a frame loses its last rows inside the surface.
+   *
+   * `x`/`y` ARE SURFACE px, the unit the `WEV_POINTER` that asked for the menu carried
+   * (constraint 223). Not device px: that is `win_surface`'s unit and a surface is not obliged to
+   * be the client box. They are NOT bounded here — the page converts with `Surface.clientAt` and
+   * clamps the popup to the viewport, which is the only side that knows where the frame is.
+   *
+   * THE THREE REFUSALS CARRY THREE ERRNOS, because one "it refused" passes for a refusal for the
+   * wrong reason (M3's `truncate` answered ENOENT where it owed EROFS):
+   *
+   *   -ENOENT    no rows. A menu with nothing in it is a popup a reader cannot pick from, and it
+   *              CANNOT mean "withdraw" the way a zero-length `win_items` does — a menu is
+   *              transient and there is nothing to withdraw. Distinct so a program can tell "I
+   *              built an empty list" from "my bytes were wrong".
+   *   -EINVAL    more rows than `WIN_ITEM_CAP`, or a byte region `decodeWinItems` refused.
+   *   -EHOSTGONE the window is destroyed or detached.
+   *
+   * The fd cases are `winOf`'s in `src/kernel/calls.mjs` and unchanged: -EBADF for an fd that names
+   * nothing, -EINVAL for one that is not a window.
+   */
+  menu(win, x, y, rows) {
+    if (win.destroyed || !win.attached) return -EHOSTGONE;
+    if (!Array.isArray(rows)) return -EINVAL;
+    if (rows.length === 0) {
+      this.stats.refusedMenus += 1;
+      return -ENOENT;
+    }
+    if (rows.length > WIN_ITEM_CAP) {
+      this.stats.refusedMenus += 1;
+      return -EINVAL;
+    }
+    win.menu = {
+      x: x | 0,
+      y: y | 0,
+      rows: rows.map((r) => ({ icon: r.icon | 0, flags: r.flags | 0, label: String(r.label) })),
+    };
+    this.stats.menus += 1;
+    // THE PAGE RENDERS WHAT IT IS SENT AND DECIDES NOTHING (constraint 226). A copy per row, for
+    // `items`' reason: the page must not hold the array this side validates an index against.
+    K.post({
+      t: "win-menu",
+      win: win.id,
+      x: win.menu.x,
+      y: win.menu.y,
+      items: win.menu.rows.map((r) => ({ ...r })),
+    });
+    return win.menu.rows.length;
+  }
+
+  /**
    * The shell says one of a window's rows was activated. Returns true if the event queued.
    *
    * THE INDEX IS VALIDATED AGAINST THE LIST THE KERNEL IS HOLDING, which is the same division as
@@ -1358,11 +1441,35 @@ export class WinMgr {
    * A SEPARATOR AND A DISABLED ROW ARE NOT ACTIVATABLE, and they are refused here rather than
    * trusted not to be drawn as buttons: the flags are the publisher's statement about its own rows,
    * and the one place they can be enforced is the side that holds them.
+   *
+   * M20. `where` SELECTS WHICH LIST THE INDEX IS INTO. `WITEM_CONTEXT` indexes the open menu's rows
+   * and everything else indexes the published `items`, because they are two lists and row 2 of one
+   * is not row 2 of the other.
+   *
+   * AND A NEGATIVE INDEX FROM A CONTEXT MENU IS A DISMISSAL: the reader closed it without choosing.
+   * It is reported rather than swallowed because the program is parked waiting for the answer —
+   * with no record it waits for a row that is never coming, and Esc leaves a frozen window. It
+   * carries `b = 0`: there is no row, so there are no flags, and a reader must not find the last
+   * row's flags on a record that names none.
    */
   activateItem(id, index, where) {
     const win = this.get(id);
     if (!win || win.destroyed) return false;
-    const row = win.items[index | 0];
+    const fromMenu = ((where | 0) & WITEM_CONTEXT) !== 0;
+    if (fromMenu && (index | 0) < 0) {
+      /* A DISMISSAL WITH NO MENU OPEN IS REFUSED, not counted as one. A page that reported two
+       * dismissals for one menu would wake the program twice, and the second record names a
+       * gesture that did not happen. The first report closes the menu, so the second finds null. */
+      if (!win.menu) {
+        this.stats.badItems += 1;
+        return false;
+      }
+      win.menu = null;
+      this.stats.menuDismissals += 1;
+      return win.push({ type: WEV_ITEM, a: -1, b: 0, c: where | 0 });
+    }
+    const list = fromMenu ? (win.menu ? win.menu.rows : []) : win.items;
+    const row = list[index | 0];
     if (!row) {
       this.stats.badItems += 1;
       return false;
@@ -1371,6 +1478,9 @@ export class WinMgr {
       this.stats.badItems += 1;
       return false;
     }
+    // A MENU IS ONE CHOICE AND THEN IT IS GONE, closed here rather than on the page's word, so a
+    // second report against the same menu is refused above instead of waking the program twice.
+    if (fromMenu) win.menu = null;
     this.stats.itemActivations += 1;
     return win.push({ type: WEV_ITEM, a: index | 0, b: row.flags, c: where | 0 });
   }

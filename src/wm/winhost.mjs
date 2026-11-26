@@ -41,6 +41,9 @@ import {
   WKEY_F1, WKEY_F2, WKEY_F3, WKEY_F4, WKEY_F5, WKEY_F6,
   WKEY_F7, WKEY_F8, WKEY_F9, WKEY_F10, WKEY_F11, WKEY_F12,
   WEV_WHEEL, WWHEEL_PAGE, packWheelPoint,
+  // M20. The `where` bit on every item report this file sends for a CONTEXT MENU, which is a
+  // different list from the published `items` and the kernel indexes it by this bit.
+  WITEM_CONTEXT,
   WMODAL_SYSTEM, WMODE_BLOCKING,
   WST_NORMAL, WST_MIN, WROLE_NORMAL, WROLE_DESKTOP,
 } from "../abi.mjs";
@@ -177,13 +180,30 @@ function measureCell(into) {
  * amount, which is the only clause that can tell the two worlds apart: at dpr 2 a surfaced window
  * moves half as far as the reader asked, and a text window moves a cell per pixel.
  */
-let hostControls = { staleGeom: false, noRelayout: false, rawWheel: false };
+/**
+ * And M20's TWO.
+ *
+ * `noMenuGuard`: the `contextmenu` handler no longer refuses the host browser's own menu, which is
+ * the world M16/R8 found this file in — a foreign menu drawn over pixels a process rendered. The
+ * record is still written, so the control is readable as `defaultPrevented: false` rather than as
+ * an absence, and the `WEV_POINTER` a right press sends is untouched: ONE clause moves.
+ *
+ * `silentDismiss`: a context menu closed without a choice reports nothing. That is the plausible
+ * implementation — a dismissal is not a choice, so there is nothing to say — and what it costs is
+ * the program: it is parked in `poll` on the fd it raised the menu on, so Esc leaves a window that
+ * never comes back. See `activateItem`.
+ */
+let hostControls = {
+  staleGeom: false, noRelayout: false, rawWheel: false, noMenuGuard: false, silentDismiss: false,
+};
 
 export function setHostControls(opts = {}) {
   hostControls = {
     staleGeom: opts.staleGeom === true,
     noRelayout: opts.noRelayout === true,
     rawWheel: opts.rawWheel === true,
+    noMenuGuard: opts.noMenuGuard === true,
+    silentDismiss: opts.silentDismiss === true,
   };
   return { ...hostControls };
 }
@@ -233,7 +253,17 @@ export class WinHost {
       // `pointers` and is counted separately because a drag's move and a hover are the same event
       // type: a check asserting the kernel coalesced a hover stream needs to know how many hovers
       // the page offered, and `pointers` answers for the presses too.
-      hovers: 0, leaves: 0, cursors: 0 };
+      hovers: 0, leaves: 0, cursors: 0,
+      // M20: context menus the kernel asked for, rows in them, choices reported, dismissals
+      // reported, and menus NOTHING COULD DRAW. The last one is counted rather than silent because
+      // a page with no shell has no popup element, and the program is parked on the answer — so
+      // the honest outcome is a dismissal, and a count is how a reader tells that apart from a
+      // reader who really pressed Esc.
+      menus: 0, menuRows: 0, menuChoices: 0, menuDismisses: 0, menusUnrendered: 0,
+      // AND THE RIGHT PRESSES, which is the gesture that asks for one. A subset of `pointers`:
+      // the record itself travels through `send` like any other press, and this is only the count
+      // of how many of them carried button 2.
+      rightPresses: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -266,6 +296,19 @@ export class WinHost {
      *  here rather than left absent so "no wheel yet" and "a wheel whose conversion failed" are not
      *  the same reading. See `#wheel`. */
     this.lastWheel = null;
+    /** M20. The last `win-menu` this file rendered: the point the kernel sent in the WINDOW's unit,
+     *  the client point it converted to, the row count, and whether a shell drew it. Declared here
+     *  for `lastWheel`'s reason — "no menu yet" and "a menu whose conversion failed" must not read
+     *  the same. */
+    this.lastMenu = null;
+    /** The last item report this file sent for a context menu, as `{win, index, where}`. A
+     *  DISMISSAL is `index < 0`, and it is here because the `silentDismiss` control's whole
+     *  subject is whether the report went out at all. */
+    this.lastMenuReport = null;
+    /** The last right press on a surface, and whether the browser's own menu was refused. The
+     *  `defaultPrevented` is read back OFF THE EVENT rather than inferred from the control, so a
+     *  check asserts what the browser concluded and not what this file intended. */
+    this.lastContextMenu = null;
     /** The kernel's receipt for each batch of events: offered against queued. SOMETHING READS IT —
      *  an unread receipt is how M4a's silent input loss survived (constraint 160). */
     this.fed = { offered: 0, queued: 0 };
@@ -427,6 +470,9 @@ export class WinHost {
     if (m.t === "win-show") { this.#show(m); return true; }
     if (m.t === "win-role") { this.#role(m); return true; }
     if (m.t === "win-items") { this.#items(m); return true; }
+    // M20. The fifth, and the only one that is TRANSIENT: a menu to raise now, at a point, rather
+    // than a list to hold until it is withdrawn.
+    if (m.t === "win-menu") { this.#menu(m); return true; }
     // M19. The fourth thing the page renders on a window's say-so and decides nothing about.
     if (m.t === "win-cursor") { this.#cursor(m); return true; }
     if (m.t === "win-stack") { this.#stack(m); return true; }
@@ -797,6 +843,12 @@ export class WinHost {
      * `pointerdown` fires BEFORE `mousedown`, so the DOWN-then-UP order a program sees is
      * unchanged and the capture is already held when this record goes out. */
     el.addEventListener("mousedown", (e) => {
+      /* M20. A RIGHT PRESS TRAVELS AS AN ORDINARY DOWN RECORD, and that is the whole of what a
+       * program needs to ask for a menu: `c` carries `event.buttons`, so button 2 is already in the
+       * record (`pointerAt(ev).buttons`, src/abi.mjs) and there is no second event type. A right
+       * press delivers BOTH this and `contextmenu` (constraint 279), which is why the two handlers
+       * do disjoint things — this one is the report and that one is the refusal. */
+      if ((e.buttons | 0) & 2) this.stats.rightPresses += 1;
       send(WPTR_DOWN | clickBits(e), e);
     });
     el.addEventListener("pointermove", (e) => {
@@ -890,13 +942,24 @@ export class WinHost {
      * and not this one: a right-click inside a window raised the host browser's own menu, over
      * pixels a process drew.
      *
-     * THE PROCESS IS NOT TOLD, and cannot be yet: there is no context-menu window event, and
-     * `WEV_POINTER` arrives only while a button is DOWN, so a right-press has no record to travel
-     * in. The menu a process raises at a point is A9, in M20. This refuses the host's and nothing
-     * else, which is the honest half of the fix rather than a menu nobody can populate. */
+     * M20 CLOSED THE OTHER HALF, and it needed no new event: the `mousedown` above already sends a
+     * `WEV_POINTER` whose `c` is `event.buttons`, so a right press is a DOWN record carrying button
+     * 2 and a program reads the gesture off the record it already receives. This handler still does
+     * exactly one thing — refuse the browser's menu — because the two arrive as separate events for
+     * one press (constraint 279) and a report sent from here would be a second DOWN for one press.
+     *
+     * `defaultPrevented` IS READ BACK OFF THE EVENT. `noMenuGuard` skips the `preventDefault` and
+     * keeps the record, so the control reads as `false` rather than as a missing reading — an
+     * absent record and a refusal that did not happen are not the same world. */
     el.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
+      if (!hostControls.noMenuGuard) e.preventDefault();
       this.stats.contextmenus += 1;
+      this.lastContextMenu = {
+        win: entry.id,
+        defaultPrevented: e.defaultPrevented === true,
+        button: e.button | 0,
+        trusted: e.isTrusted === true,
+      };
     });
   }
 
@@ -1199,16 +1262,105 @@ export class WinHost {
   }
 
   /**
+   * M20. A PROCESS ASKED FOR A MENU AT A POINT, and the SHELL draws it.
+   *
+   * WHY IT IS NOT THE PROCESS'S TO DRAW: `.window-body` is `overflow: hidden` (`src/wm/aero.mjs`),
+   * so a popup drawn into the surface is clipped to the client area and a menu raised near the
+   * bottom of a frame loses its last rows. The shell's one popup element lives on the DESKTOP, so
+   * it extends past the frame — which is the clause `menu-in-surface` breaks.
+   *
+   * `m.x`/`m.y` ARE IN THE WINDOW'S OWN UNIT — surface px for a surfaced window, cells for a text
+   * one (constraint 248) — because they came from the `WEV_POINTER` that asked for the menu.
+   * `#clientPointAt` is the one conversion back, and it is `#dropPointAt`'s declared inverse.
+   *
+   * A PAGE WITH NO SHELL REPORTS THE DISMISSAL instead of dropping the menu. The program is parked
+   * in `poll` on the fd it called on, so a menu nothing can draw and nobody answers is a window
+   * frozen with no error anywhere; a dismissal is the truthful outcome and `menusUnrendered` is how
+   * a reader tells it from a reader who pressed Esc. M7-M13's pages have frames and no shell.
+   */
+  #menu(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    const rows = (Array.isArray(m.items) ? m.items : []).map((row) => ({
+      icon: row.icon | 0, flags: row.flags | 0, label: String(row.label || ""),
+    }));
+    const at = this.#clientPointAt(entry, m.x | 0, m.y | 0);
+    this.stats.menus += 1;
+    this.stats.menuRows += rows.length;
+    this.lastMenu = {
+      win: entry.id,
+      x: m.x | 0,
+      y: m.y | 0,
+      clientX: at.x,
+      clientY: at.y,
+      rows: rows.length,
+      drawn: false,
+    };
+    if (!this.shell || typeof this.shell.openContextMenu !== "function") {
+      this.stats.menusUnrendered += 1;
+      this.activateItem(entry.id, -1, WITEM_CONTEXT);
+      return;
+    }
+    this.lastMenu.drawn = true;
+    this.shell.openContextMenu(entry, rows, at);
+  }
+
+  /**
+   * M20. A point in a window's OWN unit, back into client (viewport) CSS px.
+   *
+   * THE DECLARED INVERSE OF `#dropPointAt`, and declared because that is what makes a menu land
+   * under the pointer that asked for it: the process was handed surface px or cells by a
+   * `WEV_POINTER` and hands the same numbers back, so any disagreement between the two conversions
+   * is a menu that opens somewhere the reader did not click. `Surface.clientAt` is itself
+   * `pointAt`'s inverse, so a surfaced window's half is one call and not arithmetic here.
+   *
+   * THE CENTRE OF THE CELL, like `clientAt`'s centre of the surface pixel: a cell is `cell.w` wide
+   * and its left edge is the boundary between two of them.
+   *
+   * AN ICON-VIEW WINDOW (`WROLE_DESKTOP`) FALLS DOWN THE CELL PATH AND SHOULD NOT. It is neither
+   * surfaced nor text: `#wirePointer` is wired on a SURFACE only, so that window receives no
+   * `WEV_POINTER` at all and a point from it is in no unit this file has ever handed it. A program
+   * raising a menu on one has nothing to pass; the desktop's own menus are `src/wm/desktop.mjs`'s,
+   * drawn page-side. Stated rather than guessed at, so a caller that appears is a caller that
+   * reads this.
+   */
+  #clientPointAt(entry, x, y) {
+    if (entry.surface) {
+      const got = entry.surface.clientAt(x | 0, y | 0);
+      if (got) return got;
+    }
+    const r = entry.win.bodyEl.getBoundingClientRect();
+    return {
+      x: Math.round(r.left + ((x | 0) + 0.5) * this.cell.w),
+      y: Math.round(r.top + ((y | 0) + 0.5) * this.cell.h),
+    };
+  }
+
+  /**
    * The shell says one of a window's rows was activated. Reported, never acted on.
    *
    * `where` is the `WITEM_*` bit saying which rendering it came from, because a row on the desktop
    * and the same row in a jump list are the same row and a program may care which was clicked.
    * The kernel validates the index against the list it holds — a page cannot name a row nothing
    * published.
+   *
+   * M20. A NEGATIVE INDEX FROM A CONTEXT MENU IS A DISMISSAL and it goes out like any other
+   * report, because the program is parked on the answer: a swallowed dismissal is a window that
+   * never wakes (`src/kernel/wins.mjs` holds the other half of that argument). It is the ONE route
+   * for both, so the `silentDismiss` control has one place to sit — Esc and a click away are two
+   * gestures and must not be two code paths that can disagree.
    */
   activateItem(win, index, where) {
+    const i = index | 0;
+    const w = where | 0;
+    const dismissal = i < 0 && (w & WITEM_CONTEXT) !== 0;
+    if (dismissal && hostControls.silentDismiss) return;
     this.stats.itemAsks += 1;
-    this.post({ t: "win-item-ask", win: win | 0, index: index | 0, where: where | 0 });
+    if (w & WITEM_CONTEXT) {
+      if (dismissal) this.stats.menuDismisses += 1; else this.stats.menuChoices += 1;
+      this.lastMenuReport = { win: win | 0, index: i, where: w };
+    }
+    this.post({ t: "win-item-ask", win: win | 0, index: i, where: w });
   }
 
   /** Ask the kernel for a show state. The one route a shell has, and the same shape as
@@ -1507,6 +1659,13 @@ export class WinHost {
       // driver asserts against, because a dispatched delta is not what the page received
       // (constraint 297).
       lastWheel: this.lastWheel,
+      // M20. The menu the kernel asked for in the WINDOW's unit and the client point it was drawn
+      // at, the item report that answered it, and the right press that asked. Three readings of one
+      // gesture on purpose, `frameBlocked`'s reason: the conversion, the answer and the browser's
+      // own conclusion about its menu are three different things to get wrong.
+      lastMenu: this.lastMenu,
+      lastMenuReport: this.lastMenuReport,
+      lastContextMenu: this.lastContextMenu,
       dragImage: this.dragEl ? !this.dragEl.hidden : false,
       live: [...this.frames.keys()],
       created: this.created,
