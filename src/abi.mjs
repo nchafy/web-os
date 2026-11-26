@@ -512,6 +512,15 @@ const INTS = {
    *  double-click carries its own `detail` and a program reading both would open a row twice. */
   WPTR_CLICK2: 0x80,
   WPTR_CLICK3: 0x100,
+  /** M19. THE POINTER LEFT THIS WINDOW, and it is the only pointer record that carries no usable
+   *  position: the event fires at a point outside the surface, so `a` and `b` are whatever the
+   *  page reported and a program MUST clear its hover rather than hit-test them. Without it a lit
+   *  row stays lit forever — the last hover a window ever gets is the one nearest the edge.
+   *
+   *  IT IS EXCLUSIVE OF THE OTHER THREE. A record is a press, a release, a move or a leave, never
+   *  two, which is what lets `WinMgr`'s tail replacement compare the WHOLE `mods` word: a leave
+   *  followed by a hover must not be swallowed by it (`bench/m19-hover/probe.py`). */
+  WPTR_LEAVE: 0x200,
 
   //: Modifier bits on WEV_KEY, in `mods`. The widget translates Ctrl into a C0 byte, so these are
   //: for a reader that wants to know what was held, never for deriving the byte.
@@ -611,6 +620,18 @@ const INTS = {
   //: looks like: the desktop is a window at the bottom of the stack with no frame and no taskbar
   //: button, and nothing about that is expressible as geometry.
   WIN_SET_ROLE: 5,
+  /** M19. a2 = a `WCUR_*` value, applied to this window's CLIENT AREA. One selector, like the five
+   *  above it, because it is "change a field of this window".
+   *
+   *  A CLOSED ENUM AND NOT A STRING, for the reason `DL_TEXT` takes a family and not a font: a
+   *  process naming its own CSS cursor would reach the page's stylesheet through a syscall
+   *  argument, and `url(...)` is a fetch. The kernel refuses a value above `WCUR_MAX` with
+   *  -EINVAL, so the page renders a name out of `WCUR_CSS` and never one it was handed.
+   *
+   *  THE FRAME IS NOT INCLUDED. A resize grip's cursor belongs to the chrome around the surface
+   *  and is already CSS on the grip (`src/wm/window.mjs`); this says what is over the PIXELS the
+   *  process drew. */
+  WIN_SET_CURSOR: 6,
 
   /**
    * THE SHOW STATE. Win32 calls it that (`ShowWindow`'s `SW_*`) and the name is worth keeping,
@@ -653,6 +674,37 @@ const INTS = {
   //: the work area by the shell. Its `win_items` are the desktop's icons.
   WROLE_DESKTOP: 1,
   WROLE_LIMIT: 1,
+
+  /**
+   * M19's CURSOR, as a closed enum DENSE FROM 0, because 0 is the value a window nobody has set
+   * carries and that value has to mean "the ordinary arrow". `WCUR_CSS` below names each one for
+   * the page, indexed by the number, so a value and its CSS keyword cannot drift.
+   *
+   * CLOSED, AND SHORTER THAN CSS's LIST ON PURPOSE. Each row below is a case a process in this
+   * system has: anything else would be a parameter for a case that does not exist. Adding one is a
+   * row here and a row in `WCUR_CSS`, and `selfTest` fails if either is missing.
+   */
+  WCUR_DEFAULT: 0,
+  //: The I-beam. Over an editable field, and over a label a rename is in progress on.
+  WCUR_TEXT: 1,
+  //: The hand. Over something a SINGLE click activates, which a file row is not: its activation
+  //: verb is the platform's click COUNT (constraint 300).
+  WCUR_POINTER: 2,
+  //: `paint`'s. The one cursor whose hotspot has to be a point rather than a corner.
+  WCUR_CROSSHAIR: 3,
+  //: Over something a press-and-drag MOVES, which is how a drag source says so before the button
+  //: goes down. The drag itself is `src/kernel/dataobj.mjs`'s session and sets no cursor.
+  WCUR_MOVE: 4,
+  //: Busy AND STILL READING ITS QUEUE. There is deliberately no `wait`: "this program is not
+  //: answering" is the page's own verdict from M7's not-responding detector, and a process that
+  //: could claim it would be claiming something it cannot know about itself.
+  WCUR_PROGRESS: 5,
+  //: A column divider in a list header. The one splitter a program in this system draws.
+  WCUR_COL_RESIZE: 6,
+  //: Over a target that will refuse what is being dragged. The cursor half of a typed refusal
+  //: (constraint 241).
+  WCUR_NOT_ALLOWED: 7,
+  WCUR_MAX: 7,
 
   /**
    * THE SCOPE: which windows a modal window affects. Computed by walking the owner chain, so a
@@ -737,6 +789,7 @@ const INTS = {
    * partially (constraint 293): half a filename is a filename, and a reader cannot tell it from the
    * real one.
    */
+  // a5 IS READ ONLY UNDER `DLT_ELLIPSIS`, where it is the run's maximum width in surface px.
   DL_TEXT: 5,           // a0,a1 = x,y (TOP-left); a2 = px size; a3 = byte length; a4 = rgba
   DL_TEXT_DATA: 6,      // a0..a5 = 24 bytes of UTF-8, little-endian words
   /*
@@ -775,6 +828,23 @@ const INTS = {
   DLT_MONO: 2,
   DLT_RIGHT: 4,
   DLT_CENTER: 8,
+  /**
+   * M19. `a5` IS A MAXIMUM WIDTH IN SURFACE PX, and a run wider than it is truncated with an
+   * ellipsis by the renderer. Without the flag `a5` is ignored, which is what keeps every run
+   * written before this additive: `encodeTextRun` wrote `a5: 0` and still does unless asked.
+   *
+   * THE RENDERER TRUNCATES AND NOT THE PROGRAM, because only the renderer can measure. A process
+   * can sum `/dev/advance` and get an UPPER BOUND on a proportional run — the renderer kerns, so
+   * the sum is wrong by up to 13.2147 px on a real filename, always in the same direction
+   * (`bench/m19-advance/results-headless.json`, clause `kerning-proportional`) — so a program that
+   * cut the string itself would cut it early and could not be told it had. Handing the limit to
+   * the one agent with a `measureText` is the only exact answer available.
+   *
+   * A SIZE WITH NO ROW IN `/dev/advance` LAYS OUT WITH THIS FLAG ALONE. That is the declared
+   * fallback for a run the table cannot price at all, and it is why `TEXT_SIZES` may be a short
+   * list without making the renderer refuse a size outside it.
+   */
+  DLT_ELLIPSIS: 16,
 
   /** How many ops one `win_draw` may carry. Derived from MAX_INLINE and the record size at the
    *  bottom of this file, never written as a number twice. */
@@ -1049,6 +1119,8 @@ export const {
   WEV_STATE, WEV_ITEM, WEV_CLIENT, DPR_FIXED_ONE,
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
+  WCUR_DEFAULT, WCUR_TEXT, WCUR_POINTER, WCUR_CROSSHAIR, WCUR_MOVE, WCUR_PROGRESS,
+  WCUR_COL_RESIZE, WCUR_NOT_ALLOWED, WCUR_MAX,
   WITEM_HEADER, WIT_ICON, WIT_FLAGS, WIT_LEN, WIT_RESERVED,
   WIN_ITEM_CAP, WITEM_LABEL_MAX,
   WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER, WITEM_DISABLED,
@@ -1066,14 +1138,15 @@ export const {
   WKEY_F1, WKEY_F2, WKEY_F3, WKEY_F4, WKEY_F5, WKEY_F6,
   WKEY_F7, WKEY_F8, WKEY_F9, WKEY_F10, WKEY_F11, WKEY_F12, WKEY_MAX,
   WIN_EVENT_CAP, WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+  WIN_SET_CURSOR,
   WIN_F_NONE, WIN_CAP,
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
-  WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3,
+  WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, WPTR_LEAVE,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_MAX,
-  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLC_RESET,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLT_ELLIPSIS, DLC_RESET,
   SURFACE_BUDGET_PX, SURFACE_MAX_PX,
   WIN_CAP_H, WIN_INSET, BLUR_OFF_AT, BLUR_ON_AT,
 } = INTS;
@@ -1863,12 +1936,15 @@ export function textOpCount(len) {
  * Returns an array of op objects for `encodeDrawOp`. The byte length is the UTF-8 length and not
  * the string's, because a two-byte character in a filename would otherwise make the header
  * disagree with its own data.
+ *
+ * `maxWidth` is in SURFACE px and is only read by the renderer under `DLT_ELLIPSIS`; a caller
+ * passing one without the flag gets a word in `a5` that nothing looks at.
  */
-export function encodeTextRun(text, { x, y, size, rgba, flags = 0 }) {
+export function encodeTextRun(text, { x, y, size, rgba, flags = 0, maxWidth = 0 }) {
   const bytes = new TextEncoder().encode(String(text));
   const out = [{
     op: DL_TEXT, flags: flags & 0xffff,
-    a0: x | 0, a1: y | 0, a2: size | 0, a3: bytes.length, a4: rgba | 0, a5: 0,
+    a0: x | 0, a1: y | 0, a2: size | 0, a3: bytes.length, a4: rgba | 0, a5: maxWidth | 0,
   }];
   for (let at = 0; at < bytes.length; at += DL_TEXT_BYTES_PER_OP) {
     const chunk = bytes.subarray(at, at + DL_TEXT_BYTES_PER_OP);
@@ -1919,6 +1995,268 @@ export function textOfOps(ops, index) {
   }
   if (wrote !== len) return null;
   return { text: new TextDecoder().decode(bytes), records: 1 + need };
+}
+
+/* ---- M19: the cursor's names, the declared text sizes, and the advance table ------------------ */
+
+/**
+ * One CSS cursor keyword per `WCUR_*` value, INDEXED BY THE NUMBER, which is `SYS_NAME`'s shape
+ * and its reason: a value and its rendering cannot drift when the array is the only map.
+ *
+ * HERE AND NOT IN THE PAGE, because the page is a renderer of what it was sent and decides nothing
+ * (constraint 226). A keyword list in `src/wm/winhost.mjs` would be a second table to keep in step
+ * with an enum the kernel enforces.
+ */
+export const WCUR_CSS = Object.freeze([
+  "default", "text", "pointer", "crosshair", "move", "progress", "col-resize", "not-allowed",
+]);
+
+/**
+ * THE TWO FAMILY STACKS A `DL_TEXT` RUN CAN ASK FOR. A process names a family and not a font: it
+ * cannot measure one and has no access to what is installed.
+ *
+ * THEY ARE HERE BECAUSE THE ADVANCE TABLE AND THE RENDERER ARE THE TWO SIDES, which is this file's
+ * whole criterion. `/dev/advance` publishes the stack each row was measured with, so a probe can
+ * compare the renderer's own `font` against it — and a table measured in one stack and drawn in
+ * another is wrong by an amount nothing reports.
+ *
+ * THESE ARE THE STRINGS THE TABLE WAS MEASURED THROUGH — `src/wm/surface.mjs:26-27`, which still
+ * declares its own copy, as does `src/wm/taskbar.mjs:95`. Both are known second copies this slice
+ * could not close: they are not its files. Until `surface.mjs` imports these,
+ * `bench/m19-advance/probe.py` reads them out of the source with a regex and fails loudly if
+ * either stops being a quoted const.
+ *
+ * `src/wm/aero.mjs:168` IS A THIRD COPY AND IT IS ALREADY DIVERGENT: the chrome's stack carries
+ * Selawik, "Helvetica Neue" and Arial, which this one does not. So on a machine with Selawik and
+ * without Segoe UI the caption and the surface under it resolve to DIFFERENT typefaces, and this
+ * table prices the surface's. Reconciling them is the change that makes one row of
+ * `CLAUDE.md`'s table honest; it is not this file's to make.
+ */
+export const UI_FAMILY = '"Segoe UI", system-ui, -apple-system, sans-serif';
+export const MONO_FAMILY = 'ui-monospace, Menlo, Consolas, monospace';
+
+/**
+ * THE SIZES THE ADVANCE TABLE HAS A ROW FOR, in SURFACE px — the unit `DL_TEXT`'s `a2` carries,
+ * because `measureText` runs in the canvas's own coordinate space and that space is the backing
+ * store.
+ *
+ * DECLARED HERE BECAUSE THE RENDERER DECLARES NOTHING. `src/wm/surface.mjs` takes
+ * `Math.max(1, op.a2 | 0)` and draws at any positive i32, so "per size the renderer offers" is not
+ * a closed set and a table indexed by it cannot exist. A size outside this list has NO ROW, and a
+ * program drawing at one lays out with `DLT_ELLIPSIS` alone rather than with a wrong advance.
+ *
+ * DERIVED AND NOT CHOSEN: `Math.round(css * ratio)` over the CSS sizes programs draw at today
+ * (`src/bin/files.mjs` TEXT_PX and TEXT_PX-1, `src/bin/taskmgr.mjs` TEXT_PX+1, TEXT_PX-1,
+ * TEXT_PX-2) times the ratios {1, 1.5, 2}. **The rounding is half-UP, which is JavaScript's and
+ * not Python's**: 11 CSS px at dpr 1.5 is 16.5, so the set contains 17 and not the 16 a
+ * `round()`-derived list publishes. A Python-derived set publishes a row nothing draws at and
+ * omits one two programs do, silently, because an undeclared size falls back by design.
+ */
+export const TEXT_SIZES = Object.freeze([10, 11, 12, 13, 15, 17, 18, 20, 22, 24, 26]);
+
+/** The code points the table prices: printable ASCII. A character outside it makes `advanceWidth`
+ *  answer null rather than guess, because a substituted advance would break the one property the
+ *  sum has — see `advanceWidth`. */
+export const ADV_CP_MIN = 0x20;
+export const ADV_CP_MAX = 0x7e;
+export const ADV_CP_COUNT = ADV_CP_MAX - ADV_CP_MIN + 1;
+
+/** The key for one family-and-weight, derived from a `DL_TEXT` run's own flags so the table is
+ *  indexed by what the renderer will actually use. Nothing else in `flags` selects a face. */
+export function advanceKey(flags) {
+  const f = flags | 0;
+  return `${f & DLT_MONO ? "mono" : "ui"}${f & DLT_BOLD ? "-bold" : ""}`;
+}
+
+/** The four variants, DERIVED from the two bits that select one. A written-out list would be the
+ *  copy that goes stale the day a third bit selects a face. */
+export const ADV_FAMILIES = Object.freeze(
+  [0, DLT_BOLD, DLT_MONO, DLT_MONO | DLT_BOLD].map(advanceKey),
+);
+
+/** The path the kernel publishes the table at, named once so neither side spells it. */
+export const ADVANCE_PATH = "/dev/advance";
+
+/** What the numbers are, printed in the file's own header so a reader of the bytes needs no doc. */
+export const ADV_UNIT = "surface px";
+
+const ADV_HEAD_UNIT = "unit";
+const ADV_HEAD_MEASURED = "measured";
+const ADV_HEAD_UI = "ui-family";
+const ADV_HEAD_MONO = "mono-family";
+const ADV_HEAD_CP = "cp";
+const ADV_HEAD_SIZES = "sizes";
+const ADV_HEAD_FAMILIES = "families";
+
+/** A header value may not carry the field separator or a line break, or the file it is written
+ *  into stops being parseable by the decoder below. */
+function advClean(value, what) {
+  const s = String(value);
+  if (s.includes("\t") || s.includes("\n")) {
+    throw new Error(`encodeAdvances: ${what} carries a tab or a newline`);
+  }
+  return s;
+}
+
+/**
+ * THE ADVANCE TABLE AS THE BYTES `/dev/advance` SERVES: seven `key<TAB>value` header lines, then
+ * one line per family-and-size carrying 95 advances in code-point order.
+ *
+ * TEXT AND TAB-SEPARATED, like `/dev/trace` and `/proc`, because the ABI has no other publishing
+ * mechanism a process can read with `read(2)` and because a reader of the raw file is a reader of
+ * the same bytes the program parses.
+ *
+ * IT THROWS RATHER THAN RETURNING NULL, which is the opposite of `decodeAdvances`: the input is the
+ * kernel's own measured data, so a table that does not match `TEXT_SIZES` is a defect that must
+ * stop the module at load and not a stream to be refused politely. **This is the enforcement that
+ * makes the device's size set and the ABI's one fact** — the device cannot publish any other.
+ */
+export function encodeAdvances(table) {
+  if (!table || typeof table !== "object") {
+    throw new Error("encodeAdvances: no table");
+  }
+  const fams = table.families || {};
+  if (fams.ui !== UI_FAMILY || fams.mono !== MONO_FAMILY) {
+    throw new Error("encodeAdvances: the table was measured in a family stack this ABI does not "
+      + "declare, so its advances describe a face the renderer will not use");
+  }
+  // A HEADER LINE'S KEY ENDS IN A COLON and a data line's does not, which is how the decoder tells
+  // them apart without counting lines — the same shape `/dev/trace` and `/proc` already use.
+  const lines = [
+    `${ADV_HEAD_UNIT}:\t${ADV_UNIT}`,
+    `${ADV_HEAD_MEASURED}:\t${advClean(table.measured, "measured")}`,
+    `${ADV_HEAD_UI}:\t${advClean(fams.ui, "the ui family")}`,
+    `${ADV_HEAD_MONO}:\t${advClean(fams.mono, "the mono family")}`,
+    `${ADV_HEAD_CP}:\t${ADV_CP_MIN}\t${ADV_CP_MAX}`,
+    `${ADV_HEAD_SIZES}:\t${TEXT_SIZES.join("\t")}`,
+    `${ADV_HEAD_FAMILIES}:\t${ADV_FAMILIES.join("\t")}`,
+  ];
+  for (const key of ADV_FAMILIES) {
+    const rows = (table.adv || {})[key];
+    if (!rows) throw new Error(`encodeAdvances: no rows for ${key}`);
+    const published = Object.keys(rows).map(Number).sort((a, b) => a - b);
+    if (published.join(",") !== TEXT_SIZES.join(",")) {
+      throw new Error(`encodeAdvances: ${key} publishes sizes ${published.join(",")}, `
+        + `TEXT_SIZES declares ${TEXT_SIZES.join(",")}`);
+    }
+    for (const size of TEXT_SIZES) {
+      const row = rows[size];
+      if (!row || row.length !== ADV_CP_COUNT) {
+        throw new Error(`encodeAdvances: ${key} at ${size} has `
+          + `${row ? row.length : "no"} advances, not ${ADV_CP_COUNT}`);
+      }
+      for (let i = 0; i < row.length; i += 1) {
+        // A ZERO OR NEGATIVE ADVANCE IS A FAILED MEASUREMENT, not a narrow glyph: every code point
+        // in this range paints something, the space included.
+        if (!(Number.isFinite(row[i]) && row[i] > 0)) {
+          throw new Error(`encodeAdvances: ${key} at ${size} prices `
+            + `U+${(ADV_CP_MIN + i).toString(16)} at ${row[i]}`);
+        }
+      }
+      lines.push(`${key}\t${size}\t${row.join("\t")}`);
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * The declared INVERSE of `encodeAdvances`, and the gate between the device and a program.
+ *
+ * Returns null — never a partial table — for anything that is not the table this ABI declares:
+ * a missing header, a size set that is not `TEXT_SIZES`, a code-point range that is not
+ * `ADV_CP_MIN..ADV_CP_MAX`, a short row, a duplicate row, or an advance that is not a positive
+ * finite number. A PARTIAL TABLE IS THE WORST OUTCOME HERE: a program that laid out columns from
+ * half a table would lay them out wrongly and silently, where a null sends it to `DLT_ELLIPSIS`.
+ *
+ * SO IT IS ALSO THE STALE-COPY GATE for this one table, which `ABI_FINGERPRINT` is not: the
+ * fingerprint covers `INTS`, and `TEXT_SIZES` is an array. The file declares its own size set and
+ * code-point range in its header, so a process holding an older ABI than the kernel that wrote the
+ * bytes gets null rather than a row it indexes by the wrong size.
+ *
+ * AN UNKNOWN HEADER LINE IS IGNORED, deliberately: a later kernel may publish a line this reader
+ * does not know, and the required ones are checked by name. An unknown DATA line is refused, since
+ * a row for a family the ABI has no key for is a row nothing could ever read.
+ */
+export function decodeAdvances(text) {
+  if (typeof text !== "string") return null;
+  const head = new Map();
+  const adv = {};
+  for (const key of ADV_FAMILIES) adv[key] = {};
+  let rows = 0;
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    const f = line.split("\t");
+    if (f[0].endsWith(":")) {
+      head.set(f[0].slice(0, -1), f.slice(1));
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(adv, f[0])) return null;
+    const size = Number(f[1]);
+    if (!TEXT_SIZES.includes(size)) return null;
+    if (adv[f[0]][size]) return null;
+    if (f.length !== 2 + ADV_CP_COUNT) return null;
+    const row = new Array(ADV_CP_COUNT);
+    for (let i = 0; i < ADV_CP_COUNT; i += 1) {
+      const v = Number(f[2 + i]);
+      if (!(Number.isFinite(v) && v > 0)) return null;
+      row[i] = v;
+    }
+    adv[f[0]][size] = row;
+    rows += 1;
+  }
+  if (rows !== ADV_FAMILIES.length * TEXT_SIZES.length) return null;
+  const one = (k) => (head.get(k) || []).join("\t");
+  if (one(ADV_HEAD_UNIT) !== ADV_UNIT) return null;
+  if (!head.has(ADV_HEAD_MEASURED)) return null;
+  const cp = head.get(ADV_HEAD_CP) || [];
+  if (Number(cp[0]) !== ADV_CP_MIN || Number(cp[1]) !== ADV_CP_MAX) return null;
+  const sizes = (head.get(ADV_HEAD_SIZES) || []).map(Number);
+  if (sizes.join(",") !== TEXT_SIZES.join(",")) return null;
+  if ((head.get(ADV_HEAD_FAMILIES) || []).join(",") !== ADV_FAMILIES.join(",")) return null;
+  return {
+    unit: ADV_UNIT,
+    measured: one(ADV_HEAD_MEASURED),
+    families: { ui: one(ADV_HEAD_UI), mono: one(ADV_HEAD_MONO) },
+    cpMin: ADV_CP_MIN,
+    cpMax: ADV_CP_MAX,
+    sizes,
+    adv,
+  };
+}
+
+/**
+ * The width of one run, as the SUM of its published advances, or null when the table cannot price
+ * it. `size` is in surface px and `flags` is the run's own `DL_TEXT` flags.
+ *
+ * WHAT THE NUMBER IS WORTH, measured over the whole 95-code-point × 4-variant × 17-size grid in
+ * Chrome 158 and Firefox 156 at dpr 1, 1.5 and 2 (`bench/m19-advance/results-headless.json`):
+ *
+ * - With `DLT_MONO` it is EXACT. The rendered string width equals the sum over 2,448 samples,
+ *   0.0000 px, both engines, every ratio — to this table's own 1e-4 px per-advance rounding.
+ * - Without it, it is a STRICT UPPER BOUND and never a narrow one. The renderer kerns, so the sum
+ *   is high by 0.0000..13.2147 px — 8.55% of a real filename — and the error has ONE SIGN. So
+ *   "will this definitely fit?" is answerable and "exactly how wide is this?" is not. An ellipsis
+ *   decision taken on this number truncates slightly EARLY and never overflows, which is why
+ *   `DLT_ELLIPSIS` hands the limit to the renderer instead.
+ *
+ * NULL FOR AN UNPRICED SIZE OR CHARACTER, and the character case is why a substitute is not used:
+ * the widest advance in the row is not an upper bound for a code point outside the row, so a
+ * guess would cost the sum the only property it has.
+ */
+export function advanceWidth(table, text, { size, flags = 0 }) {
+  const rows = table && table.adv && table.adv[advanceKey(flags)];
+  // `| 0` TRUNCATES THE SAME WAY THE RENDERER DOES (`Math.max(1, op.a2 | 0)`), so a caller holding
+  // a fractional size is priced at the size the surface will actually draw at.
+  const row = rows && rows[size | 0];
+  if (!row) return null;
+  let width = 0;
+  // BY CODE POINT, not by UTF-16 unit: a surrogate pair is one unpriced character and not two.
+  for (const ch of String(text)) {
+    const cp = ch.codePointAt(0);
+    if (cp < ADV_CP_MIN || cp > ADV_CP_MAX) return null;
+    width += row[cp - ADV_CP_MIN];
+  }
+  return width;
 }
 
 /* M10's format table, as the three functions every side needs. THE OFFER IS A BITMASK and the bit
@@ -2455,7 +2793,7 @@ export function selfTest() {
   if (dlOps.includes(0)) fail("0 is a display-list op: a zeroed buffer would decode as one");
   if (Math.max(...dlOps) !== DL_MAX) fail("DL_MAX is not the largest op");
   if (DL_MAX_OPS < 1024) fail(`a batch holds only ${DL_MAX_OPS} ops`);
-  const dlt = [DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER];
+  const dlt = [DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLT_ELLIPSIS];
   if (new Set(dlt).size !== dlt.length) fail("two text flags collide");
   for (const b of dlt) {
     if (b === 0 || (b & (b - 1)) !== 0) fail(`text flag ${b} is not a single bit`);
@@ -2529,6 +2867,243 @@ export function selfTest() {
   if (textOfOps(lone, 0) !== null) fail("textOfOps accepted a header with no data records");
   const short = encodeTextRun("hello.txt", { x: 0, y: 0, size: 10, rgba: 0 }).slice(0, 1);
   if (textOfOps(short, 0) !== null) fail("textOfOps accepted a truncated run");
+  // `maxWidth` RIDES a5, which `DLT_ELLIPSIS` is the licence to read. A run that asks for neither
+  // must still write a5 zero, or an older renderer would clip at a width nobody set.
+  {
+    const ell = encodeTextRun("report.txt", {
+      x: 0, y: 0, size: 12, rgba: 0, flags: DLT_ELLIPSIS, maxWidth: 140,
+    });
+    if (ell[0].a5 !== 140) fail(`a maxWidth of 140 reached a5 as ${ell[0].a5}`);
+    if ((ell[0].flags & DLT_ELLIPSIS) === 0) fail("DLT_ELLIPSIS did not survive the header");
+    if (encodeTextRun("x", { x: 0, y: 0, size: 12, rgba: 0 })[0].a5 !== 0) {
+      fail("a run that named no maxWidth wrote something into a5");
+    }
+  }
+
+  /* ---- M19: THE CURSOR TABLE, THE DECLARED SIZES AND THE ADVANCE CODEC --------------------- */
+
+  /* THE CURSOR ENUM IS DENSE FROM 0 AND ITS CSS NAMES ARE INDEXED BY IT. Dense from 0 for the
+   * reason M9's and M14's axes are: it is read out of a `win_set` argument, so a gap would make an
+   * unset argument mean something, and the quiet value must be the ordinary arrow. The name table
+   * is asserted to be exactly as long, because a value with no keyword renders as `undefined` in a
+   * style property — which a browser ignores, so the cursor silently does not change. */
+  const cursors = [WCUR_DEFAULT, WCUR_TEXT, WCUR_POINTER, WCUR_CROSSHAIR, WCUR_MOVE,
+    WCUR_PROGRESS, WCUR_COL_RESIZE, WCUR_NOT_ALLOWED];
+  if (new Set(cursors).size !== cursors.length) fail("two cursor ids collide");
+  if (Math.min(...cursors) !== 0) fail("the cursor enum does not start at 0");
+  if (Math.max(...cursors) !== WCUR_MAX) fail("WCUR_MAX is not the largest cursor id");
+  if (cursors.length !== WCUR_MAX + 1) fail(`the cursor enum is not dense over 0..${WCUR_MAX}`);
+  if (WCUR_DEFAULT !== 0) fail("the quiet cursor must be 0, so an unset window shows an arrow");
+  if (WCUR_CSS.length !== WCUR_MAX + 1) {
+    fail(`WCUR_CSS names ${WCUR_CSS.length} cursors for ${WCUR_MAX + 1} ids`);
+  }
+  if (new Set(WCUR_CSS).size !== WCUR_CSS.length) fail("two cursor ids share a CSS keyword");
+  for (const name of WCUR_CSS) {
+    if (typeof name !== "string" || name === "") fail("a cursor id has no CSS keyword");
+  }
+
+  /* THE DECLARED SIZE SET, AND THE ROUNDING IT IS DERIVED BY. The set is asserted against the
+   * arithmetic rather than against itself: `Math.round` is half-UP, so 11 CSS px at dpr 1.5 is 17
+   * and not the 16 a half-to-even `round()` produces. A set derived the other way publishes a row
+   * nothing draws at and omits one two programs do, and nothing would say so — an undeclared size
+   * falls back by design. */
+  if (TEXT_SIZES.length === 0) fail("no text size has an advance row");
+  for (let i = 1; i < TEXT_SIZES.length; i += 1) {
+    if (TEXT_SIZES[i] <= TEXT_SIZES[i - 1]) fail("TEXT_SIZES is not strictly ascending");
+  }
+  for (const s of TEXT_SIZES) {
+    if (!Number.isInteger(s) || s < 1) fail(`${s} is not a size the renderer can be asked for`);
+  }
+  if (!TEXT_SIZES.includes(Math.round(11 * 1.5))) {
+    fail(`TEXT_SIZES omits Math.round(11 * 1.5) = ${Math.round(11 * 1.5)}, so it was derived with `
+      + "half-to-even rounding and a size two programs draw at has no row");
+  }
+  if (ADV_CP_COUNT !== 95) fail(`the advance table prices ${ADV_CP_COUNT} code points, not 95`);
+  if (ADV_FAMILIES.length !== 4 || new Set(ADV_FAMILIES).size !== 4) {
+    fail(`the family keys are ${ADV_FAMILIES.join(",")}`);
+  }
+  if (advanceKey(DLT_MONO | DLT_BOLD) !== "mono-bold" || advanceKey(0) !== "ui") {
+    fail(`advanceKey gave ${advanceKey(DLT_MONO | DLT_BOLD)} and ${advanceKey(0)}`);
+  }
+  // THE ALIGNMENT FLAGS MUST NOT SELECT A FACE: a right-aligned column and a left-aligned one are
+  // the same typeface, and a key that varied with them would need four more rows per size.
+  if (advanceKey(DLT_RIGHT | DLT_CENTER | DLT_ELLIPSIS) !== "ui") {
+    fail("an alignment flag changes which advance row is read");
+  }
+
+  /* THE DEVICE'S FORMAT, BOTH WAYS. `decodeAdvances` is the declared inverse of `encodeAdvances`,
+   * and it is also the gate a program's layout rests on — so the round trip is asserted over a
+   * fixture whose values are all distinct, and every refusal is asserted separately. A single "it
+   * refused" passes for a decoder that refused the whole file for the wrong reason. */
+  {
+    const fixture = { measured: "selfTest fixture", families: { ui: UI_FAMILY, mono: MONO_FAMILY },
+      adv: {} };
+    let seed = 0;
+    for (const key of ADV_FAMILIES) {
+      fixture.adv[key] = {};
+      for (const size of TEXT_SIZES) {
+        // DISTINCT PER ROW AND PER COLUMN, so a decoder that transposed the table, dropped a row
+        // or reused one would read back a different number rather than a plausible one.
+        fixture.adv[key][size] = Array.from({ length: ADV_CP_COUNT }, () => {
+          seed += 1;
+          return 1 + (seed % 977) / 16;
+        });
+      }
+    }
+    const text = encodeAdvances(fixture);
+    const round = decodeAdvances(text);
+    if (!round) fail("decodeAdvances refused a table encodeAdvances produced");
+    else {
+      if (round.unit !== ADV_UNIT) fail(`the table's unit decoded as ${round.unit}`);
+      if (round.measured !== "selfTest fixture") fail("the provenance line did not survive");
+      if (round.families.ui !== UI_FAMILY || round.families.mono !== MONO_FAMILY) {
+        fail("the measured family stacks did not survive the round trip");
+      }
+      if (round.sizes.join(",") !== TEXT_SIZES.join(",")) {
+        fail(`the table published sizes ${round.sizes.join(",")}`);
+      }
+      for (const key of ADV_FAMILIES) {
+        for (const size of TEXT_SIZES) {
+          const was = fixture.adv[key][size];
+          const now = round.adv[key][size];
+          if (!now || now.length !== was.length || now.some((v, i) => v !== was[i])) {
+            fail(`${key} at ${size} did not round-trip through the device's text`);
+          }
+        }
+      }
+      // THE SUM, AGAINST THE ROW IT CAME FROM. Arithmetic over the table and not over a constant:
+      // an assertion that only checked a type would pass for a function returning a row's first
+      // advance for every string.
+      const row = round.adv.mono[TEXT_SIZES[0]];
+      const want = row[0] + row["A".codePointAt(0) - ADV_CP_MIN] + row[0];
+      const got = advanceWidth(round, " A ", { size: TEXT_SIZES[0], flags: DLT_MONO });
+      if (Math.abs(got - want) > 1e-9) fail(`advanceWidth summed ${got}, the row says ${want}`);
+      if (advanceWidth(round, "", { size: TEXT_SIZES[0], flags: 0 }) !== 0) {
+        fail("an empty run is not zero wide");
+      }
+      // IT READS THE ROW THE FLAGS NAME. The fixture's variants differ, so a function that ignored
+      // `flags` would return the ui width for a mono run.
+      if (advanceWidth(round, "A", { size: TEXT_SIZES[0], flags: DLT_MONO })
+        === advanceWidth(round, "A", { size: TEXT_SIZES[0], flags: 0 })) {
+        fail("advanceWidth read the same row for a mono run and a proportional one");
+      }
+      // A SIZE WITH NO ROW AND A CHARACTER WITH NO ADVANCE ARE BOTH null, which is what sends a
+      // program to `DLT_ELLIPSIS` instead of to a wrong column width.
+      const unpriced = Math.max(...TEXT_SIZES) + 1;
+      if (advanceWidth(round, "A", { size: unpriced, flags: 0 }) !== null) {
+        fail(`advanceWidth priced size ${unpriced}, which has no row`);
+      }
+      if (advanceWidth(round, "naïve", { size: TEXT_SIZES[0], flags: 0 }) !== null) {
+        fail("advanceWidth priced a character outside the table");
+      }
+      if (advanceWidth(round, "\u{1f600}", { size: TEXT_SIZES[0], flags: 0 }) !== null) {
+        fail("advanceWidth priced an astral character");
+      }
+    }
+    // AND THE REFUSALS, each named. The first is the one that makes the device's size set and
+    // `TEXT_SIZES` ONE FACT: the encoder cannot publish any other set, so the kernel fails at
+    // module load rather than serving a table a program indexes by a size that is not there.
+    const bent = { ...fixture, adv: { ...fixture.adv } };
+    bent.adv.ui = { ...fixture.adv.ui };
+    delete bent.adv.ui[TEXT_SIZES[0]];
+    bent.adv.ui[Math.max(...TEXT_SIZES) + 1] = fixture.adv.ui[TEXT_SIZES[0]];
+    let threw = "";
+    try { encodeAdvances(bent); } catch (e) { threw = e.message; }
+    if (!threw.includes("TEXT_SIZES declares")) {
+      fail(`a table whose size set is not TEXT_SIZES encoded, or threw ${threw || "nothing"}`);
+    }
+    const shortRow = { ...fixture, adv: { ...fixture.adv } };
+    shortRow.adv["mono-bold"] = { ...fixture.adv["mono-bold"] };
+    shortRow.adv["mono-bold"][TEXT_SIZES[0]] = fixture.adv["mono-bold"][TEXT_SIZES[0]].slice(0, 4);
+    threw = "";
+    try { encodeAdvances(shortRow); } catch (e) { threw = e.message; }
+    if (!threw.includes("advances, not")) fail("a row with four advances encoded");
+    const zeroed = { ...fixture, adv: { ...fixture.adv } };
+    zeroed.adv.ui = { ...fixture.adv.ui };
+    zeroed.adv.ui[TEXT_SIZES[0]] = fixture.adv.ui[TEXT_SIZES[0]].slice();
+    zeroed.adv.ui[TEXT_SIZES[0]][0] = 0;
+    threw = "";
+    try { encodeAdvances(zeroed); } catch (e) { threw = e.message; }
+    if (!threw.includes("prices U+20")) fail("a zero advance for the space encoded");
+    threw = "";
+    try { encodeAdvances({ ...fixture, measured: "two\tfields" }); } catch (e) { threw = e.message; }
+    if (!threw.includes("carries a tab")) fail("a provenance line with a tab in it encoded");
+    threw = "";
+    try {
+      encodeAdvances({ ...fixture, families: { ui: "Comic Sans", mono: MONO_FAMILY } });
+    } catch (e) { threw = e.message; }
+    if (!threw.includes("family stack this ABI does not declare")) {
+      fail("a table measured in an undeclared family stack encoded");
+    }
+    // The decoder's own refusals, over the real text. Each mutation breaks one thing.
+    const lines = text.trimEnd().split("\n");
+    const bendLine = (i, f) => {
+      const copy = lines.slice();
+      copy[i] = f(copy[i]);
+      return `${copy.join("\n")}\n`;
+    };
+    if (decodeAdvances(bendLine(5, (l) => l.replace("\t10", "\t9"))) !== null) {
+      fail("a table publishing a size set that is not TEXT_SIZES decoded");
+    }
+    if (decodeAdvances(bendLine(4, (l) => l.replace("\t32\t", "\t33\t"))) !== null) {
+      fail("a table publishing a different code-point range decoded");
+    }
+    if (decodeAdvances(bendLine(0, () => "unit:\tcss px")) !== null) {
+      fail("a table publishing a different unit decoded");
+    }
+    if (decodeAdvances(bendLine(7, (l) => l.split("\t").slice(0, 40).join("\t"))) !== null) {
+      fail("a short advance row decoded");
+    }
+    /* AND A ROW WITH ONE ADVANCE TOO MANY, which is the only mutation the LENGTH test alone
+     * catches: a short row is already refused by the per-value test above it, so a control that
+     * deleted the length test moved nothing until this clause existed. A 96th advance means the
+     * table prices a code point the ABI does not declare, and a reader indexing by
+     * `cp - ADV_CP_MIN` would silently read the wrong column for none of them. */
+    if (decodeAdvances(bendLine(7, (l) => `${l}\t9.5`)) !== null) {
+      fail("an advance row with a 96th column decoded");
+    }
+    // FIELD 2 AND NOT THE FIRST MATCH: field 1 is the row's SIZE, and a mutation there is refused
+    // for a different reason — a clause that moved it would pass for a decoder that never looks at
+    // an advance at all.
+    const bendAdvance = (value) => bendLine(7, (l) => {
+      const f = l.split("\t");
+      f[2] = value;
+      return f.join("\t");
+    });
+    if (decodeAdvances(bendAdvance("-3")) !== null) fail("a negative advance decoded");
+    if (decodeAdvances(bendAdvance("0")) !== null) fail("a zero advance decoded");
+    if (decodeAdvances(bendAdvance("nope")) !== null) {
+      fail("an advance that is not a number decoded");
+    }
+    if (decodeAdvances(bendAdvance("")) !== null) fail("an empty advance field decoded");
+    if (decodeAdvances(`${lines.slice(0, lines.length - 1).join("\n")}\n`) !== null) {
+      fail("a table missing a whole row decoded");
+    }
+    if (decodeAdvances(bendLine(7, (l) => l.replace(/^ui\t/, "serif\t"))) !== null) {
+      fail("a row for a family the ABI does not declare decoded");
+    }
+    /* A ROW'S OWN SIZE, which is NOT covered by the `sizes:` header clause above — and a control
+     * that removed the per-row test proved it: the header mutation was refused by the header
+     * check, so the row check was asserting nothing. Both mutations below leave the row COUNT at
+     * 44, which is what makes them reach the per-row tests at all. */
+    const bendRowSize = (line, value) => bendLine(line, (l) => {
+      const f = l.split("\t");
+      f[1] = value;
+      return f.join("\t");
+    });
+    if (decodeAdvances(bendRowSize(7, "9")) !== null) {
+      fail("a row at a size TEXT_SIZES does not declare decoded");
+    }
+    if (decodeAdvances(bendRowSize(8, String(TEXT_SIZES[0]))) !== null) {
+      fail("two rows for one family and size decoded, so one row was silently dropped");
+    }
+    if (decodeAdvances(`${lines.slice(1).join("\n")}\n`) !== null) {
+      fail("a table with no unit header decoded");
+    }
+    if (decodeAdvances("") !== null || decodeAdvances(null) !== null) {
+      fail("an empty table decoded");
+    }
+  }
   // `mods` IS ONE NAMESPACE, AND IT IS CHECKED AS ONE. Every event type shares this 16-bit word
   // and a reader that tests a bit does not first switch on `type`, so a pointer flag, a modifier
   // and a wheel flag may not overlap even though no single event carries all three.
@@ -2571,7 +3146,7 @@ export function selfTest() {
    * cannot enumerate its own bindings — so the cost of a new bit is naming it twice, and the
    * benefit is that forgetting the second place fails the build instead of the feature. */
   const MODS_EXPORTED = {
-    WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3,
+    WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, WPTR_LEAVE,
     WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, WMOD_META,
     WWHEEL_PAGE, WWHEEL_COALESCED,
   };
@@ -2598,7 +3173,8 @@ export function selfTest() {
   if (WMODAL_NONE !== 0 || WMODE_MODELESS !== 0) {
     fail("the quiet value of each axis must be 0, so an unset window is ordinary");
   }
-  const selectors = [WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE];
+  const selectors = [WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+    WIN_SET_CURSOR];
   if (new Set(selectors).size !== selectors.length) fail("two win_set selectors collide");
   // 0 IS NOT A SELECTOR, so a `win_set` with an unset a1 is refused rather than meaning the first
   // case. `calls.mjs` answers -EINVAL for an unknown one, which is what makes that true.

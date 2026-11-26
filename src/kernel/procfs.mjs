@@ -111,6 +111,9 @@ function winLines(win, slot, mgr) {
     // It counts records MERGED, so `queued:` below stays the count of events OFFERED — a coalesced
     // 300-notch stream reads `queued: 1`, `coalesced: 299`, `dropped: 0`, and an appending one
     // reads 300 / 0 / 44.
+    // M19's hovers join them, and the three share this field: a reader that needs one of them apart
+    // settles the other two first, which is why `bench/m19-hover/hover.html` waits for the geometry
+    // to stop reporting before it drives a move.
     `coalesced:\t${win.stats.coalesced}`,
     `parked:\t${win.waitingReaders.length}`,
     `level:\t${win.level}`,
@@ -119,6 +122,13 @@ function winLines(win, slot, mgr) {
     `scope:\t${win.scope}`,
     `mode:\t${win.mode}`,
     `suppressed:\t${win.stats.suppressed}`,
+    // M19. The cursor this window asked for, as a `WCUR_*` number — the page's CSS keyword is
+    // `WCUR_CSS[cursor]` and is not published, because the number is what the ABI defines.
+    `cursor:\t${win.cursor}`,
+    // M19. `WPTR_LEAVE` records OFFERED to this window, BESIDE `suppressed:` because they are the
+    // pair that says what a modal did: a leave is the one input record suppression exempts, so a
+    // leave that reached a blocked window moves this and not that (see `WinMgr.feed`).
+    `leaves:\t${win.stats.leaves}`,
     `stalems:\t${Math.round(win.staleMs())}`,
     `queued:\t${win.stats.queued}`,
     `delivered:\t${win.stats.delivered}`,

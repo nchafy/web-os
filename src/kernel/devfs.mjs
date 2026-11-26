@@ -4,6 +4,7 @@
 import { DIR, FILE } from "../fs/vfs.mjs";
 import { SynthFS, relParts } from "./synth.mjs";
 import { TR_ENTER, TR_EXIT } from "./trace.mjs";
+import { ADVANCE_NAME, ADVANCE_TEXT } from "./advance.mjs";
 import { SYS_NAME } from "../abi.mjs";
 
 /** A cap: the ring holds 524,288 records and a 65,404-byte inline reply (abi.mjs MAX_INLINE)
@@ -38,12 +39,30 @@ export function renderTrace(ring, { limit = TRACE_RENDER_LIMIT } = {}) {
   return `${head.join("\n")}\n${rows.join("\n")}${rows.length ? "\n" : ""}`;
 }
 
-/** `ctx.trace` is `() => TraceRing | null`, called per read and never captured. */
+/** `ctx.trace` is `() => TraceRing | null`, called per read and never captured.
+ *
+ *  A ROW IS `{ make, mode, volatile }` AND NOT A BARE FUNCTION, because the mode and the
+ *  volatility were two ternaries on the name `trace` — which is a per-row fact written where the
+ *  rows are not, and the third row that needed either made that a table. */
 export function makeDevFS(ctx) {
   const FILES = {
-    trace: () => renderTrace(ctx.trace()),
-    null: () => new Uint8Array(0),
-    zero: () => ZERO_BYTES,
+    // `/dev/trace` is 0o444: a process that could write a kernel log could forge a syscall record.
+    // It also grows with every syscall, including this read's, so it publishes no size.
+    trace: { mode: 0o444, volatile: true, make: () => renderTrace(ctx.trace()) },
+    null: { mode: 0o666, make: () => new Uint8Array(0) },
+    zero: { mode: 0o666, make: () => ZERO_BYTES },
+    /* M19's ADVANCE TABLE: per-family, per-size glyph widths in SURFACE px, as DATA. It adds no
+     * measuring capability to a process realm (constraint 41) — a program reads the numbers that
+     * were measured once, and cannot ask for one that was not.
+     *
+     * 0o444 FOR THE REASON `trace` IS, one step weaker: nothing downstream of a forged advance is
+     * privileged, but a process that could rewrite the table could make every OTHER process lay
+     * out its columns wrongly, which is not a thing one program may do to another.
+     *
+     * NOT VOLATILE, and the string is built once in `src/kernel/advance.mjs`: the table cannot
+     * change while the kernel runs, so it publishes its real size and a `stat` then a `read` agree
+     * — which is what lets a program size one buffer and fill it. */
+    [ADVANCE_NAME]: { mode: 0o444, make: () => ADVANCE_TEXT },
   };
 
   const lookup = (rel) => {
@@ -56,12 +75,11 @@ export function makeDevFS(ctx) {
     // dispatcher does not wrap — two syscalls from an unprivileged process faulting the kernel
     // worker.
     if (!Object.prototype.hasOwnProperty.call(FILES, parts[0])) return null;
-    const make = FILES[parts[0]];
-    if (!make) return null;
-    // `/dev/trace` is 0o444: a process that could write a kernel log could forge a syscall record.
-    const mode = parts[0] === "trace" ? 0o444 : 0o666;
-    // `trace` grows with every syscall, including this read's, so it publishes no size.
-    return { type: FILE, content: make(), mode, volatile: parts[0] === "trace" };
+    const row = FILES[parts[0]];
+    if (!row) return null;
+    return {
+      type: FILE, content: row.make(), mode: row.mode, volatile: row.volatile === true,
+    };
   };
 
   const list = (rel) => (relParts(rel).length === 0 ? Object.keys(FILES) : null);

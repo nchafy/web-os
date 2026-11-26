@@ -1,0 +1,1168 @@
+{
+  "ok": false,
+  "sizesDeclared": [
+    10,
+    11,
+    12,
+    13,
+    15,
+    17,
+    18,
+    20,
+    22,
+    24,
+    26
+  ],
+  "sizesMeasured": [
+    26,
+    28,
+    30,
+    32,
+    36,
+    40,
+    44,
+    48
+  ],
+  "declaredFrom": {
+    "cssSizes": [
+      10,
+      11,
+      12,
+      13
+    ],
+    "ratios": [
+      1.0,
+      1.5,
+      2.0
+    ]
+  },
+  "tolerancePx": 0.5,
+  "clauses": {
+    "delivery": {
+      "ok": true,
+      "worlds": [
+        "chrome@dpr1",
+        "chrome@dpr1.5",
+        "chrome@dpr2",
+        "firefox@dpr1",
+        "firefox@dpr1.5",
+        "firefox@dpr2"
+      ],
+      "missing": {}
+    },
+    "coupling": {
+      "ok": true,
+      "mismatches": [],
+      "count": 0,
+      "cellsChecked": 192
+    },
+    "cross-world": {
+      "ok": true,
+      "reference": "chrome@dpr2",
+      "tolerance": 0.5,
+      "worstPx": 0.4021,
+      "worstSpreadPx": 0.4021,
+      "bestAchievablePx": 0.2011,
+      "perSize": {
+        "26": {
+          "px": 0.2138,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "28": {
+          "px": 0.3866,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "30": {
+          "px": 0.3979,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "32": {
+          "px": 0.4021,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "36": {
+          "px": 0.3716,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "40": {
+          "px": 0.3742,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "44": {
+          "px": 0.372,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        },
+        "48": {
+          "px": 0.3453,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "world": "firefox@dpr1"
+        }
+      },
+      "perSizeSpread": {
+        "26": {
+          "px": 0.2138,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 5.4971,
+            "chrome@dpr1.5": 5.4971,
+            "chrome@dpr2": 5.4971,
+            "firefox@dpr1": 5.2833,
+            "firefox@dpr1.5": 5.2833,
+            "firefox@dpr2": 5.2833
+          }
+        },
+        "28": {
+          "px": 0.3866,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 5.9199,
+            "chrome@dpr1.5": 5.9199,
+            "chrome@dpr2": 5.9199,
+            "firefox@dpr1": 5.5333,
+            "firefox@dpr1.5": 5.5333,
+            "firefox@dpr2": 5.5333
+          }
+        },
+        "30": {
+          "px": 0.3979,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 6.5479,
+            "chrome@dpr1.5": 6.5479,
+            "chrome@dpr2": 6.5479,
+            "firefox@dpr1": 6.15,
+            "firefox@dpr1.5": 6.15,
+            "firefox@dpr2": 6.15
+          }
+        },
+        "32": {
+          "px": 0.4021,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 6.9688,
+            "chrome@dpr1.5": 6.9688,
+            "chrome@dpr2": 6.9688,
+            "firefox@dpr1": 6.5667,
+            "firefox@dpr1.5": 6.5667,
+            "firefox@dpr2": 6.5667
+          }
+        },
+        "36": {
+          "px": 0.3716,
+          "variant": "ui-bold",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 7.4883,
+            "chrome@dpr1.5": 7.4883,
+            "chrome@dpr2": 7.4883,
+            "firefox@dpr1": 7.1167,
+            "firefox@dpr1.5": 7.1167,
+            "firefox@dpr2": 7.1167
+          }
+        },
+        "40": {
+          "px": 0.3742,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 8.5742,
+            "chrome@dpr1.5": 8.5742,
+            "chrome@dpr2": 8.5742,
+            "firefox@dpr1": 8.2,
+            "firefox@dpr1.5": 8.2,
+            "firefox@dpr2": 8.2
+          }
+        },
+        "44": {
+          "px": 0.372,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 9.3887,
+            "chrome@dpr1.5": 9.3887,
+            "chrome@dpr2": 9.3887,
+            "firefox@dpr1": 9.0167,
+            "firefox@dpr1.5": 9.0167,
+            "firefox@dpr2": 9.0167
+          }
+        },
+        "48": {
+          "px": 0.3453,
+          "variant": "ui",
+          "char": " ",
+          "code": 32,
+          "values": {
+            "chrome@dpr1": 10.1953,
+            "chrome@dpr1.5": 10.1953,
+            "chrome@dpr2": 10.1953,
+            "firefox@dpr1": 9.85,
+            "firefox@dpr1.5": 9.85,
+            "firefox@dpr2": 9.85
+          }
+        }
+      },
+      "cells": 3040,
+      "disagreeingChars": {
+        " ": {
+          "code": 32,
+          "cells": 32,
+          "worstPx": 0.4021,
+          "variants": [
+            "mono",
+            "mono-bold",
+            "ui",
+            "ui-bold"
+          ],
+          "sizes": [
+            26,
+            28,
+            30,
+            32,
+            36,
+            40,
+            44,
+            48
+          ]
+        }
+      },
+      "disagreeingCharCount": 95,
+      "quietWorstPx": 0.0136,
+      "reportFloorPx": 0.05,
+      "charsMeasured": 95
+    },
+    "ratio-independence": {
+      "ok": true,
+      "measured": true,
+      "epsilon": 0.0001,
+      "worstPx": 0.0,
+      "perEngine": {
+        "chrome": {
+          "ratios": [
+            1,
+            1.5,
+            2
+          ],
+          "worst": {
+            "px": 0.0
+          }
+        },
+        "firefox": {
+          "ratios": [
+            1,
+            1.5,
+            2
+          ],
+          "worst": {
+            "px": 0.0
+          }
+        }
+      }
+    },
+    "kerning-mono": {
+      "ok": true,
+      "tolerance": 0.5,
+      "worstPx": 0.0,
+      "signedRange": [
+        0.0,
+        0.0
+      ],
+      "worstRelative": null,
+      "perSize": {
+        "26": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "readme.txt",
+          "measured": 156.5332,
+          "sum": 156.5332
+        },
+        "28": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 28,
+          "string": "readme.txt",
+          "measured": 168.5742,
+          "sum": 168.5742
+        },
+        "30": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 30,
+          "string": "readme.txt",
+          "measured": 180.6152,
+          "sum": 180.6152
+        },
+        "32": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 32,
+          "string": "readme.txt",
+          "measured": 192.6563,
+          "sum": 192.6563
+        },
+        "36": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 36,
+          "string": "readme.txt",
+          "measured": 216.7383,
+          "sum": 216.7383
+        },
+        "40": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 40,
+          "string": "readme.txt",
+          "measured": 240.8203,
+          "sum": 240.8203
+        },
+        "44": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 44,
+          "string": "readme.txt",
+          "measured": 264.9023,
+          "sum": 264.9023
+        },
+        "48": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 48,
+          "string": "readme.txt",
+          "measured": 288.9844,
+          "sum": 288.9844
+        }
+      },
+      "perString": {
+        "readme.txt": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "readme.txt",
+          "measured": 156.5332,
+          "sum": 156.5332
+        },
+        "Documents": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "Documents",
+          "measured": 140.8799,
+          "sum": 140.8799
+        },
+        "AVATAR.png": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "AVATAR.png",
+          "measured": 156.5332,
+          "sum": 156.5332
+        },
+        "To-do list.md": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "To-do list.md",
+          "measured": 203.4932,
+          "sum": 203.4932
+        },
+        "Wave_form.rgba": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "Wave_form.rgba",
+          "measured": 219.1465,
+          "sum": 219.1465
+        },
+        "f(x)=y.log": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "f(x)=y.log",
+          "measured": 156.5332,
+          "sum": 156.5332
+        },
+        "LT-WAVY.TXT": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "LT-WAVY.TXT",
+          "measured": 172.1865,
+          "sum": 172.1865
+        },
+        "file (1).txt": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "file (1).txt",
+          "measured": 187.8398,
+          "sum": 187.8398
+        },
+        "lorem ipsum dolor sit amet.txt": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "lorem ipsum dolor sit amet.txt",
+          "measured": 469.5996,
+          "sum": 469.5996
+        },
+        "a.out": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "a.out",
+          "measured": 78.2666,
+          "sum": 78.2666
+        },
+        "2026-11-25 23:14": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "2026-11-25 23:14",
+          "measured": 250.4531,
+          "sum": 250.4531
+        },
+        "1.4 MB": {
+          "px": 0.0,
+          "signedPx": 0.0,
+          "variant": "mono",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "1.4 MB",
+          "measured": 93.9199,
+          "sum": 93.9199
+        }
+      },
+      "samples": 1152
+    },
+    "kerning-proportional": {
+      "ok": false,
+      "tolerance": 0.5,
+      "worstPx": 24.375,
+      "signedRange": [
+        -24.375,
+        0.0
+      ],
+      "worstRelative": {
+        "px": 24.375,
+        "signedPx": -24.375,
+        "variant": "ui",
+        "world": "chrome@dpr1",
+        "size": 48,
+        "string": "LT-WAVY.TXT",
+        "measured": 284.2031,
+        "sum": 308.5781,
+        "frac": 0.08577
+      },
+      "perSize": {
+        "26": {
+          "px": 13.2147,
+          "signedPx": -13.2147,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "LT-WAVY.TXT",
+          "measured": 155.4806,
+          "sum": 168.6953
+        },
+        "28": {
+          "px": 14.2188,
+          "signedPx": -14.2188,
+          "variant": "ui",
+          "world": "chrome@dpr2",
+          "size": 28,
+          "string": "LT-WAVY.TXT",
+          "measured": 167.7402,
+          "sum": 181.959
+        },
+        "30": {
+          "px": 15.2344,
+          "signedPx": -15.2344,
+          "variant": "ui",
+          "world": "chrome@dpr2",
+          "size": 30,
+          "string": "LT-WAVY.TXT",
+          "measured": 179.5605,
+          "sum": 194.7949
+        },
+        "32": {
+          "px": 16.2666,
+          "signedPx": -16.2666,
+          "variant": "ui",
+          "world": "firefox@dpr2",
+          "size": 32,
+          "string": "LT-WAVY.TXT",
+          "measured": 191.3167,
+          "sum": 207.5833
+        },
+        "36": {
+          "px": 18.2834,
+          "signedPx": -18.2834,
+          "variant": "ui",
+          "world": "firefox@dpr1",
+          "size": 36,
+          "string": "LT-WAVY.TXT",
+          "measured": 214.2833,
+          "sum": 232.5667
+        },
+        "40": {
+          "px": 20.3167,
+          "signedPx": -20.3167,
+          "variant": "ui",
+          "world": "firefox@dpr1",
+          "size": 40,
+          "string": "LT-WAVY.TXT",
+          "measured": 237.6833,
+          "sum": 258
+        },
+        "44": {
+          "px": 22.3437,
+          "signedPx": -22.3437,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 44,
+          "string": "LT-WAVY.TXT",
+          "measured": 260.9922,
+          "sum": 283.3359
+        },
+        "48": {
+          "px": 24.375,
+          "signedPx": -24.375,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 48,
+          "string": "LT-WAVY.TXT",
+          "measured": 284.2031,
+          "sum": 308.5781
+        }
+      },
+      "perString": {
+        "readme.txt": {
+          "px": 3.2834,
+          "signedPx": -3.2834,
+          "variant": "ui",
+          "world": "firefox@dpr2",
+          "size": 48,
+          "string": "readme.txt",
+          "measured": 215.1333,
+          "sum": 218.4167
+        },
+        "Documents": {
+          "px": 0.0231,
+          "signedPx": -0.0231,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 26,
+          "string": "Documents",
+          "measured": 129.1771,
+          "sum": 129.2002
+        },
+        "AVATAR.png": {
+          "px": 17.5833,
+          "signedPx": -17.5833,
+          "variant": "ui-bold",
+          "world": "firefox@dpr2",
+          "size": 48,
+          "string": "AVATAR.png",
+          "measured": 273.95,
+          "sum": 291.5333
+        },
+        "To-do list.md": {
+          "px": 6.3282,
+          "signedPx": -6.3282,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 48,
+          "string": "To-do list.md",
+          "measured": 266.0156,
+          "sum": 272.3438
+        },
+        "Wave_form.rgba": {
+          "px": 8.6719,
+          "signedPx": -8.6719,
+          "variant": "ui",
+          "world": "chrome@dpr2",
+          "size": 48,
+          "string": "Wave_form.rgba",
+          "measured": 333.2578,
+          "sum": 341.9297
+        },
+        "f(x)=y.log": {
+          "px": 3.5167,
+          "signedPx": -3.5167,
+          "variant": "ui",
+          "world": "firefox@dpr1",
+          "size": 48,
+          "string": "f(x)=y.log",
+          "measured": 192.3,
+          "sum": 195.8167
+        },
+        "LT-WAVY.TXT": {
+          "px": 24.375,
+          "signedPx": -24.375,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 48,
+          "string": "LT-WAVY.TXT",
+          "measured": 284.2031,
+          "sum": 308.5781
+        },
+        "file (1).txt": {
+          "px": 2.2265,
+          "signedPx": -2.2265,
+          "variant": "ui-bold",
+          "world": "chrome@dpr2",
+          "size": 48,
+          "string": "file (1).txt",
+          "measured": 209.1094,
+          "sum": 211.3359
+        },
+        "lorem ipsum dolor sit amet.txt": {
+          "px": 3.2834,
+          "signedPx": -3.2834,
+          "variant": "ui",
+          "world": "firefox@dpr2",
+          "size": 48,
+          "string": "lorem ipsum dolor sit amet.txt",
+          "measured": 593.0833,
+          "sum": 596.3667
+        },
+        "a.out": {
+          "px": 1.4167,
+          "signedPx": -1.4167,
+          "variant": "ui",
+          "world": "firefox@dpr2",
+          "size": 48,
+          "string": "a.out",
+          "measured": 99.9833,
+          "sum": 101.4
+        },
+        "2026-11-25 23:14": {
+          "px": 1.9,
+          "signedPx": -1.9,
+          "variant": "ui",
+          "world": "firefox@dpr2",
+          "size": 48,
+          "string": "2026-11-25 23:14",
+          "measured": 381.45,
+          "sum": 383.35
+        },
+        "1.4 MB": {
+          "px": 1.1719,
+          "signedPx": -1.1719,
+          "variant": "ui",
+          "world": "chrome@dpr1",
+          "size": 48,
+          "string": "1.4 MB",
+          "measured": 140.2969,
+          "sum": 141.4688
+        }
+      },
+      "samples": 1152
+    },
+    "scaled-table": {
+      "reported": true,
+      "emSize": 48,
+      "worst": {
+        "px": 0.3681,
+        "world": "chrome@dpr2",
+        "variant": "ui-bold",
+        "size": 26,
+        "char": "%",
+        "scaled": 23.334,
+        "measured": 23.7021
+      },
+      "withinTolerance": true
+    }
+  },
+  "failed": [
+    "kerning-proportional"
+  ],
+  "controls": [],
+  "verdict": "A MONOSPACED COLUMN CAN BE FITTED EXACTLY (worst 0.0000 px) AND A PROPORTIONAL ONE CANNOT: the table serves every world to 0.4021 px, but a summed width is wrong by up to 24.3750 px (8.58% of the string) because the renderer KERNS. The sum is an UPPER BOUND, so a fitted proportional column is too WIDE and never too narrow; a width a reader must trust stays proportional with `DLT_ELLIPSIS` carrying R20.",
+  "notes": [
+    "worlds measured: chrome@dpr1 dpr=1, chrome@dpr1.5 dpr=1.5, chrome@dpr2 dpr=2, firefox@dpr1 dpr=1, firefox@dpr1.5 dpr=1.5, firefox@dpr2 dpr=2   (reference chrome@dpr2)",
+    "  chrome@dpr1      dpr 1    isolated=True  HeadlessChrome 158.0.0.0 text runs 32, unknown ops 0",
+    "  chrome@dpr1.5    dpr 1.5  isolated=True  HeadlessChrome 158.0.0.0 text runs 32, unknown ops 0",
+    "  chrome@dpr2      dpr 2    isolated=True  HeadlessChrome 158.0.0.0 text runs 32, unknown ops 0",
+    "  firefox@dpr1     dpr 1    isolated=True  Firefox 156.0            text runs 32, unknown ops 0",
+    "  firefox@dpr1.5   dpr 1.5  isolated=True  Firefox 156.0            text runs 32, unknown ops 0",
+    "  firefox@dpr2     dpr 2    isolated=True  Firefox 156.0            text runs 32, unknown ops 0",
+    "WITHIN one engine, across its ratios, the worst advance movement:",
+    "    chrome   ratios 1,1.5,2           0.0000 px",
+    "    firefox  ratios 1,1.5,2           0.0000 px",
+    "per size, the WORST advance deviation from chrome@dpr2 over 3040 cells (best a midpoint table could do: 0.2011 px):",
+    "    26px declared   0.2138 px   worst at ui-bold ' ' (U+0020) in firefox@dpr1",
+    "    28px            0.3866 px   worst at ui-bold ' ' (U+0020) in firefox@dpr1",
+    "    30px            0.3979 px   worst at ui ' ' (U+0020) in firefox@dpr1",
+    "    32px            0.4021 px   worst at ui ' ' (U+0020) in firefox@dpr1",
+    "    36px            0.3716 px   worst at ui-bold ' ' (U+0020) in firefox@dpr1",
+    "    40px            0.3742 px   worst at ui ' ' (U+0020) in firefox@dpr1",
+    "    44px            0.3720 px   worst at ui ' ' (U+0020) in firefox@dpr1",
+    "    48px            0.3453 px   worst at ui ' ' (U+0020) in firefox@dpr1",
+    "code points that disagree between worlds at all: 95 of 95; 1 by more than 0.05 px, and the largest of the rest is 0.0136 px",
+    "  ' ' (U+0020)  worst 0.4021 px in 32 cells, variants mono,mono-bold,ui,ui-bold, sizes 26,28,30,32,36,40,44,48",
+    "mono: per size, the WORST |measureText(string) - sum of advances| (1152 samples, signed range +0.0000..+0.0000 px):",
+    "    26px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 156.5332, summed 156.5332)",
+    "    28px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 168.5742, summed 168.5742)",
+    "    30px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 180.6152, summed 180.6152)",
+    "    32px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 192.6563, summed 192.6563)",
+    "    36px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 216.7383, summed 216.7383)",
+    "    40px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 240.8203, summed 240.8203)",
+    "    44px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 264.9023, summed 264.9023)",
+    "    48px   0.0000 px   'readme.txt' in chrome@dpr1 mono (measured 288.9844, summed 288.9844)",
+    "proportional: per size, the WORST |measureText(string) - sum of advances| (1152 samples, signed range -24.3750..+0.0000 px):",
+    "  ! 26px  13.2147 px   'LT-WAVY.TXT' in chrome@dpr1 ui (measured 155.4806, summed 168.6953)",
+    "  ! 28px  14.2188 px   'LT-WAVY.TXT' in chrome@dpr2 ui (measured 167.7402, summed 181.9590)",
+    "  ! 30px  15.2344 px   'LT-WAVY.TXT' in chrome@dpr2 ui (measured 179.5605, summed 194.7949)",
+    "  ! 32px  16.2666 px   'LT-WAVY.TXT' in firefox@dpr2 ui (measured 191.3167, summed 207.5833)",
+    "  ! 36px  18.2834 px   'LT-WAVY.TXT' in firefox@dpr1 ui (measured 214.2833, summed 232.5667)",
+    "  ! 40px  20.3167 px   'LT-WAVY.TXT' in firefox@dpr1 ui (measured 237.6833, summed 258.0000)",
+    "  ! 44px  22.3437 px   'LT-WAVY.TXT' in chrome@dpr1 ui (measured 260.9922, summed 283.3359)",
+    "  ! 48px  24.3750 px   'LT-WAVY.TXT' in chrome@dpr1 ui (measured 284.2031, summed 308.5781)",
+    "  worst as a FRACTION of the string's width: 8.58% ('LT-WAVY.TXT' at ui 48px)",
+    "proportional: the WORST error per string, over every world, variant and size:",
+    "   24.3750 px  'LT-WAVY.TXT'                    ui 48px",
+    "   17.5833 px  'AVATAR.png'                     ui-bold 48px",
+    "    8.6719 px  'Wave_form.rgba'                 ui 48px",
+    "    6.3282 px  'To-do list.md'                  ui 48px",
+    "    3.5167 px  'f(x)=y.log'                     ui 48px",
+    "    3.2834 px  'readme.txt'                     ui 48px",
+    "    3.2834 px  'lorem ipsum dolor sit amet.txt' ui 48px",
+    "    2.2265 px  'file (1).txt'                   ui-bold 48px",
+    "    1.9000 px  '2026-11-25 23:14'               ui 48px",
+    "    1.4167 px  'a.out'                          ui 48px",
+    "    1.1719 px  '1.4 MB'                         ui 48px",
+    "    0.0231 px  'Documents'                      ui 26px",
+    "linearity: scaling the 48px row gives a worst error of 0.3681 px (chrome@dpr2 ui-bold 26px '%')"
+  ],
+  "worlds": {
+    "chrome@dpr1": {
+      "dpr": 1,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 1.0,
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    },
+    "chrome@dpr1.5": {
+      "dpr": 1.5,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 1.5,
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    },
+    "chrome@dpr2": {
+      "dpr": 2,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 2.0,
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    },
+    "firefox@dpr1": {
+      "dpr": 1,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 1.0,
+      "setViewport": {
+        "ok": true,
+        "error": ""
+      },
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    },
+    "firefox@dpr1.5": {
+      "dpr": 1.5,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 1.5,
+      "setViewport": {
+        "ok": true,
+        "error": ""
+      },
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    },
+    "firefox@dpr2": {
+      "dpr": 2,
+      "isolated": true,
+      "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0",
+      "strings": [
+        "readme.txt",
+        "Documents",
+        "AVATAR.png",
+        "To-do list.md",
+        "Wave_form.rgba",
+        "f(x)=y.log",
+        "LT-WAVY.TXT",
+        "file (1).txt",
+        "lorem ipsum dolor sit amet.txt",
+        "a.out",
+        "2026-11-25 23:14",
+        "1.4 MB"
+      ],
+      "sizes": [
+        26,
+        28,
+        30,
+        32,
+        36,
+        40,
+        44,
+        48
+      ],
+      "families": {
+        "ui": "\"Segoe UI\", system-ui, -apple-system, sans-serif",
+        "mono": "ui-monospace, Menlo, Consolas, monospace"
+      },
+      "surface": {
+        "text": 32,
+        "unknown": 0,
+        "batches": 32
+      },
+      "askedDpr": 2.0,
+      "setViewport": {
+        "ok": true,
+        "error": ""
+      },
+      "fontSample": {
+        "ui": {
+          "renderer": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "ui-bold": {
+          "renderer": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif",
+          "declared": "bold 26px \"Segoe UI\", system-ui, -apple-system, sans-serif"
+        },
+        "mono": {
+          "renderer": "26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "26px ui-monospace, Menlo, Consolas, monospace"
+        },
+        "mono-bold": {
+          "renderer": "bold 26px ui-monospace, Menlo, Consolas, monospace",
+          "declared": "bold 26px ui-monospace, Menlo, Consolas, monospace"
+        }
+      }
+    }
+  },
+  "table": "bench/m19-advance/table-sizes-26-48.json"
+}

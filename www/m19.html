@@ -1,0 +1,1835 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M19 — details, sort, selection, hover</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M18's pages do it,
+   and here it is load-bearing for the same reason it is on M16's, M17's and M18's: `.window-body`
+   is the client area a surface fills and the element every CSS-px reading below is measured off. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop out from under every rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:160px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M19 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M19 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M19's page: DETAILS, SORT, SELECTION, HOVER.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * fixture windows and then block in `gestureAsker`, which looks exactly like a broken product.
+ *
+ *   PROOF 1  SORT. A driven click on the `Type` header sorts by it, a second click REVERSES it, and
+ *            the DIRECTORIES STAY FIRST both ways. The names inside a tie group ascend whichever
+ *            way the primary sorted, which is the whole of what stable means here
+ *   PROOF 2  THE CELLS A STAT BUYS. A folder's SIZE cell is empty AND ITS DATE CELL IS NOT — the
+ *            second half is what proves the directory `lstat` is paid, and the first is what says
+ *            an empty cell is a statement rather than a gap. Asserted on an OPFS directory under
+ *            `/tmp`, because a provider or synth inode publishes mtime 0 and the clause would then
+ *            be about the mount
+ *   PROOF 3  HOVER. A driven BUTTONLESS MOVE lights a row, a SECOND one moves the light, a
+ *            `pointerleave` CLEARS it — and a stream of them into a program that is NOT draining
+ *            shows `queued:` standing still while `coalesced:` rises by the sample count, which is
+ *            the tail replacement constraint 223's amendment rests on
+ *   PROOF 4  SELECTION. Shift+click selects a range in LAYOUT order; Ctrl+click toggles one row AND
+ *            MOVES THE ANCHOR, which is proved by where the NEXT Shift+click ranges from
+ *   PROOF 5  THE ARBITRATION. A band from empty space selects by intersection and starts no drag; a
+ *            press on a row starts a drag and no band. The arbitration is the assertion, so each
+ *            half is read as the thing the other must not have done
+ *
+ * EVERY GESTURE HERE IS REAL INPUT and the page drives none of it: a synthesised `PointerEvent` is
+ * `isTrusted === false` (constraint 175), and `setPointerCapture` refuses a pointerId no live
+ * pointer owns. The one synthesised key in the run is the `q` that tears each fixture down, and it
+ * says so where it is sent.
+ *
+ * EVERY CLAUSE IS READ OFF THE DISPLAY LIST THE PAGE REPLAYED, through `textOfOps` for the strings
+ * and through `FILES_METRICS` for every rectangle (plan §M19). Two things follow, and both are
+ * deliberate:
+ *
+ *   1. NO COLOUR IS WRITTEN HERE. `src/bin/files.mjs` exports no palette, and a page that restated
+ *      `LIT_FILL` would be a second definition of the program's ink. The readings are STRUCTURAL
+ *      instead: a SELECTED row is a full-width band fill with an OUTLINE stroke on the same
+ *      rectangle, and a LIT row is a band fill with no stroke on it — which is exactly how `paint`
+ *      draws the two. The keyboard cursor's ring is excluded by its x, which is `PAD + FOCUS_INSET`
+ *      against the band's `PAD` (M18's discriminator, and the ratios the suite drives keep the two
+ *      a pixel apart).
+ *   2. EVERY ROW IS NAMED AND NEVER NUMBERED ACROSS A GESTURE. The sort reorders `rows` itself, so
+ *      an index taken before a header click names a different file after it — which is the defect
+ *      the program's own selection-by-identity rule exists to avoid. The page aims at a row by
+ *      finding its NAME in the list it just read.
+ *
+ * WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped: `WIN_SET_CURSOR`. The kernel has
+ * `WinMgr.setCursor` and `src/wm/winhost.mjs` renders `WCUR_CSS`, but `src/libos/syscall.mjs` has no
+ * `winSetCursor` stub — so no PROGRAM can reach the selector and there is nothing for a program's
+ * window to ask for. `bench/m19-host/drive.py` drives that half page-side, where it is reachable.
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import {
+  DL_CLIP, DL_FILL_RECT, DL_STROKE_RECT, DL_TEXT, DLT_RIGHT, WIN_EVENT_CAP,
+  DOBJ_PATHS, DOBJ_TEXT, decodeDrawOps, textOfOps,
+} from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import {
+  bootKernel, spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+/* THE LIVE DESKTOP IS STAGED FROM HERE AND NOT BELOW, which is M17's lesson applied rather than
+ * repeated: a page's own copy of "assemble the shell" is how a program that landed in one page's
+ * copy came to be absent from every other.
+ * THE PROOFS PATH BOOTS ITS OWN BARE HOST: its clauses are measured against two fixture windows on
+ * an empty desktop, and a taskbar reserving a strip under them would be a different desktop. */
+import { stageDesktop, place, PROGRAMS, DESKTOP_HELP } from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. One spelling, so a call site cannot be read as a
+ *  condition nobody wrote. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /* THE FOUR PROGRAM CONTROLS ARE `src/bin/files.mjs`'S OWN DECLARED FLAGS, passed on argv where
+   * the fixture is spawned. M17's precedent and its reason: the worlds they select live inside the
+   * program, so a boot cfg could not reach them, and a flag nobody consumed would be a green run
+   * over an unmodified world. */
+  stableSortOff: params.get('stable_sort_off') === '1',
+  foldersLast: params.get('folders_last') === '1',
+  noDirStat: params.get('no_dir_stat') === '1',
+  bandFromRow: params.get('band_from_row') === '1',
+  /** The kernel APPENDS a buttonless move instead of replacing the tail one. `setHoverCoalesce` is
+   *  exported from `src/kernel/wins.mjs` and NO boot-cfg branch in `src/kernel/kernel.mjs` calls it
+   *  yet — `cfg.noWheelCoalesce` has one at `:1705` and this has none — so this page asks for the
+   *  world and then MEASURES whether it got it. See `proofHover`'s closing guard. */
+  noHoverCoalesce: params.get('no_hover_coalesce') === '1',
+}
+globalThis.M19.config = CFG
+
+/* THE PAGE-SIDE CONTROLS ARE STATED EVEN WHERE THIS PAGE SETS NONE, because they are MODULE state
+ * and another page in this realm may have left them holding something. "None, and said so" is the
+ * fail-closed spelling; M16's, M17's and M18's pages carry the same note. M19's own controls are
+ * all either the program's argv or the kernel's boot cfg, so neither setter takes a key here. */
+setSurfaceControls({})
+setHostControls({})
+
+/** Chrome's own modifier bitmask: Alt 1, Ctrl 2, Meta 4, Shift 8. It is the protocol's number and
+ *  not this project's — `scripts/check.py` records the same table beside its `CTRL = 2`, and a page
+ *  cannot import from a Python module, so this is a restatement with its source named rather than a
+ *  constant invented here. */
+const CHROME_MOD_CTRL = 2
+const CHROME_MOD_SHIFT = 8
+
+const FILES = '/src/bin/files.mjs'
+const CP = '/src/bin/cp.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+const RM = '/src/bin/rm.mjs'
+const GREP = '/src/bin/grep.mjs'
+
+/**
+ * THE DIRECTORY THE PROOFS READ, AND IT IS BUILT HERE THROUGH ORDINARY PROGRAMS.
+ *
+ * `/tmp` IS THE MOUNT AND THAT IS PROOF 2's WHOLE FIXTURE. A provider or synth inode publishes
+ * mtime 0 — measured, and it is why `cellOf` draws `UNKNOWN_CELL` for a statted row with a zero
+ * stamp — so "a folder's Date cell is not empty" asserted over `/usr` would be a clause about the
+ * mount and not about the call. An OPFS directory carries a real stamp.
+ *
+ * IT IS REMOVED FIRST. OPFS outlives a page load, so a directory merely `mkdir`ed into existence
+ * accumulates whatever an earlier run left in it — and every clause below asserts an EXACT row set.
+ *
+ * THE SHAPE IS THE PROOFS'. TWO DIRECTORIES so "directories stay first" is a pair and not a single
+ * row that could be first by accident, and so `--stable-sort-off` has a tie to disturb inside them.
+ * FOUR DISTINCT TYPE CELLS over six files, with THREE of them sharing one — the `.txt` group is the
+ * tie the stable term orders, and a sort with no tie in it cannot tell a stable comparator from a
+ * naive one. The `.bin` row is a format nothing names, which draws `UNKNOWN_CELL` in the type
+ * column: the sort is over the CELL, so that row has a place in the order like any other.
+ */
+const ROOT_DIR = '/tmp/m19'
+const DIRS = Object.freeze(['dir-a', 'dir-b'])
+/** THE BYTES ARE REAL, through `cp` from `/usr/share`, for one reason that is proof 5's: a drag
+ *  publishes a data object and a program with nothing to offer is a program whose drag might be
+ *  refused for a reason that is not the arbitration. `f.bin` is `touch`ed and stays empty — it is
+ *  there for the type column, not for the drag. */
+const COPIES = Object.freeze([
+  ['/usr/share/readme.txt', 'a.txt'],
+  ['/usr/share/readme.txt', 'b.txt'],
+  ['/usr/share/readme.txt', 'c.txt'],
+  ['/usr/share/logo.rgba', 'd.rgba'],
+  ['/usr/share/logo.png', 'e.png'],
+])
+const TOUCHED = Object.freeze(['f.bin'])
+const FILE_NAMES = Object.freeze(COPIES.map(([, name]) => name).concat(TOUCHED))
+const ROW_COUNT = DIRS.length + FILE_NAMES.length
+
+/**
+ * THE THREE ORDERS, WRITTEN OUT — and written out on purpose.
+ *
+ * A page that sorted the fixture itself to predict them would be a second copy of `compareRows`,
+ * and a second comparator agrees with the first about every bug it shares. These are the orders the
+ * program OWES, stated by the check; the program's job is to produce them.
+ *
+ * ONLY THE FILE ROWS ARE LISTED, and that is what keeps `--folders-last` a control over ONE clause.
+ * That flag moves the directories from the front to the back and nothing else — the file rows keep
+ * their relative order — so a clause naming the whole list would go red for it as well as for the
+ * thing it is about. `theDirectoriesComeFirst` is the clause that owns the directories.
+ *
+ * `TYPE_DESC` HAS THE `.txt` GROUP ASCENDING, which is the stable term: reversing the primary must
+ * not shuffle the rows inside a tie. `--stable-sort-off` is the world where it does, and
+ * `theNamesAscendInEachTie` is the clause it turns.
+ */
+const NAME_ASC = Object.freeze(['a.txt', 'b.txt', 'c.txt', 'd.rgba', 'e.png', 'f.bin'])
+const TYPE_ASC = Object.freeze(['d.rgba', 'e.png', 'a.txt', 'b.txt', 'c.txt', 'f.bin'])
+const TYPE_DESC = Object.freeze(['f.bin', 'a.txt', 'b.txt', 'c.txt', 'e.png', 'd.rgba'])
+
+/** The column the proofs sort by. `Type` AND NOT `Name`: the opening order is name-ascending and
+ *  nobody chose it, so the first click on `Name` is a CHOICE rather than a reversal
+ *  (`sort.chosen` in `src/bin/files.mjs`) and "a click sorts, a second reverses" would need three
+ *  clicks to say. A click on any other column sorts ascending on the first press. */
+const SORT_COLUMN = 'type'
+
+/** The row proof 5 drags. A `.txt`, because `startDrag` refuses a DIRECTORY and a row whose format
+ *  nothing names — both by name and counted — and a refused drag would turn the arbitration clause
+ *  for a reason that is not the arbitration. */
+const DRAG_ROW = 'a.txt'
+
+/**
+ * HOW MANY BUTTONLESS MOVES THE STREAM IS.
+ *
+ * WELL ABOVE TWO, because one merge is all a tail replacement needs to be visible and a stream of
+ * one cannot show it; and WELL BELOW `WIN_EVENT_CAP`, which is the deliberate half. `dropped:` is
+ * not a clause here — the plan says so, for M17's reason — so the stream must not lap the ring in
+ * EITHER world: appending 40 records into a 256-record queue drops none, so `dropped: 0` holds in
+ * both and the clauses rest on `queued:` and `coalesced:` alone. The 500-move stream that measured
+ * the overflow is `bench/m19-hover/probe.py`'s, and the figures it published are the ones constraint
+ * 223's amendment cites.
+ */
+const HOVER_SAMPLES = 40
+/** THE ROW THE STREAM IS AIMED AT, in the HELD window's own list — row 4 of eight, which is the
+ *  middle of a listing `clientHeightFor(8)` tall. Every sample shares its y and only the x moves, so
+ *  the record the program eventually reads is a position over a ROW rather than in the gap between
+ *  two; nothing is asserted about which row it lights (`proofHover`'s `theProgramSawOneRecord`). */
+const HOVER_ROW = 4
+/**
+ * How long `files --no-drain` holds its event loop for proof 3, ms.
+ *
+ * IT MUST OUTLAST THE STAGING AND THE WHOLE STREAM, and `theHoldOutlastedTheStream` is the margin
+ * asserted rather than hoped. It was first measured the other way round: a 600 ms settle after EVERY
+ * sample made a 40-sample stream 25.4 s against a 20 s hold, the program drained halfway through,
+ * and `queued:` rose by 11 while `coalesced:` rose by 30 — the clause failing because the FIXTURE
+ * had expired and not because the kernel appended. The stream now settles ONCE, at the end, where
+ * the counters are read.
+ *
+ * THE PAGE CANNOT FINISH SOONER THAN THIS, because the program resumes only when the hold ends. The
+ * stream is about 3 s, so this is roughly a 4x margin and that is what the margin costs.
+ */
+const HOLD_MS = 15000
+
+/**
+ * The window the proofs drive, CSS px.
+ *
+ * TALL ENOUGH THAT THE LIST DOES NOT SCROLL AND THERE IS STILL EMPTY SPACE UNDER THE LAST ROW. Both
+ * halves are load-bearing: every rectangle below is located at `scroll === 0`, which
+ * `theListDoesNotScroll` is the program's own word for, and proof 5's band must START on empty space
+ * INSIDE the clipped viewport — a press above it finds the header and a press below it is outside
+ * the hit test, and neither arms a band.
+ *
+ * WIDE ENOUGH FOR FOUR COLUMNS. `columnBoxes` gives the fixed three 244 CSS px between them and
+ * floors the flexible Name column at `NAME_MIN_W`; at this width the Name column is about 250 px,
+ * so no cell is near its `DLT_ELLIPSIS` limit and the names read back whole.
+ *
+ * AT THE TOP-LEFT OF THE DESKTOP, which is M18's corner and is here for its MEASURED reason: a
+ * dispatched mouse event carries a VIEWPORT coordinate, so a point past `innerWidth` reaches nothing
+ * at all and every clause goes red with nothing saying why. `viewportPoint` is the guard, and this
+ * corner is where a 520x360 frame is inside any viewport the suite emulates.
+ */
+const PROOF_BOX = { x: 20, y: 20, w: 520, h: 360 }
+
+/** How far a rectangle read out of a display list may sit from the one `FILES_METRICS` names, DEVICE
+ *  px. ONE PIXEL, because `toSurface` rounds and the scale is MEASURED off the canvas rather than
+ *  taken from the program's `S` — which is what `FILES_METRICS`'s own docstring prescribes for a
+ *  driver, and the two agree only to a rounding. */
+const RECT_TOL_PX = 1
+
+/**
+ * How far a CELL's run may sit from the column edge `columnBoxes` names, DEVICE px.
+ *
+ * LOOSER THAN `RECT_TOL_PX` AND FOR A STATED REASON. A right-aligned cell's x is its column's RIGHT
+ * EDGE, which `columnBoxes` derives from the client width — and the width this page measures off the
+ * canvas is a `DOMRect` double while the program's is the device box `WEV_CLIENT` carried divided by
+ * the ratio, so the two differ by up to a pixel on any fractional layout (`Surface.extent`'s own
+ * note). At dpr 2 that is two device px of edge.
+ *
+ * IT DOES NOT WEAKEN THE READING, because the columns are 60 CSS px apart at their closest: a run
+ * attributed to the wrong column would need an error twenty times this.
+ */
+const CELL_X_TOL_PX = 8
+
+globalThis.M19.proofs = { sort: null, cells: null, hover: null, select: null, band: null }
+
+const ask = gestureAsker(globalThis.M19)
+
+/** The host, once there is one. */
+let HOST = null
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT, M16's: a `Surface` keeps counts and pixels, not ops, so the only way to read back
+ *  WHAT a program drew — which rows, which cells, which bands — is to keep the batch the kernel
+ *  announced. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a step can wait for a REPAINT rather than a timer. */
+const BATCHES = new Map()
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** One listener, installed by both paths BEFORE the host's — `kernelBoot` calls its listeners in
+ *  order, so a listener added first sees every batch the host is about to replay. */
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `LAST_BATCH` is module-private and the proofs read it directly, so a driver in ANOTHER ENGINE has
+ * no other route to which rows a program drew, which cell sits in which column, which row is lit and
+ * which rows are selected — and that is the whole of M19's subject. The precedent is `FILES_METRICS`
+ * and the lesson is recorded in CLAUDE.md: a bench script's excuse for restating a program's
+ * geometry was that it sits outside the process and cannot import the module, which was "true of the
+ * PROCESS and false of the page it drives".
+ *
+ * AND THE AIM IS PUBLISHED BESIDE THE READING, which is the half M17's and M18's pages left out. A
+ * second engine that can read the rows but has to compute a header's x for itself is a second engine
+ * with its own copy of `columnBoxes` — and a driver aiming one column over sorts a column nobody
+ * pointed at, with every reading still agreeing. `aimAt` hands back the VIEWPORT point, which is the
+ * only unit `input.performActions` and `Input.dispatchMouseEvent` both take, and reports the reason
+ * rather than throwing across the evaluate boundary: a thrown error arrives at a driver as `null`.
+ */
+function publishHost (host) {
+  HOST = host
+  globalThis.M19.host = host
+  globalThis.M19.dpr = dpr()
+  globalThis.M19.listState = (what) => {
+    const entry = frameByTitle(host, String(what))
+    if (!entry || !entry.surface) return null
+    return listState(entry)
+  }
+  globalThis.M19.aimAt = (what, kind, key) => {
+    const entry = frameByTitle(host, String(what))
+    if (!entry || !entry.surface) return { error: `no surfaced window named ${what}` }
+    const state = listState(entry)
+    try {
+      if (kind === 'row') return pointAtRow(entry, state, String(key))
+      if (kind === 'header') return pointAtHeader(entry, state, String(key))
+      if (kind === 'empty') return pointBelowRows(entry, state, 'a band from another engine')
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+    return { error: `no aim named ${kind}; row, header and empty are the three` }
+  }
+}
+
+async function bootHost () {
+  /* `noHoverCoalesce` IS ASKED FOR THROUGH THE BOOT CFG, which is where every kernel-side control is
+   * asked for (`noCascade`, `noDraw`, `noModal`, `noItems`, `noWheelCoalesce`) and the name is
+   * derived from the setter the same way they are. It is NOT yet consumed; `proofHover` measures
+   * whether it took and refuses rather than reporting green proofs over an unmodified kernel. */
+  const cfg = { label: 'm19', bench: 1 }
+  if (CFG.noHoverCoalesce) cfg.noHoverCoalesce = 1
+  const k = await bootKernel(cfg, globalThis.M19, say)
+  k.on(captureBatch)
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  publishHost(host)
+  return { k, host }
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window as the KERNEL holds it, by winid: the stats `/proc` publishes, among them `queued`,
+ *  `coalesced`, `dropped` and M19's own `leaves`. */
+async function kernelWin (k, id) {
+  const st = await winState(k)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/** The frame a program's window is, by the title it set — and NOT one of `skip`. The exclusion is
+ *  M17's and for its reason: this page opens a SECOND `files` while the first one's frame is still
+ *  on the desktop, so a plain title match would return whichever came first. */
+function frameByTitle (host, what, skip = null) {
+  for (const entry of host.frames.values()) {
+    if (skip && skip.has(entry.id)) continue
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE and at least one batch in it: an entry with no surface is a
+ *  frame whose canvas has not been built, and reading its ops would read nothing. */
+async function surfaced (host, title, skip = null, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title, skip)
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title, skip)
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer gesture is delivered by DOM hit-testing
+ *  and a frame above it would take it. The kernel owns the order (constraint 226), so this asks
+ *  rather than restyling. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/** WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY, and say how long it took.
+ *
+ *  It is proof 3's fixture rather than a tidiness. `coalesced` is ONE number covering M16's client
+ *  replacements, M17's wheel merges and now M19's hover replacements, so a `win-geom` arriving
+ *  mid-stream would both inflate it and split the run — the clause would then fail for a reason that
+ *  is not the kernel's hover coalescing. `geoms` is the host's own count of posts, so this reads the
+ *  subject, and `nothingResizedMidStream` asserts it either side. */
+async function geomsSettled (host, quietMs = 300, ms = 8000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = host.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await pause(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/* ---- reading the list back out of the display list ----------------------------------------- */
+
+/** The ops of one window's last batch. */
+function opsOf (entry) {
+  const bytes = LAST_BATCH.get(entry.id)
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length)
+}
+
+/** Every text run in a batch, through the ABI's own codec and with the index of its header op.
+ *  `textOfOps` is the declared inverse of the `encodeTextRun` the program drew with, so these are
+ *  the program's own strings and not a second opinion about the encoding (constraint 293). */
+function textRuns (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) { runs.push({ text: null, at: i }); continue }
+    runs.push({ text: got.text, at: i, x: ops[i].a0, y: ops[i].a1, ink: ops[i].a4,
+      flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — which is what `FILES_METRICS`'s own
+ *  docstring prescribes for a driver, and what makes the conversions below independent of a program
+ *  state no export can carry. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+const near = (a, b, tol = RECT_TOL_PX) => Math.abs(a - b) <= tol
+
+/**
+ * THE CLIENT WIDTH THE PROGRAM IS LAYING OUT IN, CSS px, read out of its own `DL_CLIP`.
+ *
+ * `viewBox` spans the whole client width (`x: 0, w: wCss`), so the clip op the program sent carries
+ * that width in surface px and dividing by the measured scale returns the program's own number. The
+ * canvas's `DOMRect` is the other reading and they differ by a rounding — `CELL_X_TOL_PX` is the
+ * slack that difference costs, and taking the figure from the batch is what keeps it that small.
+ */
+function clientWidthOf (entry, ops, scale) {
+  const clip = ops.find((op) => op.op === DL_CLIP)
+  if (clip) return clip.a2 / scale
+  return entry.surface.extent().cssW
+}
+
+/**
+ * THE ROWS, AS THE PROGRAM DREW THEM: one entry per visible row, in order, with its four CELLS.
+ *
+ * STRUCTURAL AND NOT POSITIONAL, which is the whole reason it is reliable at any ratio. `paint`
+ * draws the status strip and the header, pushes the `DL_CLIP`, then the rows — and within a row the
+ * NAME carries no `DLT_RIGHT` while the three metadata cells do. So "after the clip, left-aligned"
+ * names the rows exactly, with no coordinate and no scale in that test.
+ *
+ * THE CELLS ARE ATTRIBUTED BY COLUMN and not by order, because an EMPTY CELL IS NOT DRAWN AT ALL —
+ * `cellRun` returns early for `""`, which is exactly what proof 2 is about. A row with no Size cell
+ * would otherwise read its Type cell as its Size. Each right-aligned run is matched to the column
+ * whose `textX` it sits on; a run that matches none is reported in `stray` rather than dropped,
+ * because a cell the page could not place is a reading that failed and must say so.
+ *
+ * ROWS ARE GROUPED BY THEIR RUN'S `y`, which is `rowTop(i) + TEXT_DY` for every cell of row `i` —
+ * one number per row, shared by all four cells and by nothing else in the batch.
+ */
+function rowCells (entry, ops, scale) {
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (clipAt < 0) return { rows: [], stray: [] }
+  const wCss = clientWidthOf(entry, ops, scale)
+  const cols = FILES_METRICS.columnBoxes(wCss)
+  const stray = []
+  const byY = new Map()
+  for (const run of textRuns(ops)) {
+    if (run.at <= clipAt || typeof run.text !== 'string') continue
+    if (!byY.has(run.y)) byY.set(run.y, { y: run.y, name: null, cells: {} })
+    const row = byY.get(run.y)
+    if ((run.flags & DLT_RIGHT) === 0) { row.name = run.text; continue }
+    let best = null
+    for (const box of cols) {
+      if (!box.right_aligned) continue
+      const want = FILES_METRICS.toSurface(box.textX, scale)
+      const off = Math.abs(run.x - want)
+      if (off <= CELL_X_TOL_PX && (best === null || off < best.off)) best = { key: box.key, off }
+    }
+    if (!best) { stray.push({ text: run.text, x: run.x, y: run.y }); continue }
+    row.cells[best.key] = run.text
+  }
+  return { rows: [...byY.values()].sort((a, b) => a.y - b.y), stray }
+}
+
+/**
+ * WHICH ROWS CARRY A FULL-WIDTH BAND, AND WHICH OF THOSE ARE OUTLINED.
+ *
+ * `paint` draws a SELECTED row as a band fill PLUS an `OUTLINE` stroke on the same rectangle, and a
+ * LIT row as the band fill alone — so the stroke is the discriminator and no colour is needed. Both
+ * rectangles come from the program's own arithmetic: `PAD` across to `clientW - PAD`, `rowTop(i)`
+ * down `ROW_H`, converted by the edges exactly as `fill` and `stroke` convert them.
+ *
+ * THE KEYBOARD CURSOR'S RING IS EXCLUDED BY ITS X, which is M18's discriminator: the ring is inset
+ * by `FOCUS_INSET`, so it strokes at `PAD + 1` where the selection strokes at `PAD`. The x is
+ * matched EXACTLY for that reason — a tolerance of one device pixel would accept the wrong one at
+ * dpr 1, where the two are 6 and 7.
+ *
+ * THE HEADER RULE AND THE FOOTER RULE SHARE THE BAND'S X AND WIDTH and are excluded by their Y:
+ * neither sits on a `rowTop`. A LIVE RUBBER BAND would be a third full-width rectangle, which is why
+ * every reading of this is taken after the band's RELEASE — `paint` draws no band once it is null.
+ */
+function bandedRows (entry, ops, scale, rowCount) {
+  const wCss = clientWidthOf(entry, ops, scale)
+  const px = (v) => FILES_METRICS.toSurface(v, scale)
+  const x = px(FILES_METRICS.PAD)
+  const w = px(wCss - FILES_METRICS.PAD) - x
+  const filled = new Set()
+  const outlined = new Set()
+  for (let i = 0; i < rowCount; i += 1) {
+    const top = FILES_METRICS.rowTop(i, 0)
+    const y = px(top)
+    const h = px(top + FILES_METRICS.ROW_H) - y
+    for (const op of ops) {
+      if (op.a0 !== x || !near(op.a1, y) || !near(op.a2, w) || !near(op.a3, h)) continue
+      if (op.op === DL_FILL_RECT) filled.add(i)
+      if (op.op === DL_STROKE_RECT) outlined.add(i)
+    }
+  }
+  return { filled, outlined }
+}
+
+/**
+ * WHICH ROW THE KEYBOARD CURSOR'S RING IS ON, or -1 for "no cursor is drawn".
+ *
+ * EVERY NUMBER COMES OUT OF `FILES_METRICS.focusBox`, which is the ONE definition `paint` strokes —
+ * the whole reason M18 exported it. A page that restated the one-pixel inset would be reading a ring
+ * one pixel from where the program drew it, which is the drift that export exists to stop. The WIDTH
+ * is deliberately not matched: it is derived from the client width, and this page's reading of that
+ * is a `DOMRect` where the program's is a device box divided by the ratio (M18's own note).
+ */
+function ringRow (entry, ops, scale, rowCount) {
+  const wCss = clientWidthOf(entry, ops, scale)
+  const ringX = FILES_METRICS.toSurface(FILES_METRICS.focusBox(0, 0, wCss).x, scale)
+  const strokes = ops.filter((op) => op.op === DL_STROKE_RECT && op.a0 === ringX)
+  if (!strokes.length) return -1
+  for (let i = 0; i < rowCount; i += 1) {
+    const y = FILES_METRICS.toSurface(FILES_METRICS.focusBox(i, 0, wCss).y, scale)
+    if (strokes.some((op) => near(op.a1, y))) return i
+  }
+  return -1
+}
+
+/**
+ * THE SORT INDICATOR, AS THE READER SEES IT: `{key, dir}`, or null for "no caret is drawn".
+ *
+ * `sortCaret` draws three one-pixel-high fills at the TOP of the sorted column's header box,
+ * narrowing downwards for ascending and widening for descending. So the DIRECTION is the sign of the
+ * width difference between the first and the last, and the COLUMN is `columnAt` over the middle of
+ * them — the declared inverse of the `columnBoxes` the caret was centred on, which is what makes
+ * this a reading of the column a reader is pointing at rather than of an x this page chose.
+ *
+ * IT IS READ AHEAD OF THE CLIP, because everything in the header is, and that is what keeps the
+ * glyph fills inside the rows from being mistaken for a caret: they are 13 CSS px tall and these are
+ * one, but the y bound is the cheaper and more honest test.
+ */
+function caretOf (entry, ops, scale) {
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  const head = clipAt < 0 ? ops : ops.slice(0, clipAt)
+  const px = (v) => FILES_METRICS.toSurface(v, scale)
+  // THE CARET'S OWN BAND: `sortCaret` draws at y 1, 2 and 3 CSS px and nothing else in the header is
+  // up there — the header rule is at `HEAD_H - 4`. The width bound separates it from that rule,
+  // which spans the whole client area.
+  const bars = head.filter((op) => op.op === DL_FILL_RECT
+    && op.a1 >= 0 && op.a1 <= px(4) && op.a2 > 0 && op.a2 <= px(6))
+    .sort((a, b) => a.a1 - b.a1)
+  if (bars.length < 2) return null
+  const first = bars[0]
+  const last = bars[bars.length - 1]
+  if (first.a2 === last.a2) return null
+  const mid = (first.a0 + first.a2 / 2) / scale
+  const key = FILES_METRICS.columnAt(mid, clientWidthOf(entry, ops, scale))
+  return key === null ? null : { key, dir: first.a2 > last.a2 ? 1 : -1, bars: bars.length }
+}
+
+/** The status strip's position statement, which is the program's own word for whether its list
+ *  scrolls at all: `N items` when `scrollMax` is 0 and `a-b of N` when it is not. It is the ONLY
+ *  `DLT_RIGHT` run AHEAD of the clip — `src/bin/files.mjs` says so, and says that giving a column
+ *  label `DLT_RIGHT` would make a label read as this line. */
+const ITEMS_RE = /^(\d+) items?$/
+function positionLine (ops) {
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  for (const run of textRuns(ops)) {
+    if (typeof run.text !== 'string') continue
+    if (clipAt >= 0 && run.at > clipAt) break
+    if ((run.flags & DLT_RIGHT) !== 0) return run.text
+  }
+  return ''
+}
+
+/** EVERYTHING THIS PAGE CAN SEE OF ONE `files` WINDOW, in one object — and every row NAMED rather
+ *  than numbered, because the sort reorders the list and an index taken before a header click names
+ *  a different file after it. */
+function listState (entry) {
+  const ops = opsOf(entry)
+  const scale = scaleOf(entry)
+  const read = rowCells(entry, ops, scale)
+  const names = read.rows.map((r) => r.name)
+  const bands = bandedRows(entry, ops, scale, names.length)
+  const lit = [...bands.filled].filter((i) => !bands.outlined.has(i))
+  const ring = ringRow(entry, ops, scale, names.length)
+  return {
+    title: entry.win.titleText,
+    names,
+    files: names.filter((n, i) => (read.rows[i].cells.type || '') !== 'DIR'),
+    dirs: names.filter((n, i) => (read.rows[i].cells.type || '') === 'DIR'),
+    cells: Object.fromEntries(read.rows.map((r) => [r.name, { ...r.cells }])),
+    stray: read.stray,
+    selected: [...bands.outlined].sort((a, b) => a - b).map((i) => names[i]),
+    lit: lit.length === 1 ? names[lit[0]] : null,
+    litCount: lit.length,
+    cursor: ring < 0 ? null : names[ring],
+    position: positionLine(ops),
+    caret: caretOf(entry, ops, scale),
+    wCss: Math.round(clientWidthOf(entry, ops, scale) * 100) / 100,
+    scale: Math.round(scale * 1000) / 1000,
+    batches: BATCHES.get(entry.id) || 0,
+  }
+}
+
+/* ---- aiming real input ---------------------------------------------------------------------- */
+
+/**
+ * A POINT INSIDE THE WINDOW'S CLIENT AREA, in VIEWPORT coordinates — and it THROWS rather than
+ * returning a point nothing can receive.
+ *
+ * NO SCALE IS INVOLVED AND THAT IS DELIBERATE. `FILES_METRICS`'s docstring states it: "A driver
+ * working in page coordinates needs no scale at all, because the canvas's CSS box IS the client area
+ * these are measured in — `rect.left + xCss` is the point."
+ *
+ * THE VIEWPORT BOUND IS THE HARNESS-HONESTY HALF, and it is a measurement rather than caution.
+ * `Input.dispatchMouseEvent` takes a viewport coordinate, so a point past `innerWidth` is delivered
+ * to nothing — no error, no event, and a page that waited for a repaint simply reports a red clause.
+ * That is what the first run of M18's page did, eleven times. A harness must fail when it cannot
+ * reach what it was pointed at.
+ */
+function viewportPoint (entry, xCss, yCss, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the files surface has no measurable rect to aim ${what} at`)
+  }
+  return onScreen(entry, { x: Math.round(r.left + xCss), y: Math.round(r.top + yCss) }, what)
+}
+
+/** THE VIEWPORT BOUND, as ONE test both aims apply — `viewportPoint`'s and `proofHover`'s, which
+ *  work in different units and must refuse the same points. */
+function onScreen (entry, at, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  if (!at) throw new Error(`${what}: the surface has no measurable rect to aim at`)
+  if (at.x < 0 || at.y < 0 || at.x >= window.innerWidth || at.y >= window.innerHeight) {
+    throw new Error(`${what} is at client ${at.x},${at.y}, outside a `
+      + `${window.innerWidth}x${window.innerHeight} viewport — a dispatched mouse event carries a `
+      + 'VIEWPORT coordinate, so nothing would receive it. The frame is at '
+      + `${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}`)
+  }
+  return at
+}
+
+/** The CSS-px offset of a viewport point inside the canvas — `viewportPoint`'s inverse, and the one
+ *  place a point this page aimed becomes a coordinate the program's own arithmetic takes. Proof 5
+ *  needs it: `bandRows` is asked which rows the band it DREW covers, and a band described by numbers
+ *  this page intended rather than numbers it sent would be the wrong rectangle. */
+function cssOffsetOf (entry, at) {
+  const r = entry.surface.el.getBoundingClientRect()
+  return { x: at.x - r.left, y: at.y - r.top }
+}
+
+/** Where the row named `name` is, aimed at the middle of it. BY NAME, because the sort reorders the
+ *  list: the index is looked up in the state the page has just read, and a name that is not in it is
+ *  a THROW rather than an aim at row -1. */
+function pointAtRow (entry, state, name, xCss = null) {
+  const i = state.names.indexOf(name)
+  if (i < 0) throw new Error(`no row named ${name} in [${state.names.join(' ')}]`)
+  const r = entry.surface.el.getBoundingClientRect()
+  const x = xCss === null ? r.width / 2 : xCss
+  return viewportPoint(entry, x, FILES_METRICS.rowMid(i, 0), `row ${name}`)
+}
+
+/** A POINT ON A COLUMN'S HEADER LABEL, centred on the box `columnBoxes` names and checked against
+ *  `columnAt` before it is used. The check is the declared inverse applied as a guard: a header
+ *  press that landed in the next column would sort the wrong thing and the clause would be red with
+ *  nothing saying the aim was wrong. */
+function pointAtHeader (entry, state, key) {
+  const box = FILES_METRICS.columnBoxes(state.wCss).find((c) => c.key === key)
+  if (!box) throw new Error(`no column named ${key}`)
+  const xCss = box.x + box.w / 2
+  const hit = FILES_METRICS.columnAt(xCss, state.wCss)
+  if (hit !== key) {
+    throw new Error(`columnAt(${Math.round(xCss)}, ${state.wCss}) is ${hit}, not ${key}: the aim `
+      + 'and the hit test disagree, so a header press would sort a column nobody pointed at')
+  }
+  return viewportPoint(entry, xCss, FILES_METRICS.VIEW_TOP / 2, `the ${key} header`)
+}
+
+/** A POINT ON EMPTY SPACE INSIDE THE CLIPPED VIEWPORT, below the last row — which is where a rubber
+ *  band may start and a drag may not. Both bounds are the program's own: `rowTop(n)` is past the
+ *  last row and `viewBox` is the rectangle the hit test is bounded by, so a point between them finds
+ *  no row AND is inside the viewport, which is exactly the arbitration's "press that found none". */
+function pointBelowRows (entry, state, what) {
+  const box = FILES_METRICS.viewBox(state.wCss, entry.surface.extent().cssH)
+  const first = FILES_METRICS.rowTop(state.names.length, 0)
+  const bottom = box.y + box.h
+  if (!(first + 4 < bottom)) {
+    throw new Error(`there is no empty space in the viewport: row ${state.names.length} would start `
+      + `at ${first} CSS px and the viewport ends at ${bottom}. The window is too short for a band `
+      + 'to start anywhere a row is not, so proof 5 would be arming the wrong gesture')
+  }
+  const yCss = (first + bottom) / 2
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, yCss, what)
+}
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR THE WINDOW TO HAVE REPAINTED — or not, when the gesture is one
+ * `files` deliberately does not repaint for.
+ *
+ * `wantRepaint: false` IS NOT A SHORTCUT. A hover onto the row that is already lit changes nothing,
+ * and `setLit` answers false so nothing is drawn; the same holds for a gesture into a program that
+ * is holding its event loop. Each call states which it is, so the waiting is a property of the
+ * gesture rather than a timeout nobody tuned.
+ */
+async function gesture (entry, spec, { wantRepaint = true, ms = 4000 } = {}) {
+  const had = BATCHES.get(entry.id) || 0
+  await ask(spec)
+  if (!wantRepaint) {
+    // A SETTLE AND NOT A GUESS AT THE OUTCOME: the record still has to cross the kernel and be
+    // drained by a program parked in `poll` with a 200 ms period, and nothing repaints to say so.
+    await pause(600)
+    return { repaintedMs: -1 }
+  }
+  const got = await until(() => (BATCHES.get(entry.id) || 0) > had, ms)
+  return { repaintedMs: Math.round(got) }
+}
+
+/* ---- the fixture ---------------------------------------------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 20000)) }
+}
+
+/** Build the tree, through four ordinary programs and nothing privileged. `rm -r -f` goes first for
+ *  the reason stated at `ROOT_DIR`: OPFS persists, and a second run of this page must mean what the
+ *  first one did. */
+async function makeTree (k) {
+  const gone = await runProgram(k, RM, ['rm', '-r', '-f', ROOT_DIR])
+  const md = await runProgram(k, MKDIR, ['mkdir', '-p',
+    ROOT_DIR, ...DIRS.map((d) => `${ROOT_DIR}/${d}`)])
+  const copies = []
+  for (const [from, name] of COPIES) {
+    copies.push(await runProgram(k, CP, ['cp', from, `${ROOT_DIR}/${name}`]))
+  }
+  const tc = await runProgram(k, TOUCH, ['touch', ...TOUCHED.map((n) => `${ROOT_DIR}/${n}`)])
+  return {
+    dir: ROOT_DIR, rm: gone.exit, mkdir: md.exit, touch: tc.exit,
+    copies: copies.map((c) => c.exit), rows: ROW_COUNT,
+  }
+}
+
+/** `grep -c <fixed string> <path>`, as the kernel's own answer. The pattern is a FIXED string
+ *  (constraint 138) and the EXIT STATUS is the reading: `grep` answers 1 for a file it read and did
+ *  not match. */
+async function grepFor (k, path, needle) {
+  const row = await runProgram(k, GREP, ['grep', '-c', needle, path])
+  return { needle, exit: row.exit, matched: row.matched }
+}
+
+/** Quit a program by giving its window a synthesised `q`, and collect the account it returns.
+ *
+ *  A SYNTHESISED KEY AND IT SAYS SO. This is the page tearing its own fixture down, not a gesture
+ *  under test: `q` is how `src/bin/files.mjs` exits, and `WinHost` counts synthetic keys apart from
+ *  trusted ones for exactly this reason — so nothing here can be mistaken for the input the clauses
+ *  rest on. */
+async function quitAndReport (k, entry, pid) {
+  typeSynthetic(entry.surface.el, 'q')
+  return resultOf(k, pid, 20000)
+}
+
+/** THE M19 FIELDS OF A `files` ACCOUNT, with a shape for a program that never reached them. A
+ *  refusal path returns an account too, and defaulting rather than letting a clause dereference
+ *  `undefined` is what makes such a run report FAILED CLAUSES over a stated exit code instead of a
+ *  thrown page — the difference between a proof that failed and a harness that broke. */
+function accountOf (row) {
+  const sort = row.sort || {}
+  return {
+    exit: row.exit,
+    why: row.why || '',
+    dir: String(row.dir || ''),
+    rows: (row.rows || []).map((r) => ({
+      name: String(r.name), dir: r.dir === true, statted: r.statted === true,
+      mtimeMs: Number(r.mtimeMs || 0), size: Number(r.size || 0),
+      cells: { ...(r.cells || {}) },
+    })),
+    sort: { key: String(sort.key || ''), dir: sort.dir | 0, chosen: sort.chosen === true },
+    sorts: row.sorts | 0,
+    selected: (row.selected || []).map((i) => i | 0),
+    anchor: row.anchor === undefined ? -2 : row.anchor | 0,
+    selects: row.selects | 0,
+    bands: row.bands | 0,
+    bandSelected: row.bandSelected | 0,
+    hovers: row.hovers | 0,
+    leaves: row.leaves | 0,
+    lit: row.lit === undefined ? -2 : row.lit | 0,
+    stats: row.stats | 0,
+    dirStats: row.dirStats | 0,
+    drags: row.drags | 0,
+    refusedDrags: row.refusedDrags | 0,
+    presses: row.presses | 0,
+    pointers: row.pointers | 0,
+    scrollMax: Number(row.scrollMax || 0),
+    heldMs: Math.round(row.heldMs || 0),
+    noDrainMs: row.noDrainMs | 0,
+    /* THE RATIO THE PROGRAM IS CONVERTING WITH, which is its `S` and NOT the display's: `WEV_CLIENT`
+     * is a program's only route to the ratio, so one that has drained none is still on 1. Proof 3
+     * aims in surface pixels on exactly that premise, and `clients`/`resurfaces` are what say the
+     * premise held. */
+    dpr: Number(row.dpr || 1),
+    clients: row.clients | 0,
+    resurfaces: row.resurfaces | 0,
+    controls: { ...(row.controls || {}) },
+  }
+}
+
+const sameSet = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
+
+/** Whether `names` ascends inside every run of equal `keys` — the stable term, as a reading rather
+ *  than as a restated comparator. The primary key's own order is NOT tested here: that is the
+ *  reversal clause's, and keeping the two apart is what lets `--stable-sort-off` turn one of them. */
+function tiesAscend (keys, names) {
+  for (let i = 1; i < keys.length; i += 1) {
+    if (keys[i] !== keys[i - 1]) continue
+    if (!(names[i] > names[i - 1])) return false
+  }
+  return true
+}
+
+/** Whether a sequence of cell strings never decreases (or never increases). The program sorts on
+ *  `kindOf`'s own string, and `<` over code units is the comparison `compareValues` makes — so this
+ *  is the same order read back, not a second opinion about collation. */
+function monotone (seq, dir) {
+  for (let i = 1; i < seq.length; i += 1) {
+    if (dir > 0 ? seq[i] < seq[i - 1] : seq[i] > seq[i - 1]) return false
+  }
+  return true
+}
+
+/* ---- the driven sequence -------------------------------------------------------------------- */
+
+/**
+ * ONE WINDOW, ONE SEQUENCE — because the state carries.
+ *
+ * The four proofs over this window are four CLAIMS about one run and not four runs: a Shift range
+ * needs an anchor an earlier press put somewhere, and the arbitration needs a selection to disturb.
+ * Staging each claim its own window would mean four windows whose histories were built by gestures
+ * no clause reads, which is more fixture and less proof.
+ *
+ * EVERY STEP RECORDS THE WHOLE LIST STATE AFTER IT, so a failed clause is diagnosed from what the
+ * program had drawn at the moment rather than from the end state.
+ *
+ * THE SORT RUNS FIRST AND EVERY LATER STEP WORKS IN THE REVERSED ORDER, which is deliberate: the
+ * selection and band clauses are then about LAYOUT order in a layout the reader chose, which is the
+ * order the plan names. Each gesture is aimed by NAME at the list the previous step reported.
+ */
+async function drive (k, host) {
+  const files = await surfaced(host, 'files')
+  if (!files) throw new Error('the files window never surfaced')
+  const pid = globalThis.M19.pids.files
+  await raise(k, files)
+  const staged = BATCHES.get(files.id) || 0
+  place(files, PROOF_BOX)
+  await until(() => (BATCHES.get(files.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+
+  const steps = []
+  let now = null
+  const record = (name, extra = {}) => {
+    now = listState(files)
+    const row = { name, ...now, host: hostCounts(host), ...extra }
+    steps.push(row)
+    return row
+  }
+
+  /** HOW MANY PRESSES THIS RUN AIMS AT A ROW — kept rather than written. `src/bin/files.mjs` counts
+   *  one `selects` per press that found a row, so this is the page's side of that number: a gesture
+   *  added below moves both, and a gesture that missed the row it was aimed at moves neither.
+   *  A HOVER IS NOT A PRESS and is deliberately not counted here. */
+  let rowPresses = 0
+  const aimedAtARow = (at) => { rowPresses += 1; return at }
+
+  const start = record('before-any-gesture')
+
+  /* ---- a. THE HEADER, TWICE: a click sorts by the column, a second reverses it -------------- */
+  const headAt = pointAtHeader(files, start, SORT_COLUMN)
+  await gesture(files, { kind: 'click', name: `sort-by-${SORT_COLUMN}`, at: headAt })
+  const sorted = record('after-the-first-header-click', { at: headAt })
+  await gesture(files, { kind: 'click', name: `reverse-${SORT_COLUMN}`, at: headAt })
+  const reversed = record('after-the-second-header-click', { at: headAt })
+
+  /* ---- b. A BUTTONLESS MOVE, A SECOND ONE, AND A LEAVE -------------------------------------
+     The light must MOVE and not merely appear: a clause satisfied by one lit row is satisfied by a
+     program that lit a row at startup. The leave is a move to the top-left of the VIEWPORT, which is
+     outside this frame — `pointerleave` fires on the canvas and carries no usable position, which is
+     why `files` clears the light rather than hit-testing it (`WPTR_LEAVE` in src/abi.mjs). */
+  const hoverNames = [reversed.names[2], reversed.names[0]]
+  const hoverAt = []
+  for (const name of hoverNames) {
+    const at = pointAtRow(files, reversed, name)
+    hoverAt.push(at)
+    await gesture(files, { kind: 'hover', name: `hover-${name}`, at })
+    record(`after-hovering-${name}`, { at })
+  }
+  const litA = steps[steps.length - 2]
+  const litB = steps[steps.length - 1]
+  const leaveAt = { x: 3, y: 3 }
+  await gesture(files, { kind: 'hover', name: 'leave-the-surface', at: leaveAt })
+  const left = record('after-the-pointer-left', { at: leaveAt })
+
+  /* ---- c. THE SELECTION: plain, Shift, Ctrl, Shift again -----------------------------------
+     The last one is what proves the Ctrl press MOVED THE ANCHOR: it ranges from the row Ctrl
+     touched, not from the row the plain press did. Four gestures, and the anchor is never read
+     directly — it is not drawn, so the only honest reading of it is where the next range starts. */
+  const plainName = reversed.names[2]
+  const shiftName = reversed.names[5]
+  const ctrlName = reversed.names[0]
+  const plainAt = aimedAtARow(pointAtRow(files, reversed, plainName))
+  await gesture(files, { kind: 'click', name: `click-${plainName}`, at: plainAt })
+  const picked = record('after-a-plain-click', { at: plainAt })
+  const shiftAt = aimedAtARow(pointAtRow(files, picked, shiftName))
+  await gesture(files, { kind: 'click', name: `shift-click-${shiftName}`, at: shiftAt,
+    modifiers: CHROME_MOD_SHIFT })
+  const ranged = record('after-a-shift-click', { at: shiftAt })
+  const ctrlAt = aimedAtARow(pointAtRow(files, ranged, ctrlName))
+  await gesture(files, { kind: 'click', name: `ctrl-click-${ctrlName}`, at: ctrlAt,
+    modifiers: CHROME_MOD_CTRL })
+  const toggled = record('after-a-ctrl-click', { at: ctrlAt })
+  const reShiftAt = aimedAtARow(pointAtRow(files, toggled, plainName))
+  await gesture(files, { kind: 'click', name: `shift-click-${plainName}-again`, at: reShiftAt,
+    modifiers: CHROME_MOD_SHIFT })
+  const reranged = record('after-the-second-shift-click', { at: reShiftAt })
+
+  /* ---- d. A BAND FROM EMPTY SPACE ----------------------------------------------------------
+     Three gestures, because the band is a press, a move and a release and the page must be able to
+     describe the rectangle it DREW: `press`/`move`/`release` are separate kinds for exactly that
+     (`scripts/check.py`'s own note). The corners are converted back to the program's unit through
+     `cssOffsetOf`, so `bandRows` is asked about the band that was sent. */
+  const bandFrom = pointBelowRows(files, reranged, 'the band\'s start')
+  const bandToRow = reranged.names[reranged.names.length - 3]
+  const bandTo = pointAtRow(files, reranged, bandToRow,
+    files.surface.el.getBoundingClientRect().width / 2 - 80)
+  const beforeBand = hostCounts(host)
+  await gesture(files, { kind: 'press', name: 'press-empty-space', at: bandFrom },
+    { wantRepaint: false })
+  await gesture(files, { kind: 'move', name: 'drag-the-band-over-the-last-rows', at: bandTo })
+  const banding = record('while-the-band-is-open', { at: bandTo })
+  await gesture(files, { kind: 'release', name: 'release-the-band', at: bandTo })
+  const banded = record('after-the-band-was-released',
+    { at: bandTo, drags: hostCounts(host).drags - beforeBand.drags })
+  /* THE RECTANGLE THE BAND WAS, in the program's own CONTENT coordinates — CSS px, and `scroll` is
+   * 0, which `theListDoesNotScroll` is the program's own word for. */
+  const bandRect = {
+    ...cssOffsetOf(files, bandFrom),
+    ...Object.fromEntries(Object.entries(cssOffsetOf(files, bandTo)).map(([key, v]) => [`${key}1`, v])),
+  }
+  const band = { x0: bandRect.x, y0: bandRect.y, x1: bandRect.x1, y1: bandRect.y1 }
+  const bandWant = [...FILES_METRICS.bandRows(band, banded.names.length, banded.wCss)]
+    .sort((a, b) => a - b).map((i) => banded.names[i])
+
+  /* ---- e. A DRAG FROM A ROW ---------------------------------------------------------------
+     The SAME three kinds, aimed at a row instead of at empty space — which is the whole of the
+     arbitration: nothing about the gesture differs except what was under the press. The kernel's
+     own session is read BETWEEN the move and the release, because that is the only moment a live
+     drag exists to be read. */
+  const beforeDrag = hostCounts(host)
+  const dragFrom = aimedAtARow(pointAtRow(files, banded, DRAG_ROW))
+  await gesture(files, { kind: 'press', name: `press-${DRAG_ROW}`, at: dragFrom })
+  const pressed = record('after-pressing-a-row', { at: dragFrom })
+  const dragTo = { x: dragFrom.x + 60, y: dragFrom.y + 30 }
+  await gesture(files, { kind: 'move', name: 'move-past-the-drag-threshold', at: dragTo },
+    { wantRepaint: false })
+  const session = HOST.report().drag ? { ...HOST.report().drag } : null
+  const dragging = record('while-the-drag-is-live', { at: dragTo, session })
+  await gesture(files, { kind: 'release', name: 'drop-it', at: dragTo }, { wantRepaint: false })
+  const dropped = record('after-the-drop',
+    { at: dragTo, drags: hostCounts(host).drags - beforeDrag.drags,
+      lastDrag: HOST.report().lastDrag })
+
+  const row = await quitAndReport(k, files, pid)
+
+  return {
+    pid,
+    win: files.id,
+    dpr: dpr(),
+    box: { ...PROOF_BOX },
+    extent: files.surface ? { ...files.surface.extent() } : null,
+    steps,
+    band,
+    bandWant,
+    rowPresses,
+    at: { start, sorted, reversed, litA, litB, left, picked, ranged, toggled, reranged,
+      banding, banded, pressed, dragging, dropped },
+    account: accountOf(row),
+  }
+}
+
+/** The host counters a clause reads, as one row: hovers and leaves SENT, drag sessions BEGUN, and
+ *  drag positions posted. `hovers` is a subset of `pointers` and `dragAts` is the one counter a
+ *  buttonless move must NOT move — `#dragMove` seeing a sample with no button would be a hover
+ *  posting a drag position for a gesture nobody started. */
+function hostCounts (host) {
+  const r = host.report()
+  return {
+    pointers: r.pointers | 0, hovers: r.hovers | 0, leaves: r.leaves | 0,
+    drags: r.drags | 0, dragAts: r.dragAts | 0, dragDrops: r.dragDrops | 0,
+    geoms: r.geoms | 0, unknown: r.unknown | 0,
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: SORT — a header click sorts, a second reverses, and the directories stay first.
+
+   `docs/PLAN-SHELL.md` §M19's first clause. Four readings and they are deliberately separate:
+
+   THE CARET AND THE ORDER ARE BOTH READ, because the indicator a reader looks at and the order the
+   rows are in are two facts. A caret on the wrong column over a correctly sorted list is a window
+   that lies about why it looks the way it does, and a list sorted with no caret is a reader who
+   cannot tell a sort from a coincidence.
+
+   ONLY THE FILE ROWS CARRY THE ORDER CLAUSES, which is what keeps `--folders-last` a control over
+   `theDirectoriesComeFirst` alone: that flag moves the directories and leaves the files in the same
+   relative order, so a clause naming the whole list would go red for it too.
+   -------------------------------------------------------------------------------------------- */
+function proofSort (run) {
+  const { at, account } = run
+  const typeCells = (state) => state.files.map((n) => state.cells[n].type)
+  const sort = {
+    opening: { names: at.start.names, files: at.start.files, caret: at.start.caret,
+      position: at.start.position },
+    ascending: { names: at.sorted.names, files: at.sorted.files, caret: at.sorted.caret,
+      types: typeCells(at.sorted) },
+    descending: { names: at.reversed.names, files: at.reversed.files, caret: at.reversed.caret,
+      types: typeCells(at.reversed) },
+    account,
+  }
+
+  /* THE FIXTURE CLAUSES FIRST, because every clause below is vacuous without them: the tree this
+   * page built, a list that does not scroll (every rectangle below is located at offset 0), and a
+   * batch in which every cell found a column. */
+  sort.theTreeIsTheFixture = sameSet(at.start.names.slice().sort(),
+    [...DIRS, ...FILE_NAMES].slice().sort())
+    && at.start.names.length === ROW_COUNT
+  sort.theListDoesNotScroll = ITEMS_RE.test(at.start.position) && account.scrollMax === 0
+  sort.everyCellFoundAColumn = at.start.stray.length === 0 && at.sorted.stray.length === 0
+    && at.reversed.stray.length === 0
+  sort.theFileRowsOpenInNameOrder = sameSet(at.start.files, NAME_ASC)
+  /* AND THE CARET SAYS SO. `paint` draws a caret on whichever column `sort.key` names, chosen or
+   * not — so the opening listing already carries one, on the Name column and pointing up. That is
+   * what the clause reads, and `SORT_DEFAULT` is where the pair comes from rather than from two
+   * numbers written here. It was first written as `caret === null` on the guess that an unchosen
+   * sort draws no indicator; the run said otherwise, and a caret on the column the rows are
+   * actually in is the honest behaviour. */
+  sort.theOpeningCaretIsTheDefault = at.start.caret !== null
+    && at.start.caret.key === FILES_METRICS.SORT_DEFAULT.key
+    && at.start.caret.dir === FILES_METRICS.SORT_DEFAULT.dir
+
+  /* THE FIRST CLICK SORTED BY THE COLUMN — the order, the caret and the primary key's own
+   * monotonicity, which is the reading that does not depend on this page's expected list. */
+  sort.theHeaderClickSorted = sameSet(at.sorted.files, TYPE_ASC)
+    && monotone(typeCells(at.sorted), 1)
+  sort.theCaretNamesTheSortedColumn = at.sorted.caret !== null
+    && at.sorted.caret.key === SORT_COLUMN && at.sorted.caret.dir === 1
+
+  /* THE SECOND CLICK REVERSED IT. The PRIMARY key alone, so `--stable-sort-off` cannot turn this —
+   * that world still sorts and still reverses, and what it breaks is the tie clause below. */
+  sort.theSecondClickReversed = monotone(typeCells(at.reversed), -1)
+    && at.reversed.files.length === TYPE_ASC.length
+    && sameSet(typeCells(at.reversed), typeCells(at.sorted).slice().reverse())
+  sort.theCaretTurnedOver = at.reversed.caret !== null
+    && at.reversed.caret.key === SORT_COLUMN && at.reversed.caret.dir === -1
+
+  /* THE NAMES ASCEND INSIDE EACH TIE, WHICHEVER WAY THE PRIMARY SORTED. This is the stable term and
+   * the ONE clause `--stable-sort-off` turns: the `.txt` group is three rows of one type, and in
+   * that world their names follow the direction instead of staying ascending. Asserted in BOTH
+   * directions, because a comparator that only reverses correctly is not stable.
+   *
+   * THE DIRECTORIES ARE A TIE GROUP TOO and are read as one here — their type cell is `DIR` for both
+   * — in LAYOUT ORDER rather than at the front of the list, so `--folders-last` moving them cannot
+   * turn this clause while `--stable-sort-off` reversing them does. */
+  sort.theNamesAscendInEachTie = tiesAscend(typeCells(at.sorted), at.sorted.files)
+    && tiesAscend(typeCells(at.reversed), at.reversed.files)
+    && sameSet(at.reversed.files, TYPE_DESC)
+    && sameSet(at.sorted.dirs, DIRS) && sameSet(at.reversed.dirs, DIRS)
+
+  /* THE DIRECTORIES STAY FIRST, in all three listings. `--folders-last` is this clause's world.
+   *
+   * POSITION AND NOT ORDER, which is what keeps the two controls apart: the directories are a TIE
+   * under every sort but `name`, so `--stable-sort-off` reverses them among THEMSELVES while leaving
+   * them at the front — and a clause reading their order as well went red for both controls. The
+   * order inside the group is `theNamesAscendInEachTie`'s, which is the clause that owns it. */
+  const dirsFirst = (state) => state.dirs.length === DIRS.length
+    && sameSet(state.names.slice(0, DIRS.length).slice().sort(), DIRS.slice().sort())
+  sort.theDirectoriesComeFirst = dirsFirst(at.start) && dirsFirst(at.sorted)
+    && dirsFirst(at.reversed)
+
+  // AND THE PROGRAM'S OWN BOOKKEEPING AGREES: two header clicks, on that column, descending.
+  sort.theAccountNamesTheSort = account.sorts === 2 && account.sort.key === SORT_COLUMN
+    && account.sort.dir === -1 && account.sort.chosen === true
+
+  sort.ok = sort.theTreeIsTheFixture && sort.theListDoesNotScroll && sort.everyCellFoundAColumn
+    && sort.theFileRowsOpenInNameOrder && sort.theOpeningCaretIsTheDefault
+    && sort.theHeaderClickSorted && sort.theCaretNamesTheSortedColumn
+    && sort.theSecondClickReversed && sort.theCaretTurnedOver
+    && sort.theNamesAscendInEachTie && sort.theDirectoriesComeFirst
+    && sort.theAccountNamesTheSort
+  globalThis.M19.proofs.sort = { ok: sort.ok, evidence: sort }
+  say((sort.ok ? 'ok  ' : 'BAD ') + 'sort: [' + at.start.names.join(' ') + '] -> ['
+    + at.sorted.names.join(' ') + '] -> [' + at.reversed.names.join(' ') + ']; caret '
+    + (at.sorted.caret ? `${at.sorted.caret.key} ${at.sorted.caret.dir}` : 'none') + ' then '
+    + (at.reversed.caret ? `${at.reversed.caret.key} ${at.reversed.caret.dir}` : 'none'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE CELLS A DIRECTORY STAT BUYS.
+
+   `docs/PLAN-SHELL.md` §M19's second clause: "a folder's Size cell is empty AND ITS DATE CELL IS
+   NOT — the second half is what proves the directory `stat` is paid."
+
+   BOTH HALVES OR NEITHER. "The Size cell is empty" alone is satisfied by a program that draws no
+   metadata at all, and "the Date cell is drawn" alone is satisfied by a row that was never statted
+   and drew the unknown mark — so a FILE's two cells are read beside the folder's, and the folder's
+   date is matched against the FORMAT `dateText` produces rather than against "not empty".
+
+   AN EMPTY CELL IS NOT A MISSING RUN BY ACCIDENT: `cellRun` returns early for `""`, so a cell with
+   no text is a cell with no op, which is why `rowCells` attributes by COLUMN and reports what it
+   could not place. `everyCellFoundAColumn` above is what says nothing was mis-attributed.
+   -------------------------------------------------------------------------------------------- */
+const STAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/
+const KB_RE = /^\d+ KB$/
+function proofCells (run) {
+  const { at, account } = run
+  const drawn = at.start.cells
+  const byName = Object.fromEntries(account.rows.map((r) => [r.name, r]))
+  const cells = {
+    drawn,
+    account: account.rows,
+    stats: account.stats,
+    dirStats: account.dirStats,
+    unknownMark: FILES_METRICS.UNKNOWN_CELL,
+  }
+
+  /* A FOLDER HAS NO SIZE CELL. `st_size` on a directory is the size of its entry table, which is
+   * not the question a reader asked — so it is drawn as nothing on purpose. */
+  cells.aFolderHasNoSizeCell = DIRS.every((d) => drawn[d] && drawn[d].size === undefined)
+  /* AND IT HAS A DATE CELL, WITH A REAL STAMP IN IT. Not merely non-empty: a row that was NOT
+   * statted draws nothing and a row that was statted with a zero stamp draws the unknown mark, so
+   * the clause has to name the third state — a timestamp — or `--no-dir-stat` and a provider mount
+   * would both satisfy it. */
+  cells.aFolderHasADateCell = DIRS.every((d) => drawn[d]
+    && STAMP_RE.test(String(drawn[d].date || '')))
+  // AND A TYPE CELL READING `DIR`, which is what makes the row's kind visible beside its date.
+  cells.aFolderSaysItIsADirectory = DIRS.every((d) => drawn[d] && drawn[d].type === 'DIR')
+
+  /* A FILE HAS BOTH, which is what stops the clause above being about a column nothing draws. The
+   * `.txt` rows are copies of a real file, so their Size is a non-zero count of kilobytes. */
+  cells.aFileHasBothCells = STAMP_RE.test(String((drawn['a.txt'] || {}).date || ''))
+    && KB_RE.test(String((drawn['a.txt'] || {}).size || ''))
+
+  /* THE `lstat` WAS PAID FOR EVERY ROW, DIRECTORIES INCLUDED — the program's own count, which is
+   * the call that used to sit inside `if (!dir)`. `--no-dir-stat` drops `dirStats` to 0 and empties
+   * the folder date cells, and those two clauses are the whole of what it turns. */
+  cells.everyRowWasStatted = account.stats === ROW_COUNT && account.dirStats === DIRS.length
+    && DIRS.every((d) => byName[d] && byName[d].statted === true && byName[d].mtimeMs > 0)
+
+  /* AND WHAT THE READER SAW IS WHAT THE PROGRAM REPORTS. `account.rows[].cells` is `cellOf`'s own
+   * output, so this compares the display list against the program's statement of it rather than
+   * against a format this page would then own a second copy of. */
+  cells.theAccountAgreesWithTheDisplayList = account.rows.every((r) => {
+    const got = drawn[r.name]
+    if (!got) return false
+    return ['date', 'type', 'size'].every((key) =>
+      (r.cells[key] === '' ? got[key] === undefined : got[key] === r.cells[key]))
+  })
+
+  cells.ok = cells.aFolderHasNoSizeCell && cells.aFolderHasADateCell
+    && cells.aFolderSaysItIsADirectory && cells.aFileHasBothCells
+    && cells.everyRowWasStatted && cells.theAccountAgreesWithTheDisplayList
+  globalThis.M19.proofs.cells = { ok: cells.ok, evidence: cells }
+  say((cells.ok ? 'ok  ' : 'BAD ') + 'cells: ' + DIRS[0] + ' date "'
+    + String((drawn[DIRS[0]] || {}).date) + '" size "'
+    + String((drawn[DIRS[0]] || {}).size) + '", a.txt date "'
+    + String((drawn['a.txt'] || {}).date) + '" size "'
+    + String((drawn['a.txt'] || {}).size) + '"; ' + account.stats + ' lstat(s) of which '
+    + account.dirStats + ' on directories')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: THE SELECTION — a range in LAYOUT order, and an anchor a Ctrl press moved.
+
+   `docs/PLAN-SHELL.md` §M19's fourth clause. The rows are read as NAMES throughout, because the
+   layout order here is the TYPE-descending one two header clicks produced: an index taken before
+   the sort names a different file after it, which is the defect the program's own
+   selection-by-identity rule exists to avoid.
+
+   THE ANCHOR IS NEVER READ DIRECTLY and could not be — nothing draws it. Its proof is where the
+   SECOND Shift+click ranges from: if the Ctrl press had not moved it, that range would start at the
+   plain press's row and the set would be a different one. That is the only shape of this clause
+   that cannot pass with the anchor rule unimplemented.
+   -------------------------------------------------------------------------------------------- */
+function proofSelect (run) {
+  const { at, account } = run
+  const names = at.reversed.names
+  const plainName = names[2]
+  const shiftName = names[5]
+  const ctrlName = names[0]
+  const select = {
+    layout: names,
+    plain: { row: plainName, selected: at.picked.selected, cursor: at.picked.cursor },
+    ranged: { row: shiftName, selected: at.ranged.selected },
+    toggled: { row: ctrlName, selected: at.toggled.selected },
+    reranged: { row: plainName, selected: at.reranged.selected },
+    want: {
+      plain: [plainName],
+      ranged: names.slice(2, 6),
+      toggled: [ctrlName, ...names.slice(2, 6)],
+      reranged: names.slice(0, 3),
+    },
+    account,
+  }
+
+  /* A PLAIN PRESS REPLACES THE SELECTION AND CARRIES THE CURSOR WITH IT. Both halves: without the
+   * cursor the next Enter would open a row other than the one the reader just highlighted, which is
+   * the program's own stated reason for the line. */
+  select.aPlainClickSelectsOneRow = sameSet(at.picked.selected, select.want.plain)
+    && at.picked.cursor === plainName
+
+  /* SHIFT RANGES FROM THE ANCHOR TO THE PRESS, INCLUSIVE, IN LAYOUT ORDER — four contiguous rows of
+   * the sorted list, which is what "layout order" means when the sort reorders `rows` itself. */
+  select.shiftSelectsTheRange = sameSet(at.ranged.selected, select.want.ranged)
+
+  /* CTRL TOGGLES ONE ROW AND REPLACES NOTHING: the range stays and the pressed row joins it. */
+  select.ctrlAddsWithoutReplacing = sameSet(at.toggled.selected, select.want.toggled)
+
+  /* AND THE CTRL PRESS MOVED THE ANCHOR, which is this proof's point. The second Shift+click ranges
+   * from the row CTRL touched to the row it was aimed at; had the anchor stayed where the plain
+   * press left it the set would be `[plainName]` alone. */
+  select.ctrlMovedTheAnchor = sameSet(at.reranged.selected, select.want.reranged)
+    && !sameSet(at.reranged.selected, select.want.plain)
+
+  /**
+   * AND THE PROGRAM'S OWN SET AGREES WITH THE DISPLAY LIST — read at EXIT, which is the only moment
+   * the account exists, so it is compared against the LAST thing the page read and not against the
+   * range above. Two gestures came after the four here: a band and a drag, and the drag's press
+   * replaced the selection with its own row.
+   *
+   * `account.selected` IS IN ASCENDING INDEX ORDER, so it is converted through the layout the page
+   * read rather than compared as numbers — which is the same rule every other clause here follows,
+   * and the reason is the sort: an index is not a row.
+   *
+   * `selects` IS COMPARED AGAINST A COUNT THE PAGE KEPT, not against a constant. The program counts
+   * one per press that found a row, and the page counted the presses it aimed at one — so a gesture
+   * added to `drive` moves both and a gesture that missed its row moves neither.
+   */
+  const fromAccount = account.selected.map((i) => at.dropped.names[i])
+    .filter((n) => n !== undefined)
+  select.theProgramAgreesAboutItsOwnSet = account.selects === run.rowPresses
+    && sameSet(fromAccount, at.dropped.selected)
+
+  /* NOTHING WAS LIT WHILE THE SELECTION MOVED. A press is not a hover — `files` clears the light at
+   * every press — so a selected row reading as lit as well would mean the two states had become one
+   * picture, which is the whole reason the hover is a fill and not an ink. */
+  select.theSelectionIsNotTheLight = at.picked.lit === null && at.ranged.lit === null
+    && at.toggled.lit === null && at.reranged.lit === null
+
+  select.ok = select.aPlainClickSelectsOneRow && select.shiftSelectsTheRange
+    && select.ctrlAddsWithoutReplacing && select.ctrlMovedTheAnchor
+    && select.theProgramAgreesAboutItsOwnSet && select.theSelectionIsNotTheLight
+  globalThis.M19.proofs.select = { ok: select.ok, evidence: select }
+  say((select.ok ? 'ok  ' : 'BAD ') + 'select: click ' + plainName + ' -> ['
+    + at.picked.selected.join(' ') + '], shift ' + shiftName + ' -> ['
+    + at.ranged.selected.join(' ') + '], ctrl ' + ctrlName + ' -> ['
+    + at.toggled.selected.join(' ') + '], shift ' + plainName + ' -> ['
+    + at.reranged.selected.join(' ') + ']')
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 5: THE ARBITRATION — a band from empty space, a drag from a row.
+
+   `docs/PLAN-SHELL.md` §M19's fifth clause: "a band from empty space selects by intersection while
+   a press on a row starts a drag — the ARBITRATION is the assertion."
+
+   SO EACH HALF IS READ AS THE THING THE OTHER MUST NOT HAVE DONE. The two gestures are IDENTICAL —
+   a press, a move past the threshold, a release — and the only difference is what was under the
+   press, which is where `src/bin/files.mjs` takes the decision and takes it once.
+
+   THE ROWS A BAND TOOK COME FROM `FILES_METRICS.bandRows`, asked about the rectangle the page
+   actually SENT: `cssOffsetOf` is `viewportPoint`'s inverse, so the corners are the ones the program
+   received rather than the ones this page intended. A restated intersection is a check asserting the
+   wrong set, which is the reason that function is exported at all.
+
+   THE DRAG IS READ AS THE KERNEL'S OWN LIVE SESSION, between the move and the release, because that
+   is the only moment one exists. `host.stats.drags` counts sessions the kernel ACCEPTED, so a
+   gesture that never offered an object cannot move it.
+   -------------------------------------------------------------------------------------------- */
+function proofBand (run) {
+  const { at, account } = run
+  const band = {
+    rect: run.band,
+    want: run.bandWant,
+    got: at.banded.selected,
+    whileOpen: at.banding.selected,
+    dragsDuringTheBand: at.banded.drags,
+    session: at.dragging.session,
+    dragsDuringTheRow: at.dropped.drags,
+    lastDrag: at.dropped.lastDrag,
+    pressedSelection: at.pressed.selected,
+    account,
+  }
+
+  /* THE BAND HAD A RECTANGLE AND IT CROSSED ROWS. A degenerate band touches nothing — `bandRows`
+   * answers an empty set for a zero width or height — so a clause comparing two empty sets would
+   * pass over a gesture that never moved. */
+  band.theBandCrossedRows = run.bandWant.length >= 2
+    && run.bandWant.length < at.banded.names.length
+
+  /* AND IT SELECTED EXACTLY THE ROWS IT CROSSED, by intersection. Read after the RELEASE, where the
+   * band's own rectangle is gone from the batch: a live band is a third full-width rectangle and
+   * `bandedRows` would have to tell it from a row's. */
+  band.theBandSelectedWhatItCrossed = sameSet(at.banded.selected, run.bandWant)
+  // THE SELECTION IT MADE OUTLIVES THE RECTANGLE: a band released is a choice taken.
+  band.theBandWasAlreadySelectingWhileOpen = sameSet(at.banding.selected, run.bandWant)
+
+  /* AND IT STARTED NO DRAG. This is the first half of the arbitration, and `--band-from-row` does
+   * not turn it: that world arms a band from a ROW as well, so a band from empty space behaves
+   * exactly as it does here. */
+  band.theBandStartedNoDrag = at.banded.drags === 0
+
+  /* A PRESS ON A ROW REPLACED THE SELECTION WITH IT, which is what says the press landed on the row
+   * the page aimed at rather than on the gap between two. */
+  band.thePressLandedOnTheRow = sameSet(at.pressed.selected, [DRAG_ROW])
+
+  /* AND THEN STARTED A DRAG — the kernel's own session, with the formats the association named.
+   * `DOBJ_PATHS` and the row's own format, asserted separately: a session offering the path list
+   * alone would be a drag of a file whose bytes nobody published. */
+  band.aPressOnARowStartsADrag = at.dropped.drags === 1
+    && at.dragging.session !== null
+    && at.dragging.session.win === run.win
+    && at.dragging.session.formats.includes(DOBJ_PATHS)
+    && at.dragging.session.formats.includes(DOBJ_TEXT)
+    && account.drags === 1
+  /* AND NOTHING WAS REFUSED, which is the other way this proof could be satisfied for the wrong
+   * reason: `startDrag` declines a directory and a row whose format nothing names, by name and
+   * counted, so a drag that never began because the row was undraggable would be a red clause with
+   * a reason nothing stated. It is kept APART from the clause above so `--band-from-row` — where no
+   * drag is attempted at all and nothing is therefore refused — turns that one alone.
+   *
+   * `account.bands` IS NOT ASSERTED AS A TOTAL. That world arms a band from a ROW as well, so the
+   * total is 2 there over a band clause that is otherwise unaffected; `>= 1` is what this proof
+   * actually needs, and which rows the band took is read off the display list above. */
+  band.nothingWasRefused = account.refusedDrags === 0 && account.bands >= 1
+
+  band.ok = band.theBandCrossedRows && band.theBandSelectedWhatItCrossed
+    && band.theBandWasAlreadySelectingWhileOpen && band.theBandStartedNoDrag
+    && band.thePressLandedOnTheRow && band.aPressOnARowStartsADrag
+    && band.nothingWasRefused
+  globalThis.M19.proofs.band = { ok: band.ok, evidence: band }
+  say((band.ok ? 'ok  ' : 'BAD ') + 'band: a band over [' + run.bandWant.join(' ')
+    + '] selected [' + at.banded.selected.join(' ') + '] and began ' + at.banded.drags
+    + ' drag(s); a press on ' + DRAG_ROW + ' began ' + at.dropped.drags + ' drag(s) offering '
+    + (at.dragging.session ? at.dragging.session.formats.join(',') : 'NOTHING'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: HOVER — a light that moves, a leave that clears it, and a stream that is REPLACED.
+
+   `docs/PLAN-SHELL.md` §M19's third clause. TWO WINDOWS, because the two halves need opposite
+   fixtures and slice 2's contract says so in as many words: a DRAINING program is where a lit row
+   can be seen at all, and a HELD one is the only world where `coalesced` can rise — against a
+   draining program every record goes straight to a parked reader, so there is no tail to replace and
+   a clause asserting a rise would be vacuous (M17's lesson, repeated here on purpose).
+
+   THE LIGHT HALF IS READ OFF THE DRAINING WINDOW'S DISPLAY LIST and is already recorded by `drive`.
+   The STREAM half is this function's: one warm-up hover, a baseline, `HOVER_SAMPLES` more, and the
+   kernel's own counters either side.
+
+   THE WARM-UP IS WHAT MAKES THE PREDICTION EXACT. The first driven mouse event into a Chrome page
+   also queues one `WEV_FOCUS` (measured, `bench/m19-hover/probe.py`), and the first hover of a stream
+   has no like record at the tail to merge into — so a baseline taken BEFORE the stream has to carry
+   a focus term and a first-record term this page would then be predicting rather than reading. Taken
+   AFTER one hover, the tail is a buttonless move and every sample that follows merges into it:
+   `queued +0` and `coalesced +HOVER_SAMPLES`, with nothing subtracted.
+   -------------------------------------------------------------------------------------------- */
+async function proofHover (k, host, run) {
+  const { at } = run
+  const argv = ['files', '--no-drain', String(HOLD_MS), ...programFlags(), ROOT_DIR]
+  // EVERY FRAME THAT ALREADY EXISTS, so the window found below is this spawn's and not the one
+  // `drive` just quit — see `frameByTitle`.
+  const known = new Set(host.frames.keys())
+  /** WHEN THE HOLD STARTED, as near as this side can know it: the program begins holding once its
+   *  window is painted, which is the first thing after the spawn. Everything between here and the
+   *  end of the stream has to fit inside `HOLD_MS`. */
+  const spawnedAt = performance.now()
+  const held = await spawnProgram(k, FILES, argv)
+  const entry = await surfaced(host, 'files', known)
+  if (!entry) throw new Error('the --no-drain files window never surfaced')
+  /* RAISED AND NOT RE-PLACED. The held program has drained no `WEV_CLIENT`, so the surface the
+   * kernel granted is still the one it opened with; a frame re-placed under it leaves the two
+   * disagreeing and `Surface.pointAt` differences the disagreement into every point it posts. The
+   * raise is still needed, because a pointer gesture is delivered by DOM hit-testing. */
+  await raise(k, entry)
+  const quietMs = await geomsSettled(host)
+
+  /**
+   * A POINT INSIDE THE HELD WINDOW, ACROSS ONE ROW — AIMED IN SURFACE PIXELS THROUGH
+   * `Surface.clientAt`, which is the declared inverse of the `pointAt` that will convert it back.
+   *
+   * THIS IS THE ONE AIM ON THIS PAGE THAT IS NOT IN CSS PIXELS, and the reason is the held window.
+   * A frame is NOT sized to the client box a program asked its surface for, and a held program has
+   * drained no `WEV_CLIENT` to refit with — measured here, 420x228 of backing store under a 520-tall
+   * body. So a CSS-px offset off the canvas rect is NOT the number the program will read, and
+   * `clientAt` is the one function that puts a surface pixel on the page. `theProgramHeldBeforeIts
+   * FirstRead` is the clause that says the window is in that state.
+   *
+   * STEPPED AND NOT REPEATED, because a stream of identical coordinates is a stream a browser may
+   * fold before script ever sees it — which would credit the transport with the kernel's work,
+   * constraint 298's trap from M17.
+   *
+   * ALONG ONE ROW, so the record the program eventually reads is a position over a row rather than
+   * in the gap between two. Which row it lights is NOT asserted — see `theProgramSawOneRecord` for
+   * the measurement that rules it out.
+   *
+   * THE WALK STAYS WELL INSIDE THE SURFACE. Leaving the canvas would fire a `pointerleave`, whose
+   * `mods` is exactly `WPTR_LEAVE` and which therefore merges with nothing — one leave would split
+   * the run and `queued:` would rise for a reason that is not the coalescing.
+   * `noLeaveSplitTheStream` is the clause that says it did not.
+   */
+  const aim = (i) => {
+    const span = Math.max(1, entry.surface.w - 80)
+    return onScreen(entry,
+      entry.surface.clientAt(40 + (i % span), FILES_METRICS.rowMid(HOVER_ROW, 0)),
+      `hover sample ${i + 1}`)
+  }
+
+  // THE WARM-UP, AND THE BASELINE AFTER IT. See this proof's header.
+  await gesture(entry, { kind: 'hover', name: 'warm-up-hover', at: aim(0) },
+    { wantRepaint: false })
+  const geomsBefore = host.report().geoms
+  const before = await kernelWin(k, entry.id)
+  if (!before) throw new Error(`the kernel has no window ${entry.id} to measure`)
+  const hostBefore = hostCounts(host)
+
+  const preStreamMs = performance.now() - spawnedAt
+  /* THE STREAM ASKS AND DOES NOT SETTLE, which is a deliberate departure from every other gesture
+   * on this page and the one place the difference matters. `gesture`'s 600 ms settle exists so a
+   * step can READ the consequence of the gesture it just asked for; here there is nothing to read
+   * until the whole stream is in, and settling per sample made the stream outlast its own fixture
+   * (see `HOLD_MS`). ONE settle follows the loop, before the counters are read. */
+  const t0 = performance.now()
+  for (let i = 1; i <= HOVER_SAMPLES; i += 1) {
+    await ask({ kind: 'hover', name: `hover-sample-${i}`, at: aim(i) })
+  }
+  const streamMs = performance.now() - t0
+  // THE LAST SAMPLE STILL HAS TO CROSS THE KERNEL before its counters are read, and nothing
+  // repaints to say so: a held program draws nothing.
+  await pause(600)
+  const after = await kernelWin(k, entry.id)
+  const hostAfter = hostCounts(host)
+  const delta = {
+    queued: (after.queued | 0) - (before.queued | 0),
+    coalesced: (after.coalesced | 0) - (before.coalesced | 0),
+    dropped: (after.dropped | 0) - (before.dropped | 0),
+    delivered: (after.delivered | 0) - (before.delivered | 0),
+    leaves: (after.leaves | 0) - (before.leaves | 0),
+    geoms: hostAfter.geoms - geomsBefore,
+    hovers: hostAfter.hovers - hostBefore.hovers,
+    dragAts: hostAfter.dragAts - hostBefore.dragAts,
+  }
+
+  /* `/proc`, WHILE THE PROGRAM IS STILL NOT DRAINING. The patterns are built from the numbers the
+   * kernel just reported, so a line that merely EXISTS does not satisfy them — `grep -c` with a
+   * FIXED string (constraint 138) and its exit status is the answer. This is what ties the page's
+   * reading to the one a person has at a prompt. */
+  const path = `/proc/${held.pid}/win/${entry.id}`
+  const greps = {}
+  for (const [name, value] of [['queued', after.queued | 0], ['coalesced', after.coalesced | 0],
+    ['dropped', after.dropped | 0], ['leaves', after.leaves | 0]]) {
+    greps[name] = await grepFor(k, path, `${name}:\t${value}`)
+  }
+
+  /* NOW LET THE HOLD EXPIRE AND THE PROGRAM DRAIN, so its account can be collected. One repaint
+   * after the hold is the whole stream landing: the queue holds one merged hover record, so the
+   * program reads one position and lights one row. */
+  const had = BATCHES.get(entry.id) || 0
+  const drainedMs = await until(() => (BATCHES.get(entry.id) || 0) > had, HOLD_MS + 8000)
+  const heldAccount = accountOf(await quitAndReport(k, entry, held.pid))
+
+  const hover = {
+    pid: held.pid, win: entry.id, path, argv,
+    samples: HOVER_SAMPLES, queueCap: WIN_EVENT_CAP,
+    holdMs: HOLD_MS, preStreamMs: Math.round(preStreamMs), streamMs: Math.round(streamMs),
+    quietMs: Math.round(quietMs), drainedMs: Math.round(drainedMs),
+    before: { queued: before.queued, coalesced: before.coalesced, dropped: before.dropped,
+      leaves: before.leaves },
+    after: { queued: after.queued, coalesced: after.coalesced, dropped: after.dropped,
+      leaves: after.leaves, pending: after.pending, parked: after.parked },
+    delta,
+    greps,
+    held: heldAccount,
+    // The LIGHT half, as `drive` recorded it off the draining window.
+    lit: {
+      before: at.reversed.lit,
+      first: { row: at.litA.lit, cursor: at.litA.cursor, selected: at.litA.selected },
+      second: { row: at.litB.lit, cursor: at.litB.cursor, selected: at.litB.selected },
+      afterLeave: at.left.lit,
+      hostHovers: at.litB.host.hovers - at.reversed.host.hovers,
+      hostLeaves: at.left.host.leaves - at.litB.host.leaves,
+      hostDragAts: at.left.host.dragAts - at.reversed.host.dragAts,
+      account: run.account,
+    },
+  }
+
+  /* ---- THE LIGHT ------------------------------------------------------------------------- */
+  /* NOTHING WAS LIT BEFORE THE HOVER, which is what makes the next clause about the move. A header
+   * press clears the light, and the two header clicks are what came before. */
+  hover.nothingWasLitBeforeTheHover = at.reversed.lit === null
+  /* THE FIRST MOVE LIT A ROW AND THE SECOND MOVED THE LIGHT. The pair, because one lit row is also
+   * what a program that lit a row at startup looks like — and the rows are named, so a light that
+   * stayed put is visible as the same name twice. */
+  hover.aButtonlessMoveLitTheRow = at.litA.lit === at.reversed.names[2]
+    && at.litA.litCount === 1
+  hover.aSecondMoveMovedTheLight = at.litB.lit === at.reversed.names[0]
+    && at.litB.litCount === 1 && at.litB.lit !== at.litA.lit
+  /* AND IT MOVED NOTHING ELSE. A hover is not a press: the selection and the keyboard cursor are
+   * where the earlier gestures left them, which is why the light is a fill under the row's text and
+   * not a change of its ink. */
+  hover.theLightIsNotASelection = at.litA.selected.length === 0 && at.litB.selected.length === 0
+    && at.litA.cursor === at.reversed.cursor && at.litB.cursor === at.reversed.cursor
+  /* THE PAGE SENT EXACTLY TWO HOVERS AND NOT ONE DRAG POSITION. `#dragMove` seeing a buttonless
+   * sample would post a drag position for a gesture nobody started, and `dragAts` is the counter
+   * that says it did not. */
+  hover.theHoversWereSentAsHovers = hover.lit.hostHovers === 2 && hover.lit.hostDragAts === 0
+  /* THE POINTER LEFT AND THE LIGHT WENT OUT. One leave for one exit, and the light cleared rather
+   * than moved: `WPTR_LEAVE` carries no usable position, so a program that hit-tested it would light
+   * whatever row row 0 happens to be. */
+  hover.theLeaveClearedTheLight = at.left.lit === null && hover.lit.hostLeaves === 1
+  /* AND THE PROGRAM COUNTED BOTH KINDS SEPARATELY. `hovers` against `leaves` in its own account is
+   * what separates "a record arrived" from "the right record arrived". */
+  hover.theProgramCountedThem = run.account.hovers >= 2 && run.account.leaves >= 1
+    && run.account.lit === -1
+
+  /* ---- THE STREAM ------------------------------------------------------------------------ */
+  /* THE FIXTURE CLAUSES. Each stream clause is vacuous without them: a program that really held, a
+   * stream that really arrived, a window nothing resized, and a stream that did NOT lap the ring —
+   * which is deliberate, because `dropped:` is not one of this proof's instruments (plan §M19, for
+   * M17's reason) and a lapped ring would make `queued:` a reading of the cap instead of the
+   * coalescing. */
+  hover.theProgramHeldItsLoop = heldAccount.heldMs >= HOLD_MS - 50
+    && heldAccount.noDrainMs === HOLD_MS
+  /* AND IT HELD WITH `S = 1`, WHICH IS WHAT `aim` CONVERTS AGAINST. `WEV_CLIENT` is a program's
+   * only route to the ratio, so one that has drained none is still on 1 — and the creation-time
+   * client record is still in its queue, below the stream, because the hold is taken before the
+   * first `win_read`. `clients` and `resurfaces` count what the program drained, so both being 1
+   * here is the program refitting AFTER the hold, which is also why no clause below names the row
+   * it lit (see `theProgramSawOneRecord`). */
+  hover.theProgramHeldBeforeItsFirstRead = heldAccount.clients === 1
+    && heldAccount.resurfaces === 1
+  hover.theHoldOutlastedTheStream = preStreamMs + streamMs < HOLD_MS
+  hover.thePageRoutedEverySample = delta.hovers === HOVER_SAMPLES
+    && delta.dragAts === 0
+  hover.theStreamStayedInsideTheQueue = HOVER_SAMPLES < WIN_EVENT_CAP && delta.dropped === 0
+  hover.nothingResizedMidStream = delta.geoms === 0
+  // AND NO LEAVE RODE ALONG. A leave's `mods` is exactly `WPTR_LEAVE` and merges with nothing, so
+  // one in the middle of the stream would split the run and `queued:` would rise for a reason that
+  // is not the coalescing.
+  hover.noLeaveSplitTheStream = delta.leaves === 0
+
+  /* THE TWO NUMBERS THE PLAN NAMES. `queued` counts records that ENTERED the ring and `coalesced`
+   * counts the offers that did not, so a stream that was replaced moves the second and leaves the
+   * first exactly where it was. The warm-up is what makes `+0` the prediction rather than `+1`. */
+  hover.queuedStoodStill = delta.queued === 0
+  hover.coalescedRoseByTheWholeStream = delta.coalesced === HOVER_SAMPLES
+  hover.procPublishesTheSameNumbers = Object.values(greps)
+    .every((g) => g.exit === 0 && g.matched === 1)
+  /**
+   * AND THE RING HELD ONE HOVER: the program resuming after the hold reads ONE record where an
+   * appending stream would hand it forty. That is the replacement seen from the program's side.
+   *
+   * WHICH ROW IT LIT IS NOT ASSERTED, and the reason is measured rather than a shrug. The resumed
+   * program drains its creation-time `WEV_CLIENT` FIRST — it is below the stream in the same queue —
+   * so it refits to `S = 2` and then reads the queued pointer record, whose surface coordinate
+   * belonged to the 420x228 store that `win_surface` has just replaced. It lit row 2 for a point
+   * aimed at row 5, and that is correct arithmetic over a coordinate whose surface no longer exists.
+   * A clause naming the row would be asserting which of two surfaces a stale record belongs to,
+   * which is a question this proof is not about.
+   *
+   * THE NEWEST-WINS HALF IS PROVEN ON THE DRAINING WINDOW INSTEAD, where it is well defined:
+   * `aSecondMoveMovedTheLight` is the light following the SECOND of two moves, which a replacement
+   * that kept the older sample could not do.
+   */
+  hover.theProgramSawOneRecord = heldAccount.hovers === 1
+
+  hover.ok = hover.nothingWasLitBeforeTheHover && hover.aButtonlessMoveLitTheRow
+    && hover.aSecondMoveMovedTheLight && hover.theLightIsNotASelection
+    && hover.theHoversWereSentAsHovers && hover.theLeaveClearedTheLight
+    && hover.theProgramCountedThem
+    && hover.theProgramHeldItsLoop && hover.theProgramHeldBeforeItsFirstRead
+    && hover.theHoldOutlastedTheStream
+    && hover.thePageRoutedEverySample && hover.theStreamStayedInsideTheQueue
+    && hover.nothingResizedMidStream && hover.noLeaveSplitTheStream
+    && hover.queuedStoodStill && hover.coalescedRoseByTheWholeStream
+    && hover.procPublishesTheSameNumbers && hover.theProgramSawOneRecord
+  globalThis.M19.proofs.hover = { ok: hover.ok, evidence: hover }
+  say((hover.ok ? 'ok  ' : 'BAD ') + 'hover: the light went ' + String(at.reversed.lit) + ' -> '
+    + String(at.litA.lit) + ' -> ' + String(at.litB.lit) + ' -> ' + String(at.left.lit)
+    + ' on 2 driven moves and 1 leave; ' + HOVER_SAMPLES + ' more into a held program queued +'
+    + delta.queued + ', coalesced +' + delta.coalesced + ', dropped +' + delta.dropped
+    + ' and it read ' + heldAccount.hovers + ' record(s), lighting row '
+    + (heldAccount.lit + 1) + ' of ' + heldAccount.rows.length)
+
+  /* THE CONTROL IS MEASURED, NOT ASSUMED. `setHoverCoalesce` is exported from
+   * `src/kernel/wins.mjs` and nothing in `src/kernel/kernel.mjs` consumes a `noHoverCoalesce` boot
+   * cfg — `cfg.noWheelCoalesce` has such a branch at `:1705` and this has none — so a page that
+   * merely passed the key would report green proofs over an unmodified kernel, with the kernel's own
+   * coalescing silently credited as the thing under test. FAIL CLOSED. */
+  if (CFG.noHoverCoalesce && delta.coalesced > 0) {
+    throw new Error('no_hover_coalesce was asked for and the kernel coalesced anyway: '
+      + `coalesced rose by ${delta.coalesced} over ${HOVER_SAMPLES} samples. `
+      + 'src/kernel/kernel.mjs needs a bench-gated `cfg.noHoverCoalesce` branch calling '
+      + '`setHoverCoalesce(false)`, beside the `cfg.noWheelCoalesce` branch that calls '
+      + '`setWheelCoalesce(false)`. Until it has one there is no world for this control.')
+  }
+}
+
+/* ---- staging ------------------------------------------------------------------------------- */
+
+/** The program flags the four argv controls select, as `src/bin/files.mjs` spells them. ONE list,
+ *  read by both spawns: the held window gets them too, because a control a page applied to one
+ *  fixture and not the other is a page running two different worlds at once. */
+function programFlags () {
+  const flags = []
+  if (CFG.stableSortOff) flags.push('--stable-sort-off')
+  if (CFG.foldersLast) flags.push('--folders-last')
+  if (CFG.noDirStat) flags.push('--no-dir-stat')
+  if (CFG.bandFromRow) flags.push('--band-from-row')
+  return flags
+}
+
+/** The one window the four display-list proofs drive, on the tree this page built. */
+async function stage (k, host) {
+  const pids = {}
+  const argv = ['files', ...programFlags(), ROOT_DIR]
+  pids.files = (await spawnProgram(k, FILES, argv)).pid
+  if (!await surfaced(host, 'files')) throw new Error('files never surfaced')
+  globalThis.M19.pids = pids
+  globalThis.M19.argv = argv
+  return pids
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+/**
+ * THE THREE WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * `files` OPENS ON `/usr/share` AND NOT ON `/usr/bin`, which is the one place this page overrides a
+ * `PROGRAMS` row, and M19's columns are the reason. `/usr` is a PROVIDER mount: its inodes publish
+ * mtime 0, so a Date modified column over `/usr/bin` is thirty-three rows of the unknown mark — the
+ * column working exactly as specified and showing nothing a reader can use. `/usr/share` is a
+ * handful of rows with real formats, so the Type and Size columns say something; the Date column
+ * still reads `—` there, and that is the mount rather than the feature.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure. `aero.ICON_CELL_W` is the cell's width, imported rather than guessed at.
+ *
+ * `taskmgr` IS HERE BECAUSE IT HAS THE SAME SELECTION RULES NOW (plan §M19) and its table is the
+ * other list a reader can hover, band and Shift-click. `term` is LAST because it spawns `sh` by
+ * syscall (`PROGRAMS.term`).
+ */
+const LIVE_X = aero.ICON_CELL_W + 20
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    argv: () => ['files', '/usr/share'],
+    box: () => ({ x: LIVE_X, y: 20, w: 560, h: 280 }),
+  },
+  {
+    ...PROGRAMS.taskmgr,
+    name: 'taskmgr',
+    box: (wa) => ({ x: LIVE_X + 580, y: 20, w: 620, h: Math.max(240, wa.h - 40) }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 320, w: 560, h: Math.max(160, wa.h - 340) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. ADDED rather than substituted, so a
+ *  reader here still learns what the rest of the shell does. */
+const M19_HELP = [
+  '  `files` is a DETAILS view: Name, Date modified, Type and Size',
+  '  click a column header to sort by it, click it again to reverse — folders stay first',
+  '  the row under the pointer lights up, and the light goes out when the pointer leaves',
+  '  shift-click for a range, ctrl-click to add one row, drag from empty space to band-select',
+  '  `taskmgr` has the same selection rules, and t or x signals every selected process',
+]
+
+async function live () {
+  const { host } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M19,
+    say,
+    label: 'm19',
+    /* THE URL'S KERNEL CONTROL REACHES THE LIVE KERNEL TOO, because a flag a page accepts on one
+     * path and drops on the other is how a reader comes to believe a world was selected when it was
+     * not. It is still unconsumed by `src/kernel/kernel.mjs`; `proofHover` is what measures that. */
+    cfg: CFG.noHoverCoalesce ? { noHoverCoalesce: 1 } : {},
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M19_HELP),
+  })
+  publishHost(host)
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M19.state = 'done'
+    globalThis.M19.verdict = 'live'
+    await live()
+    return
+  }
+
+  const controls = [...programFlags(), ...(CFG.noHoverCoalesce ? ['no_hover_coalesce'] : [])]
+  say('M19 — details, sort, selection, hover.'
+    + (controls.length ? ' CONTROL: ' + controls.join(' ') : ''))
+  say('dpr ' + dpr() + '. Every click, move and band below is REAL input, performed by something')
+  say('that is not this page: a synthesised event is isTrusted === false (175). Every clause is')
+  say('read back off the display list the page replayed.')
+
+  const { k, host } = await bootHost()
+  globalThis.M19.kernelIsolated = true
+  globalThis.M19.controlsInForce = host.report().controls
+  globalThis.M19.tree = await makeTree(k)
+  say('staged ' + ROOT_DIR + ': rm exit ' + globalThis.M19.tree.rm + ', mkdir exit '
+    + globalThis.M19.tree.mkdir + ', cp exits ' + globalThis.M19.tree.copies.join(',')
+    + ', touch exit ' + globalThis.M19.tree.touch + ' for ' + ROW_COUNT + ' row(s)')
+  await stage(k, host)
+
+  const run = await drive(k, host)
+  globalThis.M19.run = run
+
+  proofSort(run)
+  proofCells(run)
+  proofSelect(run)
+  proofBand(run)
+  /* THE STREAM GOES LAST because it spawns a SECOND `files` and holds it for `HOLD_MS`: a proof that
+   * costs twenty seconds of wall time belongs after the ones that can fail in two. */
+  await proofHover(k, host, run)
+
+  const proofs = globalThis.M19.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => !p || !p.ok).map(([n]) => n)
+  globalThis.M19.verdict = bad.length ? 'bad: ' + bad.join(', ') : 'ok'
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M19.verdict)
+  globalThis.M19.state = 'done'
+  globalThis.M19.phase = 'rendered'
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice (constraint
+ * 301).
+ *
+ * `main()` is called synchronously, and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all.
+ *
+ * Below every declaration is the only position where a module's entry point cannot be in a dead
+ * zone, so it is the position it keeps. */
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M19.state = 'aborted'
+  globalThis.M19.why = 'crossOriginIsolated === ' + self.crossOriginIsolated
+    + '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No kernel, no process, no surface.'
+  out.className = 'bad'
+  say(globalThis.M19.why)
+} else {
+  main().catch((e) => {
+    globalThis.M19.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. A diagnostic
+     * that works in one engine is the kind of gap CLAUDE.md records four milestones of. */
+    globalThis.M19.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M19.why)
+  })
+}
+</script>
+</body>
+</html>

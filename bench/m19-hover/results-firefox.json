@@ -1,0 +1,194 @@
+{
+  "ok": true,
+  "moves": 500,
+  "hold": 120000,
+  "worlds": [
+    "append",
+    "coalesce"
+  ],
+  "patches": {
+    "append": "src/wm/winhost.mjs: `if (!e.buttons) return;` removed from the pointermove listener",
+    "coalesce": "src/wm/winhost.mjs: `if (!e.buttons) return;` removed from the pointermove listener; src/kernel/wins.mjs: `Window.pushPointer` added and `WinMgr.feed` routes a WEV_POINTER through it"
+  },
+  "notes": [
+    "append/held 500 moves driven in 6695 ms at dpr 1: pointers +500, queued +500 (of which 0 focus), coalesced +0, dropped +246; ring held 256 of 256",
+    "coalesce/held 500 moves driven in 6700 ms at dpr 1: pointers +500, queued +1 (of which 0 focus), coalesced +499, dropped +0; ring held 3 of 256"
+  ],
+  "bad": [],
+  "rows": [
+    {
+      "world": "append",
+      "holdMs": 120000,
+      "moves": 500,
+      "engine": "firefox",
+      "state": "staged",
+      "why": "",
+      "dpr": 1,
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "--no-drain",
+          "120000",
+          "/usr/bin"
+        ],
+        "holdMs": 120000,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 0,
+        "quietMs": 403,
+        "preStreamMs": 528,
+        "surface": {
+          "w": 420,
+          "h": 560
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 1
+      },
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": 168.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 6695,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 2,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 502,
+        "coalesced": 0,
+        "dropped": 246,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 256,
+        "parked": 0,
+        "level": 2,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 500,
+        "coalesced": 0,
+        "dropped": 246,
+        "delivered": 0,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      }
+    },
+    {
+      "world": "coalesce",
+      "holdMs": 120000,
+      "moves": 500,
+      "engine": "firefox",
+      "state": "staged",
+      "why": "",
+      "dpr": 1,
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "--no-drain",
+          "120000",
+          "/usr/bin"
+        ],
+        "holdMs": 120000,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 0,
+        "quietMs": 401,
+        "preStreamMs": 610,
+        "surface": {
+          "w": 420,
+          "h": 560
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 1
+      },
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": 168.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 6700,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 2,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 3,
+        "coalesced": 499,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 3,
+        "parked": 0,
+        "level": 2,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 1,
+        "coalesced": 499,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      }
+    }
+  ]
+}

@@ -468,6 +468,76 @@ engines** and only `mousedown` carries the platform's count — measured, constr
 that builds the DOWN record from a pointer event delivers no click count to any program, with
 nothing thrown anywhere.
 
+### The hover, the cursor, the ellipsis and the advance table, as M19 built them
+
+**ONE NEW `win_set` SELECTOR AND NO NEW SYSCALL.** Everything else is an addition to a record that
+already exists, plus one generated `/dev` row.
+
+**`WPTR_LEAVE: 0x200` IS A `WEV_POINTER` WHOSE `mods` IS EXACTLY THAT BIT.** Exclusive of
+`WPTR_DOWN`, `WPTR_UP` and `WPTR_MOVE` — a record carrying LEAVE and any of the three is REFUSED by
+`WinMgr.feed` and counted in `badPointer`, because the two readings of such a record differ and
+neither is safe to pick. **`a` and `b` ARE NOT A USABLE POSITION ON A LEAVE**: the event fires
+outside the surface, so the page sends 0/0 and a program MUST clear its hover rather than hit-test.
+`WMOD_*` bits are permitted on the record, which is why the merge test compares the FULL `mods` word
+(constraint 304) — masked equality would let a following hover swallow the leave.
+
+**A HOVER IS WHAT IT IS NOT.** A buttonless move is `mods = WPTR_MOVE` with `c = 0`, where `c`
+carries `event.buttons`; the kernel's test is `!(mods & (WPTR_DOWN | WPTR_UP)) && !(ev.c | 0)`, so a
+drag's move is excluded by the record's own contents. A hover offered onto a tail hover REPLACES it
+and bumps `coalesced` without bumping `queued`. 500 appended moves into a held program drop 247;
+tail-replaced they drop 0 — constraint 223 carries the table and the bench that produced it.
+`/proc/<pid>/win/<winid>` gained `cursor:` and `leaves:` lines beside `suppressed:`.
+
+**`WIN_SET_CURSOR: 6`, with `a2` a `WCUR_*`.** The sixth selector, after `WIN_SET_TITLE` 1,
+`WIN_SET_BOX` 2, `WIN_SET_MODAL` 3, `WIN_SET_STATE` 4 and `WIN_SET_ROLE` 5. The enum is dense
+0..`WCUR_MAX` = 7:
+
+| `WCUR_*` | | |
+| --- | --- | --- |
+| `DEFAULT` 0 | `TEXT` 1 | `POINTER` 2 |
+| `CROSSHAIR` 3 | `MOVE` 4 | `PROGRESS` 5 |
+| `COL_RESIZE` 6 | `NOT_ALLOWED` 7 | |
+
+**A NUMBER AND NEVER A KEYWORD**, because `cursor` takes `url(...)` and a `url(...)` is a fetch; the
+page indexes `WCUR_CSS[v]` in `src/abi.mjs` and renders no string a process handed it. The kernel
+answers **-EINVAL** above `WCUR_MAX` or for a non-integer, **-EHOSTGONE** for a window whose host is
+gone, and **0 with no message posted** when the value is already current — so a page-side driver
+must not wait for a second message. There is deliberately no `wait`: constraint 305 carries why, and
+why `DEFAULT` is 0. `src/libos/syscall.mjs` has no stub for the selector yet, so no program can
+reach it today.
+
+**`DLT_ELLIPSIS: 16` MAKES `DL_TEXT`'s `a5` A MAXIMUM RUN WIDTH, in SURFACE px.** Read ONLY under
+the flag, 0 when absent. **The RENDERER truncates and a program MUST NOT pre-cut**: the renderer
+has the real font, and a program's own cut would be taken on a summed width, which is high by up to
+8.555% (constraint 302) and would truncate text that fits. `encodeTextRun(text, {…, maxWidth})`
+writes the field. `src/bin/files.mjs` emits the limit on every cell; **`src/wm/surface.mjs` does not
+yet honour it**, so a long name still overflows its column.
+
+**`/dev/advance` PUBLISHES THE ADVANCE TABLE AS DATA, not as a measuring capability.** 31,613 B of
+text, mode `0o444`, **not volatile** — the table cannot change while the kernel runs, so it
+publishes its real size and a `stat` then a `read` agree, which is what lets a program size one
+buffer and fill it. `ADVANCE_PATH` names it; `decodeAdvances(text)` answers a table or **null**;
+`advanceWidth(table, str, {size, flags})` answers px or **null**. Exact under `DLT_MONO`, a strict
+upper bound otherwise, null for an unpriced size or a non-ASCII character — constraint 302 carries
+the measurement and what it permits. `advanceKey(flags)` names the four variants
+(`ui`, `ui-bold`, `mono`, `mono-bold`), `ADV_CP_MIN`/`ADV_CP_MAX` are 0x20..0x7e. It adds no
+capability to a process realm (constraint 41): a program reads numbers measured once and cannot ask
+for one that was not.
+
+**`TEXT_SIZES` IS THE DECLARED SET, IN SURFACE PX: `(10, 11, 12, 13, 15, 17, 18, 20, 22, 24, 26)`.**
+Surface px because that is the unit `a2` already carries and the space `measureText` runs in. The
+renderer still accepts any positive size; **a size outside the set has NO ROW, on purpose**, so a
+program drawing at one lays out with `DLT_ELLIPSIS` alone rather than with a wrong advance.
+Constraint 303 carries why the set must be declared at all, and the half-up/half-even rounding that
+cost one wrong set.
+
+**THESE LIVE BESIDE `TEXT_SIZES` AND NOT IN `INTS`, so they are outside `ABI_FINGERPRINT`.** The
+device's own header — family stacks, code-point range, size list — is the stale-copy gate instead,
+and `encodeAdvances` THROWS rather than returning null on a table that disagrees with `TEXT_SIZES`,
+because that input is the kernel's own data and a mismatch there is a defect rather than a bad read.
+`UI_FAMILY` and `MONO_FAMILY` now have their one definition in `src/abi.mjs`; `src/wm/surface.mjs`
+and `src/wm/taskbar.mjs` still carry copies.
+
 ---
 
 ## The five decisions that carry the design

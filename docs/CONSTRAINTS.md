@@ -2046,13 +2046,47 @@ one was the milestone's own subject, in the commit that was supposed to have clo
     **The reserved word is the growth mechanism**, the same one the termios flags use: a seventh
     argument can be added without changing the record size, and a record size that changes is a
     batch the two sides count differently.
-223. **A POINTER EVENT IS A WINDOW EVENT, IN SURFACE PIXELS, AND A HOVER IS NOT SENT.** The surface
-    is scaled to its client area by CSS, so the page converts a browser event into the process's
-    own coordinates — a process knows only its own surface and must never be handed page
-    coordinates. **A move is sent only while a button is down**: a hover would be one event per
-    `pointermove` against a 256-record queue (constraint 213), so a second of hovering would
-    overflow a queue the process is being asked to drain. A program that needs hover can ask for it
-    when there is a program that needs hover.
+223. **A POINTER EVENT IS A WINDOW EVENT, IN SURFACE PIXELS, AND A BUTTONLESS MOVE REPLACES A TAIL
+    BUTTONLESS MOVE.** The surface is scaled to its client area by CSS, so the page converts a
+    browser event into the process's own coordinates — a process knows only its own surface and
+    must never be handed page coordinates. That half is unchanged.
+    **THIS CONSTRAINT SAID "AND A HOVER IS NOT SENT" UNTIL M19, AND ITS ARGUMENT WAS A PREDICTION
+    THAT MEASURED TRUE.** It read: "**A move is sent only while a button is down**: a hover would be
+    one event per `pointermove` against a 256-record queue (constraint 213), so a second of hovering
+    would overflow a queue the process is being asked to drain. A program that needs hover can ask
+    for it when there is a program that needs hover." It is kept here rather than deleted, the way
+    `docs/DECISIONS.md` §Corrections keeps its two, because **the overflow it predicted is real and
+    the thing that was wrong about it was the remedy, not the arithmetic**.
+    **THE OVERFLOW IS THE APPEND'S, NOT THE HOVER'S.** Measured by `bench/m19-hover/probe.py` over
+    500 driven buttonless `mouseMoved` dispatches into one `files` window, Chrome 158 headless /
+    macOS 26.7.2 / Apple M2 Pro, with each world served from its own patched copy of the tree:
+
+    | world, into a program that is NOT draining | `queued` | `coalesced` | `dropped` | ring at the end |
+    | --- | --- | --- | --- | --- |
+    | appended, one record per move | +501 | +0 | **+247** | 256 of 256 |
+    | tail-replaced | +2 | **+499** | +0 | 4 of 256 |
+
+    49% of the stream lost with the ring at its cap, against nothing lost and four records held. One
+    of the two `queued` in the replaced world is a `WEV_FOCUS`, which is the first synthetic or
+    driven mouse event into a Chrome page and must be subtracted by anyone asserting these numbers;
+    Firefox queues none. Confirmed in Firefox 156 with REAL trusted input over `scripts/bidi.py`
+    (`bench/m19-hover/firefox-hover.py`): `dropped +246`, `coalesced +499` — the same counts at
+    **2.7× the stream rate** (6,695 ms against 17,929 ms), so the figure is a COUNT and not a rate.
+    **A DRAINING PROGRAM LOSES NOTHING EITHER WAY AND COALESCES NOTHING**: `dropped +0`,
+    `coalesced +0`, 501 records handed straight to a parked reader in both worlds, because there is
+    no tail to replace. Which is why **a clause asserting the coalescing MUST use a held fixture**
+    (`files --no-drain`) — against a draining one it is vacuous, which is constraint 298's lesson a
+    second time.
+    **REPLACEMENT, NOT SUMMING, AND NOT A SEPARATE EVENT KIND.** A stale hover position has no
+    history worth keeping, unlike M17's wheel notches, so `Window.pushPointer`
+    (`src/kernel/wins.mjs`) overwrites the tail record in place rather than accumulating into it. A
+    merge returns WITHOUT calling `push`: `queued` counts records that entered the ring and
+    `coalesced` the offers that did not, `unreadSince` does not restart, and no `pollWake` is needed
+    because a ring already holding a record was already readable. `/proc/<pid>/win/<winid>` prints
+    the absolute `queued:`/`coalesced:`/`dropped:` a check asserts.
+    **`coalesced` IS NOW SHARED BY THREE MECHANISMS** — M16's client-box replacements, M17's wheel
+    sums and M19's hovers — so a check that asserts a rise in it MUST settle the geometry first and
+    assert the geometry count unchanged across the stream, or it is reading a resize as a hover.
 224. **TWO THINGS THE FIRST M8 RUNS CORRECTED, both of which looked like failures and were not.**
 
     - **One colour, two renderings.** The pattern proof compared `cssColor(op.a4)` — for a canvas,
@@ -3072,3 +3106,81 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     `node --check` parses and does not execute (constraint 288), and a TDZ error is a runtime
     error. What catches it is a gate that loads the bare URL — which is what
     `bench/shell-landing/firefox-landing.py` and `bench/m18-keys/firefox-keys.py` both do.
+
+302. **A PUBLISHED ADVANCE TABLE IS EXACT FOR A MONOSPACED RUN AND A STRICT UPPER BOUND FOR A
+    PROPORTIONAL ONE, AND THE DIFFERENCE IS WHAT A PROGRAM MAY DO WITH IT.** The renderer owns the
+    font; a process owns no measuring capability and must not be given one (constraint 41), so
+    `/dev/advance` publishes per-family, per-size glyph widths as DATA and a program sums them.
+    Measured by `bench/m19-advance/probe.py`, which replays a real `DL_TEXT` op through
+    `src/wm/surface.mjs`'s own `Surface` and then measures **in the context the renderer left** —
+    the font string appears nowhere in the measurement path, so the table cannot agree with a font
+    the renderer does not use. Chrome 158 and Firefox 156, dpr 1 / 1.5 / 2, 95 code points × 4
+    variants × 17 sizes from 10 to 26 px — the figures below — with a second sweep over 26–48 px in
+    `results-sizes-26-48.json` agreeing on every clause:
+
+    | claim | measured |
+    | --- | --- |
+    | a MONO run equals the sum of its advances | **0.0000 px** over 2,448 samples, both engines, all three ratios — and again over a further 1,152 samples at 26–48 px |
+    | a PROPORTIONAL run does not | worst **13.2147 px** — `LT-WAVY.TXT` at 26 px, sum 168.6953 against measured 155.4806. It grows with the size: 24.375 px by 48 px |
+    | …and the error has ONE SIGN | signed range **−13.2147 .. +0.0000 px**: `sum >= measured`, always |
+    | …how large that is relative to the string | worst **8.555%** (`LT-WAVY.TXT` at 22 px, 142.5333 against 131.3000) |
+    | one table serves both engines and all three ratios | worst **0.4522 px**, inside the 0.5 px the plan asked for |
+    | …and it is ENGINE-shaped, not RATIO-shaped | **0.0000 px** within one engine across dpr 1 / 1.5 / 2 |
+    | …and one code point carries that cross-engine worst | the **SPACE**, U+0020. The largest of the other 94 is 0.0208 px; a midpoint table would halve the space to 0.2261 px |
+    | a per-SIZE table is necessary, not per-family | scaling one row by size errs **1.6768 px** |
+
+    **SO THE PERMITTED QUESTION IS "WILL THIS DEFINITELY FIT?" AND THE FORBIDDEN ONE IS "EXACTLY HOW
+    WIDE IS THIS?"** The renderer kerns, which is why the sum is never narrow; a layout decision
+    taken on the sum therefore truncates slightly EARLY and can never overflow its column, and that
+    asymmetry is the only reason a non-exact table is usable at all. `advanceWidth` in `src/abi.mjs`
+    carries the rule at the one place a caller reads it, and answers **null** — not a guess — for an
+    unpriced size or a non-ASCII character, which sends the caller to `DLT_ELLIPSIS` alone.
+    **THE TABLE BEING ENGINE-SHAPED RATHER THAN RATIO-SHAPED IS THE OPPOSITE OF WHAT THIS PROJECT'S
+    OWN BILLS PREDICTED** (constraints 264, 297, and M11's band), and it follows from the unit:
+    `measureText` runs in the canvas's own coordinate space, so a table indexed in SURFACE px needs
+    no dpr dimension. Indexing it in CSS px would have reintroduced every one of those defects.
+
+303. **A TABLE INDEXED BY A SIZE NEEDS A DECLARED SET OF SIZES, BECAUSE THE RENDERER HAS NONE — AND
+    THE SET MUST BE DERIVED WITH THE ROUNDING THE PROGRAMS ACTUALLY USE.**
+    `const size = Math.max(1, op.a2 | 0)` (`src/wm/surface.mjs`) accepts any positive i32, so "per
+    size the renderer offers" is not a closed set and nothing can be indexed by it. `TEXT_SIZES` in
+    `src/abi.mjs` is that set — `(10, 11, 12, 13, 15, 17, 18, 20, 22, 24, 26)`, SURFACE px, frozen —
+    and it is DERIVED rather than chosen: `Math.round(css * ratio)` over the CSS sizes programs draw
+    at today (`src/bin/files.mjs` and `src/bin/taskmgr.mjs`) times the ratios {1, 1.5, 2}. **A size
+    outside the set has NO ROW, on purpose**, so a program drawing at one lays out with
+    `DLT_ELLIPSIS` alone rather than with a wrong advance, and the renderer still accepts it.
+    **THE ROUNDING IS A TRAP AND IT COST ONE WRONG SET.** `Math.round` is half-UP; Python's `round`
+    is half-to-EVEN. 11 CSS px at dpr 1.5 is 16.5 → **JS 17, Python 16**. A Python-derived set
+    publishes a row nothing draws at and omits one two programs do, and it fails SILENTLY in the
+    direction a reader cannot see, because an undeclared size falls back by design. Whatever derives
+    the set must round the way the renderer's own call site rounds.
+
+304. **A HOVER COALESCES AND A DRAG'S MOVE MUST NOT, AND THE RECORD ITSELF IS WHAT TELLS THEM
+    APART.** A hover carries no commitment: only its latest position matters, which is why
+    constraint 223's tail replacement is correct for it. A drag's motion samples are a GESTURE —
+    the kernel owns the session (constraint 243) and a dropped sample is a path the target never
+    saw — so they must all queue. The discriminator is **`c`, which carries `event.buttons`**:
+    `!(mods & (WPTR_DOWN | WPTR_UP)) && !(ev.c | 0)` is a hover, and a drag's move fails the second
+    term by the record's own contents rather than by the kernel inferring anything about a session
+    it would then have to keep in step. `WPTR_MOVE` is deliberately NOT tested —
+    `src/kernel/wins.mjs` does not import it and must not come to depend on a bit the page chooses.
+    **AND THE MERGE TEST MUST COMPARE THE FULL `mods` WORD**, not a masked part of it. `WPTR_LEAVE`
+    is a `WEV_POINTER` whose `mods` is exactly that bit; a merge test that ignored the other bits
+    would let a following hover swallow the leave, and a program would keep a lit row for a pointer
+    that has gone. Full equality also collapses two consecutive leaves, which is correct — a leave
+    carries no position either.
+
+305. **A CURSOR A PROCESS ASKS FOR IS A NUMBER IN A CLOSED ENUM, NEVER A STRING THE PAGE PUTS IN
+    CSS.** `cursor` takes `url(...)`, and a `url(...)` is a fetch — so a process that could hand the
+    page a cursor keyword could make the page request an arbitrary address, which is a capability no
+    `win_set` selector may grant. `WIN_SET_CURSOR` therefore carries a `WCUR_*` value, dense 0..7
+    with `WCUR_MAX = 7`; the kernel refuses anything above it with **-EINVAL**; and the page renders
+    a keyword it reads out of `WCUR_CSS[v]` in `src/abi.mjs` and never one it was handed. A value
+    outside the array's range is DROPPED by the page and counted, so the two refusals are
+    independent and a check asserts each separately.
+    **THERE IS NO `wait` CURSOR, AND THAT IS A DESIGN CHOICE AND NOT AN OMISSION.** A whole-screen
+    busy cursor is a claim about the system that one process must not be able to make;
+    `WCUR_PROGRESS` is the bounded form of the same statement and is what a program gets.
+    **`WCUR_DEFAULT` IS 0 BECAUSE A WINDOW IS BORN WITH IT.** `SYS_NAME`'s shape — dense from 0 so
+    the array is the lookup — plus the fact that an unset cursor must mean the ordinary arrow, which
+    is what `win.el.dataset.cursor` being ABSENT distinguishes from its being `"0"`.

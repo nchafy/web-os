@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m19 advance-table probe</title>
+<style>
+  html, body { margin: 0; background: #14181d; color: #e8edf4;
+               font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  #host { margin: 16px; width: 520px; height: 120px; display: flex; background: #12161c; }
+  #log { margin: 0 16px 16px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<!-- THE REAL RENDERER, NOT A CANVAS OF THIS PAGE'S OWN. The question M19's column layout rests on
+     is whether a PUBLISHED advance table matches the font `src/wm/surface.mjs` actually resolves,
+     so a probe that set its own `ctx.font` would be measuring its own guess. This page builds a
+     `Surface`, replays a real `DL_TEXT` op through it, and then measures in the context the
+     RENDERER left — the font string appears nowhere in the measurement path.
+
+     NO KERNEL, NO SAB, NO PROCESS. A font advance does not depend on isolation, so this page does
+     not gate on `crossOriginIsolated`; it REPORTS it instead, so a reader knows the world a figure
+     came from. Gating here would couple the measurement to a capability it does not use, and the
+     precedent is `bench/m17-wheel/wheel.html`, which holds no kernel for the same reason: a
+     failure here must be the font's and not the boot's. -->
+<div id="host"></div>
+<div id="log">waiting for a driver</div>
+<script type="module">
+import {
+  DL_TEXT, DLT_BOLD, DLT_MONO, DLOP_BYTES, encodeTextRun, encodeDrawOp,
+} from '/src/abi.mjs'
+import { Surface } from '/src/wm/surface.mjs'
+
+const log = document.getElementById('log')
+const say = (s) => { log.textContent = s }
+
+/* THE 95 PRINTABLE ASCII CODE POINTS, built from their code points rather than written out: a
+ * literal would need the backslash and both quote characters escaped in three places (here, the
+ * JSON, and the Python that reads it), and one missed escape is a column measured against a
+ * character the table does not hold. */
+const CHARS = Array.from({ length: 95 }, (_, i) => String.fromCharCode(0x20 + i))
+
+/* THE FOUR VARIANTS A DISPLAY LIST CAN ASK FOR. `DLT_RIGHT` and `DLT_CENTER` are alignment and
+ * change no advance, so they are not variants of the table. */
+const VARIANTS = [
+  { name: 'ui', flags: 0 },
+  { name: 'ui-bold', flags: DLT_BOLD },
+  { name: 'mono', flags: DLT_MONO },
+  { name: 'mono-bold', flags: DLT_MONO | DLT_BOLD },
+]
+
+/** Real filenames, and the pairs a proportional font kerns: `AV`, `To`, `Wa`, `f(`, `LT`, `y,`.
+ *  A column width computed from a table is a SUM of advances, so whether the renderer's own
+ *  measurement of the whole string equals that sum is the question, not a detail of it. */
+const STRINGS = [
+  'readme.txt',
+  'Documents',
+  'AVATAR.png',
+  'To-do list.md',
+  'Wave_form.rgba',
+  'f(x)=y.log',
+  'LT-WAVY.TXT',
+  'file (1).txt',
+  'lorem ipsum dolor sit amet.txt',
+  'a.out',
+  '2026-11-25 23:14',
+  '1.4 MB',
+]
+
+const opsToBytes = (ops) => {
+  const buf = new Uint8Array(ops.length * DLOP_BYTES)
+  const dv = new DataView(buf.buffer)
+  ops.forEach((op, i) => encodeDrawOp(dv, i * DLOP_BYTES, op))
+  return buf
+}
+
+/** The two family stacks as `src/wm/surface.mjs` DECLARES them, read out of the file at run time.
+ *  They are not inputs to the measurement — they are how this page proves it knows which declared
+ *  stack the renderer resolved. A parse that fails is reported and fails the run, because a probe
+ *  that cannot read what it was pointed at must not report a number (CLAUDE.md, harness honesty). */
+async function declaredFamilies() {
+  const res = await fetch('/src/wm/surface.mjs')
+  if (!res.ok) throw new Error(`fetch /src/wm/surface.mjs -> ${res.status}`)
+  const src = await res.text()
+  const grab = (name) => {
+    const m = src.match(new RegExp(`const\\s+${name}\\s*=\\s*(['"\`])([\\s\\S]*?)\\1`))
+    if (!m) throw new Error(`${name} is not a quoted const in src/wm/surface.mjs any more`)
+    return m[2]
+  }
+  return { ui: grab('UI_FAMILY'), mono: grab('MONO_FAMILY') }
+}
+
+/* A SCRATCH CONTEXT, used ONLY to normalise a font string for comparison. A canvas rewrites
+ * whatever is assigned to `font`, so the declared stack and the renderer's `font` can only be
+ * compared after both have been through the same normaliser. */
+const scratch = document.createElement('canvas').getContext('2d')
+const normalise = (spec) => { scratch.font = spec; return scratch.font }
+
+globalThis.__advance = async (sizes) => {
+  const want = (Array.isArray(sizes) ? sizes : [])
+    .map((v) => Math.max(1, v | 0)).filter((v) => v > 0)
+  if (!want.length) return JSON.stringify({ error: 'no sizes were asked for' })
+
+  const out = {
+    dpr: globalThis.devicePixelRatio,
+    isolated: Boolean(globalThis.crossOriginIsolated),
+    ua: navigator.userAgent,
+    chars: CHARS.join(''),
+    strings: STRINGS,
+    sizes: want,
+    fonts: {},
+    adv: {},
+    runs: {},
+    notes: [],
+  }
+
+  let families
+  try {
+    families = await declaredFamilies()
+  } catch (err) {
+    return JSON.stringify({ error: String(err && err.message || err) })
+  }
+  out.families = families
+
+  const host = document.getElementById('host')
+  host.textContent = ''
+  /* SIZED GENEROUSLY IN BOTH AXES. Nothing is read back out of the pixels, but a surface narrower
+   * than a run would clip the drawing and a reader watching a headed run would see a truncated
+   * line and suspect the measurement. `measureText` is unaffected by the extent either way. */
+  const surf = new Surface({ w: 1200, h: 120, into: host, label: 'advance probe' })
+
+  for (const variant of VARIANTS) {
+    out.adv[variant.name] = {}
+    out.runs[variant.name] = {}
+    out.fonts[variant.name] = {}
+    for (const size of want) {
+      /* THE RENDERER SETS THE FONT. One real batch per variant and size: `replay` resets the clip,
+       * reads the header's `a2` as the size and its flags as the family and weight, and leaves the
+       * font in force — the `restore` that would discard it happens at the TOP of the next batch
+       * (`src/wm/surface.mjs` `#resetClip`). So the context measured below is in the exact font the
+       * op asked for, and this page never names one. */
+      const ops = encodeTextRun('Mg', { x: 2, y: 2, size, rgba: 0xe8edf4ff, flags: variant.flags })
+      if (ops[0].op !== DL_TEXT || ops[0].a2 !== size) {
+        return JSON.stringify({ error: `encodeTextRun lost the size: ${JSON.stringify(ops[0])}` })
+      }
+      const drew = surf.text
+      surf.replay(opsToBytes(ops))
+      if (surf.text !== drew + 1) {
+        return JSON.stringify({
+          error: `the renderer drew no run at ${variant.name} ${size}px `
+            + `(unknown ops: ${surf.unknown})`,
+        })
+      }
+      const got = surf.g.font
+      const declared = normalise(
+        `${variant.flags & DLT_BOLD ? 'bold ' : ''}${size}px `
+        + `${variant.flags & DLT_MONO ? families.mono : families.ui}`)
+      out.fonts[variant.name][size] = { renderer: normalise(got), declared }
+
+      /* ROUNDED TO 1/10 000 px. The full double is not information at this scale and the payload
+       * is 95 numbers per variant per size; the verdict's threshold is 0.5 px. */
+      const r4 = (v) => Math.round(v * 1e4) / 1e4
+      out.adv[variant.name][size] = CHARS.map((c) => r4(surf.g.measureText(c).width))
+      out.runs[variant.name][size] = STRINGS.map((s) => ({
+        measured: r4(surf.g.measureText(s).width),
+        /* THE SUM A COLUMN LAYOUT WOULD COMPUTE, out of the same per-character measurements the
+         * table would publish — so `measured - sum` is exactly the error a fitted column inherits
+         * from shaping and kerning, and not an artefact of a second rounding. */
+        sum: r4(Array.from(s).reduce(
+          (t, c) => t + (CHARS.includes(c) ? surf.g.measureText(c).width : NaN), 0)),
+      }))
+    }
+  }
+
+  out.surface = { text: surf.text, unknown: surf.unknown, batches: surf.batches }
+  say(`measured ${VARIANTS.length} variants x ${want.length} sizes x ${CHARS.length} chars `
+    + `at dpr ${out.dpr}`)
+  return JSON.stringify(out)
+}
+
+globalThis.__ready = true
+say('ready')
+</script>
+</body>
+</html>

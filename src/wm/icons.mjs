@@ -330,3 +330,14 @@ export function selfTest() {
   }
   return { drawn: drawn.length, limit: WICON_LIMIT };
 }
+
+/* RUN AT MODULE LOAD, and it was not. `selfTest` was exported and called by NOTHING, where
+ * `src/abi.mjs` and `src/kernel/trace.mjs` both invoke theirs at the foot of the file — so the one
+ * defect it exists to catch, a `WICON_*` the ABI declares and this file cannot draw, would have
+ * reached a desktop as a silent page icon with every check green. An import is the only moment at
+ * which that is cheap to find: it is a loop over the declared ids plus two `iconMarkup` calls, once
+ * per realm.
+ *
+ * IT THROWS RATHER THAN REPORTS, which is the whole of its value: a module that cannot draw the
+ * table it is the other half of must not load, and the message names the ids. */
+selfTest();

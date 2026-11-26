@@ -24,9 +24,11 @@ import {
   WMODAL_NONE, WMODAL_WINDOW, WMODAL_APP, WMODAL_SYSTEM, WMODAL_MAX,
   WMODE_MODELESS, WMODE_PASSIVE, WMODE_RENDER_ABOVE, WMODE_BLOCKING, WMODE_MAX,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP, WEV_DRAG_DONE, WPTR_DOWN, WPTR_UP,
+  WPTR_MOVE, WPTR_LEAVE,
   WEV_STATE, WEV_ITEM, WEV_CLIENT, WEV_WHEEL, WWHEEL_COALESCED,
   WST_NORMAL, WST_MIN, WST_MAX, WST_SNAP_L, WST_SNAP_R, WST_LIMIT,
   WROLE_NORMAL, WROLE_DESKTOP, WROLE_LIMIT,
+  WCUR_DEFAULT, WCUR_MAX,
   WIN_ITEM_CAP, WITEM_SEPARATOR, WITEM_DISABLED,
   encodeWinEvent, decodeWinEvent, dprFixed,
 } from "../abi.mjs";
@@ -118,6 +120,24 @@ let wheelCoalesce = true;
 
 export function setWheelCoalesce(on) {
   wheelCoalesce = !!on;
+}
+
+/**
+ * M19's NEGATIVE CONTROL, boot-gated on bench=1 (`src/kernel/kernel.mjs`): a HOVER appends instead
+ * of replacing the tail hover. `setWheelCoalesce`'s shape and for its reason — delivery, the lit
+ * row and the pointer's position all keep working, so what disappears is the replacement alone.
+ *
+ * It is the control `docs/PLAN-SHELL.md` §2 names `no-hover-coalesce`, and the world it restores is
+ * the one constraint 223 predicted and `bench/m19-hover/probe.py` measured: 500 buttonless moves
+ * into a program that is NOT draining read `queued +501`, `coalesced +0`, `dropped +247` — half the
+ * stream lost at the 256-record cap — where the replacement reads `queued +2`, `coalesced +499`,
+ * `dropped +0`. A DRAINING program is not a world for it: every record goes to a parked reader, so
+ * `coalesced` stays 0 either way and a clause asserting a rise against one is vacuous.
+ */
+let hoverCoalesce = true;
+
+export function setHoverCoalesce(on) {
+  hoverCoalesce = !!on;
 }
 
 /**
@@ -226,6 +246,12 @@ export class Window {
      */
     this.state = WST_NORMAL;
     this.role = WROLE_NORMAL;
+    /** M19. Which `WCUR_*` the page shows over the pixels this process drew. `WCUR_DEFAULT` is 0,
+     *  so a window nobody set up shows the ordinary arrow. RECORDED HERE because the value is
+     *  validated here — the page indexes `WCUR_CSS` and never reasons about the number — and
+     *  because `/proc/<pid>/win/<winid>` publishes it: a program that set a cursor has no other way
+     *  to read back what the kernel believes it set. */
+    this.cursor = WCUR_DEFAULT;
     /** Where a maximized or snapped window goes back to, as the page last reported it, or null.
      *  THE KERNEL'S because the state is: a window that lost where it came from is a window a user
      *  cannot put back, and the page is a renderer that may be re-laid-out at any moment. */
@@ -304,7 +330,14 @@ export class Window {
       // without this counter a control that broke the replacement would move no number anywhere.
       // M17: AND wheel notches SUMMED into the tail, which is the same instrument for the same
       // blindness. Records MERGED, never records offered: `queued` counts the offers.
+      // M19: AND hovers REPLACED at the tail, which is `pushClient`'s instrument again — see
+      // `pushPointer`. One counter and not three: all three are "a record that did not enter the
+      // ring", and a check that needs them apart settles the other two first.
       coalesced: 0,
+      // M19: LEAVE records this window was OFFERED, counted apart from every other pointer record
+      // because a leave is the one input a modal does not suppress (see `WinMgr.feed`). Offered and
+      // not queued, so a leave that replaced a tail leave is still counted.
+      leaves: 0,
     };
   }
 
@@ -476,6 +509,64 @@ export class Window {
           });
           // The bytes go back where they came from: the pop freed exactly one record's room. No
           // `pollWake` — a ring holding a record was already readable, so no reader can be parked.
+          this.events.push(tail);
+          this.stats.coalesced += 1;
+          return true;
+        }
+        this.events.push(tail);
+      }
+    }
+    return this.push(ev);
+  }
+
+  /**
+   * Queue a POINTER event, REPLACING a tail HOVER instead of appending.
+   *
+   * A HOVER IS WHAT IT IS NOT: no button changed in this record and none is held — `c` carries
+   * `event.buttons` (`src/wm/winhost.mjs` `#wirePointer`). `WPTR_MOVE` is deliberately not tested,
+   * because a hover and a drag sample both carry it; the button is the discriminator.
+   *
+   * A MOVE WITH A BUTTON HELD MUST NOT MERGE. That is a drag, and dropping its intermediate
+   * samples would make a drag path the straight line between its ends — `paint` would draw a chord
+   * where the hand drew a curve, and a rubber band would be measured from a corner it never had.
+   *
+   * REPLACED AND NOT SUMMED, which is `pushClient`'s argument and not `pushWheel`'s: the only
+   * question a program asks of a hover is which of its rows the pointer is over NOW, so a stale
+   * position has no history worth keeping, where a stale notch IS the history.
+   *
+   * THE OVERFLOW THIS REMOVES IS MEASURED, and it is the amendment constraint 223 carries.
+   * `bench/m19-hover/probe.py` drove 500 buttonless moves into one window: appended into a program
+   * that is NOT draining, `queued +501`, `coalesced +0`, `dropped +247` — 49% of the stream lost
+   * with the ring at its `WIN_EVENT_CAP` of 256, which is this constraint's own prediction
+   * confirmed. With this replacement, `queued +2`, `coalesced +499`, `dropped +0`, 4 records in the
+   * ring. A DRAINING program loses nothing either way and coalesces nothing: every record goes
+   * straight to a parked reader, so there is no tail to replace.
+   *
+   * THE FULL `mods` WORD MUST MATCH, which is what keeps a `WPTR_LEAVE` from being swallowed by the
+   * hover behind it: a window told the pointer had gone would be told it was back, over a row it
+   * can no longer see. The modifier bits ride the same word, so a hover with Shift newly held
+   * appends instead of merging — one extra record, which is the cheap direction to be wrong in.
+   *
+   * THE TAIL IS READ BACK, NOT REMEMBERED, for `pushClient`'s reason, and a merge returns WITHOUT
+   * calling `push`: `queued` counts records that entered the ring and `coalesced` counts the offers
+   * that did not. No `pollWake` — a ring holding a record was already readable, so no reader can be
+   * parked on it.
+   */
+  pushPointer(ev) {
+    if (this.destroyed) return false;
+    const mods = ev.mods | 0;
+    // Offered and not queued, so a leave that replaced a tail leave is still counted.
+    if (mods & WPTR_LEAVE) this.stats.leaves += 1;
+    const hover = !(mods & (WPTR_DOWN | WPTR_UP)) && !(ev.c | 0);
+    if (hover && hoverCoalesce) {
+      const tail = this.#popTail();
+      if (tail) {
+        const dv = new DataView(tail.buffer);
+        const prev = decodeWinEvent(dv, 0);
+        const like = prev.type === WEV_POINTER && (prev.mods | 0) === mods && !(prev.c | 0);
+        if (like) {
+          encodeWinEvent(dv, 0, { type: WEV_POINTER, mods, a: ev.a, b: ev.b, c: ev.c });
+          // The bytes go back where they came from: the pop freed exactly one record's room.
           this.events.push(tail);
           this.stats.coalesced += 1;
           return true;
@@ -789,6 +880,13 @@ export class WinMgr {
       // M16: device-pixel ratios refused. See `setDpr` — a refusal nobody can count is a display
       // the kernel is wrong about with nothing saying so.
       refusedDpr: 0,
+      // M19's cursor, counted like M14's two axes: the changes, and the values refused for being
+      // outside the closed enum. See `setCursor`.
+      cursorChanges: 0, refusedCursor: 0,
+      // M19. POINTER records refused for claiming a leave AND a press, release or move at once,
+      // and leaves a modal let through. The second is the one input record suppression exempts, so
+      // it is counted where `suppressed` would otherwise be the only number and would not move.
+      badPointer: 0, leavesWhileBlocked: 0,
     };
   }
 
@@ -1179,6 +1277,43 @@ export class WinMgr {
     if (role === WROLE_DESKTOP) this.lowerToBottom(win);
     K.post({ t: "win-role", win: win.id, role });
     this.governBlur("role");
+    return 0;
+  }
+
+  /**
+   * M19. Set the cursor shown over a window's CLIENT AREA. 0, or a negative errno.
+   *
+   * THE BOUND LIVES HERE AND NOT IN `calls.mjs`, which is M14's two selectors' rule: this file
+   * names the enum, so a second `want <= 7` beside the register reads is the copy constraint 234 is
+   * about. `WCUR_MAX` is the one definition.
+   *
+   * -EINVAL AND NOT A CLAMP. A clamp would answer a program that asked for a cursor this system
+   * does not have with the arrow and a success, and a caller checking the return would read the
+   * no-op as a change. The refusal is why the page may index `WCUR_CSS` by the number: a value
+   * outside the table never reaches it.
+   *
+   * AN UNCHANGED CURSOR POSTS NOTHING, which is `setRole`'s rule — the page already holds it, and a
+   * program keeping a cursor up to date per hover would otherwise post one message per pointer
+   * sample.
+   *
+   * THE FRAME IS NOT TOUCHED. A resize grip's cursor is CSS on the grip (`src/wm/window.mjs`); this
+   * is the surface alone, which is what `WIN_SET_CURSOR` says in `src/abi.mjs`.
+   */
+  setCursor(win, want) {
+    // `Number.isInteger` and not the range alone: the register path hands this `p.ctl[A2] | 0` and
+    // cannot produce a fraction, but an in-process caller can — and 1.5 truncating to `WCUR_TEXT`
+    // would be a cursor nobody asked for, reported as a success.
+    if (!(Number.isInteger(want) && want >= 0 && want <= WCUR_MAX)) {
+      this.stats.refusedCursor += 1;
+      return -EINVAL;
+    }
+    if (win.destroyed || !win.attached) return -EHOSTGONE;
+    if (want === win.cursor) return 0;
+    win.cursor = want | 0;
+    this.stats.cursorChanges += 1;
+    // THE PAGE RENDERS WHAT IT IS SENT AND DECIDES NOTHING (constraint 226): it indexes `WCUR_CSS`
+    // by the value this side has already bounded.
+    K.post({ t: "win-cursor", win: win.id, cursor: win.cursor });
     return 0;
   }
 
@@ -1721,9 +1856,38 @@ export class WinMgr {
       this.stats.forgedKernelEvents += 1;
       return false;
     }
+    /* M19. A LEAVE IS EXCLUSIVE OF THE OTHER THREE POINTER BITS (`WPTR_LEAVE` in `src/abi.mjs`),
+     * and a record claiming two is REFUSED here rather than masked. `WPTR_LEAVE` is the one pointer
+     * record whose `a`/`b` are not a position — the event fires outside the surface — so a record
+     * that also claimed a press would ask a program to hit-test a point outside its own pixels,
+     * and masking the leave off instead would deliver a press the page never reported. Counted,
+     * because a page whose records stopped arriving has no other way to learn why.
+     *
+     * THE MODIFIER BITS ARE NOT PART OF THIS. `mods` is one namespace and `modifierBits` ORs
+     * `WMOD_*` into every pointer record, so a leave with Shift held is well-formed — only the four
+     * pointer bits are mutually exclusive. */
+    const leave = ev.type === WEV_POINTER && ((ev.mods | 0) & WPTR_LEAVE) !== 0;
+    if (leave && ((ev.mods | 0) & (WPTR_DOWN | WPTR_UP | WPTR_MOVE)) !== 0) {
+      this.stats.badPointer += 1;
+      return false;
+    }
     if (ev.type === WEV_KEY || ev.type === WEV_POINTER || ev.type === WEV_WHEEL) {
       const blocker = this.blockingFor(w);
-      if (blocker) {
+      /* M19. AND A LEAVE IS THE ONE INPUT RECORD A MODAL DOES NOT SUPPRESS, which is the
+       * fail-closed direction rather than an exception to it. A leave carries no position and no
+       * button, so it is not a gesture a blocked program could act on: it is the statement that
+       * the window has no pointer, which is MORE restrictive than the belief it is already holding.
+       * Suppressing it is what leaves a row lit for ever — hover a row, let a modal open over the
+       * window, move the pointer away, and the program that lit the row is never told the pointer
+       * went, because the hover that would have moved the light is suppressed too.
+       *
+       * IT DOES NOT TOUCH `this.pointer`, and that falls out of the gate below reading only the
+       * DOWN and UP bits: `pointerleave` fires mid-drag while the capture keeps the samples coming
+       * (`src/wm/winhost.mjs`), so clearing the gate on a leave would end every drag at the first
+       * window edge it crossed (constraint 244). */
+      if (blocker && leave) {
+        this.stats.leavesWhileBlocked += 1;
+      } else if (blocker) {
         // COUNTED, on the window that did not get it: a program whose keys silently stopped
         // arriving would have no way to tell that from a keyboard that stopped working.
         w.stats.suppressed += 1;
@@ -1757,6 +1921,12 @@ export class WinMgr {
     if (ev.type === WEV_WHEEL) {
       return w.pushWheel({ ...ev, mods: (ev.mods || 0) & ~WWHEEL_COALESCED });
     }
+    /* M19. AND THE POINTER MUST NOT JOIN THE FORGERY LIST EITHER, for the wheel's reason: a
+     * pointer event is a browser event and the page is its only honest source. There is no bit to
+     * mask — `WPTR_LEAVE` is the page's to report and the kernel has no other way to know the
+     * pointer left a frame — so what this route owes is the exclusivity check above, and the tail
+     * replacement `pushPointer` performs. */
+    if (ev.type === WEV_POINTER) return w.pushPointer(ev);
     return w.push(ev);
   }
 

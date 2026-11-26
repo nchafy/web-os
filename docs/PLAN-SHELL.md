@@ -366,7 +366,7 @@ bit instead — a half-day change, and `grep -rn keyBytesOf src/bin/` is the mea
 
 ---
 
-### M19 — Details, sort, selection, hover · 3 d
+### M19 — Details, sort, selection, hover · 3 d · DONE
 
 **Closes.** R7, R11, R12, R13, R20's measured half, A5, A8, A12.
 
@@ -418,6 +418,39 @@ while a press on a row starts a drag — the arbitration is the assertion.
 the renderer's real font to lay out a column. The cheapest check is in §5. If it is not,
 `DLT_ELLIPSIS` carries R20 alone — the renderer has the real font — and the column widths stay
 proportional rather than fitted, which costs R30 and nothing in P0.
+
+> **CORRECTION, from the implementation.** The specification above is left as written and corrected
+> here rather than edited, which is this repo's rule for a falsified claim. **The assumption it
+> names was HALF right, and the split is by font family rather than by degree.**
+>
+> 1. **The advance table is EXACT for a monospaced run and cannot be made exact for a proportional
+>    one.** Measured by `bench/m19-advance/probe.py` in two engines at three ratios: a mono string's
+>    width equals the sum of its published advances to **0.0000 px** over 2,448 samples (and over
+>    1,152 more in a second sweep at 26–48 px), and a
+>    proportional one is wrong by up to **13.2147 px** because the renderer kerns (constraint 302).
+>    So the escape hatch this row wrote — "`DLT_ELLIPSIS` carries R20 alone … the column widths stay
+>    proportional rather than fitted" — is the path M19 took for the three proportional columns, and
+>    it is also not a loss: the error has ONE SIGN (`sum >= measured`, range
+>    −13.2147..+0.0000 px), so a summed width is a strict UPPER bound and answers "will this
+>    definitely fit?" exactly. R30 is deferred, as this row said it would be. **Nothing reads
+>    `/dev/advance` yet**, deliberately.
+> 2. **The table is ENGINE-shaped and not RATIO-shaped**, which is the opposite of what §5's
+>    reasoning and this project's three previous unit bills predicted: **0.0000 px** within one
+>    engine across dpr 1 / 1.5 / 2, against 0.4522 px across engines. That follows from the row's
+>    own instruction to index it in SURFACE px, and it is the only reason one committed table serves
+>    both engines.
+> 3. **`src/wm/winhost.mjs:575` is a stale address.** The `if (!e.buttons) return;` this row names
+>    was not at `:575` when the work started, and the line it refers to is now the hover branch at
+>    `:807`. The `src/abi.mjs:463` reference is stale the same way. Addresses in this file are not
+>    re-pinned by the implementation, so a reader should grep the quoted source rather than trust a
+>    line number.
+> 4. **`no-hover-coalesce` moves THREE clauses and not two.** This row predicts `queued:` rising and
+>    `coalesced:` staying 0, which is exactly what the run measures — and a third clause goes red
+>    with them: **`theProgramSawOneRecord`**, because a resumed program reading 40 appended records
+>    where it should read 1 is the same defect seen from the program's side. Measured **4 red / 56
+>    intact** including the page's own verdict. The lit-row clauses hold, as predicted.
+> 5. **`src/wm/icons.mjs`'s `selfTest` was exported and called by nothing, as this row says, and it
+>    is now called at module load** — `src/wm/icons.mjs:343`, not `:307`, which is the declaration.
 
 ---
 

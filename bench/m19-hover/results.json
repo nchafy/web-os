@@ -1,0 +1,677 @@
+{
+  "ok": true,
+  "moves": 500,
+  "gapMs": 10,
+  "holds": [
+    0,
+    120000
+  ],
+  "worlds": [
+    "off",
+    "append",
+    "coalesce"
+  ],
+  "controls": {
+    "append": "src/wm/winhost.mjs: `if (!e.buttons) return;` removed from the pointermove listener",
+    "coalesce": "src/wm/winhost.mjs: `if (!e.buttons) return;` removed from the pointermove listener; src/kernel/wins.mjs: `Window.pushPointer` added and `WinMgr.feed` routes a WEV_POINTER through it"
+  },
+  "notes": [
+    "append/held     500 moves routed in 17929 ms: queued +501 (of which 1 focus), coalesced +0, dropped +247, delivered +0; ring held 256 of 256 at the end",
+    "coalesce/held     500 moves routed in 17928 ms: queued +2 (of which 1 focus), coalesced +499, dropped +0, delivered +0; ring held 4 of 256 at the end",
+    "append/draining 500 moves routed in 17958 ms: queued +501 (of which 1 focus), coalesced +0, dropped +0, delivered +501; ring held 0 of 256 at the end",
+    "coalesce/draining 500 moves routed in 17938 ms: queued +501 (of which 1 focus), coalesced +0, dropped +0, delivered +501; ring held 0 of 256 at the end",
+    "THE AMENDMENT'S FIGURE: into a program that is not draining, 500 moves APPENDED lose 247 records (49%); the same 500 moves with tail replacement lose 0, as queued +2 / coalesced +499.",
+    "AND A DRAINING PROGRAM LOSES NOTHING EITHER WAY, with nothing to replace: dropped +0, coalesced +0, and 501 records handed straight to a parked reader against 500 moves and 1 focus event(s)."
+  ],
+  "bad": [],
+  "rows": [
+    {
+      "world": "off",
+      "holdMs": 0,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:58592/bench/m19-hover/hover.html?hold=0",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "/usr/bin"
+        ],
+        "holdMs": 0,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 1,
+        "quietMs": 402,
+        "preStreamMs": 548,
+        "surface": {
+          "w": 428,
+          "h": 524
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 2
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17881,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 2,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 3,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 3,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 1,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 1,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t3",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t0",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t0",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    },
+    {
+      "world": "off",
+      "holdMs": 120000,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:58592/bench/m19-hover/hover.html?hold=120000",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "--no-drain",
+          "120000",
+          "/usr/bin"
+        ],
+        "holdMs": 120000,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 1,
+        "quietMs": 402,
+        "preStreamMs": 538,
+        "surface": {
+          "w": 420,
+          "h": 560
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 1
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17903,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 2,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 3,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 3,
+        "parked": 0,
+        "level": 2,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 1,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t3",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t0",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t0",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    },
+    {
+      "world": "append",
+      "holdMs": 0,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:58915/bench/m19-hover/hover.html?hold=0",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "/usr/bin"
+        ],
+        "holdMs": 0,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 0,
+        "quietMs": 402,
+        "preStreamMs": 543,
+        "surface": {
+          "w": 428,
+          "h": 524
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 2
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17958,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 2,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 503,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 503,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 501,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 501,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t503",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t0",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t0",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    },
+    {
+      "world": "append",
+      "holdMs": 120000,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:58915/bench/m19-hover/hover.html?hold=120000",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "--no-drain",
+          "120000",
+          "/usr/bin"
+        ],
+        "holdMs": 120000,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 1,
+        "quietMs": 402,
+        "preStreamMs": 538,
+        "surface": {
+          "w": 420,
+          "h": 560
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 1
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17929,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 2,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 503,
+        "coalesced": 0,
+        "dropped": 247,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 256,
+        "parked": 0,
+        "level": 2,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 501,
+        "coalesced": 0,
+        "dropped": 247,
+        "delivered": 0,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t503",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t0",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t247",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    },
+    {
+      "world": "coalesce",
+      "holdMs": 0,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:59205/bench/m19-hover/hover.html?hold=0",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "/usr/bin"
+        ],
+        "holdMs": 0,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 0,
+        "quietMs": 401,
+        "preStreamMs": 539,
+        "surface": {
+          "w": 428,
+          "h": 524
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 2
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17938,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 2,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 503,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 503,
+        "suppressed": 0,
+        "pending": 0,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 501,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 501,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t503",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t0",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t0",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    },
+    {
+      "world": "coalesce",
+      "holdMs": 120000,
+      "moves": 500,
+      "gapMs": 10,
+      "url": "http://127.0.0.1:59205/bench/m19-hover/hover.html?hold=120000",
+      "state": "staged",
+      "why": "",
+      "pid": 1,
+      "win": 1,
+      "staging": {
+        "pid": 1,
+        "win": 1,
+        "argv": [
+          "files",
+          "--no-drain",
+          "120000",
+          "/usr/bin"
+        ],
+        "holdMs": 120000,
+        "dir": "/usr/bin",
+        "dpr": 1,
+        "raisedMs": 1,
+        "quietMs": 401,
+        "preStreamMs": 539,
+        "surface": {
+          "w": 420,
+          "h": 560
+        },
+        "client": {
+          "w": 428,
+          "h": 524
+        },
+        "batches": 1
+      },
+      "pageNotes": [],
+      "errors": [],
+      "rect": {
+        "x": 182,
+        "y": -0.5,
+        "w": 428,
+        "h": 524
+      },
+      "streamMs": 17928,
+      "dispatched": 500,
+      "before": {
+        "queued": 2,
+        "coalesced": 0,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 2,
+        "parked": 0,
+        "level": 0,
+        "geoms": 1,
+        "pointers": 0,
+        "unknown": 0,
+        "focus": 0,
+        "raiseAsks": 0
+      },
+      "after": {
+        "queued": 4,
+        "coalesced": 499,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "pending": 4,
+        "parked": 0,
+        "level": 2,
+        "geoms": 1,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "delta": {
+        "queued": 2,
+        "coalesced": 499,
+        "dropped": 0,
+        "delivered": 0,
+        "suppressed": 0,
+        "geoms": 0,
+        "pointers": 500,
+        "unknown": 0,
+        "focus": 1,
+        "raiseAsks": 0
+      },
+      "greps": {
+        "queued": {
+          "path": "/proc/1/win/1",
+          "pattern": "queued:\t4",
+          "exit": 0,
+          "matched": 1
+        },
+        "coalesced": {
+          "path": "/proc/1/win/1",
+          "pattern": "coalesced:\t499",
+          "exit": 0,
+          "matched": 1
+        },
+        "dropped": {
+          "path": "/proc/1/win/1",
+          "pattern": "dropped:\t0",
+          "exit": 0,
+          "matched": 1
+        }
+      },
+      "attempts": 1
+    }
+  ]
+}

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m19 hover fixture: 500 buttonless moves into one window</title>
+<style>
+  html, body { margin: 0; background: #1b1b1b; color: #e8e8e8;
+               font: 13px/1.5 ui-monospace, monospace; }
+  #log { margin: 16px; white-space: pre-wrap; }
+  #log.bad { color: #ff8a80; }
+  #desk { position: relative; width: 980px; height: 560px; margin: 0 16px 16px;
+          overflow: hidden; }
+</style>
+</head>
+<body>
+<div id="log">booting</div>
+<!-- A DESKTOP ELEMENT IS REQUIRED because a window needs somewhere to be. No taskbar: the subject
+     is the kernel's event queue, and a shell on top of it only adds ways to fail for an unrelated
+     reason. -->
+<div id="desk"></div>
+<script>
+  globalThis.HOVER = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    faults: [], errors: [], notes: [], why: '', pid: 0, win: 0,
+  }
+</script>
+<script type="module">
+/* WHAT THIS FIXTURE IS FOR: THE MEASUREMENT BEHIND AN AMENDMENT TO CONSTRAINT 223.
+ *
+ * 223 says "A HOVER IS NOT SENT", and the argument it rests on is arithmetic: "a hover would be one
+ * event per `pointermove` against a 256-record queue (constraint 213), so a second of hovering
+ * would overflow a queue the process is being asked to drain". `src/wm/winhost.mjs`'s
+ * `if (!e.buttons) return;` is that argument in code, and it is the one line making the hover case
+ * `src/abi.mjs` already documents unreachable.
+ *
+ * So the overflow is a prediction, and this page is where it is counted rather than reasoned about.
+ * It stages ONE window with a surface, blocks for a driver to deliver N buttonless moves into it,
+ * and reads the kernel's own `queued:` / `coalesced:` / `dropped:` either side of the stream — the
+ * three numbers `/proc/<pid>/win/<winid>` publishes, grepped out of that file at the end so the
+ * figure a reader can obtain is the figure asserted.
+ *
+ * THIS PAGE IS NEUTRAL ABOUT THE ANSWER. It delivers no hover of its own and patches nothing:
+ * `bench/m19-hover/probe.py` serves it out of a PATCHED COPY of the tree, one copy per world, and
+ * this page measures whichever world it was loaded in. Loaded from the repository as it stands it
+ * measures the world with no hover at all, which is the probe's control.
+ *
+ * `bootShell` AND NOT A HAND-WIRED HOST: it is the one definition of attaching a `WinHost` to a
+ * kernel (`www/shell.mjs`). `stageDesktop` is deliberately not used — a desktop process, icons and
+ * a taskbar are three more things whose geometry reports would queue `WEV_CLIENT` records into the
+ * number being measured.
+ */
+import { bootShell } from '/www/shell.mjs'
+import { spawnProgram, ask, resultOf, until, sleep } from '/www/pagekernel.mjs'
+
+const log = document.getElementById('log')
+const report = globalThis.HOVER
+const lines = []
+const say = (s) => { lines.push(String(s)); log.textContent = lines.join('\n') }
+
+const FILES = '/src/bin/files.mjs'
+const GREP = '/src/bin/grep.mjs'
+
+/** The directory the window lists. `/usr/bin` is a real listing with more rows than fit, which is
+ *  what `files` is for; nothing here depends on its contents. */
+const LIST_DIR = '/usr/bin'
+
+const params = new URLSearchParams(location.search)
+const num = (name, dflt) => {
+  const raw = params.get(name)
+  const got = raw === null ? dflt : Number(raw)
+  return Number.isFinite(got) ? got : dflt
+}
+
+/**
+ * `?hold=MS` — `files --no-drain MS`, THE WORST CASE AND NOT THE TYPICAL ONE.
+ *
+ * 223's claim is about "a queue the process is being asked to drain", so both halves have to be
+ * measured: a program servicing its fd, and a program that is not. A held program is the bound —
+ * the ring fills and cannot empty — and it is the only world in which a 256-record cap can be
+ * reached at all. `0` means no flag, so the program drains normally.
+ *
+ * The hold must outlast staging AND the whole stream: it begins once the window is painted, which
+ * is before this page has raised it, settled its geometry or driven a single move.
+ */
+const HOLD_MS = Math.max(0, num('hold', 0))
+
+/** A ceiling for the page's own waits, so a stuck run says so rather than hanging. */
+const WAIT_MS = 30000
+
+/* ---- the batch tap: how this page knows a window has been PAINTED ---------------------------
+   An entry with a surface is a frame whose canvas exists; an entry with a surface and a batch in
+   it is a window a program has drawn into, which is the state a pointer may be aimed at. */
+const BATCHES = new Map()
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+let K = null
+let HOST = null
+let ENTRY = null
+
+/** One window as the KERNEL holds it, by winid. `queued`, `coalesced` and `dropped` are its
+ *  `stats`, spread into `Window.report()` and published by `win-state`. */
+async function kernelWin (id) {
+  const st = await ask(K, 'win-state', WAIT_MS)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/** The frame a program's window is, by the title it set. */
+function frameByTitle (what) {
+  for (const entry of HOST.frames.values()) {
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+/** Wait for a window with a SURFACE and at least one batch in it. An entry with no surface is a
+ *  frame whose canvas has not been built, and a pointer aimed at it would reach nothing. */
+async function surfaced (title, ms = WAIT_MS) {
+  const got = await until(() => {
+    const e = frameByTitle(title)
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : frameByTitle(title)
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer is delivered by DOM hit-testing and a
+ *  frame above it would take the move. The kernel owns the order (constraint 226), so this asks. */
+async function raise (entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await ask(K, 'win-state', WAIT_MS)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 8000)
+}
+
+/**
+ * WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY, and say how long it took.
+ *
+ * NOT A TIDINESS — it is what makes the number mean one thing. `coalesced` counts M16's client
+ * replacements and any other tail replacement in ONE field, so a `win-geom` arriving mid-stream
+ * both inflates `coalesced` and splits the run: a client record at the tail is not a pointer
+ * record, so the next move cannot merge into it and `queued` rises again. `geoms` is the host's own
+ * count of posts, so this reads the subject rather than a proxy for it.
+ */
+async function geomsSettled (quietMs = 400, ms = 10000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = HOST.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await sleep(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/** The three numbers, plus the state that says whether they can be believed: `pending` is how many
+ *  records are in the ring, `parked` whether a reader is waiting on it, and `geoms` the host's post
+ *  count — a run whose `geoms` moved measured a resize as well as a hover. */
+function snapOf (win) {
+  const h = HOST.report()
+  return {
+    queued: win.queued | 0,
+    coalesced: win.coalesced | 0,
+    dropped: win.dropped | 0,
+    delivered: win.delivered | 0,
+    suppressed: win.suppressed | 0,
+    pending: win.pending | 0,
+    parked: win.parked | 0,
+    level: win.level | 0,
+    geoms: h.geoms | 0,
+    pointers: h.pointers | 0,
+    unknown: h.unknown | 0,
+    /* `focus` AND `raiseAsks` ARE HERE TO ACCOUNT FOR A `queued` THAT ROSE WITHOUT A POINTER.
+     * Measured: with the guard in place and 30 moves dispatched, `queued` rose by 1 and `pointers`
+     * by 0. A number in a hover measurement that nothing explains is a number that cannot be cited,
+     * so the two events a bare mouse move can still produce are counted beside it. */
+    focus: h.focus | 0,
+    raiseAsks: h.raiseAsks | 0,
+  }
+}
+
+/* ---- what the driver calls ------------------------------------------------------------------ */
+
+/**
+ * The client points N moves should be aimed at, in CSS px, measured off the SURFACE's own rect.
+ *
+ * A PATH AND NOT ONE POINT. Consecutive identical coordinates are what a browser is entitled to
+ * drop, and a hover that never moves is not the gesture being measured. The walk is a 17x9 lattice
+ * around the centre, so every move differs from the one before it and every point is well inside
+ * the canvas — a move outside it answers `pointAt` null and is not sent at all, which would make a
+ * short stream look like a kernel that coalesced.
+ */
+function aimPath (n) {
+  if (!ENTRY || !ENTRY.surface) return null
+  const r = ENTRY.surface.el.getBoundingClientRect()
+  if (!(r.width > 40 && r.height > 24)) return null
+  const cx = r.left + r.width / 2
+  const cy = r.top + r.height / 2
+  const pts = []
+  for (let i = 0; i < n; i += 1) {
+    pts.push({
+      x: Math.round(cx + (i % 17) - 8),
+      y: Math.round(cy + (Math.floor(i / 17) % 9) - 4),
+    })
+  }
+  return { rect: { x: r.left, y: r.top, w: r.width, h: r.height }, points: pts }
+}
+
+/** `grep -c` over `/proc/<pid>/win/<winid>` for a FIXED string the kernel just reported
+ *  (constraint 138), so a line that merely exists does not satisfy it. Its exit status is the
+ *  answer. */
+async function grepProc (pattern) {
+  const path = `/proc/${report.pid}/win/${report.win}`
+  const row = await spawnProgram(K, GREP, ['grep', '-c', pattern, path])
+  const got = await resultOf(K, row.pid, WAIT_MS)
+  return { path, pattern, exit: got.exit, matched: got.matched }
+}
+
+/* ---- staging -------------------------------------------------------------------------------- */
+
+async function main () {
+  if (!report.isolated || typeof SharedArrayBuffer !== 'function') {
+    report.state = 'aborted'
+    report.why = 'crossOriginIsolated === ' + self.crossOriginIsolated
+      + '; SharedArrayBuffer is undefined. No kernel, no window table, nothing to measure.'
+    log.className = 'bad'
+    log.textContent = report.why
+    return
+  }
+
+  const boot = await bootShell({
+    into: document.getElementById('desk'), report, say, label: 'm19-hover',
+    taskbar: false, tap: captureBatch,
+  })
+  K = boot.k
+  HOST = boot.host
+
+  const argv = HOLD_MS > 0
+    ? ['files', '--no-drain', String(HOLD_MS), LIST_DIR]
+    : ['files', LIST_DIR]
+  const spawnedAt = performance.now()
+  const row = await spawnProgram(K, FILES, argv)
+  report.pid = row.pid
+  say('files pid ' + row.pid + ': ' + argv.join(' '))
+
+  ENTRY = await surfaced('files')
+  if (!ENTRY) throw new Error('the files window never surfaced within ' + WAIT_MS + ' ms')
+  report.win = ENTRY.id
+  /* RAISED AND NOT RE-PLACED. A held program has drained no `WEV_CLIENT`, so the surface the kernel
+   * granted is the one it opened with; a frame re-placed under it leaves the two disagreeing and
+   * `#dropPointAt` differences that disagreement into every coordinate it posts. The raise is still
+   * needed, because a pointer is delivered by DOM hit-testing. */
+  const raised = await raise(ENTRY)
+  const quietMs = await geomsSettled()
+  report.staging = {
+    pid: row.pid,
+    win: ENTRY.id,
+    argv,
+    holdMs: HOLD_MS,
+    dir: LIST_DIR,
+    dpr: globalThis.devicePixelRatio,
+    raisedMs: Math.round(raised),
+    quietMs: Math.round(quietMs),
+    preStreamMs: Math.round(performance.now() - spawnedAt),
+    surface: { w: ENTRY.surface.w, h: ENTRY.surface.h },
+    client: { w: ENTRY.win.bodyEl.clientWidth, h: ENTRY.win.bodyEl.clientHeight },
+    batches: BATCHES.get(ENTRY.id) || 0,
+  }
+  if (quietMs < 0) report.notes.push('the geometry never settled; a mid-stream `win-geom` would '
+    + 'add client replacements to the same `coalesced` field the pointer merges land in')
+  say('win ' + ENTRY.id + ' surface ' + ENTRY.surface.w + 'x' + ENTRY.surface.h
+    + ' client ' + report.staging.client.w + 'x' + report.staging.client.h
+    + ' dpr ' + report.staging.dpr + '; geometry quiet after ' + Math.round(quietMs) + ' ms')
+
+  /* THE DRIVER'S HANDLES. Async on purpose: `win-state` is a round trip to the kernel, and a
+   * synchronous reading of a number the kernel holds would be a reading of the page's opinion. */
+  report.snapshot = async () => {
+    const win = await kernelWin(report.win)
+    if (!win) throw new Error('the kernel has no window ' + report.win + ' to measure')
+    return JSON.stringify(snapOf(win))
+  }
+  report.aimPath = (n) => JSON.stringify(aimPath(Math.max(1, n | 0)))
+  report.grepProc = async (pattern) => JSON.stringify(await grepProc(String(pattern)))
+  report.state = 'staged'
+  say('staged. waiting for a driver to deliver buttonless moves.')
+}
+
+main().catch((e) => {
+  report.state = 'error'
+  report.why = String((e && e.stack) || e)
+  report.errors.push(String(e))
+  log.className = 'bad'
+  say('ERROR ' + report.why)
+})
+</script>
+</body>
+</html>

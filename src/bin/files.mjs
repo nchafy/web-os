@@ -76,6 +76,59 @@
 // never made, which is the same defect as a double-click that silently does nothing — so both ends
 // of it are counted in `refused` and named in `refusals`.
 //
+// M19: IT IS A DETAILS VIEW. Four columns, a sort a reader chooses, a selection of more than one
+// row, and a lit row under the pointer. Five pieces, and the first of them pays for the rest:
+//
+//   EVERY ROW IS `lstat`ED, DIRECTORIES INCLUDED. The call used to sit inside `if (!dir)`, so a
+//   folder had no size, no modification time and no execute bit — and a Date modified column with
+//   an empty cell on every folder is a column that is lying about half its rows. A FOLDER'S SIZE
+//   CELL IS STILL EMPTY, and that is the distinction: a directory's `st_size` is the size of its
+//   own entry table, which is not what a reader asked, so it is drawn as nothing on purpose while
+//   the date beside it is drawn because the call was paid.
+//
+//   THE COLUMNS ARE DATA (`COLUMNS`), and their geometry is `columnBoxes` — one function, read by
+//   the header, by every cell, by the sort's hit test and by anything outside the process that
+//   wants to aim at a column. `columnAt` is its declared inverse, which is what makes a press land
+//   on the column a reader sees.
+//
+//   A HEADER CLICK CHOOSES THE SORT AND A SECOND CLICK ON THE SAME COLUMN REVERSES IT. The opening
+//   order is name-ascending and nobody chose it, so the first click on the `Name` header is a
+//   CHOICE and not a reversal: a reader looking at an ascending list who clicks `Name` expects what
+//   they are looking at, not its opposite. DIRECTORIES STAY FIRST either way, and the NAME is the
+//   secondary key ASCENDING either way — so the order within a group of equal dates or equal types
+//   does not depend on which way the primary sorted, which is the whole of what "stable" means
+//   here. A RE-LIST RESETS IT, for the reason `relist` resets everything else: a directory opened
+//   from the command line and the same directory navigated into must show the same rows in the same
+//   order, or row 1 is decided by a reader's history with a directory that is gone.
+//
+//   THE SELECTION IS A SET, WITH AN ANCHOR. A plain press replaces it and moves the anchor;
+//   Ctrl+press TOGGLES one row and MOVES THE ANCHOR THERE (so the next Shift+press ranges from the
+//   row the reader last touched); Shift+press selects the range between the anchor and the press in
+//   LAYOUT order. Layout order is index order in this program because the sort reorders `rows`
+//   ITSELF rather than an index beside it — which is the one design in which the two cannot
+//   disagree, and the reason there is no separate "display order" to get wrong.
+//
+//   A RUBBER BAND COMES FROM EMPTY SPACE AND A DRAG COMES FROM A ROW. That arbitration is taken at
+//   the press, once, from `rowUnder` alone: a press that found a row arms the drag threshold, a
+//   press that found none arms the band. Nothing downstream re-decides it, because a gesture that
+//   could become either depending on how far the hand moved is a gesture that publishes a file the
+//   reader never touched.
+//
+//   A LIT ROW IS THE HOVER, AND IT IS A BAND AND NOT AN INK. A pointer record with neither button
+//   bit and no buttons held is a hover (`WPTR_LEAVE`'s docstring in src/abi.mjs); `WPTR_LEAVE`
+//   clears it, because the last hover a window ever gets is the one nearest the edge and a lit row
+//   with the pointer gone is a lie. It is drawn as a fill UNDER the row's text rather than as a
+//   different ink, so "which row is lit" and "which row is selected" stay two readings — the
+//   selection is the only thing that changes a name's colour.
+//
+// WHAT THIS PROGRAM DOES NOT DO WITH `/dev/advance`: it does not read it. A column's width here is
+// a CSS-px constant, and the table is indexed in SURFACE px — so a column fitted to its widest cell
+// would be a width that moved with the display's ratio, which is the ratio-shaped defect that cost
+// M11, M12 and M16 (CLAUDE.md). A cell that does not fit its column is handed to the renderer as
+// `DLT_ELLIPSIS` plus the column's width in surface px, which is where the ABI puts that decision:
+// a program must not pre-cut, and a sum of published advances is only an upper bound for a
+// proportional run anyway (`advanceWidth` in src/abi.mjs).
+//
 // `--no-drain MS` IS A FIXTURE AND NOT A CONTROL, which is why it is documented apart from the two
 // below. It holds the event loop for MS milliseconds before the first poll, so a notch stream longer
 // than `WIN_EVENT_CAP` laps a queue nobody is draining — the state the kernel's wheel coalescing is
@@ -84,7 +137,7 @@
 // is the clause the proof asserts. The precedent for a shipped flag whose only job is to put the
 // system into a state a check needs is `cfg.blurBudgetPx` and `scripts/serve.py --no-isolation`.
 //
-// THREE FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
+// SEVEN FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
 // mutations nobody re-runs (the precedent is `scripts/serve.py --no-isolation`):
 //
 //   --no-resurface      ignore `WEV_CLIENT` entirely. The pre-M16 program exactly: a backing store
@@ -97,17 +150,34 @@
 //                       clamp stays — removing both costs a clause this control is not about, and
 //                       the harness said so. It counts no bottom clamp, because a clamp that did
 //                       not happen must not be reported as one.
+//   --stable-sort-off   let the secondary key follow the sort's DIRECTION — `dir * (byKey ||
+//                       byName)`, which is the naive spelling. Names then descend inside a group of
+//                       equal dates or equal types whenever the primary descends, so the order
+//                       within a group depends on which way the reader last clicked. The ONLY
+//                       clause it moves is the stable-order one: the primary key still sorts and
+//                       still reverses.
+//   --folders-last      put directories after files instead of before them. "Directories stay first
+//                       whichever way it sorts" is the clause; this is its world.
+//   --no-dir-stat       skip the `lstat` for a DIRECTORY, which is the call that used to be missing.
+//                       A folder's Date modified cell goes empty and its Size cell — empty either
+//                       way — does not move, so the clause this breaks is the one that proves the
+//                       directory stat is paid rather than the one that proves the size is omitted.
+//   --band-from-row     start a RUBBER BAND from a press on a row. The arbitration removed: the
+//                       drag never begins, and dragging across rows selects them instead of
+//                       publishing the pressed one.
 //
-// Neither belongs on a prompt. A reader who passes one gets the bug the milestone removed.
+// None belongs on a prompt. A reader who passes one gets the bug the milestone removed.
 
 import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE, DT_DIR,
   WEV_KEY, WEV_POINTER, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_DRAG_DONE,
-  WEV_CLIENT, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, clientBoxAt, keyBytesOf, keysymOf,
-  WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN, WMOD_ALT,
+  WEV_CLIENT, WPTR_DOWN, WPTR_UP, WPTR_CLICK2, WPTR_LEAVE,
+  clientBoxAt, keyBytesOf, keysymOf,
+  WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN,
+  WMOD_ALT, WMOD_CTRL, WMOD_SHIFT,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED, wheelAt,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP,
-  DLT_BOLD, DLT_MONO, DLT_RIGHT, encodeTextRun,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP, DL_MAX_OPS,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_ELLIPSIS, encodeTextRun,
   DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY,
   O_RDONLY, fmtName, fmtsOf,
 } from "/src/abi.mjs";
@@ -143,12 +213,21 @@ const ROW_GAP = 2;
 const PAD = 6;
 /** The header, which is also what makes the first row's `y` not zero. */
 const HEAD_H = 22;
+/** THE STATUS STRIP, CSS px: the bottom line of the client area, below the viewport, carrying the
+ *  position statement M17 added and the selection count M19 did. It is Windows 7's status bar, and
+ *  it exists because a header holding four column labels has no room left for a sentence.
+ *
+ *  IT IS DRAWN BEFORE THE `DL_CLIP`, with the header, and that is load-bearing rather than tidy: a
+ *  clip bounds the VIEWPORT, this sits below it, and a canvas clip only ever intersects — so a
+ *  footer drawn after the clip would be cut away entirely. */
+const FOOT_H = 20;
 /** The glyph box at the left of a row: a folder or a page, drawn out of rectangles. */
 const GLYPH_W = 16;
 /** Where the name starts. A fixed inset, so it does not follow the window. */
 const NAME_X = PAD + GLYPH_W + 8;
-/** How far inside the padding the type column's right edge sits. The column is right-aligned to
- *  the LIVE width, so this is an inset and not a position. */
+/** How far inside the padding the LAST column's right edge sits — the type column's own inset
+ *  until M19 gave it three neighbours. The columns are laid out from the LIVE width, so this is an
+ *  inset and not a position. */
 const TYPE_INSET = 4;
 const TEXT_PX = 12;
 /** Text sits this far below a row's top, which centres a 12 px run in a 20 px row. */
@@ -217,9 +296,13 @@ const focusBox = (i, scroll = 0, wCss = 0) => ({
  * canvas's: a row cut there was cut by this rectangle, and a check reading the pixels can tell the
  * two apart. `scrollMax` is derived from the same `PAD`, so the last row's bottom lands exactly on
  * it at full scroll.
+ *
+ * M19: AND `FOOT_H` BELOW THAT, because the status strip is part of the client area and not part of
+ * the list. Every one of the four functions below carries the same term, which is what keeps
+ * `rowsThatFit` and `clientHeightFor` declared inverses and `scrollMax(n, clientHeightFor(n))` zero.
  */
 const viewBox = (wCss, hCss) => ({
-  x: 0, y: VIEW_TOP, w: Math.max(0, wCss), h: Math.max(0, hCss - VIEW_TOP - PAD),
+  x: 0, y: VIEW_TOP, w: Math.max(0, wCss), h: Math.max(0, hCss - VIEW_TOP - PAD - FOOT_H),
 });
 
 /** The largest legal scroll offset for `n` rows in a client area `hCss` tall, CSS px: the offset at
@@ -228,18 +311,62 @@ const viewBox = (wCss, hCss) => ({
  *  scroll at all. The DECLARED PARTNER of `rowTop`: `rowTop(n - 1, scrollMax(n, h)) + ROW_H` is the
  *  viewport's bottom. */
 const scrollMax = (n, hCss) =>
-  Math.max(0, (n > 0 ? rowTop(n - 1) + ROW_H : 0) + PAD - hCss);
+  Math.max(0, (n > 0 ? rowTop(n - 1) + ROW_H : 0) + PAD + FOOT_H - hCss);
 
 /** How many rows a client area `hCss` CSS px tall shows at once — `viewBox`'s height less the pad
  *  above the first row, in whole pitches. At least one: a window clamped to its minimum still owes
  *  a reader a row rather than a header over nothing. `clientHeightFor` is the declared inverse. */
 const rowsThatFit = (hCss) =>
-  Math.max(1, Math.floor((hCss - VIEW_TOP - PAD * 2 + ROW_GAP) / ROW_STRIDE));
+  Math.max(1, Math.floor((hCss - VIEW_TOP - PAD * 2 - FOOT_H + ROW_GAP) / ROW_STRIDE));
 
 /** The client height `n` rows need, CSS px. Only the OPENING size reads it — after that the height
  *  is the reader's and the row count follows it — but it is `rowsThatFit`'s declared inverse, so
  *  `scrollMax(n, clientHeightFor(n))` is 0 and a window opened to fit its content cannot scroll. */
-const clientHeightFor = (n) => VIEW_TOP + PAD * 2 + n * ROW_STRIDE - ROW_GAP;
+const clientHeightFor = (n) => VIEW_TOP + PAD * 2 + FOOT_H + n * ROW_STRIDE - ROW_GAP;
+
+/**
+ * A RUBBER BAND AS A RECTANGLE, CSS px, from the two corners it was dragged between. The corners
+ * are in CONTENT coordinates — `y` measured down the whole list rather than down the window —
+ * which is what lets a band keep hold of the rows it was drawn over while the list scrolls.
+ *
+ * NORMALISED, because a band is dragged in all four directions and a negative width is a rectangle
+ * nothing intersects. ONE definition, read by the drawing, by the hit test and by a driver outside
+ * the process, so a reader cannot see a band over a row it did not select.
+ */
+const bandBox = (band) => ({
+  x: Math.min(band.x0, band.x1),
+  y: Math.min(band.y0, band.y1),
+  w: Math.abs(band.x1 - band.x0),
+  h: Math.abs(band.y1 - band.y0),
+});
+
+/**
+ * THE ROWS A BAND TOUCHES, BY INTERSECTION — not by containment, which is the rule every file
+ * manager uses: a band drawn across the middle of a list selects the rows it crosses rather than
+ * only the ones it swallowed whole.
+ *
+ * A ROW'S RECTANGLE IS THE ONE `paint` FILLS, in content coordinates: `rowTop(i)` with no offset,
+ * `PAD` to `wCss - PAD` across. A zero-width or zero-height band touches nothing, which is a press
+ * that never moved — and is why a click on empty space clears the selection rather than selecting
+ * whatever row the degenerate rectangle happens to graze.
+ *
+ * PURE, AND EXPORTED FOR `rowTop`'S REASON: a driver that wanted to assert which rows a band took
+ * would otherwise restate the intersection, and an off-by-one in a restated edge is a check that
+ * passes for the wrong set.
+ */
+const bandRows = (band, n, wCss) => {
+  const r = bandBox(band);
+  const hit = new Set();
+  if (r.w <= 0 || r.h <= 0) return hit;
+  const left = PAD;
+  const right = Math.max(left, wCss - PAD);
+  if (r.x >= right || r.x + r.w <= left) return hit;
+  for (let i = 0; i < n; i += 1) {
+    const top = rowTop(i);
+    if (r.y < top + ROW_H && r.y + r.h > top) hit.add(i);
+  }
+  return hit;
+};
 
 /** A CSS-px length as a surface coordinate, rounded: `encodeDrawOp` truncates (`a0: op.a0 | 0`),
  *  and a truncated edge is a half-pixel seam at a fractional ratio. */
@@ -255,9 +382,185 @@ const toSurface = (vCss, scale) => Math.round(vCss * scale);
  * The execute bit is the fallback and not a guess at a format: `/usr/bin` is 32 files no extension
  * rule covers, and a column that read `fmt?0` thirty-two times carried no information at all.
  */
+/** WHAT A CELL SAYS WHEN THE SYSTEM KNOWS NOTHING, and it is a MARK rather than a blank for a
+ *  reason M19 measured: `/usr` is a provider mount whose files publish no modification time, so a
+ *  Date column over `/usr/bin` — which is what the desktop's own `files` window opens on — was
+ *  twenty-five empty cells. An empty cell reads as a column that is broken; this reads as a column
+ *  saying it does not know. `kindOf` already used the same mark for a type nothing names.
+ *
+ *  AN EMPTY CELL STILL MEANS SOMETHING, which is why both spellings exist: no call was PAID. A
+ *  directory's Size is empty because its `st_size` is not the question, and every cell of a row
+ *  under `--no-dir-stat` is empty because nothing was asked. */
+const UNKNOWN_CELL = "—";
+
 const kindOf = (row) => (row.dir ? "DIR"
   : row.format ? fmtName(row.format)
-    : row.exec ? "PROG" : "—");
+    : row.exec ? "PROG" : UNKNOWN_CELL);
+
+/* ---- M19: THE FOUR COLUMNS, AS DATA ------------------------------------------------------- */
+
+/** The three fixed column widths, CSS px, each sized to the widest cell it has to hold: a
+ *  16-character timestamp, `BITMAP`, and a six-digit kilobyte count. They are written here rather
+ *  than fitted to content for the reason in this file's header — a fitted width would move with the
+ *  display's ratio. */
+const DATE_W = 120;
+const TYPE_W = 60;
+const SIZE_W = 64;
+/** The narrowest the flexible Name column may become. Below it the fixed columns run off the right
+ *  edge and the canvas cuts them, which is what Explorer does and is better than a name column too
+ *  narrow to hold a character. */
+const NAME_MIN_W = 48;
+
+/**
+ * THE DETAILS VIEW'S COLUMNS. One row per column: the key a sort and a cell are named by, the
+ * header's label, and the fixed width — `0` meaning "take whatever is left". Adding a column is
+ * adding a row here.
+ *
+ * EVERY COLUMN BUT THE NAME IS RIGHT-ALIGNED, and that is structural as well as a look. A
+ * metadata column is read down its own edge; and the NAME is then the only LEFT-aligned run after
+ * the `DL_CLIP`, which is how a driver outside the process names the rows with no coordinate and no
+ * scale in the test (`www/m18.html`'s `rowRuns`). A second left-aligned cell would make every date
+ * read as a row name.
+ *
+ * `mono` IS NOT DECORATION EITHER: a monospaced column of dates and sizes lines its digits up, and
+ * a monospaced run is the one kind whose width a published advance table prices EXACTLY
+ * (`advanceWidth` in src/abi.mjs, measured over 2,448 samples).
+ */
+const COLUMNS = Object.freeze([
+  Object.freeze({ key: "name", label: "Name", w: 0, mono: false }),
+  Object.freeze({ key: "date", label: "Date modified", w: DATE_W, mono: true }),
+  Object.freeze({ key: "type", label: "Type", w: TYPE_W, mono: true }),
+  Object.freeze({ key: "size", label: "Size", w: SIZE_W, mono: true }),
+]);
+
+/** The column the sort opens on, and the direction. ASCENDING, which is also the order `buildRows`
+ *  produces, so the opening list and the opening sort state agree. */
+const SORT_DEFAULT = Object.freeze({ key: "name", dir: 1 });
+
+/**
+ * WHERE EVERY COLUMN IS, CSS px, inside a client area `wCss` wide — the ONE definition, read by
+ * the header's labels, by every cell, by the sort's hit test and by anything outside the process
+ * that wants to aim at a column.
+ *
+ * `x`/`right` BOUND THE COLUMN AND `textX` IS WHERE ITS RUN IS DRAWN, and the two differ in both
+ * directions: the Name column's box starts at `PAD` because the glyph belongs to it while its text
+ * starts at `NAME_X`, and a right-aligned column's text sits AT its right edge, which is what
+ * `DLT_RIGHT` means.
+ */
+const columnBoxes = (wCss) => {
+  const edge = Math.max(0, wCss - PAD - TYPE_INSET);
+  const fixed = COLUMNS.reduce((n, c) => n + c.w, 0);
+  const flexible = Math.max(NAME_MIN_W, edge - PAD - fixed);
+  let x = PAD;
+  return COLUMNS.map((c) => {
+    const w = c.w || flexible;
+    const box = {
+      key: c.key, label: c.label, mono: c.mono, x, w, right: x + w,
+      textX: c.key === "name" ? NAME_X : x + w,
+      right_aligned: c.key !== "name",
+    };
+    x += w;
+    return box;
+  });
+};
+
+/** The key of the column a CSS-px `x` falls in, or `null` past the last one. THE DECLARED INVERSE
+ *  OF `columnBoxes`, which is what makes a header press sort the column a reader is pointing at. */
+const columnAt = (xCss, wCss) => {
+  const hit = columnBoxes(wCss).find((c) => xCss >= c.x && xCss < c.right);
+  return hit ? hit.key : null;
+};
+
+/**
+ * A MODIFICATION TIME AS A CELL, or `""` for a stamp of zero. `cellOf` is what turns that into the
+ * UNKNOWN mark for a row that WAS statted, so this stays a pure format of a number.
+ *
+ * `YYYY-MM-DD HH:MM` IN LOCAL TIME, AND THE FORMAT IS DELIBERATELY NOT THE HOST'S. A locale
+ * rendering is whatever the browser's `toLocaleString` decides, which no driver outside the process
+ * can predict and no check can assert; this one is 16 characters wide whatever the date, which is
+ * also what lets `DATE_W` be a constant. The sort reads the NUMBER and never this string, so the
+ * ordering does not depend on the spelling.
+ */
+const dateText = (mtimeMs) => {
+  if (!(mtimeMs > 0)) return "";
+  const d = new Date(mtimeMs);
+  const p = (v, n = 2) => String(v).padStart(n, "0");
+  return `${p(d.getFullYear(), 4)}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+/**
+ * A SIZE AS A CELL — kilobytes, rounded UP, which is Explorer's own Size column.
+ *
+ * A DIRECTORY'S CELL IS EMPTY, and that is a statement rather than a gap: `st_size` on a directory
+ * is the size of its entry table, which is not the question "how big is this folder" that a reader
+ * asked. The DATE beside it is drawn, and the pair is what says the stat was paid.
+ *
+ * ROUNDED UP SO NO NON-EMPTY FILE READS AS `0 KB`: a one-byte file occupies a block, and `0 KB`
+ * beside a name is the spelling of "empty". An empty file is `0 KB` and is the only thing that is.
+ */
+const sizeText = (row) => {
+  if (row.dir || !row.statted) return "";
+  const bytes = Number(row.size) || 0;
+  return `${bytes > 0 ? Math.max(1, Math.ceil(bytes / 1024)) : 0} KB`;
+};
+
+/**
+ * ONE CELL'S TEXT, and the ONE place a column's key becomes a string. `paint` draws what this
+ * returns and `account.rows` reports it, so what a check reads is what a reader saw.
+ *
+ * THE DATE IS WHERE "NOT ASKED" AND "ASKED AND UNKNOWN" PART. A row whose `lstat` was never paid
+ * has an empty cell; a row that was statted and came back with a zero stamp gets the UNKNOWN mark.
+ * Collapsing the two would make `--no-dir-stat` turn nothing on a provider mount, and a control
+ * that turns nothing verifies nothing.
+ */
+const cellOf = (row, key) => {
+  if (key === "name") return row.name;
+  if (key === "type") return kindOf(row);
+  if (key === "date") return row.statted ? (dateText(row.mtimeMs) || UNKNOWN_CELL) : "";
+  if (key === "size") return sizeText(row);
+  return "";
+};
+
+/** WHAT A COLUMN SORTS ON, which is a number for two of them and a string for two. Never the cell
+ *  text: a date sorted by its spelling is a date sorted lexicographically, and a size sorted by
+ *  `"9 KB"` against `"10 KB"` puts the larger first. A DIRECTORY'S SIZE IS `-1` — below every file,
+ *  including an empty one — because its cell is empty and an empty cell has no magnitude. */
+const sortValue = (row, key) => {
+  if (key === "date") return Number(row.mtimeMs) || 0;
+  if (key === "size") return row.dir ? -1 : (Number(row.size) || 0);
+  if (key === "type") return kindOf(row);
+  return row.name;
+};
+
+/** Two sort values of the same kind. `<` orders numbers numerically and strings by code unit, which
+ *  is the one comparison both kinds share — `sortValue` is what guarantees they are never mixed. */
+const compareValues = (a, b) => (a === b ? 0 : (a < b ? -1 : 1));
+
+/**
+ * THE ORDER, AS ONE COMPARATOR — three terms, applied in this sequence and no other.
+ *
+ * 1. DIRECTORIES FIRST, and NOT multiplied by the direction: "folders before files" is not a
+ *    reading of a column, so reversing the sort must not turn it over. `--folders-last` is the
+ *    world where it is the other way, and nothing else moves.
+ * 2. THE CHOSEN COLUMN, times the direction.
+ * 3. THE NAME, ASCENDING WHICHEVER WAY THE PRIMARY SORTED. This is the stable term, and the
+ *    sentence above is the whole of it: the order inside a group of equal dates or equal types is
+ *    the same whether the dates ascend or descend, so a reader who reverses a sort does not find
+ *    the rows inside each group shuffled as well. `--stable-sort-off` multiplies this term by the
+ *    direction too — `dir * (byKey || byName)`, the naive spelling — and that is the only clause it
+ *    moves.
+ *
+ * WHEN THE PRIMARY IS THE NAME there is no third term to apply, so the direction reaches the names
+ * directly and a descending name sort descends.
+ */
+const compareRows = (a, b, { key, dir }, { foldersLast = false, stableSortOff = false } = {}) => {
+  if (a.dir !== b.dir) return (a.dir ? -1 : 1) * (foldersLast ? -1 : 1);
+  const primary = compareValues(sortValue(a, key), sortValue(b, key));
+  if (key === "name" || primary !== 0) return primary * dir;
+  const byName = compareValues(a.name, b.name);
+  return stableSortOff ? byName * dir : byName;
+};
 
 /**
  * THIS PROGRAM'S ROW GEOMETRY, EXPORTED — because things outside the process need it and each copy
@@ -295,11 +598,23 @@ const kindOf = (row) => (row.dir ? "DIR"
  * the inset — which is the drift this export exists to stop, one pixel's worth of it. The ROW
  * GEOMETRY ITSELF DID NOT MOVE: the ring is drawn inside the row it marks, so `rowTop` and `rowMid`
  * mean exactly what they meant before and the drivers that aim at them need no change.
+ *
+ * M19: THE COLUMNS AND THE TWO CELL FORMATTERS ARE HERE, AND THE ROW GEOMETRY DID MOVE. `FOOT_H`
+ * is a new term in `viewBox`, `scrollMax`, `rowsThatFit` and `clientHeightFor` — all four of which
+ * are exported, so a driver that already asks here follows it and a driver that restated one of
+ * them does not. `columnBoxes` is what a header press must be aimed with and `columnAt` is its
+ * declared inverse; `dateText` and `sizeText` are exported so a driver can PREDICT a cell rather
+ * than restate the format, which is the same argument `rowTop` is exported under. The cells the
+ * program actually drew are in its account, row by row, so the two readings can be compared.
+ * `bandBox` and `bandRows` are here for the same reason again: which rows a rubber band took is
+ * an intersection, and a driver restating it is a driver asserting the wrong set.
  */
 export const FILES_METRICS = Object.freeze({
-  ROW_H, ROW_GAP, ROW_STRIDE, PAD, HEAD_H, VIEW_TOP, NAME_X, GLYPH_W, TEXT_PX, FOCUS_INSET,
+  ROW_H, ROW_GAP, ROW_STRIDE, PAD, HEAD_H, VIEW_TOP, FOOT_H, NAME_X, GLYPH_W, TEXT_PX, FOCUS_INSET,
   SURFACE_W: START_W,
-  rowTop, rowMid, rowAt, toSurface, viewBox, scrollMax, rowsThatFit, focusBox,
+  COLUMNS, SORT_DEFAULT, DATE_W, TYPE_W, SIZE_W, NAME_MIN_W, UNKNOWN_CELL,
+  rowTop, rowMid, rowAt, toSurface, viewBox, scrollMax, rowsThatFit, clientHeightFor, focusBox,
+  columnBoxes, columnAt, dateText, sizeText, bandBox, bandRows,
 });
 
 const PAPER = 0x12161cff;
@@ -328,6 +643,23 @@ const BAND_DIR = 0xe8aa3cff;
  *  "focused" and "selected" the same picture — which is the state a press on the header produces,
  *  and the one a reader most needs to tell apart. */
 const FOCUS_RING = 0x8fd0ffff;
+/**
+ * THE HOVER'S BAND, AND IT IS A FILL RATHER THAN AN INK.
+ *
+ * A lit row and a selected row must stay two readings. The selection already owns a name's COLOUR —
+ * which is the only property a reader outside the surface can tell one row from another by
+ * (`www/m18.html` reads the selection as the minority ink, with no geometry in the test) — so a
+ * hover that changed an ink would make "lit" and "selected" the same fact seen twice, and a check
+ * for either would answer for both. This sits UNDER the text and changes no ink at all.
+ *
+ * ONE STEP OFF `PAPER` AND NO MORE: a hover is a hint that the pointer is here, not a selection.
+ */
+const LIT_FILL = 0x1e2630ff;
+/** THE RUBBER BAND: a translucent wash inside a solid edge, which is what makes a band over a lit
+ *  or selected row read as a band over it rather than as a third selection colour. The alpha is the
+ *  low byte and `cssColor` is what turns it into a canvas `rgba()` (constraint 224). */
+const BAND_WASH = 0x4a9bd83c;
+const BAND_EDGE = 0x8fd0ffff;
 
 /**
  * HOW FAR THE POINTER MUST MOVE BEFORE A PRESS BECOMES A DRAG, in CSS pixels.
@@ -374,6 +706,10 @@ export function run(env) {
   let frozenSurface = false;
   let cssPxSurface = false;
   let unclampedScroll = false;
+  let stableSortOff = false;
+  let foldersLast = false;
+  let noDirStat = false;
+  let bandFromRow = false;
   let noDrainMs = 0;
   const rest = [];
   let endOfOptions = false;
@@ -385,6 +721,10 @@ export function run(env) {
       if (arg === "--no-resurface") { frozenSurface = true; continue; }
       if (arg === "--css-px-surface") { cssPxSurface = true; continue; }
       if (arg === "--unclamped-scroll") { unclampedScroll = true; continue; }
+      if (arg === "--stable-sort-off") { stableSortOff = true; continue; }
+      if (arg === "--folders-last") { foldersLast = true; continue; }
+      if (arg === "--no-dir-stat") { noDirStat = true; continue; }
+      if (arg === "--band-from-row") { bandFromRow = true; continue; }
       if (arg === "--no-drain") {
         // Refused, not silently defaulted — `--ceiling`'s rule in src/bin/term.mjs: `Number(x) || d`
         // accepts both `0` and `abc`, and a fixture that silently did not hold is a check that
@@ -441,7 +781,28 @@ export function run(env) {
      * because a counter alone passes for a window that refused the wrong thing. */
     focus: -1, keysyms: 0, dblclicks: 0, activations: 0, relists: 0, backs: 0,
     spawned: [], refused: 0, refusals: [], refusalWhy: "", history: 0,
-    controls: { frozenSurface, cssPxSurface, unclampedScroll },
+    /* M19. THE SORT, THE SELECTION, THE BAND, THE HOVER AND WHAT THE `lstat` COST.
+     *
+     * `sort.chosen` is whether a reader has clicked a header at all, and it is a state rather than
+     * a convenience: the first click on the DEFAULT column is a choice and not a reversal, so
+     * without it that click would turn the list over.
+     *
+     * `selected` IS THE SET, IN ASCENDING INDEX ORDER, because a set of row indices read back out
+     * of a program is the only statement of a Shift range a check can assert, and `anchor` is the
+     * other half — a Ctrl+press that did not move the anchor is invisible in the set alone.
+     *
+     * `stats` AGAINST `dirStats` IS THE EVIDENCE THE DIRECTORY CALL IS PAID. One `lstat` per row,
+     * directories included, so `stats === rows.length` after a listing and `dirStats` is how many
+     * of them were the call that used to be skipped. `--no-dir-stat` drops the second to zero. */
+    sort: { key: SORT_DEFAULT.key, dir: SORT_DEFAULT.dir, chosen: false }, sorts: 0,
+    selected: [], anchor: -1, selects: 0,
+    bands: 0, bandSelected: 0,
+    hovers: 0, leaves: 0, lit: -1,
+    stats: 0, dirStats: 0, cappedRows: 0,
+    controls: {
+      frozenSurface, cssPxSurface, unclampedScroll,
+      stableSortOff, foldersLast, noDirStat, bandFromRow,
+    },
     // A FIXTURE AND NOT A CONTROL (see this file's header), so it is reported apart from them.
     noDrainMs, heldMs: 0,
   };
@@ -458,13 +819,39 @@ export function run(env) {
    * `startDrag` refuses it by name. A FILE no format rule covers is kept for the same reason the
    * directory is: a row a reader can see and cannot drag is honest, and an invisible file is not.
    */
-  const buildRows = (path) => {
+  /** THE SORT A READER CHOSE, or the default nobody chose. `chosen` is what makes the first click
+   *  on the `Name` header a choice rather than a reversal (this file's header). */
+  let sort = { key: SORT_DEFAULT.key, dir: SORT_DEFAULT.dir, chosen: false };
+
+  /** THE ORDER, APPLIED TO A LIST IN PLACE. One call site per list — `buildRows` for a new
+   *  directory and the header press for a new column — so the comparator cannot be applied with one
+   *  set of controls here and another there. `order` is a parameter because `relist` sorts a list it
+   *  has not committed yet, with a sort state it has not committed either. */
+  const sortRows = (list, order = sort) => list.sort((a, b) =>
+    compareRows(a, b, order, { foldersLast, stableSortOff }));
+
+  /**
+   * THE LIST AS THE ACCOUNT CARRIES IT: one entry per row, IN LAYOUT ORDER, with the four CELLS
+   * THIS PROGRAM DREW.
+   *
+   * `cells` is `cellOf`'s output and nothing else, so what a check reads is what a reader saw — a
+   * driver that formatted a date of its own would be a second renderer of one fact. The numbers are
+   * beside them because a sort is asserted on the VALUE and not on the spelling, and `format` keeps
+   * the name it has had since M10: it is `kindOf`, which is the type cell.
+   */
+  const reportRows = () => rows.map((r) => ({
+    name: r.name, format: kindOf(r), dir: r.dir, size: r.size, mtimeMs: r.mtimeMs,
+    statted: r.statted,
+    cells: Object.fromEntries(COLUMNS.map((c) => [c.key, cellOf(r, c.key)])),
+  }));
+
+  const buildRows = (path, order = sort) => {
     const entries = env.std.listDir(env, path);
     if (typeof entries === "number") return entries;
     // The directory with exactly one trailing slash, so a child path is `base + name` and the
     // root does not become `//name`.
     const base = path.endsWith("/") ? path : `${path}/`;
-    return entries
+    const built = entries
       .filter((e) => e.name !== "." && e.name !== "..")
       .map((e) => {
         const isDir = e.type === DT_DIR;
@@ -479,18 +866,44 @@ export function run(env) {
          * One `lstat` per row buys it. That is 32 extra calls for a directory of 32 things, which
          * is what `ls -l` already costs — and the alternative is a listing that cannot tell a
          * program from a data file, which is the distinction a reader of `/usr/bin` most wants. */
+        /* M19: AND THE CALL IS NOW PAID FOR A DIRECTORY TOO, which is what a Date modified column
+         * costs. It sat inside `if (!isDir)`, so a folder had no modification time at all and the
+         * column would have had an empty cell on every one of them — a column lying about half its
+         * rows. `--no-dir-stat` is that world, kept as a control: the folder DATE cells go empty
+         * and nothing else moves, so the clause it breaks is exactly the one that says the call
+         * happens.
+         *
+         * A REFUSED STAT LEAVES THE ROW, with its cells empty. A listing that dropped the rows it
+         * could not stat would be a file manager hiding files, which is the defect M14 removed
+         * from the other end. */
         let exec = false;
-        if (!isDir) {
+        let size = 0;
+        let mtimeMs = 0;
+        /* WHETHER THE CALL WAS PAID AND ANSWERED, which is what `cellOf` reads to tell an empty
+         * cell from an unknown one. A REFUSED stat leaves it false and the row stays, with empty
+         * cells: a listing that dropped the rows it could not stat would be a file manager hiding
+         * files, which is the defect M14 removed from the other end. */
+        let statted = false;
+        if (!isDir || !noDirStat) {
+          account.stats += 1;
+          if (isDir) account.dirStats += 1;
           const st = env.fs.lstat(`${base}${e.name}`);
-          if (typeof st !== "number") exec = (st.mode & 0o111) !== 0;
+          if (typeof st !== "number") {
+            statted = true;
+            exec = (st.mode & 0o111) !== 0;
+            size = Number(st.size);
+            // NANOSECONDS INTO MILLISECONDS, which is the unit `Date` takes and the unit the VFS
+            // stamped in the first place (`src/kernel/calls.mjs`). A BigInt would also not survive
+            // the account's trip out of this process.
+            mtimeMs = Number(st.mtimeNs / 1000000n);
+          }
         }
-        return { name: e.name, dir: isDir, format, exec, path: `${base}${e.name}` };
-      })
-      .sort((a, b) => {
-        // Directories first, then by name, which is every file manager's order.
-        if (a.dir !== b.dir) return a.dir ? -1 : 1;
-        return a.name < b.name ? -1 : 1;
+        return {
+          name: e.name, dir: isDir, format, exec, size, mtimeMs, statted,
+          path: `${base}${e.name}`,
+        };
       });
+    return sortRows(built, order);
   };
 
   /** The rows, AND THEY ARE STATE SINCE M18: a re-list replaces the whole array rather than opening
@@ -502,7 +915,7 @@ export function run(env) {
       exit: env.std.complainErrno(env, NAME, dir, rows), program: NAME, errno: -rows,
     };
   }
-  account.rows = rows.map((r) => ({ name: r.name, format: kindOf(r) }));
+  account.rows = reportRows();
   /* AN EMPTY DIRECTORY ON THE COMMAND LINE IS STILL A REFUSAL, AND AN EMPTY ONE NAVIGATED INTO IS
    * NOT. The difference is whether there is a window to say it in: here there is none, so the only
    * honest place for the message is stdout and the only honest outcome is an exit. `relist` keeps
@@ -529,16 +942,53 @@ export function run(env) {
    *  the surface, so a viewport the window has no room for must not be named at all. */
   let surfW = 0;
   let surfH = 0;
-  /** The selected row, the press that might become a drag, and whether it has. Declared here
+  /** The press that might become a drag or a band, and whether it has become a drag. Declared here
    *  because a resize re-reads them. */
   let press = null;
   let dragging = false;
-  let hot = -1;
-  /** THE KEYBOARD CURSOR, and `-1` is "nothing is focused" rather than "row 0". It is NOT `hot`:
-   *  a press on the header clears the selection, and clearing the reader's place in the list with
-   *  it would make the arrow keys start over every time the pointer missed. */
+  /**
+   * THE SELECTION, AS A SET OF ROW INDICES, AND ITS ANCHOR.
+   *
+   * A SET because M19's rules need more than one row and an anchor-based range cannot be expressed
+   * with a single index. INDICES rather than names because `rows` IS the layout — the sort reorders
+   * the array itself — so an index is a position a reader can point at, and a Shift range over
+   * indices is a range in layout order by construction.
+   *
+   * THE ANCHOR IS WHERE A RANGE STARTS, and it is moved by a plain press AND by a Ctrl+press. The
+   * second half is the rule that is easy to miss: Ctrl+clicking three rows and then Shift+clicking
+   * a fourth must range from the third, not from the first, or the reader's last gesture is not
+   * where the next one starts from.
+   */
+  let sel = new Set();
+  let anchor = -1;
+  /** THE LIT ROW — the hover, `-1` for none. Not the selection and not the cursor: a reader moving
+   *  the pointer across a list has chosen nothing, and a hover that selected would make every pass
+   *  of the hand a choice. */
+  let lit = -1;
+  /** THE RUBBER BAND, or null. ITS CORNERS ARE IN CONTENT COORDINATES — `y` plus the scroll offset
+   *  — so a band that is open while the list scrolls keeps hold of the rows it was drawn over
+   *  rather than sliding across new ones. The drawing converts back by subtracting the offset, in
+   *  the one place every other rectangle is converted. */
+  let band = null;
+  /** THE KEYBOARD CURSOR, and `-1` is "nothing is focused" rather than "row 0". It is NOT the
+   *  selection: a press on the header clears the selection, and clearing the reader's place in the
+   *  list with it would make the arrow keys start over every time the pointer missed. */
   let focus = -1;
   const setFocus = (i) => { focus = i; account.focus = i; };
+
+  /** Publish the selection. ASCENDING, because a set has no order and a check asserting a Shift
+   *  range needs one — and the anchor beside it, because a Ctrl+press that moved the anchor and
+   *  toggled nothing else is invisible in the set alone. */
+  const reportSelection = () => {
+    account.selected = [...sel].sort((a, b) => a - b);
+    account.anchor = anchor;
+  };
+  /** Replace the selection with one row, or with nothing at `-1`. */
+  const selectOnly = (i) => {
+    sel = i >= 0 ? new Set([i]) : new Set();
+    anchor = i;
+    reportSelection();
+  };
 
   /* ---- THE SCROLL OFFSET, WHICH IS WHAT M17 ADDED ------------------------------------------ */
 
@@ -676,10 +1126,27 @@ export function run(env) {
    *  selecting it would be a press landing on a row nobody can see — the hit test and the clip must
    *  bound the same rectangle or one of them is lying. */
   const rowUnder = (yCss) => {
-    const box = FILES_METRICS.viewBox(clientW, clientH);
-    if (yCss < box.y || yCss >= box.y + box.h) return -1;
+    if (!inViewport(yCss)) return -1;
     const i = FILES_METRICS.rowAt(yCss, scroll);
     return i >= 0 && i < rows.length ? i : -1;
+  };
+
+  /** WHETHER A CSS-PX `y` IS INSIDE THE VIEWPORT AT ALL — the HEADER, the status strip and the gap
+   *  between two rows answer differently to `rowUnder`, which cannot tell "above the list" from
+   *  "between two rows". A rubber band may start in either of the second two and in neither of the
+   *  first, so the two questions are separate functions rather than one return value. */
+  const inViewport = (yCss) => {
+    const box = FILES_METRICS.viewBox(clientW, clientH);
+    return yCss >= box.y && yCss < box.y + box.h;
+  };
+
+  /** Light row `i`, or nothing at `-1`. Answers whether it CHANGED, so a stream of hovers across
+   *  one row costs one repaint and not one per sample. */
+  const setLit = (i) => {
+    if (i === lit) return false;
+    lit = i;
+    account.lit = i;
+    return true;
   };
 
   /* ---- THE ONE CONVERSION: CSS PIXELS INTO SURFACE PIXELS ---------------------------------- */
@@ -706,11 +1173,33 @@ export function run(env) {
   /** A text run. `size` IS SURFACE PX (`src/wm/surface.mjs` sets the font from it), so it scales
    *  with everything else — a 12 px label drawn at 12 device px inside a 40-device-px row is the
    *  half-size text a reader reported. */
-  const text = (ops, s, { x, y, size, rgba, flags = 0 }) => ops.push(...encodeTextRun(s, {
-    x: px(x), y: px(y), size: px(size), rgba, flags,
-  }));
-  /** Where the type column is right-aligned to, CSS px. A function because the width is live. */
-  const typeRight = () => clientW - PAD - TYPE_INSET;
+  const text = (ops, s, { x, y, size, rgba, flags = 0, maxWidth = 0 }) =>
+    ops.push(...encodeTextRun(s, {
+      x: px(x), y: px(y), size: px(size), rgba, flags, maxWidth: maxWidth ? px(maxWidth) : 0,
+    }));
+  /**
+   * ONE CELL, CLIPPED TO ITS OWN COLUMN BY THE RENDERER.
+   *
+   * `DLT_ELLIPSIS` plus `a5` is the ABI's answer to "this run may be wider than the room it has",
+   * and the limit is handed over rather than applied here: a program cannot measure a string, and a
+   * sum of published advances is a strict UPPER bound for a proportional run — so a program that
+   * pre-cut would truncate early by up to 8.55% of the string (`advanceWidth` in src/abi.mjs). The
+   * renderer measures what it is about to draw and is the only thing that can.
+   *
+   * THE LIMIT IS THE COLUMN'S WIDTH LESS ONE `PAD`, so two neighbouring cells cannot touch. A
+   * right-aligned run's `x` is its right edge, so the width is what bounds it leftwards.
+   */
+  const cellRun = (ops, box, s, { y, size, rgba, mono = false }) => {
+    if (s === "") return;
+    text(ops, s, {
+      x: box.textX,
+      y,
+      size,
+      rgba,
+      flags: DLT_ELLIPSIS | (mono ? DLT_MONO : 0) | (box.right_aligned ? DLT_RIGHT : 0),
+      maxWidth: Math.max(1, box.w - PAD),
+    });
+  };
 
   /**
    * A FOLDER OR A PAGE, OUT OF RECTANGLES. There is no image op either, so a 16x16 glyph is what
@@ -750,9 +1239,25 @@ export function run(env) {
     return { op: DL_CLIP, a0: x, a1: y, a2: w, a3: h };
   };
 
-  /** One frame. EVERY NUMBER IN HERE IS A CSS PIXEL — `fill`, `stroke` and `text` are what turn
-   *  them into surface pixels, and they are the only things that do. */
-  const paint = (hot) => {
+  /**
+   * THE SORT INDICATOR: a wedge at the TOP of the sorted column's header cell, pointing UP for
+   * ascending. Windows 7 draws a triangle in that exact place, and the display list has no path op,
+   * so it is three fills of descending width — the glyph's argument applied to four pixels.
+   *
+   * CENTRED ON THE COLUMN'S BOX, which is `columnBoxes`'s own rectangle, so a check can locate it
+   * from the export rather than from a number of its own.
+   */
+  const sortCaret = (ops, box, dir) => {
+    const mid = box.x + box.w / 2;
+    for (let r = 0; r < 3; r += 1) {
+      const w = dir > 0 ? 5 - r * 2 : 1 + r * 2;
+      fill(ops, mid - w / 2, 1 + r, w, 1, HEAD_INK);
+    }
+  };
+
+  /** One frame. EVERY NUMBER IN HERE IS A CSS PIXEL — `fill`, `stroke`, `text` and `cellRun` are
+   *  what turn them into surface pixels, and they are the only things that do. */
+  const paint = () => {
     // `DL_CLEAR`'s `a0` IS A COLOUR AND NOT A COORDINATE, so it is pushed raw: scaling it would
     // produce a different colour, which is the one way this list could go silently wrong.
     const ops = [{ op: DL_CLEAR, a0: PAPER }];
@@ -761,27 +1266,64 @@ export function run(env) {
      * dishonesty CLAUDE.md names. */
     const clip = clipOp();
     const { first, last } = visible();
-    const drawn = clip ? Math.max(0, last - first + 1) : 0;
-    account.firstRow = drawn > 0 ? first : 0;
-    account.shownRows = drawn;
+    const cols = columnBoxes(clientW);
 
-    /* THE HEADER, AND IT IS DRAWN BEFORE THE CLIP — which is the whole reason the clip exists. A
-     * scrolled row's top is above the header's baseline, so an unclipped list paints its name over
-     * these words; the check reads the header's pixels back for exactly that reason.
+    /* THE STATUS STRIP, BEFORE THE CLIP, because it sits BELOW the viewport and a canvas clip only
+     * ever intersects — drawn after the clip it would be cut away entirely.
      *
-     * It names the columns, which is what tells a reader the right-hand text is a TYPE and not part
-     * of the name — and it carries the count, because "this directory has 26 things in it" is the
-     * first question a listing answers. SINCE M17 IT ALSO CARRIES THE POSITION, because a scrolling
-     * list that does not say where it is is a list a reader is lost in: the "+N more" line said
-     * what was unreachable and this says what is on screen. There is no scrollbar — a thumb is
-     * dragged, and a drag on one would be a gesture this program cannot route. */
-    text(ops, "Name", { x: NAME_X, y: PAD, size: TEXT_PX, rgba: HEAD_INK, flags: DLT_BOLD });
+     * THE POSITION STATEMENT IS WHAT M17 PUT IN THE HEADER and what M19's four column labels left
+     * no room for. It is the same sentence in the same words: `a-b of N` while the list scrolls and
+     * `N items` while it does not, which is itself the statement "this list cannot scroll".
+     *
+     * IT IS THE ONLY RIGHT-ALIGNED RUN BEFORE THE CLIP, AND THAT IS LOAD-BEARING OUTSIDE THIS
+     * PROCESS. `www/m18.html`'s `positionLine` reads this statement as "the first `DLT_RIGHT` run
+     * ahead of the clip", because before M19 it was the only one there was. So the column labels
+     * below are LEFT-aligned at their own boxes — which is also what Explorer does with a column
+     * header over right-aligned values — and the selection count is left-aligned too. Give any of
+     * them `DLT_RIGHT` and a label is read as the list's position: the clause asserting "this list
+     * does not scroll" goes red over a list that does not scroll, which is the shape of defect that
+     * takes a day to find.
+     *
+     * THE SELECTION COUNT IS A SEPARATE RUN so neither reading can be mistaken for the other by
+     * something matching text — and `N selected` matches neither of that page's two regexes. */
+    const drawn = clip ? Math.max(0, last - first + 1) : 0;
     const place = maxScroll() > 0 && drawn > 0
       ? `${first + 1}-${last + 1} of ${rows.length}`
       : `${rows.length} item${rows.length === 1 ? "" : "s"}`;
+    const footY = clientH - FOOT_H + 4;
+    fill(ops, 0, clientH - FOOT_H, clientW, 1, HEAD_RULE);
     text(ops, place, {
-      x: typeRight(), y: PAD, size: TEXT_PX, rgba: HEAD_INK, flags: DLT_BOLD | DLT_RIGHT,
+      x: clientW - PAD - TYPE_INSET, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK,
+      flags: DLT_RIGHT,
     });
+    if (sel.size > 0) {
+      text(ops, `${sel.size} selected`, { x: PAD, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK });
+    }
+
+    /* THE HEADER, ALSO BEFORE THE CLIP — which is the whole reason the clip exists. A scrolled
+     * row's top is above the header's baseline, so an unclipped list paints its name over these
+     * words; the check reads the header's pixels back for exactly that reason.
+     *
+     * SINCE M19 IT IS FOUR COLUMN LABELS AND NOTHING ELSE, each over the column it names, with a
+     * wedge on the one the sort is on. A label is what tells a reader the right-hand text is a DATE
+     * and not part of the name, and it is also the thing a press on it sorts — so the labels and
+     * the hit test read one geometry (`columnBoxes`) and cannot disagree about which column a
+     * reader pointed at. There is no scrollbar — a thumb is dragged, and a drag on one would be a
+     * gesture this program cannot route. */
+    for (const box of cols) {
+      text(ops, box.label, {
+        // The `Name` label keeps the column's own text origin, because the rows' names are there
+        // and a label over its values is the point. The other three have no left text origin of
+        // their own — their cells hang off the right edge — so the label takes the box's left.
+        x: box.key === "name" ? box.textX : box.x + 2,
+        y: PAD,
+        size: TEXT_PX,
+        rgba: HEAD_INK,
+        flags: DLT_BOLD | DLT_ELLIPSIS,
+        maxWidth: Math.max(1, box.w - PAD),
+      });
+      if (box.key === sort.key) sortCaret(ops, box, sort.dir);
+    }
     fill(ops, PAD, HEAD_H - 4, clientW - PAD * 2, 1, HEAD_RULE);
 
     /* FROM HERE DOWN THE LIST IS CLIPPED. No reset follows it: `Surface.replay` resets the clip at
@@ -792,33 +1334,51 @@ export function run(env) {
     // NO CLIP, NO ROWS: `first - 1` is an empty range, and it is the ONE place that decision is
     // taken — a row drawn outside a viewport this program could not name would paint the header.
     const lastDrawn = clip ? last : first - 1;
+    let shown = 0;
+    let capped = 0;
     for (let i = first; i <= lastDrawn; i += 1) {
       const row = rows[i];
       const top = rowTop(i, scroll);
-      const selected = i === hot;
+      const selected = sel.has(i);
+      /* ONE ROW IS BUILT APART AND THEN MEASURED, WHICH IS WHAT `DL_MAX_OPS` COSTS. A batch over
+       * the cap is refused WHOLE (`win_draw`), and a refused batch is a window that stopped
+       * repainting with no error a reader can see. Four columns is four text runs, and a run is a
+       * header plus one record per 24 bytes: a 255-byte name in a selected and focused row is 24
+       * ops, and ninety of those is 2,160 against a 2,048-op batch — reachable by a tall window
+       * over a directory of long names with everything selected. So the loop stops while there is
+       * still room and SAYS HOW MANY ROWS IT DROPPED, rather than sending a batch that draws
+       * nothing. */
+      const rowOps = [];
       /* A SELECTED ROW INVERTS, which is what a list view does and what makes the selection
        * visible without a second colour to learn. The fill is the row's own KIND colour, so the
        * amber/green distinction survives selection rather than being painted over by one
-       * highlight. */
+       * highlight.
+       *
+       * THE HOVER'S BAND IS UNDER IT AND LOSES TO IT: a row that is both lit and selected reads as
+       * selected, because the selection is the reader's choice and the hover is only where their
+       * hand is. */
       if (selected) {
-        fill(ops, PAD, top, clientW - PAD * 2, ROW_H,
+        fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H,
           row.dir ? SELECT_FILL_DIR : SELECT_FILL);
+      } else if (i === lit) {
+        fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H, LIT_FILL);
       }
       const kind = row.dir ? BAND_DIR : (BAND[row.format] || BAND_UNKNOWN);
-      glyph(ops, row, PAD + 2, top + 2, selected ? INK_SELECTED : kind);
-      text(ops, row.name, {
-        x: NAME_X, y: top + TEXT_DY, size: TEXT_PX,
-        rgba: selected ? INK_SELECTED : INK,
-      });
-      /* THE TYPE, RIGHT-ALIGNED AND MONOSPACE. Right-aligned because a column of types is read
-       * down its own edge; monospace because `DIR` and `PNG` and `TEXT` lining up is the whole
-       * point of a column. `kindOf` is the one place the word is decided. */
-      text(ops, kindOf(row), {
-        x: typeRight(), y: top + TEXT_DY, size: TEXT_PX - 1,
-        rgba: selected ? INK_SELECTED : INK_DIM, flags: DLT_MONO | DLT_RIGHT,
-      });
+      glyph(rowOps, row, PAD + 2, top + 2, selected ? INK_SELECTED : kind);
+      /* THE CELLS, ONE PER COLUMN AND IN COLUMN ORDER. `cellOf` decides every string and
+       * `columnBoxes` every rectangle, so the column a cell lands in is the column its header names.
+       * The NAME is drawn at the row's own size and the three metadata columns one pixel smaller and
+       * monospace, which is what makes a column of dates and sizes line its digits up. */
+      for (const box of cols) {
+        cellRun(rowOps, box, cellOf(row, box.key), {
+          y: top + TEXT_DY,
+          size: box.key === "name" ? TEXT_PX : TEXT_PX - 1,
+          rgba: selected ? INK_SELECTED : (box.key === "name" ? INK : INK_DIM),
+          mono: box.mono,
+        });
+      }
       if (selected) {
-        stroke(ops, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
+        stroke(rowOps, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
       }
       /* THE KEYBOARD CURSOR, LAST AND INSIDE THE ROW. Windows 7 draws a dotted focus rectangle and
        * the display list has no dash pattern, so this is a hairline inset by one CSS pixel — which
@@ -827,12 +1387,33 @@ export function run(env) {
        * paper, for the contrast reason the selected text already has. */
       if (i === focus) {
         const ring = FILES_METRICS.focusBox(i, scroll, clientW);
-        stroke(ops, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
+        stroke(rowOps, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
       }
+      // ONE op of headroom is kept for the band below, which is two ops and is drawn at most once.
+      if (ops.length + rowOps.length + 2 > DL_MAX_OPS) { capped = lastDrawn - i + 1; break; }
+      ops.push(...rowOps);
+      shown += 1;
+    }
+    account.firstRow = shown > 0 ? first : 0;
+    account.shownRows = shown;
+    if (capped !== account.cappedRows) {
+      account.cappedRows = capped;
+      if (capped > 0) {
+        env.std.say(env, `${NAME}: ${capped} row(s) past a ${DL_MAX_OPS}-op batch were not drawn\n`);
+      }
+    }
+
+    /* THE RUBBER BAND, LAST AND INSIDE THE CLIP, because it is drawn over the rows it is selecting
+     * and bounded by the same viewport they are. Its corners are CONTENT coordinates, so the offset
+     * comes back off here — the one place that conversion happens. */
+    if (band) {
+      const r = bandBox(band);
+      fill(ops, r.x, r.y - scroll, r.w, r.h, BAND_WASH);
+      stroke(ops, r.x, r.y - scroll, r.w, r.h, BAND_EDGE);
     }
     return env.win.draw(made.fd, ops);
   };
-  paint(-1);
+  paint();
 
   /** THE BOUNDARY, AND THE ONLY PLACE A DEVICE PIXEL BECOMES THIS PROGRAM'S OWN UNIT. `w` and `h`
    *  arrive from `std.resurface`, which divided the event's device-px box by the ratio the event
@@ -981,20 +1562,67 @@ export function run(env) {
    * window exactly as it was — with the refusal named. A half-applied navigation would be a title
    * naming one directory over the rows of another.
    */
+  /**
+   * SORT BY COLUMN `key`, OR REVERSE IT.
+   *
+   * A CLICK ON A COLUMN THAT IS NOT THE SORT COLUMN sorts ASCENDING by it. A click on the one that
+   * IS reverses it — EXCEPT the very first click, because the opening order is name-ascending and
+   * nobody chose it: a reader looking at an ascending list who clicks `Name` expects the order they
+   * are looking at and not its opposite. `sort.chosen` is the state that tells the two apart.
+   *
+   * THE SELECTION GOES AND THE CURSOR STAYS ON ITS ROW. The selection named POSITIONS in an order
+   * that no longer exists, so carrying it over would highlight rows the reader never chose — the
+   * same argument `relist` makes. The cursor is carried by IDENTITY instead of by index, because a
+   * reader's place in a list is the FILE they were on: an index would leave the ring on whatever
+   * happened to land in that slot.
+   */
+  const sortBy = (key) => {
+    if (!COLUMNS.some((c) => c.key === key)) return refuse(String(key), "is not a column");
+    const was = focus >= 0 && focus < rows.length ? rows[focus] : null;
+    sort = sort.chosen && sort.key === key
+      ? { key, dir: -sort.dir, chosen: true }
+      : { key, dir: 1, chosen: true };
+    sortRows(rows);
+    account.sort = { ...sort };
+    account.sorts += 1;
+    account.rows = reportRows();
+    selectOnly(-1);
+    setFocus(was ? rows.indexOf(was) : -1);
+    setLit(-1);
+    band = null;
+    press = null;
+    dragging = false;
+    env.std.say(env, `${NAME}: sorted by ${key} `
+      + `${sort.dir > 0 ? "ascending" : "descending"}\n`);
+    return true;
+  };
+
   const relist = (next, { push = true } = {}) => {
-    const built = buildRows(next);
+    /* M19: AND THE SORT GOES WITH THEM, which is why the new list is built with the DEFAULT order
+     * rather than the one in hand. `files /some/dir` and the same directory navigated into must
+     * show the same rows in the same order — a sort that travelled would make row 1 depend on a
+     * column the reader chose for a directory that is gone, and nothing on screen would say so.
+     * Built before it is committed, like the rows, so a directory that cannot be read leaves both
+     * the listing and the sort exactly as they were. */
+    const order = { key: SORT_DEFAULT.key, dir: SORT_DEFAULT.dir, chosen: false };
+    const built = buildRows(next, order);
     if (typeof built === "number") return refuse(next, env.std.errnoName(built));
     if (push) history.push(dir);
     dir = next;
     rows = built;
+    sort = order;
+    account.sort = { ...sort };
     account.dir = dir;
-    account.rows = rows.map((r) => ({ name: r.name, format: kindOf(r) }));
+    account.rows = reportRows();
     account.history = history.length;
     account.relists += 1;
     scroll = 0;
     account.scroll = 0;
     account.scrollMax = maxScroll();
-    hot = -1;
+    selectOnly(-1);
+    lit = -1;
+    account.lit = -1;
+    band = null;
     press = null;
     dragging = false;
     setFocus(-1);
@@ -1059,6 +1687,8 @@ export function run(env) {
   rows.forEach((r, i) => env.std.say(env, `  row ${i + 1}  ${r.name}\t${kindOf(r)}\n`));
   env.std.say(env, "press a row and drag it onto another window. the wheel scrolls. "
     + "arrows move, Enter or a double-click opens, Backspace goes back. q quits.\n");
+  env.std.say(env, "click a column header to sort, again to reverse. shift or ctrl extend the "
+    + "selection; drag from empty space to band-select.\n");
 
   /** Publish one row as a drag. The object's fd is CLOSED immediately and on purpose: the session
    *  holds the kernel's own reference, so the payload outlives this program's handle on it — and
@@ -1249,14 +1879,70 @@ export function run(env) {
         const at = env.std.cssPointAt(ev, S);
         if (ev.mods & WPTR_DOWN) {
           const i = rowUnder(at.y);
-          press = i >= 0 ? { row: i, x: at.x, y: at.y } : null;
+          /* THE ARBITRATION, TAKEN HERE AND NOWHERE ELSE. A press that found a row arms the DRAG
+           * threshold; a press inside the viewport that found none arms a BAND. Nothing downstream
+           * re-decides it, because a gesture that could become either depending on how far the hand
+           * moved is a gesture that publishes a file the reader never touched.
+           *
+           * `--band-from-row` IS THE WORLD WITHOUT IT: every press arms a band, so a press on a row
+           * and a drag across its neighbours selects them and no drag session ever begins. */
+          const inView = inViewport(at.y);
+          press = i >= 0 && !bandFromRow ? { row: i, x: at.x, y: at.y } : null;
+          band = (i < 0 || bandFromRow) && inView
+            ? { x0: at.x, y0: at.y + scroll, x1: at.x, y1: at.y + scroll }
+            : null;
           dragging = false;
-          if (i !== hot) { hot = i; repaint = true; }
+          if (setLit(-1)) repaint = true;
+          /* A PRESS IN THE HEADER SORTS THE COLUMN UNDER IT. The hit test is `columnAt`, the
+           * declared inverse of the geometry the labels were drawn with, so the column a reader
+           * pointed at is the column that sorts. A press ABOVE the viewport that is not on a column
+           * clears the selection and does no more, which is what it did before M19. */
+          if (at.y < VIEW_TOP) {
+            const key = columnAt(at.x, clientW);
+            if (key !== null) { if (sortBy(key)) repaint = true; continue; }
+            if (sel.size > 0) { selectOnly(-1); repaint = true; }
+            continue;
+          }
           if (i >= 0) {
             account.presses += 1;
+            /* THE THREE SELECTION GESTURES, AND THE MODIFIER DECIDES WHICH.
+             *
+             * Shift RANGES from the anchor to this row in LAYOUT order, which is index order
+             * because the sort reorders `rows` itself. With no anchor there is no range, so a first
+             * Shift+press behaves as a plain one rather than selecting from row 0 — a range a
+             * reader never started one end of.
+             *
+             * Ctrl TOGGLES one row AND MOVES THE ANCHOR HERE. The second half is the rule that is
+             * easy to miss and is asserted on its own: three Ctrl+presses then a Shift+press must
+             * range from the third, or the reader's last gesture is not where the next starts.
+             *
+             * Neither modifier REPLACES the selection, which is the whole of what they are for. */
+            if (ev.mods & WMOD_SHIFT) {
+              if (anchor < 0) selectOnly(i);
+              else {
+                const lo = Math.min(anchor, i);
+                const hi = Math.max(anchor, i);
+                sel = new Set();
+                for (let r = lo; r <= hi; r += 1) sel.add(r);
+                reportSelection();
+              }
+            } else if (ev.mods & WMOD_CTRL) {
+              if (sel.has(i)) sel.delete(i);
+              else sel.add(i);
+              anchor = i;
+              reportSelection();
+            } else {
+              selectOnly(i);
+            }
+            account.selects += 1;
+            repaint = true;
             // THE POINTER CARRIES THE CURSOR WITH IT. Without this, Enter after a click opens a
             // row other than the one the reader just highlighted.
-            if (i !== focus) { setFocus(i); repaint = true; }
+            if (i !== focus) setFocus(i);
+          } else if (sel.size > 0 || anchor >= 0) {
+            // A PRESS ON EMPTY SPACE CLEARS THE SELECTION, which is where the band starts from.
+            selectOnly(-1);
+            repaint = true;
           }
           /* THE SECOND CLICK IS THE ACTIVATION VERB, AND THE FIRST ONE IS NOT. `WPTR_CLICK2` rides
            * the DOWN record and nothing else (`src/wm/winhost.mjs`), so this is the only place it
@@ -1270,8 +1956,50 @@ export function run(env) {
           }
           continue;
         }
-        if (ev.mods & WPTR_MOVE) {
-          if (!press || dragging) continue;
+        /* THE POINTER LEFT THE SURFACE. It carries no usable position — the event fired outside the
+         * window — so the lit row is CLEARED rather than hit-tested, which is `WPTR_LEAVE`'s own
+         * contract (src/abi.mjs). Without it the last hover a window ever gets is the one nearest
+         * the edge, and that row stays lit for as long as the window is open.
+         *
+         * TESTED BEFORE THE MOVE, because a leave is not a move: the bits are exclusive and reading
+         * it as one would hit-test a coordinate the ABI says is meaningless. */
+        if (ev.mods & WPTR_LEAVE) {
+          account.leaves += 1;
+          if (setLit(-1)) repaint = true;
+          continue;
+        }
+        if (ev.mods & WPTR_UP) {
+          /* THE BAND ENDS WITH THE PRESS THAT STARTED IT, and the selection it made STAYS. A band
+           * released is a choice taken; only the rectangle goes. */
+          if (band) {
+            account.bands += 1;
+            account.bandSelected = sel.size;
+            band = null;
+            repaint = true;
+          }
+          press = null;
+          dragging = false;
+          continue;
+        }
+        /* A MOVE, AND IT IS ONE OF THREE THINGS: a band being dragged, a press becoming a drag, or
+         * A HOVER. `c` carries `event.buttons`, so a hover is a record with neither button bit and
+         * nothing held — which is what makes a drag's own motion samples NOT hovers without this
+         * program having to track whether a gesture is in flight. */
+        if (band) {
+          band.x1 = at.x;
+          band.y1 = at.y + scroll;
+          const hit = bandRows(band, rows.length, clientW);
+          if (hit.size !== sel.size || [...hit].some((r) => !sel.has(r))) {
+            sel = hit;
+            reportSelection();
+          }
+          /* A FRAME PER SAMPLE, AND IT IS OWED RATHER THAN WASTEFUL: the rectangle is the feedback,
+           * so a band that only repainted when the selection changed would lag the pointer by a
+           * whole row and read as the gesture not working. */
+          repaint = true;
+          continue;
+        }
+        if (press && !dragging) {
           const far = Math.abs(at.x - press.x) >= DRAG_THRESHOLD_CSS_PX
             || Math.abs(at.y - press.y) >= DRAG_THRESHOLD_CSS_PX;
           if (!far) continue;
@@ -1280,11 +2008,9 @@ export function run(env) {
           if (began < 0 && account.why) break;
           continue;
         }
-        if (ev.mods & WPTR_UP) {
-          press = null;
-          dragging = false;
-          continue;
-        }
+        if (press || (ev.c | 0) !== 0) continue;
+        account.hovers += 1;
+        if (setLit(rowUnder(at.y))) repaint = true;
         continue;
       }
       if (ev.type === WEV_DRAG_DONE) {
@@ -1344,7 +2070,7 @@ export function run(env) {
       if (ev.type === WEV_CLOSE) { account.why = "the window asked to close"; break; }
       if (ev.type === WEV_DESTROYED) { account.why = "the window was destroyed"; break; }
     }
-    if (repaint) paint(hot);
+    if (repaint) paint();
     if (account.why) break;
   }
 
@@ -1377,5 +2103,16 @@ export function run(env) {
     + `${account.relists} re-list(s), ${account.backs} back, ${account.spawned.length} spawned, `
     + `${account.refused} refused`
     + `${account.refused ? ` (last: ${account.refusalWhy})` : ""}\n`);
+  /* M19: THE COLUMNS' OWN LINE. The sort is where the reader left it; `selected` against `anchor`
+   * is the pair a range gesture is read from; `stats` against `dirStats` is the evidence the
+   * directory `lstat` was paid, which is the call the Date modified column exists on. */
+  env.std.say(env, `${NAME}: sorted by ${account.sort.key} `
+    + `${account.sort.dir > 0 ? "ascending" : "descending"}`
+    + `${account.sort.chosen ? "" : " (the opening order, unchosen)"}`
+    + ` from ${account.sorts} header click(s), `
+    + `${account.selected.length} row(s) selected around anchor `
+    + `${account.anchor < 0 ? "none" : account.anchor + 1}, `
+    + `${account.bands} band(s), ${account.hovers} hover(s) and ${account.leaves} leave(s), `
+    + `${account.stats} lstat(s) of which ${account.dirStats} on directories\n`);
   return { exit: 0, ...account };
 }

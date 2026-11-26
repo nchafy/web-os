@@ -826,6 +826,28 @@ class Control:
     #: the world before `WKEY_*` existed as a separate channel: the arrows reach a program as bytes
     #: no program binds, and every real byte key still works.
     KEYSYM_AS_BYTE = "keysym-as-byte"
+    #: M19's first. `compareRows`'s third term is multiplied by the direction — `dir * (byKey ||
+    #: byName)`, the naive spelling — so the rows inside a tie group follow the sort instead of
+    #: staying ascending. `src/bin/files.mjs`'s own `--stable-sort-off` flag, on argv where the
+    #: fixture is spawned: the world lives inside the program, so no boot cfg could reach it.
+    STABLE_SORT_OFF = "stable-sort-off"
+    #: M19's second. `compareRows`'s FIRST term is inverted, so directories come after files. The
+    #: primary and the stable term are untouched, which is what keeps this apart from the above.
+    FOLDERS_LAST = "folders-last"
+    #: M19's third. The `lstat` goes back inside `if (!isDir)`, which is where it was before M19 —
+    #: so a folder has no modification time and the Date modified column is empty on every one of
+    #: its directory rows. A column lying about half its rows, as a world.
+    NO_DIR_STAT = "no-dir-stat"
+    #: M19's fourth. The kernel APPENDS a buttonless move instead of replacing the tail one, so a
+    #: hover stream enters the ring record by record. `setHoverCoalesce(false)` is exported from
+    #: src/kernel/wins.mjs and NO boot-cfg branch in src/kernel/kernel.mjs consumes a
+    #: `noHoverCoalesce` key, so the page asks for the world, MEASURES whether it got it, and
+    #: refuses. Registered as UNMEASURABLE with that address, not as a green run over a kernel
+    #: that coalesced.
+    NO_HOVER_COALESCE = "no-hover-coalesce"
+    #: M19's fifth. Every press arms a RUBBER BAND, a row's included, so the arbitration
+    #: `src/bin/files.mjs` takes once is removed and no drag session ever begins.
+    BAND_FROM_ROW = "band-from-row"
     ONCE = "once"
 
 
@@ -890,6 +912,11 @@ CONTROL_RUNS = {
     Control.ONE_CLICK_OPENS: ("one-click-opens",),
     Control.NO_HANDLER_TABLE: ("no-handler-table",),
     Control.KEYSYM_AS_BYTE: ("keysym-as-byte",),
+    Control.STABLE_SORT_OFF: ("stable-sort-off",),
+    Control.FOLDERS_LAST: ("folders-last",),
+    Control.NO_DIR_STAT: ("no-dir-stat",),
+    Control.NO_HOVER_COALESCE: ("no-hover-coalesce",),
+    Control.BAND_FROM_ROW: ("band-from-row",),
 }
 
 
@@ -5823,6 +5850,297 @@ def _m18_keysym_as_byte(source: pathlib.Path) -> pathlib.Path:
     return _patch_tree(source, "src/wm/winhost.mjs", _KEYSYM_CALL, _KEYSYM_AS_BYTE)
 
 
+#: `src/kernel/wins.mjs`'s hover-coalescing switch, verbatim, and the same declaration started in
+#: the OFF position — which is the whole of what `setHoverCoalesce(false)` would do at boot.
+#:
+#: IT IS A SERVED-BYTES FIXTURE BECAUSE THE BOOT LEVER DOES NOT EXIST. `setHoverCoalesce` is
+#: exported and no `cfg.noHoverCoalesce` branch in src/kernel/kernel.mjs calls it, and that file is
+#: not this slice's to edit — so the world is built out of the bytes the module that OWNS the
+#: switch is served as, which is M18's three controls' shape. `www/m19.html` is still handed
+#: `no_hover_coalesce=1`, so the page's own fail-closed guard runs and THROWS if the appending
+#: kernel did not arrive: two independent readings of "the control took", one in the fixture's
+#: occurrence count and one in the page's own measurement.
+#:
+#: WHEN THE BOOT BRANCH LANDS this needle is still here and still patches, so the control keeps
+#: working and should then be re-pointed at `cfg.noHoverCoalesce` — a `query`-only control is
+#: cheaper and reaches the kernel through its own declared interface.
+_HOVER_COALESCE = "let hoverCoalesce = true;"
+_HOVER_COALESCE_OFF = "let hoverCoalesce = false;"
+
+
+def _m19_no_hover_coalesce(source: pathlib.Path) -> pathlib.Path:
+    return _patch_tree(source, "src/kernel/wins.mjs", _HOVER_COALESCE, _HOVER_COALESCE_OFF)
+
+
+# ======================================================================================
+# M19 — details, sort, selection, hover
+#
+# Every clause is one boolean www/m19.html publishes, paired here with the label this check
+# records and the evidence keys a failure prints. M17's and M18's table discipline, for their
+# reason: a label spelled in a control's declaration and a boolean spelled in the page are the two
+# sides of one fact, and only a table stops them drifting.
+#
+# ALL FIVE CONTROLS ARRIVE THROUGH THE PAGE'S OWN QUERY STRING, which is the structural difference
+# from M18's three. Four of them are `src/bin/files.mjs`'s declared argv flags — the worlds live
+# inside the PROGRAM, so a served-bytes patch would be editing a file that already ships the
+# switch — and the fifth is a boot cfg key. The page applies the four to BOTH spawns and MEASURES
+# the fifth, because a flag nobody consumes is a green run over an unmodified world (www/m17.html
+# measured exactly that, twice).
+# ======================================================================================
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the sort.
+_M19_SORT = (
+    # THE FIXTURE CLAUSES FIRST: every reading below is vacuous without the tree this page built,
+    # a list that does not scroll (every rectangle is located at offset 0), and a batch in which
+    # every cell was attributed to a column.
+    ("the tree the proofs navigate is the fixture", "theTreeIsTheFixture", ("opening",)),
+    ("and the listing does not scroll", "theListDoesNotScroll", ("opening", "account")),
+    ("and every cell found a column", "everyCellFoundAColumn", ("opening",)),
+    ("the file rows open in name order", "theFileRowsOpenInNameOrder", ("opening",)),
+    ("and the opening caret is SORT_DEFAULT", "theOpeningCaretIsTheDefault", ("opening",)),
+    # THE ORDER AND THE CARET ARE TWO FACTS. A caret on the wrong column over a correctly sorted
+    # list is a window that lies about why it looks the way it does.
+    ("a header click sorted by that column", "theHeaderClickSorted", ("ascending",)),
+    ("and the caret names it", "theCaretNamesTheSortedColumn", ("ascending",)),
+    ("a second click reversed it", "theSecondClickReversed", ("ascending", "descending")),
+    ("and the caret turned over", "theCaretTurnedOver", ("descending",)),
+    ("the names ascend inside each tie, both ways", "theNamesAscendInEachTie",
+     ("ascending", "descending")),
+    ("and the directories stay first in all three listings", "theDirectoriesComeFirst",
+     ("opening", "ascending", "descending")),
+    ("and the program's own record names the sort", "theAccountNamesTheSort", ("account",)),
+)
+
+#: Proof 2: the cells a directory `lstat` buys. BOTH HALVES OR NEITHER — "the Size cell is empty"
+#: alone is satisfied by a program that draws no metadata at all.
+_M19_CELLS = (
+    ("a folder has no Size cell", "aFolderHasNoSizeCell", ("drawn",)),
+    ("and it has a Date cell with a real stamp in it", "aFolderHasADateCell",
+     ("drawn", "unknownMark")),
+    ("and a Type cell reading DIR", "aFolderSaysItIsADirectory", ("drawn",)),
+    ("a file has both cells", "aFileHasBothCells", ("drawn",)),
+    ("the lstat was paid for every row, directories included", "everyRowWasStatted",
+     ("stats", "dirStats", "account")),
+    ("and the program's record agrees with the display list",
+     "theAccountAgreesWithTheDisplayList", ("drawn", "account")),
+)
+
+#: Proof 3: hover. The LIGHT half is read off a draining window; the STREAM half needs a HELD one,
+#: because against a draining program every record goes straight to a parked reader and there is
+#: no tail to replace — a clause asserting a rise would be vacuous (slice 2's contract, M17's
+#: lesson).
+_M19_HOVER = (
+    ("nothing was lit before the hover", "nothingWasLitBeforeTheHover", ("lit",)),
+    ("a buttonless move lit the row", "aButtonlessMoveLitTheRow", ("lit",)),
+    ("and a second move moved the light", "aSecondMoveMovedTheLight", ("lit",)),
+    ("and the light is not a selection", "theLightIsNotASelection", ("lit",)),
+    # `dragAts` IS THE ONE COUNTER A BUTTONLESS MOVE MUST NOT MOVE: `#dragMove` seeing a sample
+    # with no button would be a hover posting a drag position for a gesture nobody started.
+    ("and the page sent them as hovers and not as drag positions", "theHoversWereSentAsHovers",
+     ("lit",)),
+    ("a pointerleave cleared the light", "theLeaveClearedTheLight", ("lit",)),
+    ("and the program counted the two kinds separately", "theProgramCountedThem", ("lit",)),
+    # THE STREAM'S FIXTURE CLAUSES. Each reading below is vacuous without a program that really
+    # held, a stream that really arrived, a window nothing resized, and a stream that did NOT lap
+    # the ring — `dropped:` is deliberately not one of this proof's instruments.
+    ("the held program held its loop", "theProgramHeldItsLoop", ("holdMs", "held")),
+    ("and it held before its first read, so S is 1", "theProgramHeldBeforeItsFirstRead",
+     ("held",)),
+    ("and the hold outlasted the stream", "theHoldOutlastedTheStream",
+     ("preStreamMs", "streamMs", "holdMs")),
+    ("the page routed every sample", "thePageRoutedEverySample", ("samples", "delta")),
+    ("and the stream stayed inside the queue", "theStreamStayedInsideTheQueue",
+     ("samples", "queueCap", "delta")),
+    ("and nothing resized mid-stream", "nothingResizedMidStream", ("delta", "quietMs")),
+    ("and no leave split the stream", "noLeaveSplitTheStream", ("delta",)),
+    # THE TWO NUMBERS THE PLAN NAMES, as two expectations: `queued` counts records that ENTERED
+    # the ring and `coalesced` counts the offers that did not.
+    ("queued stood still", "queuedStoodStill", ("before", "after", "delta")),
+    ("and coalesced rose by the whole stream", "coalescedRoseByTheWholeStream",
+     ("before", "after", "delta", "samples")),
+    ("and /proc publishes the same numbers", "procPublishesTheSameNumbers", ("greps", "path")),
+    ("and the resumed program read ONE record", "theProgramSawOneRecord", ("held", "drainedMs")),
+)
+
+#: Proof 4: the selection. The anchor is never read directly — nothing draws it — so its proof is
+#: where the SECOND Shift+click ranges from.
+_M19_SELECT = (
+    ("a plain click selects one row and carries the cursor", "aPlainClickSelectsOneRow",
+     ("plain", "want")),
+    ("Shift ranges from the anchor in layout order", "shiftSelectsTheRange",
+     ("ranged", "want", "layout")),
+    ("Ctrl adds without replacing", "ctrlAddsWithoutReplacing", ("toggled", "want")),
+    ("and the Ctrl press moved the anchor", "ctrlMovedTheAnchor",
+     ("reranged", "want", "layout")),
+    ("and the program agrees about its own set", "theProgramAgreesAboutItsOwnSet", ("account",)),
+    ("and nothing was lit while the selection moved", "theSelectionIsNotTheLight",
+     ("plain", "ranged")),
+)
+
+#: Proof 5: the arbitration. Each half is read as the thing the other must not have done, which is
+#: the only shape in which "a band from empty space, a drag from a row" is an assertion at all.
+_M19_BAND = (
+    ("the band had a rectangle and it crossed rows", "theBandCrossedRows", ("rect", "want")),
+    ("and it selected exactly the rows it crossed", "theBandSelectedWhatItCrossed",
+     ("rect", "want", "got")),
+    ("and it was already selecting while it was open",
+     "theBandWasAlreadySelectingWhileOpen", ("want", "whileOpen")),
+    ("and it started no drag", "theBandStartedNoDrag", ("dragsDuringTheBand",)),
+    ("a press on a row replaced the selection with it", "thePressLandedOnTheRow",
+     ("pressedSelection",)),
+    ("and then started a drag offering the row's own formats", "aPressOnARowStartsADrag",
+     ("dragsDuringTheRow", "session", "account")),
+    ("and nothing was refused", "nothingWasRefused", ("account", "lastDrag")),
+)
+
+#: proof name -> its clause table, in the order the page runs them. Read by the body and by the
+#: label inventory, so a clause added to one reaches the other.
+_M19_PROOFS = (("sort", _M19_SORT), ("cells", _M19_CELLS), ("select", _M19_SELECT),
+               ("band", _M19_BAND), ("hover", _M19_HOVER))
+
+M19_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+) + tuple(label for _, table in _M19_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m19.html",
+)
+
+M19_DOCUMENT = "/www/m19.html?proofs=1"
+
+M19_READY = ("(() => { const M = globalThis.M19 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M19 = """(() => {
+  const M = globalThis.M19 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    tree: M.tree || {},
+    sort: one(P.sort),
+    cells: one(P.cells),
+    hover: one(P.hover),
+    select: one(P.select),
+    band: one(P.band),
+  }
+})()"""
+
+M19_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list, "tree": dict,
+    "sort": (dict, type(None)),
+    "cells": (dict, type(None)),
+    "hover": (dict, type(None)),
+    "select": (dict, type(None)),
+    "band": (dict, type(None)),
+}
+
+#: How many gestures www/m19.html asks for, and asserted rather than counted loosely: 2 header
+#: clicks, 2 hovers, 1 leave, 4 selection clicks, 3 for the band, 3 for the drag — FIFTEEN in
+#: `drive` — then the hover stream's warm-up and its 40 samples. A page that finished without
+#: asking would have measured a list nobody touched and still produced row names.
+M19_GESTURES = 56
+
+#: What MULTIPLYING THE STABLE TERM BY THE DIRECTION must break: the tie clause, alone.
+#:
+#: THE ASCENDING LISTING IS IDENTICAL IN THIS WORLD — `dir` is +1 there, so `dir * byName` IS
+#: `byName` — which is why `a header click sorted by that column` holds and why the clause names
+#: BOTH directions. A comparator that only reverses correctly is not stable.
+#:
+#: AND THE DIRECTORIES STAY AT THE FRONT, which is what keeps this control apart from
+#: `folders-last`: they are a tie group under a `type` sort, so this world reverses them AMONG
+#: THEMSELVES and leaves them first. The order inside the group belongs to the tie clause.
+_STABLE_SORT_OFF_FAILS = (
+    "the names ascend inside each tie, both ways",
+    "the page's own verdict is ok",
+)
+
+#: What INVERTING THE DIRECTORIES-FIRST TERM must break: the position clause, alone. The primary
+#: key and the stable term are untouched, so every order reading above holds — the file rows are
+#: in the same relative order and the names still ascend inside each tie.
+_FOLDERS_LAST_FAILS = (
+    "and the directories stay first in all three listings",
+    "the page's own verdict is ok",
+)
+
+#: What PUTTING THE `lstat` BACK INSIDE `if (!isDir)` must break: the folder's DATE cell, and the
+#: count that says the call happened. TWO, and the second is not redundant — a date cell could
+#: also be empty because the stamp came back zero, which is a provider mount rather than a skipped
+#: call, and `cellOf` draws the UNKNOWN mark for that. The pair is what tells them apart.
+#:
+#: `and the program's record agrees with the display list` HOLDS, deliberately: an unstatted row
+#: reports `''` and draws nothing, so the two sides agree about a cell that is not there.
+_NO_DIR_STAT_FAILS = (
+    "and it has a Date cell with a real stamp in it",
+    "the lstat was paid for every row, directories included",
+    "the page's own verdict is ok",
+)
+
+#: What APPENDING A BUTTONLESS MOVE INSTEAD OF REPLACING THE TAIL ONE must break: the two numbers
+#: the plan names, and the record count the program reads on the other side of them.
+#:
+#: `dropped:` IS NOT IN HERE AND CANNOT BE. The stream is 40 against a `WIN_EVENT_CAP` of 256, so
+#: an appending ring does not lap and `dropped` is 0 in BOTH worlds — which is `docs/PLAN-SHELL.md`
+#: §M19's own instruction and M17's reason from the other side. `and the stream stayed inside the
+#: queue` is the clause that says the ring was never the limit, and it HOLDS here, which is what
+#: makes `queued stood still` a reading of the coalescing rather than of the cap.
+#:
+#: AND THE LIGHT HALF HOLDS, ENTIRELY. A DRAINING program's records go straight to a parked reader,
+#: so there is no tail to replace and this world delivers a hover exactly as the shipped one does —
+#: which is why the page needs two windows at all, and which this control is the proof of.
+#:
+#: `and /proc publishes the same numbers` HOLDS: the grep patterns are built from the counters the
+#: kernel just reported, so procfs agreeing with them is true whatever those counters say.
+#:
+#: MEASURED, Chrome 158 headless at dpr 2: `queued` 4 -> 44 (delta +40), `coalesced +0`,
+#: `dropped +0`, `pending: 44`, and the program resuming after its hold read `hovers: 41` — the
+#: forty samples plus the warm-up — against `1` with the replacement in place.
+_NO_HOVER_COALESCE_FAILS = (
+    "queued stood still",
+    "and coalesced rose by the whole stream",
+    "and the resumed program read ONE record",
+    "the page's own verdict is ok",
+)
+
+#: What ARMING A BAND FROM A ROW must break: the DRAG half of the arbitration, alone.
+#:
+#: THE PRESS STILL SELECTS. `src/bin/files.mjs` takes the arbitration at the press and then falls
+#: through to the selection branch either way, so `a press on a row replaced the selection with
+#: it` holds and the clause above it is the only one that moves — which is the whole point of
+#: reading each half as the thing the other must not have done.
+#:
+#: `and nothing was refused` HOLDS, and it is kept out of this tuple for that reason: no drag is
+#: ATTEMPTED in this world, so nothing is refused and `account.bands` reaches 2 rather than 1,
+#: which is why that clause asserts `>= 1` and not a total.
+_BAND_FROM_ROW_FAILS = (
+    "and then started a drag offering the row's own formats",
+    "the page's own verdict is ok",
+)
+
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -5924,6 +6242,14 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "proofs navigate does not exist — the page refuses before it builds a host, for "
                 "the reason www/m16.html and www/m17.html do. UNMEASURABLE rather than FAIL, "
                 "because a FAIL would claim a row was double-clicked and opened the wrong thing.",
+        ), "m19": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and nothing receives a click, a band or a "
+                "hover. There is also no FILESYSTEM, so `/tmp/m19` is never built and the "
+                "eight-row tree the five proofs read does not exist — the page refuses before it "
+                "builds a host. UNMEASURABLE rather than FAIL, because a FAIL would claim a "
+                "40-sample hover stream was sent and the kernel counted it wrongly.",
         ), "landing": Expect(
             UNMEASURABLE,
             why="the same mechanism, at the page a reader actually opens: without COOP/COEP there "
@@ -7508,6 +7834,171 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "Enter re-opens the pointer's row and the clause fails by naming the wrong file",
             failed=_KEYSYM_AS_BYTE_FAILS,
             held=held_rest(M18_LABELS, _KEYSYM_AS_BYTE_FAILS),
+        )},
+    ),
+    "stable-sort-off": NegativeControl(
+        name="stable-sort-off",
+        why="stable_sort_off=1: `compareRows`'s third term becomes `dir * (byKey || byName)` — the "
+            "naive spelling — so the rows inside a tie group follow the sort's DIRECTION instead "
+            "of staying ascending. `docs/PLAN-SHELL.md` §M19's first control.\n"
+            "IT ARRIVES ON ARGV, like four of M19's five: the comparator is the PROGRAM's, so "
+            "www/m19.html passes `--stable-sort-off` where it spawns `files` and not where it "
+            "boots a kernel. The page applies it to BOTH spawns, because a control applied to one "
+            "fixture and not the other is a page running two worlds at once.\n"
+            "WHAT MUST BREAK: the tie clause, alone. THE ASCENDING LISTING IS IDENTICAL HERE — "
+            "`dir` is +1, so `dir * byName` IS `byName` — which is why the clause reads BOTH "
+            "directions and why `a header click sorted by that column` holds. A comparator that "
+            "only reverses correctly is not stable.\n"
+            "AND THE DIRECTORIES STAY FIRST, which is what keeps this apart from `folders-last`: "
+            "they are a tie group under a `type` sort, so this world reverses them AMONG "
+            "THEMSELVES and leaves them at the front. The position clause reads `slice(0, n)` "
+            "sorted, so it is blind to the order inside the group — which belongs to the tie "
+            "clause, and that is the one clause this control turns.\n"
+            "WHERE THE FIXTURE BITES: the tree carries a THREE-ROW `.txt` tie on purpose. With no "
+            "tie group there is nothing for a secondary key to order and this control would move "
+            "nothing at all.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("stable_sort_off", "1"),),
+        expects={"m19": Expect(
+            Outcome.FAIL,
+            why="a secondary key multiplied by the direction must shuffle the rows inside a tie "
+                "group when the primary is reversed",
+            failed=_STABLE_SORT_OFF_FAILS,
+            held=held_rest(M19_LABELS, _STABLE_SORT_OFF_FAILS),
+        )},
+    ),
+    "folders-last": NegativeControl(
+        name="folders-last",
+        why="folders_last=1: `compareRows`'s FIRST term is inverted, so directories come after "
+            "files. `docs/PLAN-SHELL.md` §M19's second control, and its own `--folders-last` argv "
+            "flag.\n"
+            "WHAT MUST BREAK: the position clause, ALONE. The primary key and the stable term are "
+            "untouched — the file rows keep the same relative order and the names still ascend "
+            "inside each tie — so every other order reading holds. That is the whole reason the "
+            "two sort clauses are separate expectations: a single `the list is sorted` clause "
+            "would go red for this control and for `stable-sort-off` alike and separate "
+            "nothing.\n"
+            "IT MOVES THE SELECTION'S AIM AND NOT ITS CLAUSES. Every gesture on this page aims at "
+            "a row by finding its NAME in the listing it just read, so a layout the control "
+            "reordered is still aimed at correctly — which is the rule www/m19.html follows for "
+            "the sort's sake and which this control is the test of.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("folders_last", "1"),),
+        expects={"m19": Expect(
+            Outcome.FAIL,
+            why="directories after files must fail the clause that says they come first, in all "
+                "three listings",
+            failed=_FOLDERS_LAST_FAILS,
+            held=held_rest(M19_LABELS, _FOLDERS_LAST_FAILS),
+        )},
+    ),
+    "no-dir-stat": NegativeControl(
+        name="no-dir-stat",
+        why="no_dir_stat=1: the `lstat` goes back inside `if (!isDir)`, which is where it sat "
+            "before M19 (src/bin/files.mjs, through its own `--no-dir-stat` flag). "
+            "`docs/PLAN-SHELL.md` §M19's third control.\n"
+            "WHAT MUST BREAK: the folder's DATE cell, and the count that says the call happened. "
+            "TWO, and the second is not redundant — a date cell is ALSO empty when the stamp came "
+            "back zero, which is a provider or synth inode rather than a skipped call, and "
+            "`cellOf` draws the UNKNOWN mark for that case. The pair is what tells a call nobody "
+            "paid from an answer nobody has.\n"
+            "WHY THE FIXTURE IS UNDER /tmp AND NOT /usr. A provider mount publishes mtime 0 on "
+            "every inode, so on `/usr` the folder date cell is the unknown mark with or without "
+            "this control and the clause would be about the mount instead of the call. Measured, "
+            "and www/m19.html says so where it builds the tree.\n"
+            "WHAT MUST HOLD: `and the program's record agrees with the display list`. An "
+            "unstatted row reports `''` and draws no op at all, so the two sides agree about a "
+            "cell that is not there — a control that also moved that clause would be evidence "
+            "about the program's bookkeeping rather than about the call.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_dir_stat", "1"),),
+        expects={"m19": Expect(
+            Outcome.FAIL,
+            why="a directory nothing statted has no modification time, so its Date modified cell "
+                "is empty and the count of directory stats is zero",
+            failed=_NO_DIR_STAT_FAILS,
+            held=held_rest(M19_LABELS, _NO_DIR_STAT_FAILS),
+        )},
+    ),
+    "no-hover-coalesce": NegativeControl(
+        name="no-hover-coalesce",
+        why="no_hover_coalesce=1: `docs/PLAN-SHELL.md` §M19's fourth control — the kernel APPENDS "
+            "a buttonless move instead of replacing the tail one, so against the same 40-sample "
+            "stream into a held program `queued:` must rise by the sample count and `coalesced:` "
+            "must stay 0.\n"
+            "`dropped:` IS NOT ONE OF THIS CONTROL'S INSTRUMENTS, and the plan says so: the "
+            "stream is 40 against a `WIN_EVENT_CAP` of 256, so an appending ring does not lap and "
+            "`dropped` stays 0 in BOTH worlds. M17's reason, from the other side — a clause "
+            "reading a counter that cannot move is a clause no control turns. `and the stream "
+            "stayed inside the queue` is what says the ring was never the limit, and it HOLDS "
+            "here, which is what makes `queued stood still` a reading of the coalescing rather "
+            "than of the cap.\n"
+            "IT IS A SERVED-BYTES FIXTURE, AND THE BOOT LEVER THIS CONTROL WANTS DOES NOT EXIST. "
+            "`setHoverCoalesce(false)` is exported from src/kernel/wins.mjs and no boot-cfg branch "
+            "in src/kernel/kernel.mjs consumes a `noHoverCoalesce` key — `cfg.noWheelCoalesce` has "
+            "one at `:1705` and this has none, and that file is not this check's to edit. So the "
+            "world is built out of the bytes the module that OWNS the switch is served as, which "
+            "is M18's three controls' shape, rather than being reported as a control that turns "
+            "nothing. When the branch lands this should be re-pointed at `cfg.noHoverCoalesce`: a "
+            "query-only control is cheaper and reaches the kernel through its own interface.\n"
+            "AND THE PAGE IS STILL HANDED `no_hover_coalesce=1`, which is not decoration. That "
+            "key is what arms www/m19.html's own fail-closed guard, so the page MEASURES whether "
+            "the appending kernel arrived and throws with the address if it did not — two "
+            "independent readings of 'the control took', one in the fixture's occurrence count "
+            "and one in the page's own measurement. A page that merely passed the key would "
+            "report green proofs over an unmodified kernel with the kernel's own coalescing "
+            "silently credited to the control, which is the failure every control in this file is "
+            "written against.\n"
+            "WHAT MUST HOLD: the LIGHT half, entirely. Appending delivers a hover to a DRAINING "
+            "program exactly as replacing does, because every record goes straight to a parked "
+            "reader and there is no tail to replace — which is why the page needs two windows at "
+            "all, and which this control is the proof of.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m19_no_hover_coalesce,
+        query=(("no_hover_coalesce", "1"),),
+        expects={"m19": Expect(
+            Outcome.FAIL,
+            why="an appended stream must enter the ring record by record. Measured: queued 4 -> "
+                "44 (+40), coalesced +0, dropped +0, pending 44, and the program resuming after "
+                "its hold read 41 hover records — the stream plus the warm-up — against 1 with "
+                "the replacement in place",
+            failed=_NO_HOVER_COALESCE_FAILS,
+            held=held_rest(M19_LABELS, _NO_HOVER_COALESCE_FAILS),
+        )},
+    ),
+    "band-from-row": NegativeControl(
+        name="band-from-row",
+        why="band_from_row=1: every press arms a RUBBER BAND, a row's included, so the "
+            "arbitration src/bin/files.mjs takes once at the press is removed and no drag session "
+            "ever begins. `docs/PLAN-SHELL.md` §M19's fifth control, through that program's own "
+            "`--band-from-row` flag.\n"
+            "WHAT MUST BREAK: the DRAG half of the arbitration, alone. The band half is "
+            "untouched — a band from empty space behaves in this world exactly as it does in the "
+            "shipped one — which is why `the band had a rectangle and it crossed rows`, `and it "
+            "selected exactly the rows it crossed` and `and it started no drag` all hold. A "
+            "control that moved them too would be evidence about rubber bands rather than about "
+            "the decision.\n"
+            "AND THE PRESS STILL SELECTS. The arbitration is taken and then the press falls "
+            "through to the selection branch either way, so `a press on a row replaced the "
+            "selection with it` holds — which is what says the press landed on the row the page "
+            "aimed at rather than in the gap between two, and keeps the clause above it the only "
+            "one that moves.\n"
+            "`and nothing was refused` HOLDS, and is kept out of the declaration for that reason: "
+            "no drag is ATTEMPTED here, so nothing is refused, and `account.bands` reaches 2 "
+            "rather than 1 — which is why that clause asserts `>= 1` and not a total.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("band_from_row", "1"),),
+        expects={"m19": Expect(
+            Outcome.FAIL,
+            why="a press that arms a band cannot also start a drag, so the kernel has no live "
+                "session to read between the move and the release",
+            failed=_BAND_FROM_ROW_FAILS,
+            held=held_rest(M19_LABELS, _BAND_FROM_ROW_FAILS),
         )},
     ),
 }
@@ -14884,6 +15375,197 @@ def check_m18(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m18.html", env.served_matches_disk(env.document),
                     "the m18.html served does not match www/m18.html on disk")
+
+
+# ======================================================================================
+# m19. Details, sort, selection, hover.
+# ======================================================================================
+
+#: How long the driver waits for www/m19.html to reach a terminal state.
+#:
+#: THE FLOOR IS THE HOLD AND NOT THE GESTURES. Proof 3 spawns `files --no-drain 15000` and the
+#: program resumes only when that hold expires, so 15 s of the run is a program deliberately not
+#: reading. On top of it sit the fixture (an `rm -r`, a `mkdir -p`, five `cp` and a `touch`, each a
+#: program run to completion), two `files` spawns, 56 CDP round trips of which 41 are the hover
+#: stream, four fixed-string greps of `/proc`, and the 600 ms settles the gestures that
+#: deliberately do not repaint each wait out. MEASURED at 20.6 s at dpr 2 for a run whose every
+#: clause holds. The margin here is ~15x and deliberately so, because the one thing a smaller
+#: number buys is a BROKEN run on a slower machine.
+M19_TIMEOUT = 300.0
+
+
+def _m19_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE EXPECTATION PER CLAUSE AND NOT ONE PER PROOF, because four of the five controls name a
+    SINGLE clause: `folders-last` must turn the directories-first reading and nothing else, and
+    `band-from-row` must turn the drag and leave the band. A check recording "proof 1 passed"
+    could not tell `stable-sort-off` from `folders-last` at all - both are a list in the wrong
+    order - and a control satisfied by any failure verifies nothing.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause,
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m19",
+    milestone="m19",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.STABLE_SORT_OFF,
+              Control.FOLDERS_LAST, Control.NO_DIR_STAT, Control.NO_HOVER_COALESCE,
+              Control.BAND_FROM_ROW),
+    labels=M19_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M19_DOCUMENT,
+    ready_expr=M19_READY,
+    ready_what="globalThis.M19 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m19.html?proofs=1)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M19 && globalThis.M19.state",
+    refusal_want="aborted",
+    note="DETAILS, SORT, SELECTION, HOVER — five driven proofs over one `files` window plus a "
+         "second, HELD one, and the first check in this suite whose subject includes a gesture "
+         "the ABI did not deliver until now: a BUTTONLESS MOVE. Constraint 223 said 'a hover is "
+         "not sent', on the argument that a second of hovering would overflow a queue the process "
+         "is being asked to drain; the clauses here are the measured reversal of it, and "
+         "`bench/m19-hover/probe.py` is where the 500-move figures behind the amendment live.\n"
+         "NO NEW GESTURE KIND WAS OWED, unlike M17's `wheel` and M18's `modifiers`-on-a-key. The "
+         "page asks only for `click` (with `modifiers`), `hover`, `press`, `move` and `release`, "
+         "all five of which `_perform_gesture` already performs — and `hover` is a `mouseMoved` "
+         "with `buttons: 0`, which is exactly the record the kernel's hover test reads.\n"
+         "THE STREAM HALF NEEDS A HELD PROGRAM AND THE LIGHT HALF NEEDS A DRAINING ONE, so the "
+         "page runs two windows. Against a DRAINING program every record goes straight to a "
+         "parked reader, so `coalesced` stays 0 whether the kernel replaces a tail or appends — a "
+         "clause asserting a rise against a draining fixture is vacuous, which is M17's lesson "
+         "and slice 2's contract in as many words. `the held program held its loop` and `and it "
+         "held before its first read, so S is 1` are the clauses that say the fixture really was "
+         "in that state.\n"
+         "AND THE GEOMETRY IS SETTLED BEFORE THE STREAM, because `coalesced:` is ONE counter "
+         "covering M16's client replacements, M17's wheel merges and now M19's hover "
+         "replacements. A `win-geom` arriving mid-stream would inflate it AND split the run, and "
+         "the clause would then be red for a reason that is not the kernel's hover coalescing. "
+         "`and nothing resized mid-stream` and `and no leave split the stream` are the two "
+         "readings that rule the other two inflations out.\n"
+         "FOUR OF THE FIVE CONTROLS ARE THE PROGRAM'S OWN ARGV FLAGS; THE FIFTH HAS NO BOOT "
+         "LEVER AND IS A SERVED-BYTES FIXTURE INSTEAD. --negative no-hover-coalesce wants a "
+         "bench-gated `cfg.noHoverCoalesce` branch in src/kernel/kernel.mjs calling the "
+         "`setHoverCoalesce` that src/kernel/wins.mjs already exports; there is none, and that "
+         "file is not this check's to edit — so the world is built by serving `let hoverCoalesce "
+         "= false` out of a patched COPY of the module that owns the switch, which is M18's three "
+         "controls' shape. The page is still handed the key, because that is what arms its own "
+         "fail-closed guard: it MEASURES whether the appending kernel arrived and throws with the "
+         "address if it did not, so the control is read twice — once in the fixture's occurrence "
+         "count and once in the page's own measurement. When the boot branch lands this should be "
+         "re-pointed at the cfg key.\n"
+         "negative controls: --negative stable-sort-off multiplies the comparator's name term by "
+         "the direction, so the three-row `.txt` tie shuffles when the primary is reversed — the "
+         "ASCENDING listing is identical in that world by arithmetic, which is why the clause "
+         "reads both directions. --negative folders-last inverts the directories-first term and "
+         "must turn the position clause ALONE; it is the pair of the above, and a single 'the "
+         "list is sorted' clause would go red for both and separate neither. --negative "
+         "no-dir-stat puts the `lstat` back inside `if (!isDir)`, which is where it was before "
+         "M19, and turns the folder DATE cell plus the count that says the call happened — two "
+         "clauses, because an empty date cell is ALSO what a provider mount's mtime 0 produces "
+         "and only the pair tells a call nobody paid from an answer nobody has. --negative "
+         "band-from-row arms a band from a row, so no drag session begins while the band half and "
+         "the press's own selection both hold. --negative no-hover-coalesce appends: measured "
+         "`queued` 4 -> 44 (+40), `coalesced +0`, `dropped +0`, and the resumed program reading 41 "
+         "hover records against 1 — with every LIGHT clause green, because a draining program has "
+         "no tail to replace. --negative no-isolation must come out BROKEN: no SAB, no kernel, no "
+         "filesystem, so not even the fixture tree exists.\n"
+         "MEASURED SUBSETS, one run each at dpr 2: 2 red / 58 intact for stable-sort-off and for "
+         "folders-last, 3 / 57 for no-dir-stat, 2 / 58 for band-from-row, 4 / 56 for "
+         "no-hover-coalesce.",
+)
+def check_m19(env: Env) -> None:
+    performed = drive_gestures(env, "M19", timeout=M19_TIMEOUT)
+    got = env.read(READ_M19, M19_SHAPE)
+    if got["state"] == "error":
+        # THE PAGE'S OWN REFUSAL COMES OUT HERE, and one of them is a control:
+        # `no_hover_coalesce` selects a world nothing in src/ builds, and the page says so with
+        # the address rather than crediting the shipped kernel's coalescing to the control.
+        # UNMEASURABLE is that control's declared outcome, so this path is what satisfies it.
+        env.unmeasurable(
+            "www/m19.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m19.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed, no filesystem is mounted "
+            "and the eight-row tree the five proofs read is never built.%s"
+            % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m19.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE FIXTURE IS BUILT BY REAL PROGRAMS — `rm -r`, `mkdir -p`, five `cp`, a `touch` — and two
+    # `files` processes read it. A process that faulted during its own init reads downstream as "a
+    # pid appeared", because `/proc` carries the row either way until it is reaped. A swallowed
+    # failure is a defect (CLAUDE.md, harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because every row, cell, band and light reading on this page is a CSS-px box
+    # converted by a scale measured off the canvas — and proof 3's one surface-px aim is converted
+    # the other way. A figure labelled with a ratio it was not taken at is what cost M11 and M12 a
+    # milestone each (constraint 264).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, TO THE EXACT COUNT. Every click, move, band and hover below is
+    # input this driver dispatched; a page that finished without asking would have measured a list
+    # nobody touched and still produced row names. The count is exact rather than a floor because
+    # the hover stream is 41 of the 56 and a stream cut short is the one way this page could
+    # report a coalescing figure over fewer samples than it claims.
+    env.expect_that("the page was really driven",
+                    performed == M19_GESTURES and got["gestures"] == performed,
+                    {"performed": performed, "want": M19_GESTURES,
+                     "pageLogged": got["gestures"], "phase": got["phase"]})
+    # AND THE WORLD IS THE ONE ASKED FOR. The four program controls are checked against the
+    # DOCUMENT, because they travel on argv into a process and nothing page-side holds them; the
+    # kernel one is checked the same way for the same reason. `controlsInForce` is the HOST's own
+    # report, and this page sets no host or surface control at all — so it must be present and
+    # entirely off, which is what says a page-side switch another page in this realm left holding
+    # is not quietly in force here.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(live) and not [key for key, value in live.items() if value]
+        and bool(cfg.get("proofs"))
+        and bool(cfg.get("stableSortOff")) == ("stable_sort_off=1" in env.document)
+        and bool(cfg.get("foldersLast")) == ("folders_last=1" in env.document)
+        and bool(cfg.get("noDirStat")) == ("no_dir_stat=1" in env.document)
+        and bool(cfg.get("bandFromRow")) == ("band_from_row=1" in env.document)
+        and bool(cfg.get("noHoverCoalesce")) == ("no_hover_coalesce=1" in env.document),
+        {"asked": cfg, "inForce": live, "document": env.document, "tree": got["tree"]})
+
+    for proof, table in _M19_PROOFS:
+        _m19_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's precedent: a diagnosis that names the one fact
+    # explaining several red clauses at once, with the address, is cheaper than a reader
+    # rediscovering it from five separate evidence blocks.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. A sorted list and an unsorted one are the same picture at
+    # a glance, and a lit row and a selected one differ by a stroke — every clause above reads the
+    # display list the program sent rather than this PNG (constraint 40).
+    env.shoot("m19-details")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m19.html", env.served_matches_disk(env.document),
+                    "the m19.html served does not match www/m19.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

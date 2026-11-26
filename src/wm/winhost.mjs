@@ -31,7 +31,11 @@ import { iconMarkup, iconForProgram } from "./icons.mjs";
 import { IconView } from "./desktop.mjs";
 import {
   WEV_KEY, WEV_CLOSE, WEV_FOCUS, WEV_POINTER, WMOD_SHIFT, WMOD_CTRL, WMOD_ALT, WMOD_META,
-  WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, packKeyBytes,
+  WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, WPTR_LEAVE, packKeyBytes,
+  // M19. The cursor's CSS keyword comes from the ABI, indexed by the `WCUR_*` the kernel sent. A
+  // keyword list in this file would be a second table beside an enum the kernel enforces, and the
+  // page renders what it was sent (constraint 226).
+  WCUR_DEFAULT, WCUR_CSS,
   WKEY_LEFT, WKEY_RIGHT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END,
   WKEY_PAGE_UP, WKEY_PAGE_DOWN, WKEY_DELETE, WKEY_INSERT, WKEY_MENU,
   WKEY_F1, WKEY_F2, WKEY_F3, WKEY_F4, WKEY_F5, WKEY_F6,
@@ -224,7 +228,12 @@ export class WinHost {
       // M17: wheel records routed into a window's queue. What the PAGE sent, as against what the
       // kernel queued after coalescing — the two differ by design, so neither answers for the
       // other.
-      wheels: 0 };
+      wheels: 0,
+      // M19: buttonless moves and leaves sent, and cursors rendered. `hovers` is a SUBSET of
+      // `pointers` and is counted separately because a drag's move and a hover are the same event
+      // type: a check asserting the kernel coalesced a hover stream needs to know how many hovers
+      // the page offered, and `pointers` answers for the presses too.
+      hovers: 0, leaves: 0, cursors: 0 };
     /** The live drag, as the KERNEL announced it: `{win, obj, offer, formats, effects}` or null.
      *  The page never decides that one is live — it reports where the pointer is (constraint 243). */
     this.drag = null;
@@ -418,6 +427,8 @@ export class WinHost {
     if (m.t === "win-show") { this.#show(m); return true; }
     if (m.t === "win-role") { this.#role(m); return true; }
     if (m.t === "win-items") { this.#items(m); return true; }
+    // M19. The fourth thing the page renders on a window's say-so and decides nothing about.
+    if (m.t === "win-cursor") { this.#cursor(m); return true; }
     if (m.t === "win-stack") { this.#stack(m); return true; }
     if (m.t === "win-blocked") { this.#blocked(m); return true; }
     if (m.t === "win-modal") { this.#modal(m); return true; }
@@ -531,6 +542,12 @@ export class WinHost {
       // no way to learn what a pid is running.
       state: WST_NORMAL, role: WROLE_NORMAL, items: [], icons: null,
       prog: String(m.prog || ""),
+      // M19. The cursor the kernel last set, as a `WCUR_*` and never a keyword. A NUMBER FROM
+      // BIRTH, so no reader has to tell `undefined` from a value: `WCUR_DEFAULT` is 0 precisely
+      // because that is what a window nobody has set carries (`src/abi.mjs`). The STYLE is left
+      // unwritten until a process asks, which keeps the stylesheet in charge of a window that
+      // never asks — so `data-cursor` absent means "never set" and "0" means "set to the arrow".
+      cursor: WCUR_DEFAULT,
       // M16. The animation frame a gesture's geometry report is waiting on, or 0. Per entry and
       // not per host, because two windows can be resized by two pointers.
       geomRaf: 0,
@@ -719,16 +736,28 @@ export class WinHost {
   /**
    * Pointer events, in SURFACE pixels, as window events on the window's own fd.
    *
-   * A MOVE IS SENT ONLY WHILE A BUTTON IS DOWN. A hover would be one event per pointermove — and
-   * `WIN_EVENT_CAP` is 256 records (constraint 213), so a second of hovering would overflow a
-   * queue the process is being asked to drain. A program that needs hover can ask for it when
-   * there is a program that needs hover.
+   * M19. A BUTTONLESS MOVE IS SENT, AND THE OVERFLOW THIS FILE PREDICTED WAS THE APPEND AND NOT THE
+   * HOVER. It said "a second of hovering would overflow a queue the process is being asked to
+   * drain", and the prediction was right about the append: measured over 500 driven moves into one
+   * window, appending into a program that is not draining queues 501 records and drops 247 of them
+   * at `WIN_EVENT_CAP`'s 256 (constraint 213), losing 49% of the stream. With the kernel's tail
+   * replacement the SAME stream queues 2 and coalesces 499, with 4 records in the ring, and a
+   * DRAINING program drops nothing either way. `bench/m19-hover/probe.py`, confirmed in Firefox 156
+   * with trusted input at 2.7x the rate and identical counts — so the figure is a count and not a
+   * rate (constraint 223).
+   *
+   * THE COALESCING IS THE KERNEL'S AND NOT THIS FILE'S. `Window.pushPointer` replaces a tail
+   * buttonless move the way `pushClient` replaces a tail client box; a page that merged samples
+   * itself would be deciding what a program was told it received (constraint 226).
    */
   #wirePointer(entry) {
+    /** Posts one `WEV_POINTER` and answers whether it went. The answer is read by the hover count:
+     *  a sample whose point fell outside the backing store is not a hover the program was told
+     *  about, and counting it would make the page's figure disagree with the kernel's. */
     const send = (flags, event) => {
-      if (!entry.surface) return;
+      if (!entry.surface) return false;
       const at = entry.surface.pointAt(event);
-      if (!at) return;
+      if (!at) return false;
       const mods = flags | modifierBits(event);
       this.stats.pointers += 1;
       this.post({
@@ -736,6 +765,7 @@ export class WinHost {
         win: entry.id,
         evs: [{ type: WEV_POINTER, mods, a: at.x, b: at.y, c: event.buttons | 0 }],
       });
+      return true;
     };
     const el = entry.surface.el;
     el.addEventListener("pointerdown", (e) => {
@@ -770,12 +800,44 @@ export class WinHost {
       send(WPTR_DOWN | clickBits(e), e);
     });
     el.addEventListener("pointermove", (e) => {
-      if (!e.buttons) return;
-      send(WPTR_MOVE, e);
+      const sent = send(WPTR_MOVE, e);
+      /* A HOVER IS A MOVE WITH NO BUTTON HELD, and `c` carries `event.buttons` — so the record
+       * itself says which it is and no flag is needed. That is the same test the kernel's tail
+       * replacement makes, deliberately: two tests over one field cannot disagree. */
+      if (!(e.buttons | 0)) {
+        if (sent) this.stats.hovers += 1;
+        // AND NO DRAG. `#dragMove` returns at once without a live session, but a drag cannot
+        // outlive its button (constraint 244), so a buttonless sample is never one of its own.
+        return;
+      }
       // M10. THE SAME CAPTURE CARRIES THE DRAG. `setPointerCapture` above is what makes a move
       // that left the canvas keep arriving, which is exactly what a drag across the desktop needs
       // — so there is no second capture and no page-wide listener.
       this.#dragMove(entry, e);
+    });
+    /* M19. THE POINTER LEFT, AND IT IS THE ONE RECORD WITH NO POSITION. Without it the last hover a
+     * window ever receives is the one nearest the edge, so a lit row stays lit for ever.
+     *
+     * IT CANNOT GO THROUGH `send`. `Surface.pointAt` answers null for a point outside the backing
+     * store and a leave fires exactly there, so `send` would drop the one record that clears the
+     * hover. `a`/`b` are 0 and a program MUST NOT hit-test them (`src/abi.mjs`'s `WPTR_LEAVE`).
+     *
+     * `mods` IS `WPTR_LEAVE` AND NOTHING ELSE — no modifier bits, unlike every other record here.
+     * A leave carries no gesture, so there is nothing a Shift could modify, and the kernel's tail
+     * replacement compares the WHOLE `mods` word: an exact value is what lets two leaves collapse
+     * into one while keeping a leave from being swallowed by the hover after it.
+     *
+     * A CAPTURED POINTER FIRES NO LEAVE. Boundary events go to the capture target while a drag
+     * holds it, which is why this does not interrupt one. */
+    el.addEventListener("pointerleave", (e) => {
+      if (!entry.surface) return;
+      this.stats.pointers += 1;
+      this.stats.leaves += 1;
+      this.post({
+        t: "win-in",
+        win: entry.id,
+        evs: [{ type: WEV_POINTER, mods: WPTR_LEAVE, a: 0, b: 0, c: e.buttons | 0 }],
+      });
     });
     el.addEventListener("pointerup", (e) => {
       // THE UP GOES FIRST, so the kernel's record of the pointer is down=false before the drop is
@@ -866,6 +928,38 @@ export class WinHost {
     if (!entry) { this.stats.unknown += 1; return; }
     entry.win.setTitle(m.title || "");
     this.#changed("title");
+  }
+
+  /**
+   * M19. The cursor over the window's CLIENT AREA, as the kernel set it.
+   *
+   * ON `bodyEl` AND NOT ON THE CANVAS, and that is the whole of this method's subtlety: `#surface`
+   * replaces the canvas on every resize to a new size, so a cursor written there would be lost by
+   * the next resize with nothing reporting it. `cursor` is an inherited property and the body is
+   * the client area, so the canvas gets it and the frame's own grips — which are outside the body
+   * and set their own (`src/wm/window.mjs`) — do not.
+   *
+   * THE KEYWORD COMES FROM `WCUR_CSS`, indexed by the number (constraint 226): the page renders a
+   * name out of the ABI's table and never one a process handed it, which is what keeps `url(...)`
+   * — a fetch — out of a syscall argument. An index with no row is counted and dropped rather
+   * than written: `style.cursor = undefined` is a silent no-op that leaves the previous cursor in
+   * place, so the frame would show a cursor nothing asked for. The kernel range-checks too; this
+   * is the renderer refusing to render what it cannot name.
+   *
+   * `dataset.cursor` CARRIES THE NUMBER THE KERNEL SENT, where the style carries the rendering —
+   * the division `dataset.state` and `dataset.role` already make, and what lets a driver assert
+   * what was asked for rather than what CSS resolved it to.
+   */
+  #cursor(m) {
+    const entry = this.get(m.win | 0);
+    if (!entry) { this.stats.unknown += 1; return; }
+    const cur = m.cursor | 0;
+    const css = WCUR_CSS[cur];
+    if (typeof css !== "string") { this.stats.unknown += 1; return; }
+    entry.cursor = cur;
+    entry.win.bodyEl.style.cursor = css;
+    entry.win.el.dataset.cursor = String(cur);
+    this.stats.cursors += 1;
   }
 
   #box(m) {

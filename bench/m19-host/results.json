@@ -1,0 +1,193 @@
+{
+  "url": "http://127.0.0.1:50325/www/m17.html",
+  "root": "/Users/chafyni/claude/web-os/.claude/worktrees/m7-window",
+  "moves": 20,
+  "keyword": "crosshair",
+  "proveFailure": false,
+  "rows": {
+    "chrome": {
+      "moves": 20,
+      "outside": false,
+      "clauses": {
+        "hover-delivered": true,
+        "hover-is-not-a-drag": true,
+        "geometry-quiet": true,
+        "leave-delivered": true,
+        "cursor-rendered": true,
+        "cursor-refused": true
+      },
+      "bad": [],
+      "state": "staged",
+      "staging": {
+        "state": "done",
+        "why": "",
+        "dpr": 1,
+        "errors": [],
+        "win": 2,
+        "wins": [
+          {
+            "id": 1,
+            "title": "Desktop",
+            "surfaced": false
+          },
+          {
+            "id": 2,
+            "title": "files \u2014 /usr/bin",
+            "surfaced": true
+          },
+          {
+            "id": 3,
+            "title": "Task Manager",
+            "surfaced": true
+          },
+          {
+            "id": 4,
+            "title": "Terminal",
+            "surfaced": false
+          }
+        ]
+      },
+      "win": 2,
+      "box": {
+        "x": 120,
+        "y": -1,
+        "w": 448,
+        "h": 225
+      },
+      "before": {
+        "pointers": 0,
+        "hovers": 0,
+        "leaves": 0,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 8
+      },
+      "mid": {
+        "pointers": 20,
+        "hovers": 20,
+        "leaves": 0,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 8
+      },
+      "after": {
+        "pointers": 21,
+        "hovers": 20,
+        "leaves": 1,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 8
+      },
+      "cursor": {
+        "css": "crosshair",
+        "data": "3",
+        "entry": 3,
+        "computed": "crosshair",
+        "cursors": 1,
+        "afterBadCss": "crosshair",
+        "afterBadEntry": 3,
+        "unknownRose": 1,
+        "cursorsAfterBad": 1
+      },
+      "attempts": 1
+    },
+    "firefox": {
+      "moves": 20,
+      "outside": false,
+      "clauses": {
+        "hover-delivered": true,
+        "hover-is-not-a-drag": true,
+        "geometry-quiet": true,
+        "leave-delivered": true,
+        "cursor-rendered": true,
+        "cursor-refused": true
+      },
+      "bad": [],
+      "state": "staged",
+      "staging": {
+        "state": "done",
+        "why": "",
+        "dpr": 1,
+        "errors": [],
+        "win": 2,
+        "wins": [
+          {
+            "id": 1,
+            "title": "Desktop",
+            "surfaced": false
+          },
+          {
+            "id": 2,
+            "title": "files \u2014 /usr/bin",
+            "surfaced": true
+          },
+          {
+            "id": 3,
+            "title": "Task Manager",
+            "surfaced": true
+          },
+          {
+            "id": 4,
+            "title": "Terminal",
+            "surfaced": false
+          }
+        ]
+      },
+      "win": 2,
+      "box": {
+        "x": 120,
+        "y": 225,
+        "w": 448,
+        "h": 225
+      },
+      "before": {
+        "pointers": 0,
+        "hovers": 0,
+        "leaves": 0,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 12
+      },
+      "mid": {
+        "pointers": 20,
+        "hovers": 20,
+        "leaves": 0,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 12
+      },
+      "after": {
+        "pointers": 21,
+        "hovers": 20,
+        "leaves": 1,
+        "dragAts": 0,
+        "cursors": 0,
+        "unknown": 0,
+        "resurfaces": 4,
+        "geoms": 12
+      },
+      "cursor": {
+        "css": "crosshair",
+        "data": "3",
+        "entry": 3,
+        "computed": "crosshair",
+        "cursors": 1,
+        "afterBadCss": "crosshair",
+        "afterBadEntry": 3,
+        "unknownRose": 1,
+        "cursorsAfterBad": 1
+      },
+      "attempts": 1
+    }
+  }
+}

@@ -22,7 +22,7 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 301 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 305 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The 71-call syscall table, the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  301 normative constraints  ← cite these
+  CONSTRAINTS.md  305 normative constraints  ← cite these
   ABI.md          the syscall table
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -88,6 +88,22 @@ bench/
                   engines — `pointerdown.detail` 0, `mousedown.detail` 1 then 2 (constraint 300) —
                   and `firefox-keys.py` opens a row and walks a list with REAL keys in Firefox,
                   with a `--prove-failure` half that substitutes `j` for the Down arrow
+  m19-advance/    M19's advance-table measurement, run BEFORE the table was published. Replays a
+                  real DL_TEXT op through `src/wm/surface.mjs`'s OWN Surface and measures in the
+                  context the renderer left, so the font string is nowhere in the measurement path.
+                  Two engines x three ratios x 17 sizes; `table-headless.json` IS the candidate
+                  table and `results-headless.json` the verdict (constraints 302, 303)
+  m19-hover/      M19's hover measurement — the one constraint 223's reversal rests on. 500 driven
+                  moves into a held program in three worlds, each served from its own patched COPY
+                  of the tree, plus `firefox-hover.py` with REAL trusted input. STALE AS A RIG now
+                  that the kernel coalesces by default; the numbers stand, the re-run misleads
+  m19-host/       `drive.py`: the page's half alone — a hover delivered, a hover that is not a drag,
+                  a leave, a rendered cursor and a refused one. Six clauses, `--prove-failure`
+  m19-page/       `firefox-m19.py`: www/m19.html in Firefox, through the page's own `M19.listState`
+                  and `M19.aimAt` — so a second engine grows no display-list reader of its own
+  m19-details/    `firefox-details.py`: the sort, the range select and the hover on the LANDING
+                  page in Firefox with real trusted input. Two controls, each naming its own
+                  subset, and `--prove-failure`
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -103,6 +119,8 @@ src/
     devfs.mjs     /dev, and the one renderer /dev/trace and the page both read
     trace.mjs     the syscall trace ring. Reads no clock; see constraint 72
     providers.mjs the provider table as DATA, and the only place a request URL is built
+    advance.mjs   M19: the measured glyph advances, as DATA and never as a measuring capability.
+                  One frozen table and the string /dev/advance serves, built once at load
     providerfs.mjs  /usr, mounted atomically over a provider or refused loudly
     wins.mjs      M7: a window IS a file description. The event ring, the owner chain, the
                   destroy cascade, the not-responding detector. It replaced M4a's console.
@@ -194,6 +212,13 @@ www/
                   own, so they are `repo_fixture` patches and a clause asserts the page reads only
                   `proofs`. `diagnose` names the ONE fact behind several red clauses, with the
                   address
+  m19.html        M19's 49 clauses over FIVE driven proofs: a header click that sorts and a second
+                  that reverses, a folder with a Date cell and no Size cell, a buttonless move that
+                  lights a row and a leave that clears it, an anchor-based range select, and a
+                  rubber band that selects by intersection while a press on a ROW starts a drag.
+                  It asks for EXACTLY 56 gestures, 41 of them the hover stream. `M19.listState` and
+                  `M19.aimAt` are its own decoder and its own aim, published so a driver in another
+                  engine grows neither
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -201,7 +226,7 @@ www/
   shell.mjs       the ONE DEFINITION of staging the desktop shell, a layer above `pagekernel.mjs`:
                   `PROGRAMS` and `DESKTOP_HELP` as frozen DATA a milestone adds to, `stageDesktop`
                   as the order a desktop is assembled in, and `requireIsolation` as the abort gate
-                  nineteen proof pages still paste. index, m14, m17 and m18 import it; it re-exports
+                  nineteen proof pages still paste. index, m14, m17, m18 and m19 import it; it re-exports
                   `gestureAsker`/`spawnProgram`/`until`/`sleep` rather than redefining them,
                   because a second banner is a second handshake for `scripts/check.py` to agree
                   with by hand
@@ -247,7 +272,8 @@ row below rather than restate it.
 | The trace render limit | `TRACE_RENDER_LIMIT` in `src/kernel/devfs.mjs`. `/dev/trace` and the page's `trace-read` are one renderer, so they are one limit |
 | A window's event queue and its record | `WIN_EVENT_CAP` and `WEV_*` + `encodeWinEvent`/`decodeWinEvent`/`keyBytesOf`/`packKeyBytes` in `src/abi.mjs`. The kernel writes the record and the libos reads it, which is the two sides |
 | A text run in a display list | `DL_TEXT` + `DL_TEXT_DATA`, `DLT_*` and `encodeTextRun`/`textOfOps`/`textOpCount` in `src/abi.mjs`. A header plus continuation records, because a record is 32 bytes and a string is not; the two functions are declared inverses and the selfTest asserts the round trip. The kernel validates a run with the SAME codec the renderer draws it with (constraint 293) |
-| `src/bin/files.mjs`'s row geometry | `FILES_METRICS` in that file, exported. `rowMid` is what a driver outside the process reads — `www/m10.html` and `bench/m10-data/shell.py` both restated it until M15 moved the rows and the drift arrived exactly as CLAUDE.md predicted (the wrong file dragged) |
+| `src/bin/files.mjs`'s row geometry | `FILES_METRICS` in that file, exported. `rowMid` is what a driver outside the process reads — `www/m10.html` and `bench/m10-data/shell.py` both restated it until M15 moved the rows and the drift arrived exactly as CLAUDE.md predicted (the wrong file dragged). **M19 added `FOOT_H`**, a new term in `viewBox`/`scrollMax`/`rowsThatFit`/`clientHeightFor` — a driver that ASKS here follows it and one that restated a formula does not |
+| The DETAILS view's columns, in both directions | `COLUMNS` (frozen data) + `columnBoxes(wCss)` and `columnAt(xCss, wCss)` on `FILES_METRICS`, in `src/bin/files.mjs`. `columnAt` is the declared inverse of `columnBoxes`, which is what makes a header press sort the column a reader is pointing at — the same pairing `#cellAt`/`#boxFor` make on the desktop. The hit test and the drawing read ONE geometry, so they cannot disagree about which column a pixel is in. `dateText`/`sizeText` are the two cell formatters and `UNKNOWN_CELL` the mark for a statted row with a zero stamp |
 | A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
 | What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
 | The surface budget | `SURFACE_BUDGET_PX` and `SURFACE_MAX_PX` in `src/abi.mjs`; the accounting is `WinMgr.surface`/`releaseSurface` in `src/kernel/wins.mjs` and nowhere else |
@@ -288,8 +314,13 @@ row below rather than restate it.
 | A KEY THAT IS NOT BYTES | `WKEY_*` (dense 1..`WKEY_MAX`) + `keysymOf` in `src/abi.mjs`, and `KEYSYM_BY_KEY`/`keysymForKey` in `src/wm/winhost.mjs` — the ABI's table and the ONE browser-key mapping onto it, which is `event.key` and never `code`, because `code` is a physical position and would make an AZERTY keyboard send the wrong keysym. `a == 0` is the discriminator and `keysymOf` is the one place it is read, as `keyBytesOf` is the one place the bytes are unpacked: the two are disjoint and exhaustive, asserted BOTH ways in `selfTest` (constraint 299). **Enter, Tab and Backspace are BYTES** — `bytesForKey` in `src/wm/terminal.mjs` spells them 10, 9 and 127, and a keysym row for any of them would take the key away from every program reading them today |
 | A CLICK COUNT | `WPTR_CLICK2`/`WPTR_CLICK3` in `src/abi.mjs`, set by `clickBits` in `src/wm/winhost.mjs` and nowhere else, on the DOWN record only — `event.detail` is meaningful on the UP of a double-click too, and a program reading both opens a row twice for one gesture. The count is the PLATFORM's and never a timer's, so it MUST be read off the event that carries it: `pointerdown.detail` is 0 in both engines and only `mousedown` has it (`bench/m18-keys/clickcount.py`, constraint 300) |
 | The CLIP, and who resets it | `DL_CLIP` + `DLC_RESET` in `src/abi.mjs`, applied in `Surface.replay` in `src/wm/surface.mjs` — which MUST reset at the top of every batch, because a canvas clip only ever intersects. A clip left set by batch N makes batch N+1 draw nothing: a window blank on its next repaint with no error anywhere. `bench/m17-wheel/probe.mjs` is what proves the reset exists |
+| A LEAVE, and the test that must not swallow it | `WPTR_LEAVE` in `src/abi.mjs`, sent as `mods` EXACTLY that bit by `src/wm/winhost.mjs` and merged by `Window.pushPointer` in `src/kernel/wins.mjs` on FULL `mods` equality. A masked test lets a following hover swallow the leave and a program keeps a lit row for a pointer that has gone (constraint 304). `a`/`b` are not a position on a leave — the event fires outside the surface |
+| Whether a buttonless move coalesces, and the degrade it prevents | `Window.pushPointer` in `src/kernel/wins.mjs` and nowhere else; `setHoverCoalesce(on)` is the one lever that turns it off. A merge returns WITHOUT calling `push`, so `queued` counts records that ENTERED the ring and `coalesced` the offers that did not — the division M17's wheel already made. 500 appended moves into a held program drop 247; tail-replaced they drop 0 (`bench/m19-hover/`, constraint 223) |
+| A CURSOR a process asks for | `WIN_SET_CURSOR` + `WCUR_*` (dense 0..`WCUR_MAX`) and `WCUR_CSS` in `src/abi.mjs`; the accounting is `WinMgr.setCursor` in `src/kernel/wins.mjs` and the rendering is `WinHost.#cursor` in `src/wm/winhost.mjs`, which MUST index `WCUR_CSS[v]` and never write a keyword of its own. A NUMBER and not a string, because `cursor` takes `url(...)` and a `url(...)` is a fetch (constraint 305). There is deliberately no `wait` |
+| The GLYPH ADVANCES, and the set of sizes they are priced at | `src/kernel/advance.mjs` holds the measured table and builds the string `/dev/advance` serves; `TEXT_SIZES`, `ADVANCE_PATH`, `encodeAdvances`/`decodeAdvances`, `advanceWidth`, `advanceKey` and `ADV_CP_MIN`/`ADV_CP_MAX` are in `src/abi.mjs`. The sizes are SURFACE px — the unit `DL_TEXT`'s `a2` carries — and DERIVED from the CSS sizes programs draw at, half-UP as `Math.round` is. A size outside the set has NO ROW on purpose (constraints 302, 303). These sit beside `TEXT_SIZES` and not in `INTS`, so the device's own header is the stale-copy gate rather than `ABI_FINGERPRINT` |
+| The two font stacks | `UI_FAMILY`/`MONO_FAMILY` in `src/abi.mjs`. The renderer and the advance table MUST agree about them or the table prices a font nothing draws — which is why `bench/m19-advance/probe.py` reads the pair out of `src/wm/surface.mjs` by regex and fails loudly if either stops being a quoted const. **`src/wm/surface.mjs:26-27` and `src/wm/taskbar.mjs:95` still carry copies**; that is the import this row is waiting for |
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
-| The 301 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 305 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -306,15 +337,22 @@ cannot import the module; that was true of the PROCESS and false of the page it 
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 **The desktop-staging copy left it with the landing page**, and the isolation gate now HAS a one
 definition it did not have: `requireIsolation`/`isolationFailure` in `www/shell.mjs`.
-`grep -ln crossOriginIsolated www/*.html` now names **21** files and only `www/index.html` reaches
-it through that function, so the row above is understated rather than closed — the remaining twenty
-are proof pages, and M18 added one more rather than retiring any.
+`grep -ln crossOriginIsolated www/*.html` now names **22** files and only `www/index.html` reaches
+it through that function, so the row above is understated rather than closed — the remaining
+twenty-one are proof pages, and M18 and M19 each added one more rather than retiring any.
 **ONE MORE LEFT IT IN M18, AND IT WAS FOUR COPIES RATHER THAN TWO**: the extension split lived
 inside `formatForPath`, inside `iconForPath` and as `src/bin/desktop.mjs`'s own `extOf`, each
 spelling the same `lastIndexOf(".")` rule. It is `std.extOf` now, and the file-association table
 went with it — `OPENS_FILES` moved from `src/bin/desktop.mjs` to `src/libos/std.mjs` because
 `files` became its second reader, which is the rule for when an abstraction is earned rather than
 anticipated.
+**M19 ADDED A ROW TO THIS LIST AND IT IS A LIVE HAZARD, NOT A TIDINESS ONE.** `UI_FAMILY` and
+`MONO_FAMILY` now have their one definition in `src/abi.mjs`, and `src/wm/surface.mjs:26-27` and
+`src/wm/taskbar.mjs:95` still spell them out. The renderer and the published advance table MUST
+agree about the stack — a renamed font in one copy prices a font nothing draws, and every fitted
+column is then wrong with no error anywhere. `bench/m19-advance/probe.py` is the alarm: it reads
+`src/wm/surface.mjs`'s pair by regex at run time and refuses to conclude if either stops being a
+quoted const.
 
 ## Architecture rules
 
@@ -493,6 +531,22 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   control satisfied by any failure verifies nothing. M3's first control spun a poll loop hard enough
   to lap the trace ring and so also failed a proof it was not about; the poll was paced rather than
   the control re-scoped.
+- **A COALESCING CLAUSE MUST USE A HELD PROGRAM, AND MUST SETTLE THE GEOMETRY FIRST.** Against a
+  DRAINING fixture every record goes straight to a parked reader, so there is no tail to replace and
+  `coalesced` stays 0 in both worlds — the clause inverts, fires, and verifies nothing. `--no-drain`
+  is what makes it assertable, which is M17's lesson and then M19's. And `coalesced` is now shared by
+  THREE mechanisms — M16's client-box replacements, M17's wheel sums, M19's hovers — so a clause that
+  does not assert the geometry count unchanged across its stream may be reading a resize as a hover.
+- **A TABLE INDEXED BY A UNIT MUST BE INDEXED IN THE UNIT THE OP CARRIES, and that is what decides
+  whether it is ratio-shaped.** M19's advance table is indexed in SURFACE px — `DL_TEXT`'s `a2`, and
+  the space `measureText` runs in — and moves **0.0000 px** across dpr 1 / 1.5 / 2 within one engine
+  while moving 0.4522 px across engines. Indexed in CSS px it would have been the fourth ratio bill
+  after 264, 297 and M11's band. Ask which space the measurement happens in before choosing the
+  index (302).
+- **A SIZE SET DERIVED IN PYTHON IS NOT THE SET JAVASCRIPT DRAWS AT.** `Math.round` is half-UP and
+  Python's `round` is half-to-EVEN: 11 CSS px at dpr 1.5 is JS 17 and Python 16. A set derived with
+  the wrong rounding publishes a row nothing draws at and omits one two programs do, with no error
+  anywhere, because an undeclared size falls back by design (303).
 - **Assert each refusal's errno separately.** A single "it refused" passes for a filesystem that
   refused for the wrong reason. M3's `truncate` answered ENOENT where it owed EROFS, and only the
   per-call assertion caught it.
@@ -535,6 +589,11 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   reader twice reported being unable to open anything on a desktop whose Chrome suite was green
   (constraints 289-292). The registered suite stays Chrome-driven: one engine, one set of measured
   constants.
+  **AND FIREFOX CAN BE DRIVEN AT A CHOSEN RATIO, so "Firefox renders at dpr 1" is true of its
+  DEFAULT and is no longer a limit.** `browsingContext.setViewport` with `devicePixelRatio` is
+  honoured by Firefox 156, verified by reading `devicePixelRatio` back off the page at 1, 1.5 and 2 —
+  which is how `bench/m19-advance/probe.py` covered three ratios in a second engine. `scripts/bidi.py`
+  does not wrap it yet; call it directly, as that probe does.
 - **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
   that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
   started in Firefox at all (206) — both with every expectation green, both found by a human
@@ -644,6 +703,27 @@ scripts/check.py --negative no-handler-table # ...and the world with no file ass
                                   # `files` refuses BY THE ROW'S OWN NAME
 scripts/check.py --negative keysym-as-byte   # ...and a keysym packed into the byte field: the
                                   # arrow clauses fall and every BYTE key holds
+scripts/check.py --only m19         # M19's 60 expectations over five driven proofs, 20.3 s
+python3 bench/m19-advance/probe.py  # CAN A COLUMN BE FITTED FROM A PUBLISHED TABLE? two engines,
+                                  # three ratios, 17 sizes. Mono YES to 0.0000 px, proportional NO
+                                  # — and the error has one sign, so the sum is an UPPER BOUND
+python3 bench/m19-advance/probe.py --prove-failure  # ...four controls, each moving its own clause
+python3 bench/m19-hover/probe.py    # WHAT DOES A 500-MOVE HOVER STREAM COST? appended vs replaced,
+                                  # into a DRAINING program and a HELD one (constraint 223)
+python3 bench/m19-hover/firefox-hover.py  # ...the held pair again, with REAL trusted input
+python3 bench/m19-host/drive.py     # the PAGE's half alone: a hover, a leave, a cursor, a refusal
+python3 bench/m19-host/drive.py --prove-failure  # ...and the world where the guard is back
+python3 bench/m19-page/firefox-m19.py     # www/m19.html in Firefox, through the page's own decoder
+python3 bench/m19-details/firefox-details.py  # DOES THE DETAILS VIEW SORT AND LIGHT UP IN FIREFOX?
+                                  # on the LANDING page, with real trusted input
+python3 bench/m19-details/firefox-details.py --control held-button  # ...and with the button HELD,
+                                  # the three hover clauses fire and the three order ones hold
+scripts/check.py --negative stable-sort-off   # a tie group that follows the sort's direction
+scripts/check.py --negative folders-last      # ...and directories after files
+scripts/check.py --negative no-dir-stat       # ...and a folder with no Date cell, because nobody
+                                  # paid for the call
+scripts/check.py --negative band-from-row     # ...and a press on a row that bands instead of dragging
+scripts/check.py --negative no-hover-coalesce # ...and a hover stream APPENDED into a held program
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end

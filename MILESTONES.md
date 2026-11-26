@@ -46,7 +46,8 @@ checks is a wish.
 | M17 | The wheel, the clip, and a list that scrolls | 2 | — | ✅ done — **ACCEPT**, 35 expectations over 3 driven proofs, **the first REAL WHEEL this suite has dispatched**, 57 clauses under node, 2 controls wired and 2 registered UNMEASURABLE with an address, constraint 294 amended and 298 qualified by the proof itself |
 | M17a | **A consolidation, not a feature**: one landing desktop, one staging definition | — | 0.5 | ✅ done — the bare URL is the product, `www/shell.mjs` is the only copy of the staging, 17 expectations DERIVED from `/usr/bin` and the mount table, `--negative launcher-stale`, and a Firefox gate with real trusted input |
 | M18 | Keys that are not bytes, and a row that opens | 2.5 | — | **PARTIAL — code landed, proof RED and deliberately so** — 38 expectations over 3 driven proofs, 23 green, **15 red on one listener**: `clickBits` reads `event.detail` on a `pointerdown`, whose `detail` is 0 in BOTH engines, so `WPTR_CLICK2` reaches no program (constraint 300). The keysym half is green end to end; `--negative one-click-opens` scores 8 red / 30 intact, the other two controls REFUSE and name the clauses they cannot hold; a Firefox gate with real trusted keys and a `--prove-failure` half |
-| — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
+| M19 | Details, sort, selection, hover | 3 | — | ✅ done — **ACCEPT**, 60 expectations over 5 driven proofs in one 20.3 s run, 5 controls each moving its own named subset (2/58, 2/58, 3/57, 2/58, 4/56), a Firefox gate with real trusted input and a `--prove-failure` half, **constraint 223 reversed on a measurement** — 500 appended moves drop 247 and tail-replaced drop 0 — and an advance table measured in two engines at three ratios before a byte of it was published (302, 303) |
+| — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test, **now CALLED at module load**; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
 | D1 | Sv32 MMU: page tables, TLB, faults | 3 | | ⬜ D |
@@ -3788,6 +3789,212 @@ and the out-of-range case at module load.
 
 **`README.md` STILL SAYS 298 CONSTRAINTS.** `CLAUDE.md` is updated in all three places it carries
 the count; `README.md:59` is outside this slice's files and is owed 301.
+
+## M19 — details, sort, selection, hover · done
+
+R7, R11, R12, R13, R20's measured half, A5, A8 and A12. `files` is a Details view: four columns, a
+header click that sorts, an anchor-based selection, a rubber band, and an `lstat` paid for **every**
+row including a directory. `taskmgr` has the same selection rules and a lit row. A buttonless move
+now REACHES a program, a `pointerleave` clears it, a process may ask for a cursor, and `/dev/advance`
+publishes the glyph widths a column could be fitted from. **One new `win_set` selector and no new
+syscall.** `docs/ABI.md` §The hover, the cursor, the ellipsis and the advance table carries the
+shape; `docs/CONSTRAINTS.md` 302-305 what it established, and 223 is the constraint it reversed. The
+wall-clock figure is not recorded for M17's and M18's reason: this row was written as parallel
+slices in one session, so a single-developer number invented for the column would be worse than the
+dash.
+
+### The measurement came first, and this time it changed the design
+
+`docs/PLAN-SHELL.md` §M19 scheduled one question before the code: is a published advance table close
+enough to the renderer's real font to lay out a column? `bench/m19-advance/` answered it by replaying
+a real `DL_TEXT` op through `src/wm/surface.mjs`'s own `Surface` and measuring **in the context the
+renderer left** — the font string appears nowhere in the measurement path, so a table that agreed
+with a font the renderer does not use could not pass. 95 code points × 4 variants × 17 sizes, Chrome
+158 and Firefox 156, each at dpr 1 / 1.5 / 2.
+
+| clause | verdict |
+| --- | --- |
+| `delivery` | green — all six worlds reported |
+| `coupling` | green — 408 cells, 0 mismatches between the renderer's normalised `font` and the declared stack |
+| `cross-world` | green — one table serves both engines and all three ratios to **0.4522 px**, inside the plan's 0.5 px |
+| `ratio-independence` | green — **0.0000 px** within one engine across dpr 1 / 1.5 / 2 |
+| `kerning-mono` | green — **0.0000 px** over 2,448 samples, and again over 1,152 more in a second sweep at 26–48 px |
+| `kerning-proportional` | **RED, and that is the finding** — worst **13.2147 px**, signed range **−13.2147 .. +0.0000** |
+| `scaled-table` | unscored — scaling one row by size errs **1.6768 px**, which is why the table is per-size |
+
+**THE VERDICT SPLIT BY FAMILY AND THE ERROR HAS ONE SIGN.** A monospaced column can be fitted
+EXACTLY; a proportional one cannot be fitted to 0.5 px, because the renderer kerns — but `sum >=
+measured` always, so a summed width is a strict UPPER bound. That permits "will this definitely
+fit?" and forbids "exactly how wide is this?", and it is why a program must not pre-cut a run: its
+own cut would be taken on a figure up to **8.555%** too wide and would truncate text that fits.
+`DLT_ELLIPSIS` therefore puts the truncation in the RENDERER, which has the real font. Constraint
+302 carries the whole table.
+
+**AND THE TABLE IS ENGINE-SHAPED, NOT RATIO-SHAPED, WHICH IS THE OPPOSITE OF WHAT THIS PROJECT'S
+BILLS PREDICTED.** Constraints 264 and 297 and M11's blur band are each a figure that was right at
+one ratio and wrong at another; indexing this table in SURFACE px — the unit `DL_TEXT`'s `a2` already
+carries, and the space `measureText` runs in — makes the ratio dimension vanish. Exactly one of the
+95 code points disagrees between engines by more than 0.05 px: the SPACE, worst 0.4522 px at 20 px.
+The largest of the other 94 is **0.0208 px**.
+
+**`TEXT_SIZES` HAD TO BE DECLARED BECAUSE THE RENDERER HAS NO CLOSED SET**, and deriving it cost one
+wrong answer: `Math.round` is half-UP, Python's `round` is half-to-EVEN, so 11 CSS px at dpr 1.5 is
+JS 17 and Python 16. The set contains **17, not 16**. A Python-derived set would publish a row
+nothing draws at and omit one two programs do, silently, because an undeclared size falls back by
+design (constraint 303).
+
+### Constraint 223 is reversed on a measurement, and the prediction it made was TRUE
+
+223 said "A HOVER IS NOT SENT" on the argument that a second of hovering would overflow a 256-record
+queue. `bench/m19-hover/` drove 500 buttonless moves into one `files` window in three worlds, each
+served from its own patched COPY of the tree, against a draining program AND a held one — because
+223's sentence is about "a queue the process is being asked to drain" and only a held program can
+reach the cap.
+
+| 500 moves into a program that is NOT draining | `queued` | `coalesced` | `dropped` | ring |
+| --- | --- | --- | --- | --- |
+| appended, one record per move | +501 | +0 | **+247** | 256 of 256 |
+| tail-replaced | +2 | **+499** | +0 | 4 of 256 |
+
+**SO THE OVERFLOW WAS REAL AND THE REMEDY WAS WRONG.** 49% of the stream lost, which is 223's
+arithmetic confirmed; tail replacement loses none of it. A DRAINING program loses nothing either way
+and coalesces nothing, because every record goes to a parked reader and there is no tail — which is
+why a clause about the coalescing MUST use `files --no-drain`, M17's lesson a second time. Confirmed
+in Firefox 156 with real trusted input at **2.7× the stream rate** and identical counts (`dropped
++246`, `coalesced +499`), so the figure is a COUNT and not a rate. The old text is kept in 223 rather
+than deleted, the way `docs/DECISIONS.md` §Corrections keeps its two.
+
+### Five driven proofs, 49 clauses, 60 expectations, one 20.3 s run
+
+`www/m19.html` is the desktop at its bare URL and the harness at `?proofs=1` (constraint 283). It
+asks for **exactly 56 gestures** — fifteen in `drive`, a warm-up, and a 40-sample hover stream — and
+the count is asserted EXACTLY rather than as a floor, because the stream is 41 of the 56 and a stream
+cut short is the one way the page could publish a coalescing figure over fewer samples than it
+claims. **No new gesture kind is owed**, unlike M17 and M18: `click`, `hover`, `press`, `move` and
+`release` are all already in `scripts/check.py`'s `_perform_gesture`.
+
+| | proof | what it asserts |
+| --- | --- | --- |
+| 1 | `sort`, 12 clauses | a header click sorts, a second reverses, the caret names the column it sits over and turns over with it, the names ascend inside each tie BOTH ways, directories stay first in all three listings, and every cell found a column. The sort column is `type` and not `name`, because the FIRST press on the default column is a choice and not a reversal |
+| 2 | `cells`, 6 clauses | a folder has no Size cell **and does have a Date cell with a real stamp** — the second half is what proves the directory `lstat` is paid — plus `stats`/`dirStats` as arithmetic, and the account agreeing with the display list the page replayed |
+| 3 | `hover`, 18 clauses | nothing lit before the hover; a buttonless move lights a row and a second moves the light; the light is NOT a selection; a `pointerleave` clears it; then a 40-sample stream into a HELD program with `queued` standing still, `coalesced` rising by the whole stream, `/proc` publishing the same numbers, and the resumed program reading ONE record |
+| 4 | `select`, 6 clauses | a plain click selects one row, Shift selects the range in LAYOUT order, Ctrl adds without replacing and moves the anchor, the program agrees about its own set, and the selection is not the light |
+| 5 | `band`, 7 clauses | a rubber band from empty space crosses rows and selects what it crossed, is already selecting WHILE open, starts no drag — and a press on a ROW does start one. The arbitration is the assertion |
+
+The other eleven expectations are the preamble and the envelope: isolation on the page and in the
+kernel, no kernel error, no process faulted, **the ratio the run asked for** (constraint 264), the
+exact gesture count, the controls in force matching the document, the page's own verdict, and
+COOP/COEP plus the document actually served.
+
+**THE FIXTURE IS BUILT BY REAL PROGRAMS** — `rm -r -f`, `mkdir -p`, five `cp` from `/usr/share` and
+a `touch` — into `/tmp/m19`: 2 directories and 6 files over 4 distinct type cells with a 3-row
+`.txt` tie, which is what gives `--stable-sort-off` something to disturb. **It is under `/tmp` and
+not `/usr` deliberately**: a provider or synth inode publishes mtime 0, so on `/usr` the folder's
+Date cell reads the unknown mark with or without the control and the clause would be about the mount
+rather than about the call. Measured.
+
+### Five controls, each moving its own named subset, all five re-run
+
+| control | world | measured |
+| --- | --- | --- |
+| `stable-sort-off` | the comparator's third term follows the sort's DIRECTION instead of staying ascending | **2 red / 58 intact** |
+| `folders-last` | the primary term is inverted, so directories come after files | **2 red / 58 intact** |
+| `no-dir-stat` | the `lstat` goes back inside `if (!isDir)`, where it sat before M19 | **3 red / 57 intact** |
+| `band-from-row` | every press arms a band, a row's included, so no drag session ever begins | **2 red / 58 intact** |
+| `no-hover-coalesce` | the kernel APPENDS a buttonless move instead of replacing the tail one | **4 red / 56 intact** |
+
+Verbatim from the five runs: `m19 came out fail as required, with 2 and 58`, `2 and 58`, `3 and 57`,
+`2 and 58`, `4 and 56`. `held` is DERIVED by `held_rest` and never listed, so a clause added to the
+check is held by default and the first control run says so if it is not.
+
+**FOUR OF THE FIVE ARRIVE ON ARGV AND ONE DOES NOT, AND THAT ONE IS A DEBT.** The comparator, the
+folder order, the directory `stat` and the band arbitration are the PROGRAM's, so the page passes
+`--stable-sort-off`, `--folders-last`, `--no-dir-stat` and `--band-from-row` to BOTH `files` spawns —
+a control applied to one fixture and not the other is a page running two worlds at once.
+`no-hover-coalesce` is a KERNEL world and `src/kernel/wins.mjs` exports `setHoverCoalesce`, but no
+`cfg.noHoverCoalesce` branch in `src/kernel/kernel.mjs` calls it, so the control is a `repo_fixture`
+that patches `let hoverCoalesce = true;` in a SERVED COPY. The needle is a single exact occurrence,
+so a rename makes the fixture refuse loudly rather than patch nothing. **It should be re-pointed at
+`query=(("no_hover_coalesce","1"),)` with `repo_fixture=None` when that branch lands** — see §What is
+owed.
+
+**AND THE PAGE MEASURES WHETHER ITS WORLD ARRIVED.** `no_hover_coalesce=1` is handed to the page as
+well as to the fixture, which arms a fail-closed guard: the page throws with the address if the
+appending kernel did not arrive. Two independent readings of "the control took" — the fixture's
+occurrence count and the page's own measurement — because a page that merely passed the key would
+report green proofs over an unmodified kernel with the kernel's coalescing silently credited to the
+control.
+
+### The second engine, and what it is a gate on
+
+`bench/m19-details/firefox-details.py` drives Firefox 156 over `scripts/bidi.py` with real trusted
+input on the LANDING page — not the proof page — so it is a gate on the path a reader takes
+(constraint 301). Six clauses: `sort`, `reverse`, `range`, `hover`, `hover-moved`, `leave`. Its two
+controls name their own subsets and the run prints them: `held-button` fires the three hover clauses
+and keeps the three order ones; `stable-sort-off` fires `reverse` alone, keeps the rest, and declares
+`range` UNSCOPED — the gesture works, the names it selects are the control's.
+
+**IT NEEDED NO NEW `scripts/bidi.py` METHOD, and the one thing worth carrying forward is how a
+modified click is delivered**: Shift+click is ONE `input.performActions` with a `key` source and a
+`pointer` source in lockstep, not two calls. Verified delivering the modifier.
+
+**AND FIREFOX AT A CHOSEN RATIO IS AVAILABLE NOW.**
+`browsingContext.setViewport` with `devicePixelRatio` is honoured by Firefox 156, verified by reading
+`devicePixelRatio` back off the page at 1, 1.5 and 2 — which is how `bench/m19-advance/probe.py`
+covered three ratios in a second engine. `CLAUDE.md`'s "Firefox renders at dpr 1 on this machine" is
+true of its DEFAULT and is no longer a limit. `scripts/bidi.py` does not wrap it; a later slice may.
+
+### What is owed, in files no M19 slice owned
+
+Each of these is landed-adjacent rather than broken: the suite is green with all of them
+outstanding, and each has an address.
+
+1. **`src/libos/syscall.mjs` has no `winSetCursor` stub**, so `WIN_SET_CURSOR` is reachable from the
+   kernel and from the page and from **no program**. The kernel's half is complete
+   (`WinMgr.setCursor`, -EINVAL above `WCUR_MAX`, -EHOSTGONE for a dead host, 0-and-silent on a
+   repeat) and `src/wm/winhost.mjs` renders `WCUR_CSS[v]`, so what is missing is the three-line
+   stub beside `winSetRole`.
+2. **`src/kernel/kernel.mjs` has no `cfg.noHoverCoalesce` branch**, beside `cfg.noWheelCoalesce` at
+   `:1705`. Until it lands, `--negative no-hover-coalesce` reaches its world by served bytes rather
+   than through the kernel's own declared interface.
+3. **`src/wm/surface.mjs` does not honour `a5`**, so `DLT_ELLIPSIS` is emitted by every `files` cell
+   and ignored by the renderer: a long name still overflows into the Date column. The ABI half is
+   complete and the program must not work around it — a program-side cut is exactly what constraint
+   302 forbids.
+4. **`UI_FAMILY` and `MONO_FAMILY` have their one definition in `src/abi.mjs` and two copies
+   remain**: `src/wm/surface.mjs:26-27` and `src/wm/taskbar.mjs:95`. `bench/m19-advance/probe.py`
+   reads the pair out of `src/wm/surface.mjs` BY REGEX at run time and fails loudly if either stops
+   being a quoted const, which is the measurement waiting for the import.
+5. **`bench/m19-hover/probe.py` IS STALE AS A CONTROL RIG, though its published measurement stands.**
+   Its `append` world removes only winhost's `if (!e.buttons) return;` — and the kernel coalesces by
+   default now, so that world no longer appends and its own overflow clause cannot turn. Its
+   `coalesce` world inserts a second `pushPointer` whose later real definition wins, so the inserted
+   copy is dead. Both worlds should be produced by `setHoverCoalesce(false)` once item 2 lands. It is
+   the RE-RUN that would mislead, not the numbers in `results.json`.
+6. **`bench/m3-synth/probe.mjs:154` expects `/dev` to list three devices** and it now lists four. It
+   is an unregistered node probe that was **already failing two other clauses before M19** —
+   `/proc` has carried `dataobj` since M10 and the `O_CREAT` refusal no longer throws — so M19 adds
+   a third stale line to a probe nothing gates on.
+7. **`README.md:59` says 298 constraints** and is owed 305. It was owed 301 by M18 and is still not
+   in a slice's file list.
+8. **`bench/m19-page/__pycache__/` is a committed-adjacent build artifact** from importing
+   `probe.py` as a module. Nothing reads it.
+
+### What is NOT done
+
+**NOTHING READS `/dev/advance` YET.** The device, the codec, the decoder and `advanceWidth` all
+exist and no program calls them: `src/bin/files.mjs` cites the measurement in three comments and
+reads the table nowhere, deliberately — a content-fitted column would be surface-px-indexed and so
+ratio-shaped, which is the defect class that cost M11, M12 and M16. The first reader is a later
+row's, and R30 is what it buys.
+
+**THE CURSOR IS NOT USED BY ANY PROGRAM**, for item 1's reason. `taskmgr`'s and `files`' hover does
+not change the pointer.
+
+**THE REGISTERED SUITE RUNS AT ONE RATIO**, `VIEWPORT_SCALE` 2.0, with the ratio asserted as a clause
+of its own. Firefox covers dpr 1, by its own six clauses and not by the suite — except in
+`bench/m19-advance/`, which is the first gate in this project to drive a second engine at three
+chosen ratios.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

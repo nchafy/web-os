@@ -16,7 +16,7 @@ import {
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DRAG, DOBJ_WHERE_DROP, DOBJ_F_APPEND,
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
-  WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE,
+  WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE, WIN_SET_CURSOR,
   WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DLC_RESET,
   decodeDrawOps, textOfOps,
   WMODAL_MAX, WMODE_MAX, decodeWinItems,
@@ -1025,6 +1025,13 @@ HANDLERS.win_set = (p, k) => {
   }
   if (what === WIN_SET_ROLE) {
     return k.wins.setRole(d.win, p.ctl[A2] | 0);
+  }
+  /* M19's cursor, and the rules live in `WinMgr` for M14's two reasons again: the bound is
+   * `WCUR_MAX`, which that file names, so a `want <= 7` written here would be the second copy of a
+   * closed enum (constraint 234). 0 and not the value set — unlike the two above it, a cursor is
+   * always the one asked for, because the kernel refuses every other value. */
+  if (what === WIN_SET_CURSOR) {
+    return k.wins.setCursor(d.win, p.ctl[A2] | 0);
   }
   // A selector nobody implements is -EINVAL, never 0: a caller checking the return would read a
   // no-op as a successful change.
