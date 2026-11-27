@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>m22 chord probe</title>
+<style>
+  html, body { margin: 0; background: #202020; color: #e8e8e8;
+               font: 13px/1.5 "Segoe UI", system-ui, sans-serif; }
+  #pad { margin: 24px; padding: 18px; width: 420px; min-height: 120px;
+         background: #2d3b4d; border: 1px solid #5a6a7d; outline: none; }
+  #log { margin: 0 24px 24px; white-space: pre-wrap; font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+<!-- A FOCUSABLE BOX AND NOTHING ELSE. The subject is which chords an ENGINE delivers to a page,
+     so this page holds no kernel, no SAB and no `src/` import: a chord that failed to arrive must
+     be the host's doing and not a boot that never finished. -->
+<div id="pad" tabindex="0">click here; this box holds the focus</div>
+<div id="log">waiting for a chord</div>
+<script type="module">
+const pad = document.getElementById('pad')
+const log = document.getElementById('log')
+
+/* `?nopd=1` IS THE `nopreventdefault` CONTROL'S WORLD, and it is a query parameter rather than a
+ * source edit because a control must be re-runnable from the command line (CLAUDE.md). With it the
+ * listener observes and suppresses nothing, so `prevented` MUST read false for every chord — which
+ * is what tells "the page can cancel this" apart from an assertion over a constant. */
+const PREVENT = new URL(location.href).searchParams.get('nopd') !== '1'
+
+/* The four keys that are only ever a modifier. A held modifier is a keydown of its own, so its
+ * record would otherwise be counted as the chord's arrival. */
+const MODIFIER_KEYS = new Set(['Alt', 'Control', 'Shift', 'Meta', 'AltGraph'])
+
+const seen = []
+const state = {
+  prevent: PREVENT,
+  seen,
+  /* HOST ACTION, OBSERVED RATHER THAN ASSUMED. A chord the browser ALSO acts on moves the page
+   * out from under the reader: switching tabs hides the document, and focusing browser chrome
+   * blurs the window. `preventDefault` governs the DOM's default action and says nothing about a
+   * browser accelerator, so these three counters are the only script-readable evidence that the
+   * host did something of its own with the same press. */
+  blurs: 0,
+  hidden: 0,
+  visibility: [],
+}
+globalThis.__chords = state
+
+addEventListener('blur', () => { state.blurs += 1 })
+document.addEventListener('visibilitychange', () => {
+  state.visibility.push(document.visibilityState)
+  if (document.visibilityState === 'hidden') state.hidden += 1
+})
+
+/* CAPTURE PHASE ON `window`, so nothing between here and the target can swallow a chord and make
+ * the engine look guilty. */
+addEventListener('keydown', (e) => {
+  const rec = {
+    key: e.key, code: e.code, repeat: e.repeat,
+    alt: e.altKey, ctrl: e.ctrlKey, shift: e.shiftKey, meta: e.metaKey,
+    trusted: e.isTrusted,
+    /* `cancelable: false` MEANS `preventDefault` IS A NO-OP — the host's default action happens
+     * whatever the page does, so the reader gets two behaviours from one press. That is the
+     * reading that separates "received" from "free". */
+    cancelable: e.cancelable,
+    modifierOnly: MODIFIER_KEYS.has(e.key),
+    prevented: false,
+  }
+  if (PREVENT && !rec.modifierOnly) e.preventDefault()
+  rec.prevented = e.defaultPrevented
+  seen.push(rec)
+  log.textContent = `${seen.length} keydown(s); last key=${e.key} alt=${e.altKey} `
+    + `ctrl=${e.ctrlKey} shift=${e.shiftKey} meta=${e.metaKey} `
+    + `cancelable=${e.cancelable} prevented=${e.defaultPrevented}`
+}, { capture: true })
+
+globalThis.__reset = () => {
+  seen.length = 0
+  state.blurs = 0
+  state.hidden = 0
+  state.visibility.length = 0
+  return true
+}
+
+globalThis.__focus = () => {
+  pad.focus()
+  return document.activeElement === pad
+}
+
+globalThis.__snap = () => JSON.stringify({
+  prevent: state.prevent,
+  /* The modifier's own keydowns are dropped HERE and not by the caller, so both engine drivers
+   * read one filtered shape and cannot disagree about which records were the chord. */
+  seen: seen.filter((r) => !r.modifierOnly),
+  modifierRecords: seen.filter((r) => r.modifierOnly).length,
+  blurs: state.blurs,
+  hidden: state.hidden,
+  visibility: state.visibility.slice(0, 8),
+  hasFocus: document.hasFocus(),
+  visibilityState: document.visibilityState,
+  activeIsPad: document.activeElement === pad,
+})
+
+globalThis.__ready = true
+</script>
+</body>
+</html>

@@ -733,6 +733,12 @@ export class Window {
     this.menu = null;
     this.destroyed = true;
     this.attached = false;
+    /* A STALE PARK IS DROPPED WITHOUT A REPLY, and `reapPid` is the path that can reach this with
+     * one in hand: teardown answers the dying process's inflight call FIRST and then destroys its
+     * windows, so the `read` it was parked in has already been answered. A second `reply` to that
+     * slot bumps SEQ and decrements G_INFLIGHT again, which breaks the issued == replied identity
+     * `check_syscall` asserts. The test is `#prune`'s, which every other reader path already uses. */
+    this.#prune();
     const answered = this.waitingReaders.length;
     for (const r of this.waitingReaders) K.reply(r.slot, -EHOSTGONE, -1, ST_RETURN, 0);
     this.waitingReaders = [];
@@ -880,6 +886,11 @@ export class WinMgr {
     this.stats = {
       created: 0, destroyed: 0, cascaded: 0, cascadedPlacements: 0,
       refusedCap: 0, refusedOwner: 0,
+      // M22: windows taken down by their CREATOR'S DEATH rather than by the last close of a
+      // description. Counted apart from `destroyed` because the two answer different questions —
+      // `destroyed` cannot distinguish a window a program closed from one `reapPid` took, and the
+      // whole point of that path is that it runs when no close ever arrives. See `reapPid`.
+      reapedWindows: 0,
       // M10: pointer presses recorded, and drag-event records the PAGE tried to feed (see `feed`).
       presses: 0, forgedDrags: 0,
       // M9: raises granted, raises refused by a modal, and how many times the stack was posted.
@@ -1724,8 +1735,14 @@ export class WinMgr {
 
   /** One batch of display-list ops, forwarded to the page that owns the canvas. The ops are NOT
    *  interpreted here: the kernel counts and accounts, and `src/wm/surface.mjs` is the one
-   *  renderer. A window with no surface refuses, because there is nothing to draw on. */
-  draw(win, ops) {
+   *  renderer. A window with no surface refuses, because there is nothing to draw on.
+   *
+   *  M23: `blits` is the batch's image payloads, `Map<fd, Uint8Array>` or null, resolved and
+   *  validated by `src/kernel/calls.mjs` — the only side that holds a file table. It RIDES THIS
+   *  MESSAGE because an fd means nothing in the page's realm and the payload is kernel-owned
+   *  (constraints 240, 241): there is no other channel, and a `DL_BLIT` whose payload did not
+   *  arrive draws nothing and counts as `Surface.blitsUnbacked`. */
+  draw(win, ops, blits = null) {
     if (win.destroyed || !win.attached) {
       win.stats.refusedDraws += 1;
       return -EHOSTGONE;
@@ -1741,9 +1758,16 @@ export class WinMgr {
     win.stats.ops += count;
     this.stats.batches += 1;
     this.stats.ops += count;
-    // A COPY, for the reason `writeCells` makes one: the source is the caller's SAB and the caller
-    // may overwrite it the instant its call is answered.
-    if (drawReaches) K.post({ t: "win-draw", win: win.id, ops: ops.slice() });
+    /* A COPY, for the reason `writeCells` makes one: the source is the caller's SAB and the caller
+     * may overwrite it the instant its call is answered.
+     *
+     * THE PAYLOADS ARE NOT COPIED HERE and must not be: `postMessage` clones them on the way out,
+     * so a `slice` would be a second copy of up to `DOBJ_MAX_BYTES` per blit per repaint. A map
+     * with no entry is sent as null rather than as an empty map, which is every batch every
+     * program sent before M23. */
+    if (drawReaches) {
+      K.post({ t: "win-draw", win: win.id, ops: ops.slice(), blits: blits || null });
+    }
     return 0;
   }
 
@@ -1917,6 +1941,36 @@ export class WinMgr {
   /** The page's half: a frame the user closed, or a page that went away. Same cascade. */
   detach(id) {
     return this.destroyTree(id);
+  }
+
+  /**
+   * Teardown's half: every window the dying process CREATED, regardless of how many descriptions
+   * still hold them. Returns the winids destroyed, cascades included.
+   *
+   * CONSTRAINT 14's "DESTROY WINDOWS" IS NOT THE LAST `close`, and the gap between them is
+   * reachable from userland without trying. `spawnChild` inherits EVERY fd of the caller into the
+   * child, window fds included, and one description shared by two processes has `refs === 2` — so a
+   * process with one living child is reaped with `refs` still above zero, `F_WIN.close` never runs,
+   * and `destroyTree` is never reached. `src/bin/desktop.mjs` spawns every program a reader starts,
+   * so on the shipped desktop ANY running program kept the desktop's frame, its published rows and
+   * its tray icon on screen after the process behind them was gone: the classic tray defect,
+   * reached through fd inheritance. `www/m22.html` PROOF 5 measured it — `reaped`, and no
+   * `win-destroy`.
+   *
+   * THE CREATOR AND NOT THE HOLDERS, because a window is the creating process's resource the way
+   * its surface area is: nobody else can draw to it, read its events, answer its close request or
+   * publish its rows. An heir keeps the fd and the description keeps answering — `destroy` pushes
+   * `WEV_DESTROYED` and every later call on it answers -EHOSTGONE, which is the path an heir
+   * already owes for a frame the reader closed.
+   */
+  reapPid(pid) {
+    // A SNAPSHOT FIRST: a window in this list may be the cascade CHILD of another one in it, and
+    // `destroyTree` answers [] for a window an earlier walk already took.
+    const mine = this.ofPid(pid | 0);
+    const ids = [];
+    for (const w of mine) for (const id of this.destroyTree(w.id)) ids.push(id);
+    this.stats.reapedWindows += ids.length;
+    return ids;
   }
 
   /**

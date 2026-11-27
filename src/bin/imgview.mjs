@@ -13,16 +13,30 @@
 //   --no-resurface     R34's NEGATIVE CONTROL. See `run`.
 //
 // WHAT IT ACCEPTS, in order of preference: a BITMAP, which it draws; a PNG, whose header it reads
-// and reports; and nothing else. A PATH LIST IS NOT AN IMAGE and this program says so out loud —
-// which is the whole claim. `PLAN.md` §5's negative control for M10 is "offer only the text format;
-// the image paste must fail cleanly, not silently paste a path", and the thing that must not happen
-// is this window rendering a filename as a picture (constraint 247).
+// and reports and whose TYPE ICON it draws; and nothing else. A PATH LIST IS NOT AN IMAGE and this
+// program says so out loud — which is the whole claim. `PLAN.md` §5's negative control for M10 is
+// "offer only the text format; the image paste must fail cleanly, not silently paste a path", and
+// the thing that must not happen is this window rendering a filename as a picture (constraint 247).
 //
-// IT DOES NOT DECODE PNG, and that is stated rather than hidden. There is no decoder in this system
-// and a display list has no image op (M8), so the PNG is proof that OPAQUE BYTES of a format
-// nothing here understands cross two processes untouched — its header is read, its size reported,
-// and the picture a reader sees comes from the BITMAP, which is the one image format fill-rects can
-// draw.
+// IT DOES NOT DECODE PNG, and that is stated rather than hidden. The picture a reader sees comes
+// from the BITMAP, which is the one image format this program turns into pixels.
+//
+// A PNG THEREFORE GETS ITS TYPE ICON AND A NAMED REASON, and that is the point of `paintTypeIcon`.
+// The three things this window can be were two — "nothing arrived" and "something arrived that is
+// not an image" — and a PNG was neither: its header was read, its size was reported to the program
+// that spawned this one, and the window itself kept whatever it last painted. After a drag that is
+// the amber hover frame, and after `-f logo.png` it is an empty rectangle. A reader double-clicking
+// a PNG got a blank window and no sentence anywhere, which is the dishonest-success class this
+// project refuses — so the third state is drawn, and it says PNG, its size, and that nothing here
+// decodes it.
+//
+// WHERE AN HONEST DECODE WOULD GO, measured rather than assumed: `bench/m23-blit/` establishes that
+// a process CAN decode, in a stripped realm under M6's live CSS policy, with the pixels byte-exact
+// against `/usr/share/logo.rgba` in both engines — but ONLY in an awaited turn, never while parked
+// in a syscall and never while spinning. So the site is this program and not the kernel, and the
+// shape is an `await` between syscalls. It is NOT built here: `www/m10.html`'s PROOF 4 and
+// `scripts/check.py`'s "and it refuses to draw what it cannot decode" both assert that this program
+// does not draw a PNG, and a decode landing without those two moving is a red suite.
 //
 // M16/R34: A BIGGER WINDOW IS A BIGGER PICTURE, NOT A STRETCHED ONE. A reader reported that
 // "expanding just expands a png", which is a CSS stretch of a backing store that never changed:
@@ -38,10 +52,11 @@ import {
   POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EHOSTGONE,
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_CLIENT,
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_CLIP,
+  DLT_BOLD, DLT_CENTER,
   DOBJ_BITMAP, DOBJ_PNG,
   DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DROP,
-  decodeBitmap, fmtBit, fmtsOf, fmtName, keyBytesOf,
+  decodeBitmap, encodeTextRun, fmtBit, fmtsOf, fmtName, keyBytesOf,
 } from "/src/abi.mjs";
 
 const NAME = "imgview";
@@ -68,6 +83,9 @@ const FIRST_SURFACE_H_DEV = 200;
 const INSET_CSS = 4;
 const STROKE_CSS = 2;
 const BAND_H_CSS = 24;
+/** The type icon's reason line. A CSS-px size because that is what a layout constant is here, and
+ *  `px()` is the one thing that turns it into the SURFACE px `DL_TEXT`'s `a2` carries. */
+const REASON_PX_CSS = 11;
 
 const PAPER = 0x0b0d11ff;
 const FRAME = 0x3a3f48ff;
@@ -81,10 +99,20 @@ const HOVER = 0xd8d14aff;
 /**
  * THE MOST PIXELS THIS PROGRAM WILL DRAW, because every one of them is a FILL_RECT.
  *
- * A display list has no image op, so a bitmap is drawn pixel by pixel and `DL_MAX_OPS` bounds a
- * batch. 1,024 is 32x32, which the libos sends in one call. A larger bitmap is REPORTED AND NOT
- * DRAWN — refusing to draw is honest, and silently drawing the first thousand pixels of it would be
- * a picture that is wrong without saying so.
+ * A bitmap is drawn pixel by pixel and `DL_MAX_OPS` bounds a batch. 1,024 is 32x32, which the libos
+ * sends in one call. A larger bitmap is REPORTED AND NOT DRAWN — refusing to draw is honest, and
+ * silently drawing the first thousand pixels of it would be a picture that is wrong without saying
+ * so.
+ *
+ * AND `DL_BLIT` DOES NOT RETIRE THIS CEILING, which is the thing to know before reaching for it.
+ * M23's image op draws a data object's payload at the payload's OWN extent: it carries no
+ * destination width or height, so the caller's only way to choose a size is to produce a payload at
+ * that size. This window's entire picture is `drawnBox`'s INTEGER UPSCALE of a 16x16 source, and a
+ * blit cannot express it. Upscaling in this process so that it could would cost, at the 496x448
+ * client `drawnBox` works through — scale 28, extent 448x448 — `BITMAP_HEADER + 448*448*4` =
+ * 802,824 payload bytes through the byte region per repaint, against 257 ops × `DLOP_BYTES` = 8,224
+ * for the rects that draw the same thing. So the op this program would want is a blit WITH a
+ * destination extent, and that is an ABI change rather than a call site.
  *
  * IT BOUNDS THE SOURCE, AND R34 ADDS NO SECOND CEILING FOR THE BOX. `drawnBox` absorbs the client
  * extent into `scale`, so the op count is `bmp.w * bmp.h` whatever the window becomes — a
@@ -138,6 +166,58 @@ export function drawnBox(src, extent) {
   const w = src.w * scale;
   const h = src.h * scale;
   return { scale, w, h, x: Math.floor((extent.w - w) / 2), y: Math.floor((extent.h - h) / 2) };
+}
+
+/** How much of the limiting axis the type icon's sheet spans, its height against its width, and the
+ *  dog-ear and tag as fractions of that width. Four ratios rather than four lengths, for the reason
+ *  `iconBox` states. */
+const ICON_SPAN = 0.34;
+const ICON_ASPECT = 1.3;
+const ICON_FOLD = 0.26;
+const ICON_TAG = 0.3;
+/** The gap between the sheet and the reason line, as a fraction of the sheet's HEIGHT. */
+const ICON_LABEL_GAP = 0.16;
+
+/**
+ * THE TYPE ICON'S LAYOUT: a dog-eared sheet centred in `extent`, the tag inside it and the reason
+ * line below. Every number is SURFACE pixels except `tagPx`, which is the surface-px font size
+ * `DL_TEXT`'s `a2` takes.
+ *
+ * DERIVED FROM THE EXTENT, NOT FROM A CSS CONSTANT, and that is `drawnBox`'s own argument applied
+ * to the other thing this window can show. R34's defect was a picture that did not grow with its
+ * window; an icon pinned to a CSS size is the same defect from the other side — a 48 px stamp in a
+ * 900 px window. The sheet is a FRACTION of the limiting axis, so the two states resize alike. The
+ * tag's size comes from the sheet's own width for the same reason, which is why it is here and
+ * `REASON_PX_CSS` is not: one is a proportion of a drawing, the other is a layout constant.
+ *
+ * THE BLOCK IS CENTRED, NOT THE SHEET. Centring the sheet alone and hanging the reason line off its
+ * bottom puts the pair low by the gap plus a line, which reads as a mistake rather than as a
+ * margin.
+ *
+ * EXPORTED FOR THE REASON `drawnBox` IS. A clause that reads the glyph's pixels back has to locate
+ * it, and `drawnBox`'s own comment records what happens when a driver outside the process has to
+ * restate this program's arithmetic instead: three readers each computed `floor(c.width / 16)` and
+ * all three were wrong the moment the surface stopped being square.
+ */
+export function iconBox(extent) {
+  const w = Math.max(2, Math.round(Math.min(extent.w, extent.h) * ICON_SPAN));
+  const h = Math.round(w * ICON_ASPECT);
+  const gap = Math.round(h * ICON_LABEL_GAP);
+  const x = Math.floor((extent.w - w) / 2);
+  const y = Math.floor((extent.h - h - gap) / 2);
+  return {
+    x,
+    y,
+    w,
+    h,
+    fold: Math.max(1, Math.round(w * ICON_FOLD)),
+    centreX: x + Math.floor(w / 2),
+    tagPx: Math.max(1, Math.round(w * ICON_TAG)),
+    // The tag's TOP, because `DL_TEXT`'s y is a top edge and not a baseline (src/wm/surface.mjs
+    // sets `textBaseline = "top"`). Below the fold, so the two never overlap.
+    tagY: y + Math.round(h * 0.5),
+    labelY: y + h + gap,
+  };
 }
 
 function unInterrupted(call) {
@@ -280,6 +360,69 @@ export function run(env) {
   };
 
   /**
+   * THE THIRD STATE, AS PIXELS: an image format arrived, its bytes are intact, and this program
+   * cannot turn it into a picture. A dog-eared sheet with the format on it and the reason under it,
+   * which is what Windows 7 shows for a file it has no preview for.
+   *
+   * IT IS NOT `paintRefusal`. The pink band means "I was given something and it was not an image",
+   * and a reader who sees it for a PNG learns something false — the PNG *is* an image and it did
+   * arrive whole. Two states, two pictures, because a reader must be able to tell them apart
+   * without reading stdout.
+   *
+   * CLIPPED TO THE INSET BOX, and the clip is what bounds the text: `DLT_ELLIPSIS` is declared in
+   * the ABI and `src/wm/surface.mjs` does not read it, so `maxWidth` goes nowhere and a long reason
+   * paints over the frame and off the surface. A process cannot measure a string either — the
+   * advance table lives in `src/kernel/advance.mjs` and a process may not import kernel code — so
+   * the clip is the ONLY mechanism available here. A clip whose sides are not positive is -EINVAL
+   * for the WHOLE batch (`win_draw`), which would be a window that silently stopped repainting, so
+   * a window with no room for one gets the sheet and no words.
+   */
+  const paintTypeIcon = (tag, reason) => {
+    view = { kind: "icon", tag, reason };
+    account.repaints += 1;
+    const i = px(INSET_CSS);
+    const box = iconBox(store);
+    const inner = { x: i, y: i, w: store.w - 2 * i, h: store.h - 2 * i };
+    const roomForWords = inner.w > 0 && inner.h > 0;
+    const ops = [{ op: DL_CLEAR, a0: PAPER }, frameOp(REFUSED)];
+    if (roomForWords) {
+      ops.push({ op: DL_CLIP, a0: inner.x, a1: inner.y, a2: inner.w, a3: inner.h });
+    }
+    ops.push({
+      op: DL_STROKE_RECT, a0: box.x, a1: box.y, a2: box.w, a3: box.h, a4: REFUSED, a5: lineW(),
+    });
+    // THE DOG-EAR, cut back out in the paper colour and then folded: the display list has no path
+    // op, so a notch is a fill of the background over the outline and a line across the gap. The
+    // same trick `src/bin/files.mjs`'s row glyph uses, at a size a window chose.
+    ops.push({
+      op: DL_FILL_RECT, a0: box.x + box.w - box.fold, a1: box.y,
+      a2: box.fold, a3: box.fold, a4: PAPER,
+    });
+    ops.push({
+      op: DL_LINE, a0: box.x + box.w - box.fold, a1: box.y,
+      a2: box.x + box.w - 1, a3: box.y + box.fold, a4: REFUSED, a5: lineW(),
+    });
+    if (roomForWords) {
+      ops.push(...encodeTextRun(tag, {
+        x: box.centreX, y: box.tagY, size: box.tagPx, rgba: REFUSED,
+        flags: DLT_BOLD | DLT_CENTER,
+      }));
+      ops.push(...encodeTextRun(reason, {
+        x: box.centreX, y: box.labelY, size: px(REASON_PX_CSS), rgba: REFUSED, flags: DLT_CENTER,
+      }));
+    }
+    const r = env.win.draw(made.fd, ops);
+    /* A REFUSED BATCH IS THIS PAINTER'S OWN DEFECT ARRIVING A SECOND WAY: the window would keep
+     * the hover frame a drag left and nothing anywhere would say why, which is the state this
+     * function exists to remove. `paintEmpty` and `paintRefusal` swallow the same return; a new
+     * swallow is not something to add. */
+    if (r < 0) {
+      env.std.warn(env, `${NAME}: the ${tag} type icon was refused: ${env.std.errnoName(r)}\n`);
+    }
+    return r;
+  };
+
+  /**
    * R34's EVIDENCE, AS DATA. A harness reading pixels can see the extent; it cannot see whether
    * the extent it sees is the one the program meant, and `account.extents` is where the two meet.
    *
@@ -333,12 +476,15 @@ export function run(env) {
     return ops.length;
   };
 
-  /** RE-RENDER WHAT IS ON SCREEN at the size the store is now. Three kinds, one per painter, and
+  /** RE-RENDER WHAT IS ON SCREEN at the size the store is now. Four kinds, one per painter, and
    *  the default is the empty frame rather than a silent return: a `view` this does not recognise
-   *  would otherwise leave a stretched canvas, which is the bug. */
+   *  would otherwise leave a stretched canvas, which is the bug. The icon re-renders for the same
+   *  reason the picture does — `iconBox` reads the extent, so a sheet left at the old size is the
+   *  CSS stretch R34 removed, arriving through the one state R34 never had. */
   const repaint = () => {
     if (view.kind === "bitmap") return drawBitmap(view.bmp);
     if (view.kind === "refused") return paintRefusal();
+    if (view.kind === "icon") return paintTypeIcon(view.tag, view.reason);
     return paintEmpty(view.edge);
   };
 
@@ -375,8 +521,8 @@ export function run(env) {
       } else {
         row.bitmap = { w: bmp.w, h: bmp.h, bytes: got.length };
         if (bmp.w * bmp.h > MAX_DRAW_PX) {
-          refuse(`${source}: ${bmp.w}x${bmp.h} is more than ${MAX_DRAW_PX} fill-rects; `
-            + "a display list has no image op");
+          refuse(`${source}: ${bmp.w}x${bmp.h} is more than ${MAX_DRAW_PX} fill-rects, `
+            + "which is how this program scales a bitmap");
           row.refused = "too-large";
         } else {
           const ops = drawBitmap(bmp);
@@ -414,6 +560,31 @@ export function run(env) {
       row.refused = typeof asked === "number" ? env.std.errnoName(asked) : "none";
       refuse(`${source}: no image here — it offers ${row.offered.join(", ") || "nothing"} `
         + `(${row.refused})`);
+    }
+    /* AN IMAGE ARRIVED AND IS STILL NOT ON SCREEN. The one state this window used to leave blank:
+     * the header was read, the size went into the report, and nothing was painted — so the window
+     * kept the amber hover frame a drag had left, or the empty rectangle `-f` started with.
+     *
+     * CONDITIONED ON A WHOLE HEADER AND NOT ON THE FORMAT BIT. Bytes that are not a PNG, and a PNG
+     * the kernel refused to hand over, are REFUSALS and already painted as one above — a type icon
+     * for them would claim the bytes are fine. This draws only for a payload whose own header says
+     * it is the image it claims to be.
+     *
+     * `row.drawn` IS THE DISCRIMINATOR, so an object offering both formats whose bitmap drew keeps
+     * its picture: the icon is what a window shows INSTEAD of an image, never over one. */
+    if (row.drawn !== true && row.png && !row.png.malformed && !row.png.refused) {
+      const tag = fmtName(DOBJ_PNG).toUpperCase();
+      /* PRINTABLE ASCII AND NO EM DASH, which is the one typographic rule a display-list string has
+       * here: `advanceWidth` prices ADV_CP_MIN..ADV_CP_MAX and answers null for anything outside
+       * it, so a run carrying one cannot be measured by the layer that will eventually implement
+       * `DLT_ELLIPSIS`. The size is the EVIDENCE the bytes arrived whole, which is why it is on
+       * screen and not only in the report. */
+      const reason = `${row.png.w}x${row.png.h}, ${row.png.bytes} bytes - no decoder`;
+      row.icon = { tag, reason };
+      account.refusals.push(`${source}: ${tag} ${reason}`);
+      paintTypeIcon(tag, reason);
+      env.std.warn(env, `${NAME}: ${source}: ${tag} ${row.png.w}x${row.png.h}, `
+        + `${row.png.bytes} bytes arrived intact and this program has no decoder\n`);
     }
     account.shown.push(row);
     return row;

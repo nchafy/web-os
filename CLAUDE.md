@@ -22,10 +22,10 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 311 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 2 | `docs/CONSTRAINTS.md` | 319 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
 | 3 | `docs/ABI.md` | The syscall table — **75 calls specified, 63 realised**, and §Two counts is the reconciliation, with the identity that ties them — plus the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
-| 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
+| 5 | `docs/DECISIONS.md` | 41 decisions (`grep -c '^## D[0-9]' docs/DECISIONS.md`), what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
 | 7 | `docs/designs/REVIEW-FINDINGS.md` | 24 verified critiques. Several are traps already walked into once. | 15 min |
 | 7b | `docs/LEARNING-MODE.md` | Option D: the learning mode and the teaching CPU. Read §2 (where the honesty line sits) before writing any view. | 12 min |
@@ -62,7 +62,7 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  311 normative constraints  ← cite these
+  CONSTRAINTS.md  319 normative constraints  ← cite these
   ABI.md          the syscall table: 75 specified, 63 realised, and §Two counts reconciles them
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
@@ -139,6 +139,48 @@ bench/
   m21-files/      `probe.mjs` drives `files` against `src/fs/vfs.mjs` ITSELF — the real codecs with a
                   Map where the blob store would be — because the three facts this milestone turns on
                   are ones a fake would have to be TRUSTED about (98)
+  m22-switch/     M22's chord measurement, TAKEN BEFORE THE TABLE WAS WRITTEN. `chords.html` is the
+                  served fixture; `probe.py` drives it in BOTH engines and scores 25 candidates on
+                  five clauses, running each a SECOND time with the listener cancelling nothing —
+                  the per-chord positive control that tells a FREE chord from a BORROWED one (312).
+                  The whole table is gated behind a bare `5` keydown, because headed Chrome here
+                  delivers no key at all and an ungated run reads that as 25 taken chords. It found
+                  Firefox's `key: "~"` for Shift+Backquote (313). `firefox-shell.py` is the Firefox
+                  gate: 32 clauses over the LANDING desktop, with `--prove-failure` the
+                  `save-to-window-fd` world that moves exactly ONE of them
+  m22-pins/       `probe.py`: ARE A PIN AND A TRAY ICON ROWS A PROCESS PUBLISHED, and does the pin
+                  survive a reload? It exists because one route was already wrong when it was
+                  written — the pin toggle was first a `WITEM_CONTEXT` row raised from bare desktop,
+                  which can NEVER be pressed (the desktop window is neither surfaced nor text, so it
+                  receives no `WEV_POINTER`), and a source read cannot tell those worlds apart.
+                  `--prove-failure` opens the same menu and dismisses it with Escape, which is the
+                  positive control for the click. `firefox-pins.py` is the same gesture in Firefox
+  m22-band/       `probe.py`: IS A BUTTON PAST THE 42 CSS px SHRINK FLOOR REACHABLE, and what does
+                  `band-clips` actually take away? It measured the WHEEL'S AXIS (deltaX moves it,
+                  deltaY moves it 0) and that `overflow: hidden` does NOT stop a programmatic
+                  `scrollLeft` — which is what rescoped the control to the wheel clause alone.
+                  `firefox-band.py` is the second engine, where the scrollbar is suppressed by a
+                  different property
+  m23-blit/       M23's decode measurement, TAKEN BEFORE `DL_BLIT` HAD A CALLER — CAN A PROCESS
+                  DECODE AN IMAGE, AND WHERE? `program.mjs` starts a fresh decode in each of the
+                  three states a process can be in (parked, spinning, awaiting) on a real kernel in
+                  M6's stripped realm under its live CSP, then reads the pixels back and compares
+                  them to `/usr/share/logo.rgba`. It falsified `docs/PLAN-SHELL.md` §M23's premise:
+                  `createImageBitmap` is NOT in `src/libos/lockdown.mjs`'s `TARGETS`. Answer: only
+                  in an AWAITED turn (318, D42). `probe.py` scores it and exits 4 on a control that
+                  proved nothing; `firefox-decode.py` gates on AGREEMENT with Chrome, not on the
+                  answer; `firefox-views.py` is the file manager's seven clauses in Firefox
+  m23-page/       `program.mjs` is `m23blit`, a process whose surface is PINNED at 320x200 device
+                  px so every pixel clause is ratio-free; `drive.py` scores four declared controls
+                  and `--live` gates the BARE URL; `firefox-blit.py` reads the blit's pixels in a
+                  second engine
+  m23-files/      `probe.py`: the Explorer surface no registered check reaches — four of M23's five
+                  R-numbers are unreachable from the Details view BY CONSTRUCTION. It is what found
+                  `DL_BLIT`'s payload channel unconnected end to end, three lines in three files,
+                  and said so in its own diagnosis rather than blaming the program. **It is 17 of
+                  18 and exits 1**: `the pixels are the logo's` samples two px inside the op's
+                  origin and the plate-centred blit is not there — see `MILESTONES.md` M23 §What is
+                  owed. `firefox-files.py` is the eight-clause gate in Firefox
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -191,13 +233,22 @@ src/
                   inverse of `pointAt`, which is what lets a driver drag from inside a picture
     taskbar.mjs   M14: the Superbar, the start menu, a jump list, the tray and the window menu.
                   Page-side chrome (D39) whose CONTENTS are a process's — it renders rows it was
-                  published and decides nothing about what they are
+                  published and decides nothing about what they are.
+                  M22's band is here too: a real scroller with two chevrons, `switchWindow`/
+                  `selectSlot` as the two public methods a chord reaches, and `pinnedRows`/`trayRows`
+                  DERIVED from the published rows — `trayRows` reads `host.frames`, so an icon exists
+                  because a live window publishes it and the classic outliving-tray defect has no way
+                  to be produced here
     desktop.mjs   M14: the icon view. Selection, the rubber band, both context menus, and the
                   GRID — `#cellAt` is the declared inverse of `#boxFor`, which is what lets a
                   dropped icon land where the auto-layout would have put it (constraint 284).
                   The arrangement holds a CELL, so a resize re-lays it out
     icons.mjs     M14: one vector drawing per `WICON_*`, with `selfTest` asserting the ABI's
                   table is covered
+    chords.mjs    M22: A14's substitute-chord table, read by the menus that LABEL a chord and by the
+                  dispatcher that LISTENS for it. `BLOCKED` is the measured-disqualified set as DATA,
+                  asserted at module load to be disjoint from the bound set AND from its labels
+                  (312, 313, D41). `takeChord` matches and calls `preventDefault` in one call
 www/
   index.html      THE LANDING PAGE: the boot preflight, which still refuses to proceed and says
                   which capability is missing, AND THEN THE DESKTOP. It carries NO proofs and
@@ -283,6 +334,31 @@ www/
                   `restore_overwrites`, `move_forced_copy`, `stale_listing`, `paste_clobbers`. It
                   CLEARS the Bin first, because the Bin accumulates by design and `freeFrom` would
                   otherwise number the payload `bin-me (2).txt`. The bare URL is a live desktop
+  m22.html        M22's five proofs — `pins`, `save`, `switch`, `band`, `tray` — 73 expectations over
+                  **TWO LOADS of one document**, which is R24's own shape and not a convenience: a
+                  pin that survives a reload cannot be asserted in the load that made it. Load 1
+                  makes the pin and `location.replace`s to `&phase=2`; only load 2 reaches `done`.
+                  Every gesture id is prefixed `p1-`/`p2-`, because `drive_gestures` skips a `want`
+                  whose id equals the last one performed and the serial restarts in a new document.
+                  `M22.aimAt` publishes viewport points for a driver in another engine and
+                  `M22.chords` publishes the table as DATA, so a bench script never spells "Alt+`".
+                  Three query controls: `band_clips`, `save_to_window_fd`, `tray_outlives`. Its
+                  `switch` proof asserts the SPLIT between chords the shell took and keys that
+                  reached a window, because `host.keyCounts()` cannot see a taken chord (315), and
+                  PROOF 5's note BRANCHES on `win-destroy` — with it, the kernel tore the window
+                  down and a surviving row is the SHELL's (316). The bare URL is a live desktop
+  m23.html        M23's three proofs — `blit` (9 clauses), `refuse` (9, SIX attempts and FIVE
+                  distinct errnos), `shell` (15) — 45 expectations. `M23.blitReadback(title)` IS
+                  THE FUNCTION A SECOND ENGINE MUST ASSERT WITH: a driver with its own copy of
+                  "where the payload is and what colour it should be" asserts the wrong pixel the
+                  first time `thumbFit` changes. `M23.aimAt(what, key)` finds the search field and
+                  the view button by SCANNING `crumbHit`, never by restating `wCss - VIEWBTN_W`, and
+                  returns `{error}` rather than throwing, because a throw arrives at a driver as
+                  `null`. `m23blit` runs TWICE — `--once` to learn the picture, then again to be
+                  sampled — because an account arrives on a process's DEATH and `reapPid` takes its
+                  window with it. Five query controls: `no_payloads`, `no_refusals`,
+                  `whole_payload`, `no_thumbs`, `blit_unvalidated`; `no_payloads` is armed on BOTH
+                  paths because the Firefox gate drives the bare URL. The bare URL is a live desktop
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -341,6 +417,8 @@ row below rather than restate it.
 | What a deleted file's ORIGIN RECORD IS | a **SYMLINK** whose target is the origin path, beside the payload in the Bin. NOT a file of bytes and NOT a shared index: `vfs.symlink` stores its target verbatim in ONE journal record and a journal record carries a CRC-32, while an OPFS blob carries NONE (`grep -c "crc\|checksum" src/kernel/store.mjs` → 0) — so a symlink target is integrity-checked and inside `scripts/fsfuzz.py`'s gate and a sidecar is neither. The delete's time is the record's own `t`. `bench/m21-bin/sidecar.mjs` is the file format this REPLACED, kept as evidence — imported by `bench/m21-bin/probe.mjs` to score the design it lost to, and by nothing under `src/` (constraint 309) |
 | The DETAILS view's columns, in both directions | `COLUMNS` (frozen data) + `columnBoxes(wCss)` and `columnAt(xCss, wCss)` on `FILES_METRICS`, in `src/bin/files.mjs`. `columnAt` is the declared inverse of `columnBoxes`, which is what makes a header press sort the column a reader is pointing at — the same pairing `#cellAt`/`#boxFor` make on the desktop. The hit test and the drawing read ONE geometry, so they cannot disagree about which column a pixel is in. `dateText`/`sizeText` are the two cell formatters and `UNKNOWN_CELL` the mark for a statted row with a zero stamp |
 | A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
+| THE IMAGE OP, and where its fd is spelled | `DL_BLIT` + `encodeBlit(fd, x, y)`/`blitFdOf(op)` in `src/abi.mjs`, declared inverses, with `EBADMSG` for bytes that contradict their own header. **PIXELS MUST NOT TRAVEL INLINE** — six i32 arguments is six pixels, worse than one `DL_FILL_RECT` each — so the op names a **data-object fd**, whose payload is already kernel-owned and refcounted (240, 241). `a2` is spelled in exactly two places, `src/kernel/calls.mjs`'s validator and `src/wm/surface.mjs`; no third site may spell it. **THERE IS NO DESTINATION EXTENT**: the extent is the payload's `BMP_W`/`BMP_H`, so the size is chosen at DECODE time and a dpr-2 thumbnail is a `cell × dpr` payload (319). The kernel validates with `decodeBitmap` and never with a decoder — five refusals, five errnos, each assertable separately (317, D42). `Surface.blits`/`blitsUnbacked` are the two counters that tell "the payload channel dropped it" from "the program drew nothing", which are the same picture |
+| A THUMBNAIL's size, its ceilings and its budget | `thumbFit`, `THUMB_MAX_SIDE`, `THUMB_CAP`, `THUMB_SOURCE_MAX` and `THUMB_FORMATS` on `FILES_METRICS` in `src/bin/files.mjs`. Every number is DERIVED — `THUMB_MAX_SIDE` from `DOBJ_MAX_BYTES` less `BITMAP_HEADER`, `THUMB_CAP` from `DOBJ_CAP` less a four-object reserve for the clipboard and a drag — so none is written down. A clause reading a blit's pixels back MUST call `thumbFit` rather than restate it: a restated extent is right at dpr 1 and wrong by the ratio everywhere else, with every expectation green (319) |
 | What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
 | The surface budget | `SURFACE_BUDGET_PX` and `SURFACE_MAX_PX` in `src/abi.mjs`; the accounting is `WinMgr.surface`/`releaseSurface` in `src/kernel/wins.mjs` and nowhere else |
 | The z-order, and who may be raised over whom | `WinMgr.stack` and `blockingFor` in `src/kernel/wins.mjs`. The page renders the order it is sent and decides nothing (constraint 226) |
@@ -389,7 +467,11 @@ row below rather than restate it.
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
 | A MENU A PROCESS RAISES | `SYS_win_menu` in `src/abi.mjs`, `HANDLERS.win_menu` in `src/kernel/calls.mjs` and `WinMgr.menu` in `src/kernel/wins.mjs` — and the ROW is `win_items`' row, `encodeWinItems`/`decodeWinItems`, reused verbatim so a menu row and a jump-list row cannot come to disagree. `x`/`y` are SURFACE px and SIGNED, the unit the `WEV_POINTER` that asked for the menu already carried (constraint 223) — device px is `win_surface`'s unit and `win_surface`'s alone. `Window.menu` holds the open menu SEPARATELY from the published `items`, because they are two lists and row 2 of one is not row 2 of the other. **A zero-length region answers -ENOENT and is NOT a withdrawal**, which is the one place this call parts from `win_items`: a menu is transient and there is nothing to withdraw. A process MUST NOT draw its own popup — `.window-body` is `overflow: hidden` (constraint 308) |
 | WHICH LIST AN ACTIVATION INDEXES, and what a dismissal is | `WITEM_CONTEXT` in `src/abi.mjs` (the seventh item flag; `WITEM_FLAGS_ALL` is `0x7f` and `selfTest` asserts it is the OR of the declared flags) + `itemAt(ev)`, and `WinMgr.activateItem` in `src/kernel/wins.mjs` is the one place the bit is read to pick the list. `itemAt` is the THIRD and last signed-field accessor, beside `pointerAt` and `wheelAt` — `WEV_ITEM`'s `a` is read with `getUint32`, so the kernel's `a = -1` arrives as `4294967295` to anything that does not go through it, and constraint 225 is the record of what the first one cost. **A dismissal is `index < 0`, not `=== -1`** (constraint 307), so a second reason to close a menu with nothing chosen is another negative value and not a second comparison at every call site |
-| The 311 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| THE SUBSTITUTE-CHORD TABLE, and which chords are forbidden | `src/wm/chords.mjs` — `CHORDS` (11 frozen rows), `BLOCKED` (4, each with its measured `why`), `SWITCH_NEXT`/`SWITCH_PREV`/`slotChord(n)`, `labelFor`, `chordAt` and `takeChord`. **In `src/wm/` and NOT in `src/abi.mjs`**, because a chord is not a fact the kernel and a process must agree on: both readers are page-side and `KeyboardEvent.code` is a browser string. The MODIFIER side is imported from the ABI, so the bits this table compares are `WinHost.modifierBits`' own. **THE BINDING IS ON `code` AND NEVER ON `key`** — Firefox delivers Shift+Backquote as `key: "~"`, Chrome as a backquote, both as `code: "Backquote"` (constraint 313), which is the opposite of the keysym table's rule and for the opposite reason (a chord is a gesture; a keysym is a character). `takeChord` calls `preventDefault` ITSELF so the match and the cancel cannot come apart, and `chordAt` matches an EXACT modifier word — a superset match makes Alt+Shift+\` fire Alt+\` and the reverse chord unreachable. **A LABEL IS DERIVED THROUGH `labelFor` AND NEVER WRITTEN OUT**: a menu advertising an accelerator the system cannot receive is the live-looking-button defect, and `selfTest` refuses to load the module if a bound row collides with a blocked chord OR wears its label (constraint 312, D41). **THE ONE DISPATCHER IS A CAPTURE-PHASE LISTENER IN `src/wm/taskbar.mjs`, AND THE PHASE IS NOT A DETAIL** — `src/wm/terminal.mjs` listens deeper in the tree and bubble-phase, so a bubble dispatcher is behind every focused widget and `preventDefault` does not help: it stops the BROWSER, not the page. Measured bubble-phase: `prevented: true`, `switches: 0`, `where: 'terminal'`, `screenGrew: 1`. `stopPropagation` goes with the match, an unbound key is left untouched, and `modifierBits` is imported from `src/wm/winhost.mjs` because `takeChord` takes the mods from its caller (constraint 315) |
+| THE VIEW MODES, the address strip, the search and the thumbnails | `FILES_METRICS` in `src/bin/files.mjs`, exported: `VIEWS` (7 rows, LARGEST FIRST — the slider's order), `VIEW_BY_ID`, `VIEW_DEFAULT`, `axisOf`, `cellHOf`, `lanesOf`, `itemBox`/`itemAtPoint` (declared inverses), `contentLength`, `crumbSegments`/`crumbHit` (declared inverses), `searchMatch` and the `SEARCH_*` bounds. **`scroll` IS AN OFFSET ALONG `axisOf(view)` AND NOT A `y`** — List flows in columns and scrolls sideways, which is the whole distinction between List and Small Icons. The old Details names are kept and CALL the general ones (`scrollMaxFor`→`scrollMax`, `pageStepFor`→`rowsThatFit`, `focusBoxFor`→`focusBox`, `bandItems`→`bandRows`), so a driver that already aims with them aims at the same pixels. **`HEADER_MID` AND `CRUMB_MID` ARE EXPORTED AND `VIEW_TOP / 2` IS NOT A POINT IN EITHER BAND** |
+| WHETHER A PUBLISHED ROW IS A TRAY ICON OR A PINNED BUTTON | `WITEM_TRAY` (the **eighth** item flag, `0x80`; `WITEM_FLAGS_ALL` is `0xff` and `selfTest` asserts both the OR and that the flag list is 8 rows) + `isTrayRow`/`isPinnedRow` in `src/abi.mjs`, which are the ONLY readers. **The bit is a PLACE and not a kind**: `WITEM_TRAY` alone is a status icon, `WITEM_TRAY \| WITEM_MENU` is a pinned button, and the two are **exclusive over all 256 flag words, asserted at module load by a loop and not a fixture**. A status icon that carries `WITEM_MENU` is drawn in the BAND — a different picture rather than an error. A pinned row's LABEL must be the program's name as `progName` reports it, because that is the Superbar's group key and the only thing that merges a pin with the window the program later opens. The kernel needed NO change: `WinMgr.activateItem` passes `where` through unvalidated |
+| The shrink floor a taskbar button stops at, and the chevron's width | `TASK_BTN_MIN_W = 42` and `BAND_CHEV_W = 15` in `src/wm/aero.mjs`, with `.task-btn`'s `min-width` DERIVED from the first. The band is a real `overflow-x: auto` scroller (`.taskbar-band` inside `.taskbar-bandwrap`) and its scrollbar is suppressed in BOTH engines; it used to be `overflow: hidden` behind a comment claiming it scrolled, which is a button in the DOM with a non-zero rect that cannot be clicked. A wheel over it must carry **deltaX** — `deltaY` moves it 0 px in both engines (`bench/m22-band/probe.py`) |
+| The 319 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -406,9 +488,11 @@ cannot import the module; that was true of the PROCESS and false of the page it 
 `docs/designs/REVIEW-CODE-2026-11.md` carries the addresses.
 **The desktop-staging copy left it with the landing page**, and the isolation gate now HAS a one
 definition it did not have: `requireIsolation`/`isolationFailure` in `www/shell.mjs`.
-`grep -ln crossOriginIsolated www/*.html` now names **22** files and only `www/index.html` reaches
-it through that function, so the row above is understated rather than closed — the remaining
-twenty-one are proof pages, and M18 and M19 each added one more rather than retiring any.
+`grep -ln crossOriginIsolated www/*.html` now names **26** files — the figure here read 22 for three
+milestones and was itself a hand-kept count going stale, which is the row's own argument. **Four
+pages reach the gate through that function**: `www/index.html`, `www/m20.html`, `www/m21.html` and
+`www/m22.html` (`grep -ln requireIsolation www/*.html`), so the row is now partly closed rather than
+only understated, and the remaining twenty-two are older proof pages.
 **ONE MORE LEFT IT IN M18, AND IT WAS FOUR COPIES RATHER THAN TWO**: the extension split lived
 inside `formatForPath`, inside `iconForPath` and as `src/bin/desktop.mjs`'s own `extOf`, each
 spelling the same `lastIndexOf(".")` rule. It is `std.extOf` now, and the file-association table
@@ -457,10 +541,11 @@ These are the ones a plausible-looking change breaks. Each has a constraint numb
   it — and a shell reading facts the page was already told adds no capability to anything. A
   taskbar as a *process* would still need that second endpoint, and a process could not draw one
   anyway: the display list had no text op and no image op, and a `WEV_POINTER` arrives only while a
-  button is down. **M15 ADDED A TEXT OP (constraint 293) and the conclusion is unchanged**: a shell
-  needs hover, a menu that outlives a button press, and a rubber band, and none of those is a
-  drawing op. What the text op bought is a process that can draw a LIST — `files` and `taskmgr` —
-  which is what the missing op had actually been costing. **What keeps the division honest is that the shell's CONTENTS are a process's**:
+  button is down. **M15 ADDED A TEXT OP (constraint 293) AND M23 ADDED AN IMAGE OP (`DL_BLIT`,
+  constraint 317), and the conclusion is unchanged**: a shell needs hover, a menu that outlives a
+  button press, and a rubber band, and none of those is a drawing op. What the two ops bought is a
+  process that can draw a LIST with PICTURES in it — `files` and `taskmgr` — which is what the
+  missing ops had actually been costing. **What keeps the division honest is that the shell's CONTENTS are a process's**:
   `src/bin/desktop.mjs` reads the filesystem and publishes rows through `win_items`, and
   `scripts/check.py --negative no-items` is the run that tells that apart from a page drawing a
   hard-coded menu. (constraints 275, 223)
@@ -555,6 +640,15 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   accounted or revoked (constraint 219, `docs/DECISIONS.md` D31). The window ABI is still `win_*`
   calls rather than a `/dev/wm` device file, but for the reason a window needs identity, an owner
   and an fd — not because of a transfer.
+- **`DL_BLIT` CARRIES NO DESTINATION WIDTH OR HEIGHT, and adding them is an ABI change rather than
+  a convenience.** The extent is the payload's own `BMP_W`/`BMP_H`, which puts the size where the
+  DECODE is: a 32×32 thumbnail is a 32×32 payload, and on a dpr-2 surface a 96 CSS px cell asks for
+  192 device px. That is what keeps one unambiguous unit in the op. The cost is recorded rather than
+  hidden — `src/bin/imgview.mjs` cannot use the op at all, because its picture is an integer upscale
+  and a payload for it is 802,824 bytes per repaint against 8,224 bytes of fill-rects (constraint
+  319). **And the same shape is why a decode is `await`ed and never folded into a syscall reply**:
+  measured, a decode promise does not settle in a process that is parked or spinning (318, D42) —
+  which is constraint 219's bill a second time, for a promise instead of a transfer.
 - **Enter, Tab and Backspace are NOT in the keysym table, and adding them is a regression.**
   `bytesForKey` already spells them 10, 9 and 127, so every program that reads them reads bytes —
   a keysym row for any one of them takes the key away from all of them. The space is disjoint by
@@ -585,6 +679,22 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   `symlink` to a real VFS, so a lexical answer there would be the wrong path returned with no error
   — the one outcome worse than a refusal. `LEXICAL_REALPATH` in `src/kernel/calls.mjs` is the one
   list of mounts that may be answered lexically, and it is DATA.
+- **Alt+Tab is NOT offered and is labelled NOWHERE, even though it is delivered in both engines.**
+  Chrome's host acts on it unless the page cancels, so taking it means borrowing the window
+  manager's own binding — and a menu advertising an accelerator the system is only borrowing is the
+  live-looking-button defect, the same rule that made minimize and maximize drawn and *disabled*.
+  It is in `src/wm/chords.mjs`'s `BLOCKED` with its measured `why`, and `selfTest` fails at module
+  load if a row is bound to it OR merely wears its label (constraint 312, D41).
+- **A forward chord followed by a reverse does NOT return a reader to where they were.** A raise
+  re-orders the kernel's stack, so Alt+\` then Alt+Shift+\` walks `4 → 3 → 2`, measured. Each
+  direction is asserted against the published stack **as it was at that press**. Windows 7's answer
+  is a held-chord transient order that commits on modifier release; it is not built, and the clause
+  is written against the behaviour that exists rather than the one that is wanted.
+- **The taskbar band only overflows in a narrow window, so the chevrons are a correctness fix with
+  no visible change on a normal desktop.** That is precisely why it shipped broken behind a comment
+  claiming the band scrolled while its CSS clipped it: a clipped button is in the DOM, has a
+  non-zero rect, and cannot be clicked. Both M22 probes SEARCH for the overflow viewport rather than
+  opening a dozen windows, because the subject is a band narrower than its content.
 
 ## Code conventions
 
@@ -708,6 +818,21 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   **A check that dispatches a constant delta and asserts a constant offset is right at dpr 1 and
   wrong by the ratio everywhere else, with every expectation green** — the same shape as M11's,
   M12's and M16's bills. Scale by the ratio, or assert against the delta the page received.
+- **A KEY CHORD IS BOUND ON `event.code` AND NEVER ON `event.key`, BECAUSE THE TWO ENGINES DISAGREE
+  ABOUT `key` ON A SHIFTED CHORD.** Firefox 156 delivers Shift+Backquote as `key: "~"` and Chrome 158
+  over CDP as ``key: "`"``; both deliver `code: "Backquote"` (`bench/m22-switch/probe.py`, constraint
+  313). A dispatcher matching `key` works in Chrome, silently misses Alt+Shift+\` in Firefox, and
+  leaves **every Chrome expectation green** — the same shape as the five bills below. The keysym
+  table binds the other way on purpose: `code` is a physical position, so a keysym read off it would
+  send the wrong character on an AZERTY keyboard. **A chord is a gesture and a keysym is a
+  character**, and neither table may be switched to the other's field.
+- **A CHORD A PAGE RECEIVES IS NOT A CHORD A PAGE MAY HAVE, so a key measurement needs a SECOND RUN
+  that cancels nothing.** All 25 of M22's candidates are delivered in both engines; only the
+  uncancelled run shows that Chrome's host acts on Alt+Tab, Alt+Shift+Tab and F6 unless the page
+  prevents it, and on Shift+F6 **even when it does** (constraint 312). A probe that only listened
+  would have reported 25 free chords. **And a key measurement needs a REACHABILITY GATE**: headed
+  Chrome here delivers no key at all, which without the gate reads as "the host took all 25" — the
+  harness-honesty rule at a new door.
 - **FIREFOX CAN BE DRIVEN NOW, and the rule below is why that matters.** `scripts/bidi.py` speaks
   WebDriver BiDi to Firefox 156: `input.performActions` delivers events carrying
   `isTrusted === true`, verified by its own self-test. `bench/m7-win/firefox.py`'s "Mozilla removed
@@ -720,8 +845,13 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   **AND FIREFOX CAN BE DRIVEN AT A CHOSEN RATIO, so "Firefox renders at dpr 1" is true of its
   DEFAULT and is no longer a limit.** `browsingContext.setViewport` with `devicePixelRatio` is
   honoured by Firefox 156, verified by reading `devicePixelRatio` back off the page at 1, 1.5 and 2 —
-  which is how `bench/m19-advance/probe.py` covered three ratios in a second engine. `scripts/bidi.py`
-  does not wrap it yet; call it directly, as that probe does.
+  which is how `bench/m19-advance/probe.py` covered three ratios in a second engine. **M23 WRAPPED
+  IT**: `Firefox.set_dpr(ratio)` sets the context's ratio and `None` restores the engine's own, with
+  its own self-test asserting that 2 and 1.5 both arrive UNROUNDED and that **the ratio SURVIVES A
+  NAVIGATION** — so it is set BEFORE the page under test loads. **It wraps the SIZE too**:
+  `Firefox.set_viewport(width, height)` takes CSS px and FORCES the viewport, which M22 needed
+  because `--width`/`--height` are capped by the display, so a launched size is not reproducible
+  across machines. Its own self-test asserts it.
   **A KEY WITH NO SPELLING IN `KEYS` RAISES `BidiError`, SO CHECK BEFORE ASSUMING THE GESTURE IS
   UNDRIVABLE.** `scripts/bidi.py`'s `KEYS` carries WebDriver's own code points, and M20's F2 rename
   had none until that row added `"F1".."F12"` = U+E031..U+E03C — the contiguous block ending
@@ -736,7 +866,11 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   `with ff.held("Control"): ff.click(x, y)` delivers `ctrlKey === true` with `isTrusted === true`,
   measured by `python3 scripts/bidi.py`'s own self-test. A Ctrl-drag is
   `with ff.held("Control"): ff.drag(start, end)`. `names` are `KEYS` rows; an unknown one raises
-  `BidiError` listing them.
+  `BidiError` listing them. **M23 ADDED A SECOND READING TO THAT CLAIM — WHEEL, not only pointer**:
+  a `wheel` delivered inside the block carries `ctrlKey === true`, `isTrusted === true`,
+  `deltaMode === 0`, **and its delta is CSS px and not CDP's device px** (constraint 297), which is
+  what makes `with ff.held("Control"): ff.wheel(...)` a drivable Ctrl+wheel and not a dispatched
+  constant.
   **THE CHROME DRIVER HAS THE SAME SHAPE OF GAP IN THE OTHER DIRECTION**: `scripts/check.py`'s
   `mouse_drag` passes no `modifiers`, so a Ctrl-drag in Chrome must be spelled
   press/move/move/release with the modifier on each record — which is why `www/m21.html` asks for no
@@ -759,6 +893,12 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   it rendered, in BOTH engines, while the Chrome suite was green — found by
   `bench/m17-wheel/firefox-scroll.py` being the first gate to load the product URL rather than
   `?proofs=1` (301). A gate in a second engine is also a gate on the path a reader takes.
+  **M22 IS THE FIRST ROW WHERE THE SECOND ENGINE'S DISAGREEMENT WAS CAUGHT BEFORE ANY CODE DEPENDED
+  ON IT, and it is the counting of the bill rather than a sixth entry.** Firefox's `key: "~"` for
+  Shift+Backquote was found by a probe that ran BEFORE the chord table was written, so the table
+  bound `code` from its first line and the engine never had a chance to make it a milestone (313).
+  The measurement is cheap and the bill is not: that is the whole argument for a probe ahead of a
+  design, which `MILESTONES.md` records for M0, M16, M19, M19a and M21 as well.
 - **A PLATFORM FACT MUST BE READ OFF THE EVENT THAT CARRIES IT, AND BOTH ENGINES MUST BE ASKED
   WHICH ONE DOES.** M18 took a double-click's count from `event.detail` on a `pointerdown`, where
   a pointer event carries no click count — so no double-click reached any program, in any engine,
@@ -937,6 +1077,87 @@ scripts/check.py --negative restore-overwrites # a restore that CLOBBERS the rea
 scripts/check.py --negative move-forced-copy  # ...and a drag that always offers COPY: 7 / 65
 scripts/check.py --negative stale-listing     # ...and an F5 that serves the rows already in hand —
                                   # `refreshes` still rises, so only the three content clauses turn
+python3 bench/m22-switch/probe.py   # WHICH Alt+Tab SUBSTITUTE IS FREE? 25 candidates x 2 engines x
+                                  # TWO RUNS, the second with the listener cancelling nothing — which
+                                  # is what tells a FREE chord from a BORROWED one (312). 14 qualify
+python3 bench/m22-switch/probe.py --prove-failure  # ...and three controls, each moving ONE column:
+                                  # nodispatch, nomods, nopreventdefault
+python3 bench/m22-switch/probe.py --only alt-backquote,alt-tab  # ...or just the two that decided it
+python3 bench/m22-switch/probe.py --headed  # headed FIREFOX agrees with headless on all 25 rows, at
+                                  # dpr 2 against dpr 1. HEADED CHROME MEASURES NOTHING — its window
+                                  # never takes the OS focus and no key arrives, which the
+                                  # reachability gate reports instead of scoring 25 taken chords
+pkill -9 -f "Firefox.app"           # IN A SEPARATE COMMAND. See the warning below the block
+python3 bench/m22-switch/firefox-shell.py  # THE WHOLE SHELL IN A SECOND ENGINE: the labels, a pinned
+                                  # button, the chord, the save and the tray on the LANDING desktop.
+                                  # 29 of 32 green; the three red are the GATE's own — two stale
+                                  # KNOWN_RED allowances the run asks to delete, and a
+                                  # `defaultPrevented` read downstream of the dispatcher's
+                                  # `stopPropagation` (315). MILESTONES.md M22 §What is owed
+python3 bench/m22-switch/firefox-shell.py --prove-failure  # ...the save-to-window-fd world, which
+                                  # moves EXACTLY ONE clause and leaves all five drawing clauses green
+python3 bench/m22-pins/probe.py     # IS A PIN A ROW A PROCESS PUBLISHED, and does it survive a
+                                  # reload? 8 clauses on the bare URL. 8 of 8 ok
+python3 bench/m22-pins/probe.py --prove-failure  # ...and the same menu dismissed with ESCAPE, which
+                                  # is the positive control for the click
+python3 bench/m22-band/probe.py     # IS A BUTTON PAST THE 42 px SHRINK FLOOR REACHABLE, and what does
+                                  # `band-clips` take away? 13 of 13 ok, and it is why that control
+                                  # names the WHEEL clause and not reachability
+python3 bench/m22-band/firefox-band.py  # ...and the band in Firefox, where the scrollbar is
+                                  # suppressed by a different property
+scripts/check.py --only m22         # M22's 73 expectations over five proofs and TWO LOADS of one
+                                  # document, 11.6 s, ALL GREEN
+scripts/check.py --negative tray-outlives     # a shell that REMEMBERS its tray rows: 3 / 70, and the
+                                  # kernel's `win-destroy` clause GREEN beside it (316)
+scripts/check.py --negative band-clips        # ...and `overflow: hidden` back on the band: 3 / 70
+scripts/check.py --negative save-to-window-fd # ...and the editor telling a reader their file was
+                                  # saved when it was not: 5 / 68, every drawing clause GREEN (314)
+python3 bench/m23-blit/probe.py     # CAN A PROCESS DECODE AN IMAGE, AND IN WHICH STATE? Parked,
+                                  # spinning and awaiting, on a real kernel in M6's stripped realm.
+                                  # Only AWAITED settles; 7 cold macrotask turns; pixels exact (318)
+python3 bench/m23-blit/probe.py --control-never  # ...and the control that proves the reading can
+                                  # tell a settled promise from one that never will
+python3 bench/m23-blit/probe.py --no-csp  # ...and the world where `eval` is NOT refused, which is
+                                  # what makes "M6 is live in the measured realm" a measurement
+python3 bench/m23-blit/firefox-decode.py  # ...the same question in Firefox: exit 4 on DISAGREEMENT,
+                                  # because a decode site available in one engine is not one
+pkill -9 -f "Firefox.app"           # IN A SEPARATE COMMAND. See the warning below the block
+python3 bench/m23-blit/firefox-views.py  # THE FILE MANAGER IN A SECOND ENGINE: the view button,
+                                  # Ctrl+wheel at BOTH edges, a .png and a .rgba at the same
+                                  # extent, a type icon for what nothing can decode, search and the
+                                  # trail. 7 of 7 on the LANDING page, with real trusted input
+python3 bench/m23-blit/firefox-views.py --dpr 2  # ...and at the ratio Firefox does not pick itself,
+                                  # through `scripts/bidi.py`'s new `set_dpr` (the ratio SURVIVES a
+                                  # navigation, so it is set before the page loads)
+python3 bench/m23-page/firefox-blit.py  # DOES THE BLIT LAND IN FIREFOX? the BARE URL, 5 clauses,
+                                  # 18 of 18 `files` pixels exact at dpr 1
+python3 bench/m23-files/firefox-files.py  # the crumb, the view button and a typed query: 8 of 8
+python3 bench/m23-files/probe.py    # THE EXPLORER SURFACE NO REGISTERED CHECK REACHES — four of
+                                  # M23's five R-numbers are unreachable from Details BY
+                                  # CONSTRUCTION. 17 of 18, EXIT 1: the one red is this probe's own
+                                  # aim at a plate-centred blit (MILESTONES.md M23 §What is owed)
+python3 bench/m23-files/probe.py --no-thumbs  # CONTROL: the program decodes nothing, and `wanted`
+                                  # still counts the candidates — which is what tells this world
+                                  # from a mode that has no pictures
+node bench/m23-blit/probe.mjs       # `DL_BLIT`'s codec, its five refusals and the payload map under
+                                  # node: 53 clauses, exit 1 on any failure
+python3 bench/m23-page/drive.py --control no_payloads  # the payload map dropped one layer below the
+                                  # renderer, scored against its declared clause set (exit 4 on a
+                                  # mismatch, naming what HELD and what it TURNED)
+python3 bench/m23-page/drive.py --live  # ...or the BARE URL as a gate: exit 0 only on `phase: live`
+                                  # with no thrown module
+scripts/check.py --only m23         # M23's 45 expectations over three proofs, 10.1 s, ALL GREEN
+scripts/check.py --negative no-payloads   # the renderer never gets the payloads: 6 / 39, and ALL
+                                  # SIX ERRNO CLAUSES GREEN — the refusals are the kernel's
+scripts/check.py --negative no-refusals   # ...and the six bad calls never made: 9 / 36. The only
+                                  # world that can say the errno clauses are coupled to the calls
+scripts/check.py --negative whole-payload # ...and a well-formed bitmap where the torn one goes:
+                                  # 5 / 40, with the five-distinct-errnos clause still GREEN
+scripts/check.py --negative no-thumbs     # ...and `files` decoding nothing: 6 / 39, with R26's
+                                  # fallback arithmetic GREEN — a row keeps the icon it would have
+                                  # had, which is the whole difference from a blank cell
+scripts/check.py --negative blit-unvalidated  # ...and the kernel forwarding bytes `decodeBitmap`
+                                  # refuses: 5 / 40. A `repo_fixture`, because there is no cfg key
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end

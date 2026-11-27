@@ -1,0 +1,1425 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M23 — the blit, its five refusals, and the file manager's views</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M22's pages do it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop — and every window and every surface pixel on it — out from under every point
+   the page aims at. */
+#log { margin:8px; white-space:pre-wrap; height:120px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+/* TALL ENOUGH FOR A FILE MANAGER IN EXTRA LARGE ICONS BESIDE A 200 px SURFACE: a cell in that mode
+   is 268 CSS px wide and 300 tall, and a window clamped out of the work area is a window no gesture
+   can reach. */
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M23 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M23 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M23's page: A PROCESS PUTS AN IMAGE IN ITS OWN WINDOW, every way that can be refused answers its
+ * own errno, and the file manager's seven views, its address strip, its details pane and its search
+ * are read back out of the display list the page replayed.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283).
+ *
+ *   PROOF 1  blit: A `DL_BLIT` OF A KNOWN BITMAP RENDERS THE COLOUR IT WAS ASKED FOR, read back
+ *            with `surface.pixel` in the shape `pixelColor` renders one into (constraint 224). The
+ *            bitmap is four quadrants and the destination comes off the `DL_BLIT` op the page
+ *            TAPPED, so neither a colour nor a coordinate is restated here. One payload is
+ *            TRANSLUCENT over a known ground, which is the only reading that tells a renderer that
+ *            composites from one that overwrites — and `putImageData` overwrites
+ *   PROOF 2  refuse: THE REFUSAL PATH, SIX ATTEMPTS AND FIVE DISTINCT ERRNOS, each its own clause.
+ *            A batch holding a good fill and a bad blit is refused WHOLE: the fill's rectangle is
+ *            still the clear colour and the page's tap never saw the batch
+ *   PROOF 3  shell: THE VIEWS, THE ADDRESS STRIP, THE DETAILS PANE AND SEARCH, each asserted
+ *            through the display list and read back with `textOfOps` — plus the thumbnails, whose
+ *            pixels are compared against THIS REPO'S OWN `/usr/share/logo.rgba`, fetched over HTTP
+ *            from the file the provider mount serves
+ *
+ * ## WHAT THE TWO RUNS OF `m23blit` ARE FOR
+ *
+ * An account arrives on a process's DEATH, and a window dies with its process — `WinMgr.reapPid`
+ * destroys the windows a dying process created (constraint 14). So one run cannot hand this page
+ * both the points to read and the pixels at them. `--once` draws and exits, which is how the page
+ * learns WHAT the picture is; the second run parks, which is how the page reads it. The two
+ * accounts' pictures are asserted EQUAL, which is the clause that says the first run described the
+ * second.
+ *
+ * ## WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped
+ *
+ *   1. THE QUIT KEY IS SYNTHESISED. `q` goes to the surface as a `KeyboardEvent` this page
+ *      dispatches, because `scripts/cdp.py`'s `KEYS` table carries no printable letters as keys and
+ *      the gesture protocol's `type` kind is for a field. Every POINTER gesture and the typed query
+ *      are REAL input. What a synthesised key could not prove here is a key's ARRIVAL, which is
+ *      M18's subject and not this one — the quit is a way to collect an account.
+ *   2. `blit-unvalidated` HAS NO WORLD, AND THE REASON IS A FILE THIS SLICE DOES NOT OWN.
+ *      `setBlitValidated` is exported from `src/kernel/calls.mjs` and NOTHING CALLS IT: there is no
+ *      `cfg.blitUnvalidated` in `src/kernel/kernel.mjs`, where every other bench-gated control hook
+ *      lives. `?blit_unvalidated=1` passes the key anyway and the page MEASURES whether the world
+ *      was built — if the EBADMSG attempt is still refused, it says the hook is missing and refuses
+ *      rather than reporting a control that turned nothing (CLAUDE.md).
+ *      `?no_payloads=1` is the control this page CAN build, and it is the one that matters most:
+ *      `Surface.prototype.replay` is wrapped to drop the payload map, which is the shape of every
+ *      way the payload side-channel can fail. It turns the pixel clauses and raises
+ *      `blitsUnbacked`, and leaves all six errno clauses green.
+ *   3. THE THUMBNAIL PIXELS ARE ASSERTED WHERE THE SOURCE IS LOCALLY FLAT, and that is a
+ *      measurement rather than a hedge. A payload is produced by `drawImage` into a scratch canvas
+ *      (`src/bin/files.mjs` `makeThumb`), so a 16x16 logo in a 96 CSS px cell at dpr 2 is RESAMPLED
+ *      to 32x32 and an interpolated pixel is not any source pixel. The clause therefore samples
+ *      only destination pixels whose whole 3x3 SOURCE neighbourhood is one colour, where no
+ *      interpolation kernel can change the answer, and it says how many points qualified. At dpr 1
+ *      the payload is 1:1 and every point qualifies.
+ */
+import {
+  DL_CLEAR, DL_TEXT, DL_BLIT,
+  decodeDrawOps, textOfOps, blitFdOf, decodeBitmap,
+  pixelColor, cssColor, unpackColor,
+} from '/src/abi.mjs'
+/* THE PROGRAM'S OWN GEOMETRY AND ITS OWN TABLES, imported rather than restated — `www/m19.html`'s
+ * precedent and CLAUDE.md's row for this file. The view modes, the cell arithmetic, the address
+ * strip's hit test and `thumbFit` are all `src/bin/files.mjs`'s to declare; a page that computed a
+ * cell's centre itself would be aiming at a rectangle the program does not have. */
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import { Surface, setSurfaceControls } from '/src/wm/surface.mjs'
+import { setHostControls } from '/src/wm/winhost.mjs'
+import { setShellControls } from '/src/wm/taskbar.mjs'
+import {
+  spawnProgram, resultOf, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+import {
+  bootShell, stageDesktop, requireIsolation, PROGRAMS, DESKTOP_HELP,
+} from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+/** AND IT SCROLLS TO THE NEWEST LINE. The log is a FIXED-HEIGHT box for M13's reason, so the lines
+ *  a reader most needs are the ones that have just scrolled out of it — and in a second engine this
+ *  log is the only channel there is (CLAUDE.md), where a screenshot cannot scroll. */
+const say = (s) => {
+  out.textContent += s + '\n'
+  out.scrollTop = out.scrollHeight
+}
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /* THE FOUR WORLDS, EACH RE-RUNNABLE FROM THE COMMAND LINE WITHOUT A SOURCE EDIT. Three are argv
+   * on a program and one is this page's wrapper around the renderer (header note 2). */
+  noPayloads: params.get('no_payloads') === '1',
+  noRefusals: params.get('no_refusals') === '1',
+  wholePayload: params.get('whole_payload') === '1',
+  noThumbs: params.get('no_thumbs') === '1',
+  /** THE WORLD THAT HAS NO HOOK. Passed to the kernel and MEASURED, never assumed (header note 2). */
+  blitUnvalidated: params.get('blit_unvalidated') === '1',
+}
+globalThis.M23.config = CFG
+
+/* THE PAGE-SIDE CONTROLS, SET IN FULL. They are MODULE state, so a page that sets none still has to
+ * say none: otherwise the others are left holding whatever the last page in this realm asked for. */
+setSurfaceControls({})
+setHostControls({})
+setShellControls({ noGroup: false })
+
+const BLIT = '/bench/m23-page/program.mjs'
+const FILES = '/src/bin/files.mjs'
+
+/** THE DIRECTORY THE SHELL PROOF OPENS, and the two pictures in it. `/usr/share` is a READ-ONLY
+ *  provider mount whose rows are files in this repository (`src/kernel/providerfs.mjs`), which is
+ *  what makes the ground truth below fetchable: the bytes the mount serves and the bytes the page
+ *  compares against are ONE FILE. */
+const SHARE = '/usr/share'
+/** The same file, by the URL the provider's own template builds for it. Fetched rather than
+ *  restated: a page carrying a copy of the logo's pixels would be asserting that two copies of an
+ *  image match. */
+const GROUND_TRUTH_URL = '/src/share/logo.rgba'
+
+/** The view the shell proof opens in. A THUMBNAIL MODE, because `VIEW_DEFAULT` is Details and
+ *  Details draws type icons by design (`VIEWS`, R26's scope). */
+const OPEN_VIEW = 'large'
+
+/** The query typed into the search field with real keys. It matches both pictures and not the text
+ *  file, so `matched` is strictly between 0 and `listed` — a query matching everything or nothing
+ *  would pass for a search that did not run. */
+const QUERY = 'log'
+
+/** How far a drawn text run may sit from the x `crumbSegments` predicts, CSS px. A run attributed
+ *  to the wrong segment would need an error larger than `CRUMB_PAD`, and the segments here are 20
+ *  CSS px apart at their closest. `www/m19.html`'s `CELL_X_TOL_PX` is the same allowance for the
+ *  same reason: the program's x is rounded into surface px and back. */
+const CRUMB_X_TOL_PX = 6
+
+/** How much a composited channel may differ from the source-over arithmetic. ONE STEP, because a
+ *  canvas composites in premultiplied 8-bit and the rounding is the platform's — a wider tolerance
+ *  would admit a renderer that drew the source colour outright, which is the thing this clause is
+ *  about. */
+const COMPOSITE_TOL = 1
+
+/* ---- what the proofs are, before any of them has run ------------------------------------------ */
+
+globalThis.M23.proofs = { blit: null, refuse: null, shell: null }
+
+const ask = gestureAsker(globalThis.M23)
+
+/** The host and the shell, once there are any. Published for a driver in another engine. */
+let HOST = null
+let SHELL = null
+let KERNEL = null
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** winid -> the last display-list batch the kernel sent for it, as bytes, and how many have
+ *  arrived. THE PAGE'S OWN INSTRUMENT, M16's and M19's: a `Surface` keeps counts and pixels, not
+ *  ops, so the only way to read back WHAT a program drew — which text, which blit, to where — is to
+ *  keep the batch the kernel announced. It is also the only reading of a batch that NEVER ARRIVED,
+ *  which is proof 2's whole-batch clause. */
+const LAST_BATCH = new Map()
+const BATCHES = new Map()
+/** AND THE FIRST ONE, which is a different fact. `m23blit` clears the surface in a batch of its
+ *  own and then draws, so the colour "nothing was drawn here" means is in batch 1 and the pictures
+ *  are in batch 2 — a page keeping only the last batch would have to take the clear colour on the
+ *  program's word. */
+const FIRST_BATCH = new Map()
+/**
+ * THE BLIT PAYLOADS THE KERNEL SENT WITH THE LAST BATCH, by winid — `Map<fd, Uint8Array>` or null.
+ *
+ * KEPT WHOLE AND NOT COUNTED, for two reasons. A map that arrived EMPTY and a message carrying no
+ * map at all are the same picture on screen and different defects, which a count cannot tell apart.
+ * And the payload is the only thing that says what extent a blit DREW — `DL_BLIT` carries no size
+ * — so the pixels a thumbnail clause reads back are bounded by `decodeBitmap` over these bytes and
+ * not by a figure this page assumed. They are the page's own clones: `postMessage` copied them on
+ * the way out of the kernel, so holding them reaches nothing kernel-side.
+ */
+const LAST_PAYLOADS = new Map()
+
+function captureBatch (m) {
+  if (!m || m.t !== 'win-draw') return
+  const id = m.win | 0
+  const ops = m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0)
+  LAST_BATCH.set(id, ops)
+  if (!FIRST_BATCH.has(id)) FIRST_BATCH.set(id, ops)
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+  LAST_PAYLOADS.set(id, m.blits instanceof Map ? new Map(m.blits) : null)
+}
+
+/** Each payload the last batch carried, as `{fd, bytes, w, h}` — the extent out of the ABI's own
+ *  `decodeBitmap`, which is the codec the kernel validated with and the renderer draws with. A
+ *  payload that does not decode is reported with a zero extent rather than dropped. */
+function payloadRows (win) {
+  const held = LAST_PAYLOADS.get(win | 0)
+  if (!held) return null
+  return [...held.entries()].map(([fd, bytes]) => {
+    const bmp = decodeBitmap(bytes)
+    return { fd, bytes: bytes.length, w: bmp ? bmp.w : 0, h: bmp ? bmp.h : 0 }
+  })
+}
+
+/* ---- reading a display list back -------------------------------------------------------------- */
+
+/** The ops of a window's last batch, decoded with the SAME codec the renderer draws them with. */
+function opsOf (win, which = LAST_BATCH) {
+  const bytes = which.get(win | 0)
+  if (!bytes || bytes.length === 0) return []
+  return decodeDrawOps(bytes, bytes.length)
+}
+
+/**
+ * EVERY TEXT RUN IN A BATCH: `{text, x, y, size, rgba}`.
+ *
+ * `textOfOps` IS THE CODEC AND THE PAGE DOES NOT HAVE A SECOND ONE. A run is a header plus
+ * continuation records and the header says how many, so the walk has to skip past its own data —
+ * which is also why this is a `for` with an index and not a `filter`.
+ */
+function textRunsOf (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) continue
+    runs.push({ text: got.text, x: ops[i].a0, y: ops[i].a1, size: ops[i].a2, rgba: ops[i].a4 })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/** Every `DL_BLIT` in a batch, with its fd read through `blitFdOf` and NEVER as `a2`: the kernel's
+ *  validator and `src/wm/surface.mjs` are that function's two readers, and a page spelling `a2`
+ *  would be the third (`src/abi.mjs`). */
+function blitsOf (ops) {
+  return ops.filter((o) => o.op === DL_BLIT)
+    .map((o) => ({ fd: blitFdOf(o), raw: o.a2, x: o.a0, y: o.a1 }))
+}
+
+/** The one `DL_CLEAR` a batch may open with, or null. Its `a0` is the colour the program asked the
+ *  whole surface to be, which is what every "nothing was drawn here" clause reads. */
+function clearOf (ops) {
+  const op = ops.find((o) => o.op === DL_CLEAR)
+  return op ? op.a0 : null
+}
+
+/** Whether any text run in a batch matches. Used for a claim about what is ON SCREEN, so it reads
+ *  the runs the page replayed and not the program's account. */
+const someRun = (runs, re) => runs.some((r) => re.test(r.text))
+
+/* ---- the surface, and the pixels in it -------------------------------------------------------- */
+
+/** Every frame the host holds, as rows a driver in another engine can read. */
+function framesOf (host) {
+  return [...host.frames.values()]
+    .map((e) => ({ id: e.id, pid: e.pid, prog: e.prog, role: e.role, title: e.win.titleText,
+      surfaced: Boolean(e.surface) }))
+    .sort((a, b) => a.id - b.id)
+}
+
+/** Wait for a frame whose title contains `title` AND which has a surface, and hand back the entry.
+ *  BOTH, because a window exists before its program has asked for a surface and a pixel read
+ *  against a frame with none is a read of nothing. */
+async function surfaced (host, title, ms = 20000) {
+  const find = () => {
+    for (const entry of host.frames.values()) {
+      if (entry.win.titleText.includes(title) && entry.surface) return entry
+    }
+    return null
+  }
+  const got = await until(() => Boolean(find()), ms)
+  return got < 0 ? null : find()
+}
+
+/** Wait for one more batch than the window has had. A REPAINT AND NOT A TIMER: every gesture below
+ *  waits for its own consequence, which is M19's rule. */
+async function repainted (win, ms = 8000) {
+  const had = BATCHES.get(win | 0) || 0
+  return Math.round(await until(() => (BATCHES.get(win | 0) || 0) > had, ms))
+}
+
+/**
+ * ONE PIXEL, READ BACK THE WAY A READER WOULD SEE IT, plus what was asked for and both renderings
+ * of it.
+ *
+ * `want` IS `pixelColor` AND `wouldBeCss` IS `cssColor`, and keeping both is the whole of
+ * constraint 224: `getImageData` reports alpha as a 0-255 BYTE and CSS writes it as a 0-1 fraction,
+ * so a page that compared a read against `cssColor` would be wrong about every pixel and right
+ * about none — and for an opaque colour the two differ ONLY in the alpha, which is exactly the
+ * place a second copy gets it wrong.
+ */
+function pixelAt (entry, x, y, rgba) {
+  return {
+    at: { x, y },
+    read: entry.surface.pixel(x, y),
+    want: pixelColor(rgba),
+    wouldBeCss: cssColor(rgba),
+  }
+}
+
+/** The surface's own counters, which are the renderer's half of every blit clause. */
+const surfaceReport = (entry) => (entry && entry.surface ? { ...entry.surface.report() } : null)
+
+/** Surface px per CSS px on a window's canvas, MEASURED where it is true rather than assumed from
+ *  the dpr: a pinned surface is stretched by CSS and a followed one is not, and `files` uses the
+ *  ratio its `WEV_CLIENT` carried. `FILES_METRICS.toSurface` is the conversion itself. */
+function scaleOf (entry) {
+  const r = entry.surface.el.getBoundingClientRect()
+  return r.width > 0 ? entry.surface.w / r.width : 1
+}
+
+/* ---- aiming real input ------------------------------------------------------------------------ */
+
+/** Whether a point is somewhere a real pointer can be put, with the reason when it is not: a
+ *  gesture dispatched at a point outside the viewport is delivered to nothing and reads back as a
+ *  gesture that did nothing. */
+function onScreen (at, what) {
+  if (!at) return { hits: false, why: `${what}: no point` }
+  const inside = at.x >= 0 && at.y >= 0
+    && at.x < window.innerWidth && at.y < window.innerHeight
+  return { hits: inside, at, what, viewport: { w: window.innerWidth, h: window.innerHeight },
+    why: inside ? '' : `${what} is at ${at.x},${at.y}, outside the viewport` }
+}
+
+/** A CSS-px point inside a window's client area as a VIEWPORT point, through `Surface.clientAt` —
+ *  the declared inverse of the `pointAt` that produced every `WEV_POINTER` (constraint 248). The
+ *  page converts CSS to surface with the program's own `toSurface` and nothing else. */
+function aimCss (entry, xCss, yCss, what) {
+  const s = scaleOf(entry)
+  const at = entry.surface.clientAt(
+    FILES_METRICS.toSurface(xCss, s), FILES_METRICS.toSurface(yCss, s))
+  return { ...onScreen(at, what), css: { x: xCss, y: yCss }, scale: s }
+}
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR WHAT IT WAS FOR.
+ *
+ * `wait` IS THE GESTURE'S OWN CONSEQUENCE AND NOT A TIMEOUT NOBODY TUNED, which is M19's rule: a
+ * predicate the page can read, or `'settle'` where nothing observable is owed.
+ */
+async function gesture (spec, { wait = 'settle', ms = 10000 } = {}) {
+  await ask(spec)
+  if (wait === 'settle') { await pause(350); return -1 }
+  return Math.round(await until(wait, ms))
+}
+
+/* ---- running programs and collecting their accounts ------------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 30000)) }
+}
+
+/** Quit a windowed program by giving its surface a synthesised `q`, and collect the account it
+ *  returns. `www/m19.html`'s own route, and header note 1 says what it does not prove. */
+async function quitAndReport (k, entry, pid) {
+  typeSynthetic(entry.surface.el, 'q')
+  return resultOf(k, pid, 30000)
+}
+
+/** A result row's account fields, with the shapes every clause below dereferences defaulted. A
+ *  refusal path returns an account too, and a clause reading `undefined.length` would report a
+ *  defect in this page rather than in the program. */
+function accountOfBlit (row = {}) {
+  return {
+    why: String(row.why || ''),
+    exit: row.exit | 0,
+    win: row.win | 0,
+    surface: row.surface || { w: 0, h: 0 },
+    pattern: row.pattern || null,
+    refusals: Array.isArray(row.refusals) ? row.refusals : [],
+    wholeBatch: row.wholeBatch || null,
+    batches: row.batches | 0,
+    blitOps: row.blitOps | 0,
+    controls: row.controls || {},
+    quitBy: String(row.quitBy || ''),
+  }
+}
+
+/* ---- the ground truth ------------------------------------------------------------------------- */
+
+/**
+ * `/usr/share/logo.rgba`, FETCHED FROM THE FILE THE PROVIDER MOUNT SERVES, and decoded with the
+ * ABI's own `decodeBitmap`.
+ *
+ * TWO READINGS OF ONE FILE, which is the point: the thumbnail's pixels came out of the kernel's
+ * copy of these bytes through a decode, a resample and a payload, and these came over HTTP. A page
+ * holding its own copy of the logo's colours would be asserting that two constants match.
+ */
+async function groundTruth () {
+  const res = await fetch(GROUND_TRUTH_URL)
+  if (!res.ok) return { why: `${GROUND_TRUTH_URL} answered ${res.status}` }
+  const bytes = new Uint8Array(await res.arrayBuffer())
+  const bmp = decodeBitmap(bytes)
+  if (!bmp) return { why: `${GROUND_TRUTH_URL} is ${bytes.length} B and not a bitmap` }
+  return { w: bmp.w, h: bmp.h, pixels: bmp.pixels, bytes: bytes.length }
+}
+
+/** The packed `0xRRGGBBAA` at a pixel of anything `decodeBitmap` answered — the one encoding of a
+ *  colour in this system, so the comparison can go through `pixelColor` like every other. One
+ *  function for the fetched file AND for a kernel payload, because `decodeBitmap` gives both the
+ *  same shape and two readers of one layout is how they come to disagree. */
+function packedAt (src, x, y) {
+  const at = (y * src.w + x) * 4
+  return ((src.pixels[at] << 24) | (src.pixels[at + 1] << 16)
+    | (src.pixels[at + 2] << 8) | src.pixels[at + 3]) >>> 0
+}
+
+/**
+ * THE POINTS OF A PAYLOAD A PIXEL READ CAN BE ASSERTED AT: the corners, the edge midpoints and the
+ * centre, keeping only the OPAQUE ones.
+ *
+ * OPAQUE ONLY, and that is constraint 224 again rather than caution: a translucent payload pixel is
+ * composited with whatever is under it, so a clause comparing it against the payload's own colour
+ * would be asserting that the renderer did NOT composite — which is the opposite of what proof 1
+ * asserts about the same op. Nine points rather than one, because a payload drawn mirrored or
+ * transposed reads identically at its centre.
+ */
+function payloadSamples (bmp) {
+  const xs = [0, bmp.w >> 1, bmp.w - 1]
+  const ys = [0, bmp.h >> 1, bmp.h - 1]
+  const out = []
+  for (const dy of ys) {
+    for (const dx of xs) {
+      const rgba = packedAt(bmp, dx, dy)
+      if ((rgba & 0xff) === 0xff) out.push({ dx, dy, rgba })
+    }
+  }
+  return out
+}
+
+/**
+ * THE DESTINATION PIXELS A RESAMPLED PAYLOAD CAN BE ASSERTED AT: those whose whole 3x3 SOURCE
+ * neighbourhood is one colour.
+ *
+ * WHY THIS AND NOT THE CORNERS. `src/bin/files.mjs` produces a payload with `drawImage` into a
+ * scratch canvas of the fitted size, so at dpr 2 a 16x16 logo becomes 32x32 and an interpolated
+ * pixel is not any source pixel — a clause asserting a source colour at an arbitrary destination
+ * point would be asserting that the platform's interpolation kernel is the one this page imagined.
+ * A point drawn from a locally FLAT region cannot be changed by any kernel that is a weighted mean
+ * of neighbours, which is every one a canvas uses. Header note 3 states the cost: at dpr 1 the
+ * payload is 1:1 and every point qualifies.
+ */
+function flatSamples (gt, w, h, limit = 12) {
+  const colour = (x, y) => packedAt(gt, Math.min(gt.w - 1, Math.max(0, x)),
+    Math.min(gt.h - 1, Math.max(0, y)))
+  const picked = []
+  for (let dy = 0; dy < h && picked.length < limit; dy += 1) {
+    for (let dx = 0; dx < w && picked.length < limit; dx += 1) {
+      // The source pixel this destination pixel's CENTRE lands in.
+      const sx = Math.min(gt.w - 1, Math.floor(((dx + 0.5) * gt.w) / w))
+      const sy = Math.min(gt.h - 1, Math.floor(((dy + 0.5) * gt.h) / h))
+      const mine = colour(sx, sy)
+      let flat = true
+      for (let oy = -1; oy <= 1 && flat; oy += 1) {
+        for (let ox = -1; ox <= 1; ox += 1) {
+          if (colour(sx + ox, sy + oy) !== mine) { flat = false; break }
+        }
+      }
+      if (flat) picked.push({ dx, dy, sx, sy, rgba: mine })
+    }
+  }
+  return picked
+}
+
+/* ---- proofs 1 and 2: the blit and its refusals ------------------------------------------------ */
+
+/** The argv both runs take, so a control is one spelling in one place. */
+function blitArgv (extra = []) {
+  const argv = ['m23blit']
+  if (CFG.noRefusals) argv.push('--no-refusals')
+  if (CFG.wholePayload) argv.push('--whole-payload')
+  return argv.concat(extra)
+}
+
+/**
+ * RUN THE BLITTER TWICE AND READ THE PIXELS OF THE SECOND RUN.
+ *
+ * The order is the whole content of this function. The `--once` run must finish before the second
+ * one starts — the page needs the picture's description before it can read a pixel of it — and the
+ * second run's pixels must be read before it is quit, because its window dies with it.
+ */
+async function driveBlit (k, host) {
+  const run = {
+    first: null, second: null, frames: null, surfaceBefore: null, surfaceAfter: null,
+    ops: [], blits: [], payloads: null, batchesSeen: 0, clear: null,
+    samples: [], outside: null, over: null, refusedPixels: [],
+    aim: null, dpr: dpr(), why: '',
+  }
+
+  /* ---- run 1: what the picture IS ---------------------------------------------------------- */
+  const first = await runProgram(k, BLIT, blitArgv(['--once']))
+  run.first = accountOfBlit(first)
+  if (!run.first.pattern) {
+    run.why = `the --once run reported no pattern: exit ${run.first.exit} ${run.first.why}`
+    return run
+  }
+
+  /* ---- run 2: the pixels ------------------------------------------------------------------- */
+  const row = await spawnProgram(k, BLIT, blitArgv())
+  const entry = await surfaced(host, 'm23blit')
+  if (!entry) {
+    run.why = 'the parked run opened no surfaced window'
+    return run
+  }
+  /* THE PICTURE IS THE SECOND BATCH: the first is the clear on its own, which is deliberate in the
+   * program — a refused batch needs a known ground to have failed to change. */
+  const got = await until(() => (BATCHES.get(entry.id) || 0) >= 2, 10000)
+  if (got < 0) {
+    run.why = `the parked run sent ${BATCHES.get(entry.id) || 0} batch(es), not 2`
+    return run
+  }
+  run.batchesSeen = BATCHES.get(entry.id) || 0
+  run.surfaceBefore = surfaceReport(entry)
+  run.ops = opsOf(entry.id).map((o) => ({ ...o }))
+  run.blits = blitsOf(opsOf(entry.id))
+  run.payloads = payloadRows(entry.id)
+  run.clear = clearOf(opsOf(entry.id, FIRST_BATCH))
+  run.frames = framesOf(host)
+
+  const pattern = run.first.pattern
+  /* THE DESTINATION COMES OFF THE OP AND NOT OFF THE ACCOUNT, which is what makes this a reading of
+   * what the program SENT rather than of what it says it sent. The account's `at` is asserted
+   * against it as a clause of its own. */
+  const blitAt = run.blits[0] || { x: pattern.blit.at.x, y: pattern.blit.at.y }
+  for (const s of pattern.blit.samples) {
+    run.samples.push({ ...s, ...pixelAt(entry, blitAt.x + s.dx, blitAt.y + s.dy, s.rgba) })
+  }
+  const outside = pattern.blit.outside
+  run.outside = { ...outside,
+    ...pixelAt(entry, blitAt.x + outside.dx, blitAt.y + outside.dy, outside.rgba) }
+
+  /* THE COMPOSITE. The read is compared against the SOURCE-OVER arithmetic the page does here, in
+   * the one place, and against both of the colours it must NOT be. */
+  const over = pattern.over
+  const overAt = run.blits[1] || { x: over.at.x, y: over.at.y }
+  const src = unpackColor(over.src)
+  const ground = unpackColor(over.ground)
+  const a = src.a / 255
+  const blend = (s, d) => Math.round(s * a + d * (1 - a))
+  run.over = {
+    at: { x: overAt.x, y: overAt.y },
+    read: entry.surface.pixel(overAt.x + 1, overAt.y + 1),
+    expect: { r: blend(src.r, ground.r), g: blend(src.g, ground.g), b: blend(src.b, ground.b) },
+    src: pixelColor(over.src),
+    ground: pixelColor(over.ground),
+  }
+
+  /* AND THE RECTANGLE THE REFUSED BATCH ASKED FOR: four corners and the centre, every one of which
+   * must still be the clear colour. Five points rather than one, because a fill that landed and was
+   * then covered by nothing is a rectangle, not a pixel. */
+  if (run.first.wholeBatch) {
+    const b = run.first.wholeBatch.at
+    for (const [x, y] of [[b.x, b.y], [b.x + b.w - 1, b.y], [b.x, b.y + b.h - 1],
+      [b.x + b.w - 1, b.y + b.h - 1], [b.x + (b.w >> 1), b.y + (b.h >> 1)]]) {
+      run.refusedPixels.push({
+        ...pixelAt(entry, x, y, run.first.wholeBatch.paper),
+        wouldBeInk: pixelColor(run.first.wholeBatch.ink),
+      })
+    }
+  }
+
+  run.surfaceAfter = surfaceReport(entry)
+  run.second = accountOfBlit(await quitAndReport(k, entry, row.pid))
+  return run
+}
+
+function proofBlit (run) {
+  const blit = {
+    why: run.why,
+    dpr: run.dpr,
+    account: run.first,
+    pattern: run.first ? run.first.pattern : null,
+    ops: run.ops.length,
+    blits: run.blits,
+    payloads: run.payloads,
+    surfaceBefore: run.surfaceBefore,
+    surfaceAfter: run.surfaceAfter,
+    samples: run.samples,
+    outside: run.outside,
+    over: run.over,
+    clear: run.clear,
+    controls: { noPayloads: CFG.noPayloads },
+  }
+
+  /* THE KNOWN BITMAP DREW THE COLOUR IT WAS ASKED FOR, at every one of its own points. Four
+   * quadrants and the four pixels around their meeting, so a payload drawn mirrored, transposed or
+   * one pixel over is a different reading and not the same one. */
+  blit.theKnownBitmapDrewEveryColourItAskedFor = run.samples.length === 8
+    && run.samples.every((s) => s.read === s.want)
+
+  /* AND THE ALPHA CAME BACK AS A BYTE, WHICH IS CONSTRAINT 224 AS A CLAUSE OF ITS OWN. Every sample
+   * above is opaque, so `pixelColor` and `cssColor` differ only in the last field — and an
+   * assertion that held for both would be an assertion that cannot tell them apart. */
+  blit.theReadIsAByteAlphaAndNotACssFraction = run.samples.length > 0
+    && run.samples.every((s) => s.read === s.want && s.read !== s.wouldBeCss)
+
+  /* THE EXTENT IS THE PAYLOAD'S AND NOTHING WAS SCALED. One pixel past the payload's bottom-right
+   * corner is still the clear colour, which a renderer that stretched a payload to anything would
+   * have painted. */
+  blit.theExtentIsThePayloadsOwn = Boolean(run.outside) && run.outside.read === run.outside.want
+
+  /* THE TRANSLUCENT PAYLOAD COMPOSITED. The read is within one step of source-over AND is neither
+   * the source nor the ground: `putImageData` would give the source exactly, and a renderer that
+   * dropped the op would give the ground. */
+  const over = run.over
+  const parsed = over ? (/^rgba\((\d+),(\d+),(\d+),(\d+)\)$/.exec(over.read) || null) : null
+  blit.theTranslucentPayloadComposited = Boolean(parsed)
+    && Math.abs(Number(parsed[1]) - over.expect.r) <= COMPOSITE_TOL
+    && Math.abs(Number(parsed[2]) - over.expect.g) <= COMPOSITE_TOL
+    && Math.abs(Number(parsed[3]) - over.expect.b) <= COMPOSITE_TOL
+    && over.read !== over.src && over.read !== over.ground
+
+  /* THE RENDERER COUNTED TWO BACKED BLITS. `blitsUnbacked` is the one signal that tells "the
+   * payload channel dropped it" from "the program drew nothing", which are the same picture — and
+   * `?no_payloads=1` is the world where it is 2. */
+  const after = run.surfaceAfter || {}
+  blit.theRendererCountedTwoBackedBlits = after.blits === 2 && after.blitsUnbacked === 0
+
+  /* THE PAYLOADS REACHED THE PAGE, as two entries of the payload map the kernel posted, each
+   * decoding to an extent. A reading of the TRANSPORT and not of the picture: an empty map and no
+   * map are the same screen, and this is the only clause that tells them apart. */
+  blit.thePayloadsRodeTheBatch = Array.isArray(run.payloads) && run.payloads.length === 2
+    && run.payloads.every((p) => p.fd > 0 && p.bytes > 0 && p.w > 0 && p.h > 0)
+
+  /* AND THE OP SAID WHERE. The destination the page read its pixels at came off the `DL_BLIT` the
+   * kernel forwarded, and it is the one the program's account names — two readings of one fact, so
+   * a program drawing somewhere other than where it says cannot pass. `blitFdOf` restored the sign
+   * of a field the record stores unsigned, which is the accessor's whole purpose. */
+  const pattern = run.first ? run.first.pattern : null
+  blit.theOpCarriedTheDestinationAndASignedFd = Boolean(pattern) && run.blits.length === 2
+    && run.blits[0].x === pattern.blit.at.x && run.blits[0].y === pattern.blit.at.y
+    && run.blits[1].x === pattern.over.at.x && run.blits[1].y === pattern.over.at.y
+    && run.blits.every((b) => b.fd > 0 && b.fd === blitFdOf({ a2: b.raw }))
+
+  /* AND THE GROUND EVERY "NOTHING WAS DRAWN HERE" CLAUSE RESTS ON IS AN OP THE PAGE SAW. The
+   * refused-rectangle clause and the extent clause both assert the clear colour, and without this
+   * they would be taking it on the program's word — `DL_CLEAR`'s `a0` out of the first batch is the
+   * second reading. */
+  blit.theClearColourCameOffTheOpToo = Boolean(pattern) && run.clear === pattern.clear
+
+  /* AND THE TWO RUNS DREW THE SAME PICTURE, which is what says the `--once` run described the one
+   * whose pixels were read. Without it the samples above are a reading of this run against another
+   * run's description. */
+  blit.theTwoRunsDrewTheSamePicture = Boolean(run.first && run.second && run.second.pattern)
+    && JSON.stringify(run.first.pattern) === JSON.stringify(run.second.pattern)
+
+  blit.ok = blit.theKnownBitmapDrewEveryColourItAskedFor
+    && blit.theReadIsAByteAlphaAndNotACssFraction
+    && blit.theExtentIsThePayloadsOwn
+    && blit.theTranslucentPayloadComposited
+    && blit.theRendererCountedTwoBackedBlits
+    && blit.thePayloadsRodeTheBatch
+    && blit.theOpCarriedTheDestinationAndASignedFd
+    && blit.theClearColourCameOffTheOpToo
+    && blit.theTwoRunsDrewTheSamePicture
+  globalThis.M23.proofs.blit = { ok: blit.ok, evidence: blit }
+  say((blit.ok ? 'ok  ' : 'BAD ') + 'blit: ' + run.samples.filter((s) => s.read === s.want).length
+    + '/' + run.samples.length + ' sample(s) exact, outside '
+    + (run.outside ? run.outside.read : 'unread') + ', composite '
+    + (over ? over.read : 'unread') + ', surface '
+    + JSON.stringify({ blits: after.blits, unbacked: after.blitsUnbacked })
+    + (run.why ? ' — ' + run.why : ''))
+}
+
+/** The six attempts, in the order the program makes them, with the errno each OWES. Derived from
+ *  the account rather than listed here: the program is the one that knows what it asked for, and a
+ *  list in this page would be a second copy of its order. */
+function refusalRows (account) {
+  return account.refusals.map((r, at) => ({ at, ...r }))
+}
+
+function proofRefuse (run) {
+  const account = run.first || accountOfBlit({})
+  const rows = refusalRows(account)
+  const refuse = {
+    why: run.why,
+    rows,
+    wholeBatch: account.wholeBatch,
+    refusedPixels: run.refusedPixels,
+    batchesSeen: run.batchesSeen,
+    batchesSent: account.batches,
+    controls: { noRefusals: CFG.noRefusals, wholePayload: CFG.wholePayload,
+      blitUnvalidated: CFG.blitUnvalidated },
+  }
+  /** One clause per attempt, by the name the program gave it. ONE EXPECTATION PER REFUSAL, because
+   *  a single "it refused" passes for a refusal for the wrong reason — M3's `truncate` answered
+   *  ENOENT where it owed EROFS and only the per-call assertion caught it (CLAUDE.md). */
+  const answered = (what) => {
+    const row = rows.find((r) => r.what === what)
+    return Boolean(row) && row.got === row.want
+  }
+  refuse.noSuchFdIsEBADF = answered('no such fd')
+  refuse.aNegativeFdIsEBADF = answered('a negative fd')
+  refuse.anFdOnAFileIsEINVAL = answered('not a data object')
+  refuse.anObjectThatNeverOfferedABitmapIsENOTSUP = answered('never offered a bitmap')
+  refuse.offeredAndNeverWrittenIsENOENT = answered('offered and never written')
+  refuse.aTornPayloadIsEBADMSG = answered('a payload that is not a bitmap')
+
+  /* AND THEY ARE NOT ALL THE SAME REFUSAL. Five distinct errnos over six attempts — the two EBADF
+   * rows are two ways to name no fd — so a kernel answering one errno for everything fails here
+   * even with every row above green by coincidence. */
+  refuse.theSixAttemptsAnsweredFiveDistinctErrnos =
+    new Set(rows.map((r) => r.got)).size === 5 && rows.length === 6
+
+  /* THE BATCH WAS REFUSED WHOLE. The fill that travelled with the bad blit is nowhere in its own
+   * rectangle: five points, all still the clear colour, and none of them the fill's ink. */
+  refuse.theGoodFillInABadBatchWasNeverDrawn = run.refusedPixels.length === 5
+    && run.refusedPixels.every((p) => p.read === p.want && p.read !== p.wouldBeInk)
+
+  /* AND THE PAGE NEVER SAW IT. A batch refused at the syscall is a batch that was never posted, so
+   * the page's own tap counted exactly the two the program was told 0 for — which is the reading
+   * that distinguishes "refused" from "forwarded and drawn over". */
+  refuse.theRefusedBatchesNeverReachedThePage = run.batchesSeen === 2
+    && account.batches === 2
+
+  refuse.ok = refuse.noSuchFdIsEBADF && refuse.aNegativeFdIsEBADF
+    && refuse.anFdOnAFileIsEINVAL && refuse.anObjectThatNeverOfferedABitmapIsENOTSUP
+    && refuse.offeredAndNeverWrittenIsENOENT && refuse.aTornPayloadIsEBADMSG
+    && refuse.theSixAttemptsAnsweredFiveDistinctErrnos
+    && refuse.theGoodFillInABadBatchWasNeverDrawn
+    && refuse.theRefusedBatchesNeverReachedThePage
+  globalThis.M23.proofs.refuse = { ok: refuse.ok, evidence: refuse }
+
+  /* THE CONTROL THAT HAS NO HOOK, MEASURED AND SAID. `?blit_unvalidated=1` asks the kernel for a
+   * world `src/kernel/kernel.mjs` has no line for, so the honest outcome is a note naming the
+   * missing hook rather than a green run that proved nothing (CLAUDE.md). */
+  if (CFG.blitUnvalidated && refuse.aTornPayloadIsEBADMSG) {
+    globalThis.M23.notes.push('blit_unvalidated: the torn payload was STILL refused EBADMSG, so '
+      + 'the world was not built. setBlitValidated is exported from src/kernel/calls.mjs and '
+      + 'nothing calls it: src/kernel/kernel.mjs reads no cfg.blitUnvalidated, where every other '
+      + 'bench-gated control hook lives. A control that turns nothing verifies nothing.')
+  }
+  say((refuse.ok ? 'ok  ' : 'BAD ') + 'refuse: '
+    + rows.map((r) => `${r.what}=${r.got}`).join(', ')
+    + ' | the refused fill: ' + (run.refusedPixels[0] ? run.refusedPixels[0].read : 'unread'))
+}
+
+/* ---- proof 3: the views, the strip, the pane and search --------------------------------------- */
+
+/** WHERE THE SEARCH FIELD AND THE VIEW BUTTON ARE, found by SCANNING `crumbHit` rather than by
+ *  restating its arithmetic. The hit test is the program's declared inverse of the strip's layout
+ *  (`crumbSegments`), so a page that walked it is aiming at exactly what a reader presses — and a
+ *  page that computed `wCss - VIEWBTN_W` itself would have a second copy of both. */
+function stripRun (kind, wCss) {
+  let from = -1
+  let to = -1
+  for (let x = 0; x < Math.floor(wCss); x += 1) {
+    if (FILES_METRICS.crumbHit(x, SHARE, wCss).kind !== kind) continue
+    if (from < 0) from = x
+    to = x
+  }
+  return from < 0 ? null : { from, to, mid: Math.round((from + to) / 2) }
+}
+
+/**
+ * DRIVE THE FILE MANAGER: read the opening frame, then one gesture per thing the row owes.
+ *
+ * EVERY GESTURE WAITS FOR ITS OWN CONSEQUENCE and the readings are taken between them, because a
+ * state read after the next gesture is a reading of a world the clause is not about.
+ */
+async function driveShell (k, host, gt) {
+  const run = {
+    dir: SHARE, view: OPEN_VIEW, gt: gt.why ? { why: gt.why } : { w: gt.w, h: gt.h, bytes: gt.bytes },
+    opened: null, crumbs: [], crumbRuns: [], thumbs: [], flat: null,
+    payloads: null, thumbPixels: [], payloadVsFile: [],
+    selected: null, searched: null, switched: null, navigated: null,
+    account: null, scale: 0, client: null, why: '',
+  }
+  const argv = ['files', '--view', OPEN_VIEW, SHARE]
+  if (CFG.noThumbs) argv.push('--no-thumbs')
+  const row = await spawnProgram(k, FILES, argv)
+  const entry = await surfaced(host, 'files')
+  if (!entry) {
+    run.why = 'files opened no surfaced window'
+    return run
+  }
+  if ((await until(() => (BATCHES.get(entry.id) || 0) > 0, 10000)) < 0) {
+    run.why = 'files drew nothing'
+    return run
+  }
+  /* AND ONE MORE BATCH, BECAUSE A THUMBNAIL IS A SECOND FRAME BY CONSTRUCTION: `fillThumbs` awaits
+   * its decodes and `paint` never decodes, so the first batch a mode with pictures sends is the one
+   * drawn before any payload existed. Waiting for a repaint is waiting for the pictures. */
+  await repainted(entry.id, 8000)
+  run.scale = scaleOf(entry)
+  const r = entry.surface.el.getBoundingClientRect()
+  run.client = { cssW: r.width, cssH: r.height, surfaceW: entry.surface.w, h: entry.surface.h }
+  const wCss = r.width
+  const hCss = r.height
+
+  const read = () => {
+    const ops = opsOf(entry.id)
+    return { ops, runs: textRunsOf(ops), blits: blitsOf(ops), batches: BATCHES.get(entry.id) || 0 }
+  }
+  run.opened = (() => {
+    const { runs, blits, batches } = read()
+    return { runs, blits, batches, texts: runs.map((t) => t.text) }
+  })()
+
+  /* ---- the address strip (R28) ------------------------------------------------------------- */
+  /* THE SEGMENTS THE PROGRAM WOULD HAVE DRAWN, and the runs it did. `crumbSegments` is the
+   * rectangle a label was drawn inside AND the thing a press is aimed at, so asserting the labels
+   * against it is asserting that a reader pressing where they see a word reaches that word. */
+  run.crumbs = FILES_METRICS.crumbSegments(SHARE, wCss)
+  run.crumbRuns = run.crumbs.map((c) => {
+    const found = run.opened.runs.find((t) => t.text === c.label
+      && Math.abs(t.x / run.scale - c.x) <= CRUMB_X_TOL_PX + FILES_METRICS.CRUMB_PAD)
+    return { label: c.label, wantX: c.x, drawnX: found ? found.x / run.scale : null,
+      elided: c.elided }
+  })
+
+  /* ---- the thumbnails (R26) ---------------------------------------------------------------- */
+  /**
+   * TWO READINGS, AND THEY ARE ABOUT TWO DIFFERENT THINGS.
+   *
+   * THE RENDERER'S HALF is exact and needs no tolerance: `DL_BLIT` has no destination size, so the
+   * renderer draws the payload at `BMP_W` x `BMP_H` and scales NOTHING — the destination pixel at
+   * an offset into the payload must be that payload pixel, byte for byte, wherever it is opaque.
+   *
+   * THE DECODE'S HALF is where interpolation lives, because the payload came out of `drawImage`
+   * into a scratch canvas of the FITTED size (`src/bin/files.mjs` `makeThumb`): at dpr 2 a 16x16
+   * logo is resampled to 32x32 and an interpolated pixel is not any source pixel. So the payload is
+   * compared against the FILE only where the source is locally flat (header note 3), which no
+   * weighted-mean kernel can change.
+   *
+   * The destination is the op's own and the extent is the payload's. Neither is this page's.
+   */
+  const payloads = LAST_PAYLOADS.get(entry.id) || null
+  run.payloads = payloadRows(entry.id)
+  run.thumbPixels = []
+  run.payloadVsFile = []
+  for (const b of read().blits) {
+    const bytes = payloads ? payloads.get(b.fd) : null
+    const bmp = bytes ? decodeBitmap(bytes) : null
+    run.thumbs.push({ fd: b.fd, at: { x: b.x, y: b.y }, bytes: bytes ? bytes.length : 0,
+      w: bmp ? bmp.w : 0, h: bmp ? bmp.h : 0 })
+    if (!bmp) continue
+    for (const p of payloadSamples(bmp)) {
+      run.thumbPixels.push({ fd: b.fd, dx: p.dx, dy: p.dy,
+        ...pixelAt(entry, b.x + p.dx, b.y + p.dy, p.rgba) })
+    }
+    if (gt.why) continue
+    for (const s of flatSamples(gt, bmp.w, bmp.h, 8)) {
+      run.payloadVsFile.push({ fd: b.fd, dx: s.dx, dy: s.dy, sx: s.sx, sy: s.sy,
+        got: packedAt(bmp, s.dx, s.dy), want: s.rgba })
+    }
+  }
+
+  /* ---- the details pane (R29): a real click selects, and the strip says so ----------------- */
+  const view = FILES_METRICS.VIEW_BY_ID[OPEN_VIEW]
+  const cell = FILES_METRICS.itemBox(view, 0, 0, wCss, hCss)
+  const aim = aimCss(entry, cell.x + cell.w / 2, cell.y + cell.h / 2, 'the first cell')
+  run.selected = { cell, aim, before: run.opened.texts }
+  if (aim.hits) {
+    await gesture({ kind: 'click', name: 'click-cell', at: aim.at },
+      { wait: () => (BATCHES.get(entry.id) || 0) > run.opened.batches, ms: 8000 })
+    const after = read()
+    run.selected.after = after.runs.map((t) => t.text)
+    /* AND THE INVERSE IS ASSERTED WITH IT: the point was computed from `itemBox` and the program
+     * resolved it with `itemAtPoint`, so a mode whose two halves disagree selects another cell. */
+    run.selected.itemAtPoint = FILES_METRICS.itemAtPoint(
+      view, cell.x + cell.w / 2, cell.y + cell.h / 2, 0, wCss, hCss)
+  }
+
+  /* ---- search (R31): a real click into the field and real keys ----------------------------- */
+  const field = stripRun('search', wCss)
+  const atField = field
+    ? aimCss(entry, field.mid, FILES_METRICS.CRUMB_MID, 'the search field')
+    : null
+  run.searched = { field, aim: atField, query: QUERY }
+  if (atField && atField.hits) {
+    const had = BATCHES.get(entry.id) || 0
+    await gesture({ kind: 'click', name: 'click-search', at: atField.at },
+      { wait: () => (BATCHES.get(entry.id) || 0) > had, ms: 8000 })
+    const typed = BATCHES.get(entry.id) || 0
+    await gesture({ kind: 'type', name: 'type-query', text: QUERY },
+      { wait: () => (BATCHES.get(entry.id) || 0) > typed, ms: 8000 })
+    const after = read()
+    run.searched.texts = after.runs.map((t) => t.text)
+    run.searched.blits = after.blits.length
+  }
+
+  /* ---- the views (R27): Ctrl+wheel steps the slider ---------------------------------------- */
+  /* A REAL WHEEL WITH A REAL MODIFIER, which is the gesture the mode slider is bound to. The
+   * DELTA'S SIGN is the whole of the aim — away from the reader makes the icons bigger — and its
+   * MAGNITUDE is not asserted: a driven wheel's delta is device px in one driver and CSS px in
+   * another (constraint 297), so a clause over the distance would be a clause about the driver. */
+  const overList = aimCss(entry, wCss / 2, FILES_METRICS.VIEW_TOP + 20, 'the list')
+  run.switched = { aim: overList, from: OPEN_VIEW }
+  if (overList.hits) {
+    const had = BATCHES.get(entry.id) || 0
+    await gesture({ kind: 'wheel', name: 'ctrl-wheel', at: overList.at, deltaY: 120,
+      modifiers: 2 }, { wait: () => (BATCHES.get(entry.id) || 0) > had, ms: 8000 })
+    run.switched.texts = read().runs.map((t) => t.text)
+  }
+
+  /* ---- the strip navigates (R28): a real click on a segment -------------------------------- */
+  const seg = run.crumbs[0]
+  const atSeg = seg
+    ? aimCss(entry, seg.x + seg.w / 2, FILES_METRICS.CRUMB_MID, `the \`${seg.label}\` segment`)
+    : null
+  run.navigated = { segment: seg || null, aim: atSeg }
+  if (atSeg && atSeg.hits) {
+    const had = BATCHES.get(entry.id) || 0
+    await gesture({ kind: 'click', name: 'click-crumb', at: atSeg.at },
+      { wait: () => (BATCHES.get(entry.id) || 0) > had, ms: 8000 })
+    run.navigated.texts = read().runs.map((t) => t.text)
+  }
+
+  run.account = await quitAndReport(k, entry, row.pid)
+  run.flat = gt.why ? null : flatSamples(gt, gt.w, gt.h).length
+  return run
+}
+
+/** `N item(s)`, `N selected`, the search sentence and the mode's own strip, as the four readings
+ *  this proof makes of the display list. Each is a SEPARATE pattern, because a single "the strip
+ *  said something" passes for a strip saying the wrong thing. */
+const SELECTED_RE = /^1 selected\b/
+const QUERY_RE = new RegExp(`"${QUERY}"`)
+const SORTED_RE = /\bsorted by\b/
+
+function proofShell (run, gt) {
+  const account = run.account || {}
+  const thumbs = account.thumbs || {}
+  const shell = {
+    why: run.why,
+    dpr: dpr(),
+    dir: run.dir,
+    client: run.client,
+    scale: run.scale,
+    groundTruth: run.gt,
+    flatPoints: run.flat,
+    crumbs: run.crumbRuns,
+    opened: run.opened ? { texts: run.opened.texts, blits: run.opened.blits.length } : null,
+    payloads: run.payloads,
+    thumbsDrawn: run.thumbs,
+    thumbPixels: run.thumbPixels,
+    payloadVsFile: run.payloadVsFile,
+    selected: run.selected,
+    searched: run.searched,
+    switched: run.switched,
+    navigated: run.navigated,
+    account: {
+      view: account.view, viewLabel: account.viewLabel, viewFlow: account.viewFlow,
+      viewAxis: account.viewAxis, viewSwitches: account.viewSwitches | 0,
+      viewFrom: account.viewFrom, lanes: account.lanes | 0,
+      crumbNav: account.crumbNav | 0, crumbs: account.crumbs || [],
+      query: account.query, matched: account.matched | 0, listed: account.listed | 0,
+      searches: account.searches | 0, shownRows: account.shownRows | 0,
+      thumbs: {
+        wanted: thumbs.wanted | 0, ready: thumbs.ready | 0, decoded: thumbs.decoded | 0,
+        fellBack: thumbs.fellBack | 0, released: thumbs.released | 0, bytes: thumbs.bytes | 0,
+        peakBytes: thumbs.peakBytes | 0, clamped: thumbs.clamped | 0,
+        drewPictures: thumbs.drewPictures | 0, drewIcons: thumbs.drewIcons | 0,
+        made: thumbs.made || [], rows: thumbs.rows || [], why: thumbs.why || '',
+      },
+    },
+    controls: { noThumbs: CFG.noThumbs, noPayloads: CFG.noPayloads },
+  }
+
+  /* ---- the views (R27) --------------------------------------------------------------------- */
+  /**
+   * THE WINDOW OPENED IN THE MODE argv NAMED, read where that is still true.
+   *
+   * AN ACCOUNT IS A READING AT EXIT, and this run steps the mode half way through — so
+   * `account.view` describes the mode the window ENDED in and cannot say what it opened in. What
+   * can: `viewFrom`, which is `"argv"` exactly when a mode was named on the command line, and the
+   * LABEL the opening frame drew. The first clause this page shipped asserted `account.view` and
+   * was red against a run that had done everything right.
+   */
+  const want = FILES_METRICS.VIEW_BY_ID[OPEN_VIEW]
+  const openedTexts = (run.opened && run.opened.texts) || []
+  shell.theWindowOpenedInTheModeArgvNamed = Boolean(want)
+    && shell.account.viewFrom === 'argv'
+    && openedTexts.some((t) => t.includes(want.label))
+
+  /* AND EVERY FIELD OF THE ACCOUNT'S MODE IS ONE ROW OF THE TABLE BOTH SIDES IMPORT. `label`,
+   * `flow`, the axis and the lane count are four readings of one row, so a program that reported a
+   * mode's name with another mode's geometry fails here — which is the state a half-applied view
+   * switch would leave. */
+  const ended = FILES_METRICS.VIEW_BY_ID[shell.account.view]
+  shell.theAccountDescribesOneRowOfTheViewTable = Boolean(ended)
+    && shell.account.viewLabel === ended.label
+    && shell.account.viewFlow === ended.flow
+    && shell.account.viewAxis === FILES_METRICS.axisOf(ended)
+    /* `lanesOf` TAKES A VIEWPORT AND NOT A CLIENT BOX, which is the program's own composition:
+     * `viewBox` is what is left after the header, the address strip and the status strip. A page
+     * that handed it the client area would be computing lanes for a taller list than exists. */
+    && shell.account.lanes === FILES_METRICS.lanesOf(ended,
+      FILES_METRICS.viewBox(run.client.cssW, run.client.cssH)).lanes
+
+  /* AND THE MODE SAID SO ON SCREEN, read back with `textOfOps`. A grid has no columns, so the four
+   * column labels Details draws are REPLACED by a sort strip naming the mode — which is the one
+   * thing a reader in Large icons could otherwise not see. */
+  shell.theModesOwnStripWasDrawn = openedTexts.some((t) => t.includes(want.label))
+    && openedTexts.some((t) => SORTED_RE.test(t))
+    && !openedTexts.includes('Date modified')
+
+  /* AND A REAL Ctrl+WHEEL STEPPED IT. The mode the program reports on exit is NOT the one it opened
+   * in, and the step is counted — a clause reading only the final mode would pass for a window that
+   * opened in it. */
+  shell.aRealCtrlWheelSteppedTheMode = shell.account.viewSwitches >= 1
+    && shell.account.view !== OPEN_VIEW
+    /* `viewFrom` IS WHERE THE OPENING MODE CAME FROM — `"argv"` or `"default"` — and not the
+     * previous mode. Asserted because it is what says the window opened where this page asked and
+     * then moved, rather than having landed in its remembered mode. */
+    && shell.account.viewFrom === 'argv'
+    && Boolean(run.switched && run.switched.texts
+      && run.switched.texts.some((t) => SORTED_RE.test(t)))
+
+  /* ---- the address strip (R28) ------------------------------------------------------------- */
+  /* EVERY SEGMENT `crumbSegments` NAMES WAS DRAWN WHERE IT SAID. The labels come out of the display
+   * list and the x out of the function a press is aimed with, so this is the clause that says a
+   * reader pressing a word reaches that word. */
+  shell.everySegmentWasDrawnWhereTheHitTestLooks = shell.crumbs.length >= 3
+    && shell.crumbs.every((c) => c.drawnX !== null)
+
+  /* AND A REAL CLICK ON ONE NAVIGATED. `crumbNav` is the program's count and the rows on screen are
+   * the page's reading: both, because a count that rose over a list that did not change is a
+   * navigation nobody saw. */
+  const navTexts = (run.navigated && run.navigated.texts) || []
+  shell.aRealClickOnASegmentNavigated = shell.account.crumbNav >= 1
+    && navTexts.length > 0
+    && !navTexts.includes('logo.rgba')
+
+  /* ---- the details pane (R29) -------------------------------------------------------------- */
+  /* A REAL CLICK SELECTED THE CELL `itemBox` NAMES, AND THE STRIP SAID SO. `itemAtPoint` is the
+   * declared inverse used to aim it, so a mode whose halves disagree selects another cell and this
+   * reads `2 selected` or nothing at all. */
+  const selAfter = (run.selected && run.selected.after) || []
+  shell.aRealClickSelectedTheCellTheGeometryNames = Boolean(run.selected)
+    && run.selected.itemAtPoint === 0
+    && selAfter.some((t) => SELECTED_RE.test(t))
+
+  /* ---- search (R31) ------------------------------------------------------------------------ */
+  /**
+   * REAL KEYS FILTERED THE LIST, AND THE STRIP SAID WHAT IT LOOKED AT.
+   *
+   * ASSERTED OUT OF THE DISPLAY LIST AND NOT OUT OF THE ACCOUNT, for `viewFrom`'s reason one step
+   * further: a query is cleared by navigating, and this run navigates after it — so `account.query`
+   * at exit is `""` and `matched`/`listed` describe the directory the window ended in. The strip's
+   * own sentence carries the figures AT THE MOMENT A READER COULD READ THEM, which is the stronger
+   * reading anyway: `"log" — 2 of 3 here` is what R31 owes, and it is parsed rather than matched so
+   * that `matched < listed` is a clause and not a hope. `searches` is the program's cumulative
+   * count and survives the navigation, which is why it is the one account field read here.
+   */
+  const searchTexts = (run.searched && run.searched.texts) || []
+  const said = searchTexts.map((t) => /^"([^"]*)" — (\d+) of (\d+)\b/.exec(t)).find(Boolean) || null
+  shell.theStripReportedWhatTheSearchLookedAt = Boolean(said)
+    && said[1] === QUERY
+    && Number(said[2]) > 0
+    && Number(said[2]) < Number(said[3])
+  shell.realKeysFilteredTheListTheReaderCanSee = shell.account.searches >= 1
+    && searchTexts.some((t) => QUERY_RE.test(t))
+    /* AND THE ROWS THEMSELVES NARROWED. The two pictures match `log` and the text file does not, so
+     * a filter that ran is a list with one name gone — which a count alone could not say. */
+    && searchTexts.includes('logo.png')
+    && !searchTexts.includes('readme.txt')
+  shell.searchSaid = said ? { query: said[1], matched: Number(said[2]), of: Number(said[3]) } : null
+
+  /* ---- the thumbnails (R26) ---------------------------------------------------------------- */
+  /* THE PICTURES WERE DECODED IN THE PROCESS AND EVERY ROW GOT A MARK. `drewPictures + drewIcons
+   * === shownRows` is R26's fallback as arithmetic: a row with no picture keeps the icon it would
+   * have had, so a blank cell is a different number and not a missing one. */
+  shell.everyRowDrewAPictureOrItsTypeIcon = shell.account.shownRows > 0
+    && shell.account.thumbs.drewPictures + shell.account.thumbs.drewIcons
+      === shell.account.shownRows
+  /* AND THE DECODES HAPPENED IN THE PROCESS. `fellBack === 0` is what says neither picture ended on
+   * its type icon: `bench/m23-blit/` measured that a locked-down realm CAN decode, and this is that
+   * measurement's consequence in the product. `peakBytes` rather than `bytes`, because a window
+   * that walked out of the directory it decoded in has a live figure of 0 while having held a
+   * megabyte — and this run does walk out of it, at the crumb click. */
+  shell.theProcessDecodedThePictures = shell.account.thumbs.decoded >= 2
+    && shell.account.thumbs.peakBytes > 0
+    && shell.account.thumbs.fellBack === 0
+  /* AND EVERY OBJECT IT MADE WAS RELEASED. `released === decoded` on exit is R26's lifetime as
+   * arithmetic: a thumbnail cache that leaked would answer -EMFILE on the next Copy, because
+   * `DOBJ_CAP` is a PER-PROCESS count. */
+  shell.everyPayloadWasReleasedOnExit = shell.account.thumbs.decoded >= 2
+    && (shell.account.thumbs.released | 0) === shell.account.thumbs.decoded
+
+  /* AND EVERY PAYLOAD IS THE EXTENT `thumbFit` NAMES, which is the figure a ratio enters through —
+   * the class of defect that cost M11, M12 and M16. The page recomputes it from the program's own
+   * exported function and the cell the payload was made for. */
+  const made = shell.account.thumbs.made
+  shell.everyPayloadIsTheExtentThumbFitNames = made.length >= 2 && made.every((m) => {
+    const fit = FILES_METRICS.thumbFit(gt.why ? 0 : gt.w, gt.why ? 0 : gt.h, m.cell, m.scale)
+    return m.w === fit.w && m.h === fit.h
+  })
+
+  /* THE RENDERER DREW THE PAYLOAD VERBATIM. Nine opaque points per picture, exact, because
+   * `DL_BLIT` carries no destination size and the renderer scales nothing — the clause that says a
+   * thumbnail on screen is the payload the process built and not a resample of it. */
+  shell.theDrawnPixelsAreThePayloadsOwn = shell.thumbPixels.length >= 12
+    && shell.thumbPixels.every((p) => p.read === p.want)
+    && shell.thumbPixels.every((p) => p.read !== p.wouldBeCss)
+
+  /* AND THE PAYLOAD IS THIS REPO'S OWN LOGO, sampled where the source is locally flat (header note
+   * 3). TWO PICTURES AND ONE FILE: `logo.png` goes through the platform's PNG decoder and
+   * `logo.rgba` through `decodeBitmap` plus `ImageData`, and both must come out as the bytes
+   * `/src/share/logo.rgba` holds — which is `bench/m23-blit/`'s byte-exact measurement, asserted
+   * here on the product's own path. */
+  shell.thePayloadIsTheFilesOwnPixels = shell.payloadVsFile.length >= 8
+    && shell.payloadVsFile.every((p) => p.got === p.want)
+
+  shell.ok = shell.theWindowOpenedInTheModeArgvNamed
+    && shell.theAccountDescribesOneRowOfTheViewTable
+    && shell.theModesOwnStripWasDrawn
+    && shell.aRealCtrlWheelSteppedTheMode
+    && shell.everySegmentWasDrawnWhereTheHitTestLooks
+    && shell.aRealClickOnASegmentNavigated
+    && shell.aRealClickSelectedTheCellTheGeometryNames
+    && shell.theStripReportedWhatTheSearchLookedAt
+    && shell.realKeysFilteredTheListTheReaderCanSee
+    && shell.everyRowDrewAPictureOrItsTypeIcon
+    && shell.theProcessDecodedThePictures
+    && shell.everyPayloadWasReleasedOnExit
+    && shell.everyPayloadIsTheExtentThumbFitNames
+    && shell.theDrawnPixelsAreThePayloadsOwn
+    && shell.thePayloadIsTheFilesOwnPixels
+  globalThis.M23.proofs.shell = { ok: shell.ok, evidence: shell }
+  say((shell.ok ? 'ok  ' : 'BAD ') + 'shell: ' + shell.account.view + ' from ' + OPEN_VIEW + ', '
+    + shell.crumbs.length + ' crumb(s), ' + shell.account.thumbs.decoded + ' decode(s), '
+    + shell.thumbPixels.filter((p) => p.read === p.want).length + '/' + shell.thumbPixels.length
+    + ' drawn pixel(s) exact, '
+    + shell.payloadVsFile.filter((p) => p.got === p.want).length + '/'
+    + shell.payloadVsFile.length + ' against the file, the strip said '
+    + JSON.stringify(shell.searchSaid)
+    + (run.why ? ' — ' + run.why : ''))
+}
+
+/* ---- the live desktop ------------------------------------------------------------------------- */
+
+/** THE WINDOWS THE LIVE DESKTOP OPENS. Clear of the icon column, because the shared staging runs
+ *  the `desktop` process and that process publishes rows: a window at the desktop's left edge sits
+ *  on top of the icons, which is constraint 289's own failure. `term` is LAST because it spawns
+ *  `sh` by syscall. */
+const LIVE_X = 150
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    /* THE PICTURES, IN A MODE THAT DRAWS THEM. `/usr/share` is the one directory on a fresh volume
+     * with images in it, and Details — the default — shows type icons by design, so a landing on
+     * the default mode would show a reader nothing this milestone added. */
+    argv: () => ['files', '--view', OPEN_VIEW, SHARE],
+    box: () => ({ x: LIVE_X, y: 20, w: 620, h: 300 }),
+  },
+  {
+    url: BLIT,
+    name: 'm23blit',
+    argv: () => ['m23blit'],
+    box: () => ({ x: LIVE_X + 640, y: 20, w: 320, h: 230 }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 340, w: 620, h: Math.max(160, wa.h - 360) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. ADDED rather than substituted, so a
+ *  reader here still learns what the rest of the shell does — and in a second engine this log is
+ *  the only channel there is. */
+const M23_HELP = [
+  '  the file manager has SEVEN VIEWS: ctrl+wheel over the list steps them, or press the button',
+  '  at the right of the address strip. Medium icons and larger show PICTURES',
+  '  a picture is the file\'s own bytes, decoded in the `files` process and drawn as one op',
+  '  press a segment of the address strip to go there; type in the search box to filter, and',
+  '  the strip at the bottom says what was looked at and what it cost',
+  '  the small window is `m23blit`: a known bitmap a process put in its own window, and the six',
+  '  ways a malformed one is refused. `q` closes it',
+]
+
+async function live () {
+  const { host, shell } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M23,
+    say,
+    label: 'm23',
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M23_HELP),
+  })
+  publish(host, shell)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `aimAt` hands back the VIEWPORT point, which is the only unit `input.performActions` and
+ * `Input.dispatchMouseEvent` both take, and REPORTS the reason rather than throwing across the
+ * evaluate boundary: a thrown error arrives at a driver as `null`. A second engine has no other
+ * route to a cell's centre or to the search field — and a driver with its own copy of `itemBox` is
+ * a driver aiming at a rectangle this program does not have (CLAUDE.md's `FILES_METRICS` row).
+ */
+function publish (host, shell) {
+  HOST = host
+  SHELL = shell
+  globalThis.M23.host = host
+  globalThis.M23.shell = shell
+  globalThis.M23.dpr = dpr()
+  globalThis.M23.viewport = { w: window.innerWidth, h: window.innerHeight }
+  globalThis.M23.frames = () => framesOf(host)
+  globalThis.M23.batchOf = (title) => {
+    const entry = [...host.frames.values()].find((e) => e.win.titleText.includes(String(title)))
+    if (!entry) return null
+    return { win: entry.id, batches: BATCHES.get(entry.id) || 0,
+      texts: textRunsOf(opsOf(entry.id)).map((t) => t.text),
+      blits: blitsOf(opsOf(entry.id)),
+      surface: surfaceReport(entry) }
+  }
+  /**
+   * EVERY BLIT ON A WINDOW, READ BACK OUT OF THE CANVAS — `[{fd, dx, dy, read, want}]`, or a
+   * `{error}`.
+   *
+   * THIS IS THE CLAUSE A SECOND ENGINE ASSERTS WITH, and it is published rather than restated for
+   * the reason CLAUDE.md's `FILES_METRICS` row gives: a Firefox script with its own copy of "where
+   * the payload is and what colour it should be" is a script asserting the wrong pixel the first
+   * time `thumbFit` changes. It reaches nothing a page did not already hold — the payload is the
+   * page's own clone of the batch and the canvas is the page's own element.
+   */
+  globalThis.M23.blitReadback = (title) => {
+    try {
+      const entry = [...host.frames.values()]
+        .find((e) => e.win.titleText.includes(String(title)) && e.surface)
+      if (!entry) return { error: `no surfaced window whose title holds ${title}` }
+      const held = LAST_PAYLOADS.get(entry.id)
+      const rows = []
+      for (const b of blitsOf(opsOf(entry.id))) {
+        const bytes = held ? held.get(b.fd) : null
+        const bmp = bytes ? decodeBitmap(bytes) : null
+        if (!bmp) { rows.push({ fd: b.fd, unbacked: true }); continue }
+        for (const p of payloadSamples(bmp)) {
+          rows.push({ fd: b.fd, dx: p.dx, dy: p.dy,
+            ...pixelAt(entry, b.x + p.dx, b.y + p.dy, p.rgba) })
+        }
+      }
+      return rows
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+  }
+  globalThis.M23.aimAt = (what, key) => {
+    try {
+      const entry = [...host.frames.values()]
+        .find((e) => e.win.titleText.includes('files') && e.surface)
+      if (!entry) return { error: 'no surfaced `files` window' }
+      const r = entry.surface.el.getBoundingClientRect()
+      const view = FILES_METRICS.VIEW_BY_ID[OPEN_VIEW]
+      if (what === 'cell') {
+        const cell = FILES_METRICS.itemBox(view, Number(key) || 0, 0, r.width, r.height)
+        return aimCss(entry, cell.x + cell.w / 2, cell.y + cell.h / 2, 'a cell')
+      }
+      if (what === 'search' || what === 'view') {
+        const found = stripRun(what, r.width)
+        if (!found) return { error: `crumbHit names no ${what} run across ${r.width} CSS px` }
+        return aimCss(entry, found.mid, FILES_METRICS.CRUMB_MID, `the ${what} field`)
+      }
+      if (what === 'segment') {
+        const segs = FILES_METRICS.crumbSegments(SHARE, r.width)
+        const seg = segs[Number(key) || 0]
+        if (!seg) return { error: `no segment ${key} of ${segs.length}` }
+        return aimCss(entry, seg.x + seg.w / 2, FILES_METRICS.CRUMB_MID, 'a segment')
+      }
+      if (what === 'list') {
+        return aimCss(entry, r.width / 2, FILES_METRICS.VIEW_TOP + 20, 'the list')
+      }
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+    return { error: `no aim named ${what}; cell, search, view, segment and list are the five` }
+  }
+}
+
+/* ---- the proofs path -------------------------------------------------------------------------- */
+
+async function proofs () {
+  say('M23 — a known bitmap through DL_BLIT, its six refusals, and the file manager\'s views.')
+  say('dpr ' + dpr() + ', viewport ' + window.innerWidth + 'x' + window.innerHeight + '.')
+  const on = Object.entries({ no_payloads: CFG.noPayloads, no_refusals: CFG.noRefusals,
+    whole_payload: CFG.wholePayload, no_thumbs: CFG.noThumbs,
+    blit_unvalidated: CFG.blitUnvalidated })
+    .filter(([, is]) => is).map(([name]) => name)
+  if (on.length) say('CONTROL: ' + on.join(' '))
+
+  const booted = await bootShell({
+    into: desktop,
+    report: globalThis.M23,
+    say,
+    label: 'm23',
+    tap: captureBatch,
+    taskbar: true,
+    /* THE KERNEL-SIDE CONTROL, PASSED AND MEASURED. `bench: 1` is `bootShell`'s own default, which
+     * is what any bench-gated hook requires; the key below has no hook to reach (header note 2). */
+    cfg: CFG.blitUnvalidated ? { blitUnvalidated: 1 } : {},
+  })
+  const { k, host, shell } = booted
+  publish(host, shell)
+  KERNEL = k
+  globalThis.M23.controlsInForce = { host: host.report().controls, shell: shell.report().controls }
+
+  const gt = await groundTruth()
+  globalThis.M23.groundTruth = gt.why ? { why: gt.why } : { w: gt.w, h: gt.h, bytes: gt.bytes }
+  if (gt.why) say('GROUND TRUTH: ' + gt.why)
+  else say(`ground truth: ${GROUND_TRUTH_URL} is ${gt.w}x${gt.h}, ${gt.bytes} B`)
+
+  /* ---- 1 and 2: the blit and its refusals -------------------------------------------------- */
+  const blitRun = await driveBlit(k, host)
+  globalThis.M23.blitRun = blitRun
+  proofBlit(blitRun)
+  proofRefuse(blitRun)
+
+  /* ---- 3: the file manager ----------------------------------------------------------------- */
+  const shellRun = await driveShell(k, host, gt)
+  globalThis.M23.shellRun = shellRun
+  proofShell(shellRun, gt)
+
+  const proofRows = globalThis.M23.proofs
+  const bad = Object.entries(proofRows).filter(([, p]) => p && !p.ok).map(([n]) => n)
+  const notDriven = Object.entries(proofRows).filter(([, p]) => !p).map(([n]) => n)
+  globalThis.M23.notDriven = notDriven
+  globalThis.M23.verdict = (bad.length ? 'bad: ' + bad.join(', ') : 'ok')
+    + (notDriven.length ? '; not driven: ' + notDriven.join(', ') : '')
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M23.verdict)
+  globalThis.M23.state = 'done'
+  globalThis.M23.phase = 'rendered'
+}
+
+/**
+ * THE PAYLOAD CONTROL, ARMED ON BOTH PATHS (header note 2).
+ *
+ * `Surface.replay` takes the map as its second argument and a batch with no map draws no blit,
+ * which is the shape of every way the payload side-channel can fail: a kernel that posted none, a
+ * transport that dropped it, a host that did not forward it. The page is the supervisor and this is
+ * the renderer the page built — a `setSurfaceControls` key would be the better home and is a change
+ * in a file this slice does not own.
+ *
+ * ON BOTH PATHS BECAUSE THE SECOND ENGINE DRIVES THE BARE URL. Firefox has no gesture protocol
+ * here, so its gate reads `blitReadback` off the live desktop — and a gate with no failing half is
+ * a gate nobody has seen fail. Armed in `main` rather than in `proofs` for exactly that.
+ */
+function armPayloadControl () {
+  if (!CFG.noPayloads) return
+  const real = Surface.prototype.replay
+  Surface.prototype.replay = function replayWithoutPayloads (bytes) {
+    return real.call(this, bytes, null)
+  }
+  globalThis.M23.notes.push('no_payloads: Surface.prototype.replay was wrapped to drop the blit '
+    + 'payload map, so every DL_BLIT counts as blitsUnbacked and draws nothing. The pixel clauses '
+    + 'MUST fail and every errno clause MUST hold: the refusals are the kernel\'s and this world '
+    + 'is the renderer\'s.')
+}
+
+async function main () {
+  armPayloadControl()
+  if (!CFG.proofs) {
+    globalThis.M23.state = 'done'
+    globalThis.M23.verdict = 'live'
+    await live()
+    return
+  }
+  await proofs()
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice (constraint
+ * 301).
+ *
+ * `main()` is called synchronously and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all. */
+if (requireIsolation(globalThis.M23, say, out)) {
+  main().catch((e) => {
+    globalThis.M23.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. */
+    globalThis.M23.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M23.why)
+  })
+}
+</script>
+</body>
+</html>

@@ -628,9 +628,14 @@ two days.
 
 ---
 
-### M22 — the shell's remainder · 3 d
+### M22 — the shell's remainder · 3 d · DONE
 
-**Closes.** R21, R22, R23, R24, R25, A14.
+**Closes.** R21, R22, R23, R24, R25, A14 — and **the PRD's §10.3**, recorded in
+`docs/DECISIONS.md` **D41**. It also answers **§10.2** as a side-effect nobody scheduled: R24's pin
+list needed a durable home, and it is `${std.sessionDir(env).dir}/.taskbar-pins` — one name per
+line, `#` comments, blank lines ignored, deduped, with `PINS_LEAF` the one definition of the leaf.
+That is this system's **first persisted configuration**, and `docs/PRD-SHELL.md` §10 still lists
+both questions as open.
 
 **Depends on M18 and M20**, and on neither M19 nor M21 — see §3.
 
@@ -661,9 +666,87 @@ in one of the two engines, R22 ships as a published chord that works in one engi
 **labelled** as such in the menu — a menu showing an accelerator the system cannot receive is the
 live-looking-button defect, so the label is the requirement, not a nicety.
 
+> **CORRECTION, from the measurement and the implementation. THE ASSUMPTION HELD AND THE
+> ONE-ENGINE FALLBACK WAS NOT REACHED — and five of this row's statements need correcting rather
+> than editing away.** `bench/m22-switch/probe.py` is the measurement: 25 candidates × 2 engines ×
+> 2 runs, Chrome 158 over `scripts/cdp.py` and Firefox 156 over `scripts/bidi.py`. Constraints
+> **312**, **313** and **314** carry what it established and **`docs/DECISIONS.md` D41** is the
+> owner's decision. `scripts/check.py --only m22` is **73 expectations, 8 red, 15.77 s**; the
+> Firefox gate is **25 of 32**. M22 stayed 3 d.
+>
+> 1. **THE PRD's §10.3 IS CLOSED, AND THE OWNER'S RULE DECIDED THE METHOD AND NOT ONLY THE CHORD:**
+>    pick whichever candidate the probe shows free in **both** engines, and **LABEL the real
+>    accelerator in the menu**. **14 of 25 qualify** — Alt+\`, Ctrl+\`, Ctrl+F6, Alt+Shift+\`,
+>    Ctrl+Shift+\` and Alt+1..9 — and D41 takes **Alt+\` forward, Alt+Shift+\` backward, Alt+1..9
+>    direct**. So **R22's one-engine fallback above was NOT built**: a branch for a world the
+>    measurement ruled out is a branch no check can reach, which is this plan's own rule about
+>    M20's refusal-by-name.
+> 2. **"WHICH CANDIDATES ARE FREE" IS TWO READINGS AND NOT ONE, which this row did not anticipate.**
+>    All 25 candidates are *delivered* in both engines with the right `code` and the right
+>    modifiers, so a probe that only logged `keydown` would have reported 25 free chords and chosen
+>    Alt+Tab. The second run — each chord again **with the listener cancelling nothing** — is what
+>    separates free from borrowed: Alt+Tab, Alt+Shift+Tab and F6 read `host: "stopped"` in Chrome
+>    and Shift+F6 reads `free: false, host: "anyway"`. **A chord the page can only suppress is
+>    borrowed, not free** (constraint 312).
+> 3. **THE DISPATCHER MUST BIND ON `KeyboardEvent.code` AND NOT ON `key`**, which no document here
+>    said. Firefox delivers Shift+Backquote as `key: "~"` and Chrome as ``key: "`"``; both deliver
+>    `code: "Backquote"`. A `key`-matching dispatcher works in Chrome and silently misses
+>    Alt+Shift+\` in Firefox with every Chrome expectation green — the shape of all five Chrome-only
+>    bills `CLAUDE.md` records. Constraint **313**.
+> 4. **`band-clips` CANNOT TURN THE REACHABILITY CLAUSE AND IS RESCOPED TO THE DRIVEN WHEEL.**
+>    Measured in both engines: `overflow: hidden` still permits a programmatic `scrollLeft`
+>    (`inView: true, scrollLeft: 38` under the control), so the chevron and `revealSlot` clauses
+>    **HOLD** in that world and a control scoped to reachability would turn nothing. Its
+>    `Expect(failed=)` names `aDrivenHorizontalWheelScrollsIt` and `theBandIsAScroller` and nothing
+>    else. **And a wheel over the band must carry `deltaX`** — a `deltaY` moves it 0 px in both
+>    engines. `bench/m22-band/probe.py` is the measurement, 13 clauses, run before the fix was
+>    designed.
+> 5. **`tray-outlives` IS SCOPED TO A DIFFERENT CLAUSE THAN THIS ROW ASKS FOR, BECAUSE THE PLAN'S
+>    OWN PROOF SENTENCE IS ALREADY RED.** "A tray icon is withdrawn when its process dies" is not
+>    true on this tree and was not made true: killing the publisher draws `reaped` out of the kernel
+>    and **no `win-destroy`**, because `spawnChild` copies every fd into a child — window fds
+>    included — so the description's `refs` never reaches 0 and `F_WIN.close`, the only caller of
+>    `WinMgr.destroyTree`, never runs. The clause stays as this row wrote it and fails; the control
+>    turns `theIconWentWhenTheLastHolderDied`, the withdrawal that does work, because a control
+>    satisfied by a standing defect verifies nothing. **The fix is one line in
+>    `src/kernel/kernel.mjs` or `src/kernel/files.mjs`** and `MILESTONES.md` §M22 §What is owed
+>    carries both candidates.
+>
+> 6. **THE DISPATCHER'S SITE AND ITS PHASE ARE BOTH CORRECTIONS, AND THE PHASE IS THE FINDING.**
+>    The table shipped with no dispatcher, and the contract this plan and `MILESTONES.md` both
+>    wrote named `src/wm/winhost.mjs`'s `#keys`. **That site cannot work.** `#keys` is the funnel
+>    both window kinds reach, and by the time it runs `src/wm/terminal.mjs` has already turned the
+>    keystroke into bytes — it listens on its own `pre`, deeper in the tree and therefore earlier
+>    in the bubble. Measured with the dispatcher first written bubble-phase: `prevented: true`,
+>    `switches: 0`, `where: 'terminal'`, `screenGrew: 1` — matched, cancelled, and the reader got a
+>    backtick. **`preventDefault` stops the BROWSER and not the page.** The dispatcher is therefore
+>    a **CAPTURE-phase** listener on `src/wm/taskbar.mjs`'s own container, with `stopPropagation`
+>    beside the match, and an unbound key left untouched. Constraint **315**; D41's correction
+>    section carries it too.
+> 7. **AND A TAKEN CHORD CANNOT BE COUNTED BY WHAT REACHED A WINDOW.** `WinHost.keyCounts()` sums
+>    the keys that reached a window's widget and a taken chord reaches none, so the shell counts
+>    its own (`stats.trustedChords` / `syntheticChords`) and the clause asserts the SPLIT: four
+>    bound chords taken by the shell, two unbound ones still reaching a window.
+> 8. **THE TRAY DEFECT WAS THE KERNEL'S AND THE PROOF WAS RIGHT.** `theRowIsTheDesktopProcesses`
+>    and `theTrayDrewExactlyOneStatusIcon` were already green, so the icon was present and the kill
+>    was aimed. Constraint 14's "close fds, **destroy windows**" is two steps and only the first was
+>    implemented. `WinMgr.reapPid(pid)` is the second — the windows the dying process CREATED,
+>    regardless of refs, one `destroyTree` per root, counted as `stats.reapedWindows` — called from
+>    `teardown()` in `src/kernel/kernel.mjs` after the fd walk. `Window.destroy` gained a `#prune()`
+>    before its -EHOSTGONE replies, because teardown answers the dying process's inflight call first
+>    and replying to that stale park again would break the `issued == replied` identity
+>    `check_syscall` asserts. Constraint **316**; `src/bin/desktop.mjs` needed no change.
+>
+> **SO M22 IS CLOSED: `scripts/check.py --only m22` is 73 expectations, ALL GREEN, 11.30 s.** Point
+> 5 above stands as written — `tray-outlives` is still scoped to the shell's own row cache and not
+> to the kernel's `win-destroy` clause, and with the kernel fixed it turns BOTH readings of the
+> withdrawal while leaving that clause green. **`src/bin/editor.mjs:247`'s defect IS retired** — the
+> save writes bytes to the file, read back through a fresh `open` in a process that did not do the
+> writing — and `--save-to-window-fd` is the world that restores it (constraint 314).
+
 ---
 
-### M23 — thumbnails, views, the breadcrumb, panes, columns, search · 4 d
+### M23 — thumbnails, views, the breadcrumb, panes, columns, search · 4 d · DONE, R29 in part and R30 NOT built
 
 **Closes.** R26–R31, A7, A10. A13 is not landed — see §6.
 
@@ -690,6 +773,64 @@ Nothing in this system decodes a PNG — `src/bin/imgview.mjs:76-82` reads the s
 and says "THIS IS NOT A DECODER" — and a locked-down realm has no `createImageBitmap`
 (`src/libos/lockdown.mjs`). If no honest decode site is agreed, R26 ships for `.rgba` payloads only
 and a PNG falls back to its type icon, which is the stated fallback and not a silent one.
+
+> **CORRECTION, from the measurement. THE PARAGRAPH ABOVE CONTAINS ONE FALSE CLAIM AND IT IS THE
+> ONE THE WHOLE ROW RESTED ON: "a locked-down realm has no `createImageBitmap`" IS FALSE, IN BOTH
+> ENGINES.** `createImageBitmap` is **not among the 11 entries in `TARGETS`** in
+> `src/libos/lockdown.mjs`, so a process realm is not stripped of it — checked by importing the
+> exported data in the measuring page rather than by grepping the file, which is this repository's
+> own rule for that table. The paragraph's first sentence is true and unaffected:
+> `src/bin/imgview.mjs` is not a decoder. The row is kept and corrected here rather than edited,
+> as §M20's own obsolete paragraph was. `bench/m23-blit/` is the measurement and
+> **`docs/DECISIONS.md` D42** is the decision.
+>
+> 1. **THE DECODE SITE IS THE PROCESS, AND THE EVIDENCE NEEDS NO OTHER.** A decode promise settles
+>    inside a real program on a real kernel in the realm M6 ships — both halves confirmed live, 10
+>    bindings stripped with 0 remaining and `eval` refused by the CSP, with `--no-csp` flipping that
+>    second reading to `no: eval returned 2` so it is a measurement and not an assumption. The
+>    pixels come back **byte-exact** against this repo's own `/usr/share/logo.rgba`: maxDelta 0,
+>    256 of 256 opaque pixels identical, in Chrome 158 at dpr 2 and Firefox 156 at dpr 1, with
+>    the awaited decode settling in 0.30 ms and 0.12–0.18 ms respectively.
+> 2. **BUT ONLY IN AN AWAITED TURN, WHICH THIS ROW DID NOT ASK AND WHICH CONSTRAINS R26's DRAWING
+>    PATH.** A present binding is not a usable one — constraint 219 is the precedent and its shape
+>    holds for a promise. Measured: NOT while parked in `nanosleep` (406.81 ms, nothing settled, and
+>    not after one microtask either), NOT while spinning (400 ms), and a cold decode needs **7**
+>    macrotask turns in Chrome / **5** in Firefox. So a decode MUST NOT be folded into a syscall
+>    reply, `files` MUST decode BETWEEN syscalls as `await`s, a synchronous thumbnail loop over a
+>    directory cannot exist, and `src/libos/syscall.mjs` needs no change and MUST NOT get one.
+>    Constraint **318**. `run` in `src/bin/files.mjs` is `async` for this reason.
+> 3. **THE KERNEL WAS THE OTHER CANDIDATE AND IS RECORDED AS REJECTED.** It awaits macrotasks so it
+>    could decode; what that hands it is an image-format parser over untrusted bytes in the only
+>    privileged realm in the system. `DL_BLIT` taking a data-object fd makes it unnecessary — the
+>    payload is already kernel-owned and refcounted, so the kernel validates with `decodeBitmap` and
+>    never learns a format (D42, constraint 317).
+> 4. **THE `.rgba`-ONLY FALLBACK IS NOT THE DESIGN AND IS STILL OWED AS AN ERROR PATH.**
+>    `createImageBitmap` **rejects** on a format the platform will not take and on corrupt bytes,
+>    recorded as `rejected: <message>` rather than as a fault, so "a picture falls back to its type
+>    icon" is reached for an **undecodable file**. `files --thumb-no-fallback` is the world where it
+>    is absent, and `drewPictures + drewIcons === shownRows` is the arithmetic that tells a fallback
+>    from a blank cell.
+> 5. **R29 LANDED IN PART AND R30 DID NOT LAND AT ALL, so this row's "Closes R26–R31" is
+>    overstated.** R29's Details-pane *content* — the selection's count and its summed size — is
+>    drawn in the status strip that was already there rather than in a fourth band, and the sum is
+>    over FILES because a directory's `st_size` is its own entry table. **R29's navigation pane and
+>    its splitter do not exist** (`grep -c 'splitter' src/bin/files.mjs` → 0), and **R30's column
+>    resize, its double-click auto-fit and its persisted widths do not exist** either. R26, R27, R28
+>    and R31 are closed. A10 was answered only as a COST — `account.statMs` beside `account.stats` —
+>    because A10's fix is a `readdir` that returns the stat beside the dirent, which is `src/abi.mjs`
+>    and a different row.
+> 6. **`DL_BLIT`'s DESTINATION HAS NO EXTENT, AND THAT DECIDES WHERE THE RATIO LIVES.** The extent is
+>    the payload's own `BMP_W`/`BMP_H`, so a thumbnail is produced at `cell × dpr` DEVICE px and the
+>    ratio enters the PAYLOAD and not the op. It also means `src/bin/imgview.mjs` CANNOT move to the
+>    op: its picture is an integer upscale, 802,824 payload bytes per repaint against 8,224 bytes of
+>    fill-rects for the same 496×448 client. Constraint **319**.
+>
+> **AND `blit-unvalidated` HAS NO BOOT CFG KEY.** `setBlitValidated` is exported from
+> `src/kernel/calls.mjs` and nothing calls it — `src/kernel/kernel.mjs` reads no
+> `cfg.blitUnvalidated`, where every other bench-gated hook lives. The control is a `repo_fixture`
+> over the served bytes instead, needling that module's own initial value, and it refuses with
+> `Gate.FIXTURE` rather than running a green world if the line is reworded. `scripts/check.py
+> --only m23` is **45 expectations, all green, 10.06 s**.
 
 ---
 
@@ -1203,7 +1344,7 @@ run gains a dpr axis: the geometry clauses are asserted under `--force-device-sc
 | M19 | Removing `if (!e.buttons) return;` (`src/wm/winhost.mjs:575`) floods a queue that `push` drops the newest from | Drive 500 buttonless moves and read `/proc`'s `queued:` and `coalesced:` — **not `dropped:`**, which a drained ring never moves. The tail-replacement prediction is `queued:` near the batch count and `coalesced:` near 500. Twenty minutes, and it is also the `no-hover-coalesce` control and the evidence constraint 223's amendment rests on. |
 | M20 | No writable default location is agreed, so every mutating verb is unreachable from the desktop icon | `node -e` over `src/kernel/providerfs.mjs` printing the mount's write mode; then §7.3's decision. The measurement is minutes. What Delete does on a read-only mount is not measurable and is the PRD's §10.1. **CLOSED BY M19a**: the location is `/Users/Default`, a writable copy of the base, and §10.1 is answered by removing the read-only case rather than handling it (D40, constraint 306). |
 | M21 | A Bin sidecar does not survive a torn journal | `scripts/fsfuzz.py` — 10,000 torn journals in about three seconds, in plain node, because nothing in `src/fs/` touches OPFS. This is the cheapest measurement in the whole plan and it is why `src/fs/` purity is a standing constraint. |
-| M22 | Every Alt+Tab substitute is taken by the host in one of the two engines | `bench/m22-switch/probe.py`: log `keydown` for each candidate chord in Chrome and in Firefox over `scripts/bidi.py`. Two hours. It **prices** the PRD's §10.3; the choice among the free ones stays a human's. |
+| M22 | Every Alt+Tab substitute is taken by the host in one of the two engines | `bench/m22-switch/probe.py`: log `keydown` for each candidate chord in Chrome and in Firefox over `scripts/bidi.py`. Two hours. It **prices** the PRD's §10.3; the choice among the free ones stays a human's. **CLOSED, AND THE ASSUMPTION WAS WRONG IN THE SAFE DIRECTION: 14 of 25 candidates are free in BOTH engines**, so the one-engine fallback was not reached and not built. §10.3 is answered by **D41** — Alt+\` forward, Alt+Shift+\` backward, Alt+1..9 direct, with the real accelerator labelled. **Logging `keydown` would NOT have been enough**: all 25 are delivered, and only a second run with the listener cancelling nothing tells a free chord from a borrowed one (constraint 312). The two hours became a 25 × 2 × 2 sweep with three scored controls and a reachability gate — because headed Chrome here delivers no key at all, which an ungated probe would have reported as 25 taken chords. |
 | M23 | There is no honest site for a PNG decode: a locked-down realm has none and the kernel is not an image library | Read `src/libos/lockdown.mjs`'s `TARGETS` — the single definition of what a realm loses — and check for `createImageBitmap`. Minutes. If it is stripped, R26 ships for `.rgba` with a named fallback. |
 
 Two cross-cutting risks, and both have cost this project a milestone before.

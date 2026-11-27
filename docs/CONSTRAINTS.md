@@ -3350,3 +3350,238 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     branch that no longer matches the filesystem under it.
     `scripts/check.py --negative restore-overwrites` is the world with the pre-check dropped — 8
     expectations red, 64 intact — and the reader's file is destroyed in it.
+
+312. **A CHORD A PAGE RECEIVES IS NOT A CHORD A PAGE MAY HAVE. THE SECOND READING IS WHAT THE HOST
+    DOES WHEN THE PAGE CANCELS NOTHING, AND IT MUST BE TAKEN PER ENGINE.** `keydown` arriving with
+    the right `code` and the right modifiers says only that the chord is *deliverable*. The host may
+    act as well — and then one press gives two behaviours, the page's and the browser's, with
+    nothing on screen saying so. **A CHORD WHOSE HOST ACTION ONLY A `preventDefault` SUPPRESSES IS
+    BORROWED, NOT FREE**, and the day a browser makes that binding uncancellable the shell's gesture
+    stops working with no error thrown anywhere. So freedom is five clauses and not one — received,
+    modifiers intact, `code` intact, `preventDefault` honoured, and the host quiet — and the fifth
+    needs its own run with the listener cancelling nothing, which is a **per-chord positive
+    control**: without it, "the host was quiet" is a fact about the cancel and not about the host.
+    Measured in `bench/m22-switch/probe.py`: 25 candidates × 2 engines × 2 runs, Chrome 158 over
+    `scripts/cdp.py` and Firefox 156 over `scripts/bidi.py`, each chord dispatched into a served
+    fixture that logs `code`, the modifier word, `isTrusted`, `cancelable`, `defaultPrevented` and
+    `blur`/`visibilitychange` counters. Committed: `bench/m22-switch/results-headless.json`,
+    `results-headed.json`, `results-controls-headless.json`.
+    **WHAT IT FOUND, AND THE SPLIT IS NOT WHERE THE PLAN EXPECTED IT.** Every one of the 25 is
+    *delivered* in both engines, so a probe that only listened would have reported all 25 free. The
+    uncancelled run separates them: in Chrome **Alt+Tab**, **Alt+Shift+Tab** and **F6** read
+    `host: "stopped"` — the key arrives and cancelling it is the only thing keeping the host from
+    acting — and **Shift+F6** reads `free: false, host: "anyway"`, the host acting even when the page
+    cancels. Firefox's blur half is unreadable (it reports no focus even before a chord, recorded in
+    the run's own `notes`), so its `visibilitychange` half is read and the Chrome reading is the
+    binding one. **14 of 25 qualify** — free and preventable in both engines with no documented
+    window-manager or browser consumer: Alt+`, Ctrl+`, Ctrl+F6, Alt+Shift+`, Ctrl+Shift+` and
+    Alt+1..9. The other 7 are rejected on their documented consumers (Ctrl+Tab, Ctrl+Shift+Tab,
+    Ctrl+Alt+Tab, Meta+Tab, Alt+Escape, Ctrl+Escape, Alt+Space) and not on a measurement.
+    **A MEASUREMENT OVER A CHANNEL THAT DELIVERS NOTHING READS AS "THE HOST TOOK EVERYTHING", so the
+    whole table is gated behind a bare `5` keydown that MUST arrive.** Headed Chrome on this machine
+    delivers no key at all; the gate catches that and the run refuses, where an ungated probe would
+    have reported 25 taken chords and killed R22. `--prove-failure` runs three controls, each moving
+    one named column: `nodispatch` (25 of 25 rows `received: no`, which is exactly how a
+    host-consumed chord renders), `nomods` (24 of 25 lose `mods`), `nopreventdefault` (0 of 25
+    `prevented`, and Chrome's `hostQuiet` falls from 25 to 21).
+    **`src/wm/chords.mjs` IS THE ONE TABLE, AND THE DISQUALIFIED SET IS DATA IN IT** — `BLOCKED`,
+    each row with its measured `why`, asserted at module load to be disjoint from the bound set
+    **and from the bound set's labels**, because a row bound to Backquote and labelled "Alt+Tab"
+    passes every other clause. **A MENU MUST PUBLISH THE ACCELERATOR THE DISPATCHER LISTENS FOR**:
+    an accelerator the system cannot receive is the live-looking-button defect, and the shell's
+    labels are therefore read off `labelFor` and never written out. `takeChord` calls
+    `preventDefault` itself, so the match and the cancel cannot come apart — F6's `stopped` is the
+    demonstration of what a missed one costs, which is the reader's focus leaving the page with no
+    error anywhere. **D41** is the decision; `scripts/check.py --only m22` asserts both labels and
+    that no blocked label is on screen.
+
+313. **A KEY CHORD MUST BE BOUND TO `KeyboardEvent.code` AND NEVER TO `key`, BECAUSE THE TWO ENGINES
+    DISAGREE ABOUT `key` ON A SHIFTED CHORD.** Measured: Shift+Backquote arrives in Firefox 156 as
+    `key: "~"` and in Chrome 158 over CDP as ``key: "`"``; **both** deliver `code: "Backquote"`
+    (`bench/m22-switch/probe.py`, the `alt-shift-backquote` and `ctrl-shift-backquote` rows read
+    `keyOk: false` in Firefox and `true` in Chrome, and `codeOk: true` in both; reproduced through
+    the real shell by `bench/m22-switch/firefox-shell.py` → `keyDisagrees`). So a dispatcher matching
+    ``event.key === "`"`` works in Chrome, silently misses Alt+Shift+` in Firefox, and **leaves every
+    Chrome expectation green** — the shape of all five Chrome-only bills `CLAUDE.md` records.
+    `code` is a physical position and `key` is what the layout and the modifiers made of it, which
+    is also why the keysym table (constraint 299) binds the other way round: `KEYSYM_BY_KEY` reads
+    `event.key` precisely so an AZERTY keyboard does not send the keysym of the key in that
+    position. **A CHORD IS A GESTURE AND A KEYSYM IS A CHARACTER**, and that is the whole of the
+    rule: the two tables read different fields on purpose and neither may be switched to the other's.
+    `src/wm/chords.mjs`'s `chordAt` reads `code` and the modifier word and nothing else, and the
+    modifier word is `WinHost.modifierBits`' — a second reading of `altKey` in the chord table would
+    be the copy that drifts. The match is on an **EXACT** modifier word and not a superset, or
+    Alt+Shift+` also fires Alt+` and the reverse chord is unreachable.
+
+314. **A SAVE THAT WRITES TO THE WINDOW FD REPORTS A SUCCESS THAT DID NOT HAPPEN, AND EVERY DRAWING
+    CLAUSE HOLDS WHILE IT DOES.** `src/bin/editor.mjs`'s "save and close" wrote `[saved]` to the
+    **window** fd and never to the file, and it shipped that way from M9 to M22 — admitted in a
+    comment and reachable by a reader in two keystrokes. The reason it survived is the one worth
+    carrying: **nothing a reader or a check can see is wrong in that world.** `commitSave` returns
+    the document's length, so the byte count is right, the title follows the path, the Save As dialog
+    names the destination it will not write, and the screen says `[saved N byte(s) to P]` — the only
+    false reading is in the filesystem. `scripts/check.py --negative save-to-window-fd` and
+    `src/bin/editor.mjs --save-to-window-fd` are that world, re-runnable from argv with no source
+    edit: it turns **4 byte clauses of 73 and leaves all five drawing clauses green** in Chrome, and
+    in Firefox turns exactly ONE of 32 — `theBytesAreInTheFileWhenItIsReopened`
+    (`bench/m22-switch/firefox-shell.py --prove-failure`, 25 green → 24).
+    **SO A SAVE'S CHECK MUST RE-OPEN THE FILE AND READ THE BYTES BACK, AND A REPORTED COUNT IS NOT
+    EVIDENCE.** This is constraint 39's rule at the place it is cheapest to get wrong: the artifact
+    a user touches says the save worked (CLAUDE.md §Verification), so the only assertion capable of
+    failing is a fresh `open` in a process that did not do the writing. The control's asymmetry is
+    the point and is declared in its `Expect(failed=)`: a control that also moved a drawing clause
+    would be describing a different defect from the one that shipped.
+
+## What M22's dispatcher and M23 found
+
+315. **A SHELL CHORD MUST BE TAKEN ON THE CAPTURE PHASE. A BUBBLE-PHASE LISTENER ON THE SHELL IS
+    BEHIND EVERY FOCUSED WIDGET IN THE TREE, SO THE WIDGET EATS THE CHORD FIRST — AND CANCELLING IT
+    DOES NOT HELP.** `preventDefault` stops the BROWSER, not the page: a chord the shell matches and
+    cancels still reaches the focused window's own handler, and `src/wm/terminal.mjs` listens on its
+    own `pre`, which is deeper in the tree and therefore earlier in the bubble. Measured, with the
+    dispatcher first written bubble-phase: `prevented: true`, `switches: 0`, `where: 'terminal'`,
+    `screenGrew: 1` — the chord was cancelled, the terminal had already turned it into bytes, and
+    Alt+\` arrived in the reader's shell as a backtick (`scripts/check.py --only m22` PROOF 3, the
+    `switch` clause table). Capture runs ancestor-first, so a listener registered with `true` on the
+    shell's own container sees the chord before any window can, and `stopPropagation` MUST go with
+    it — without that second half the deeper listener still fires on the way down's return trip.
+    **THE MATCH MUST STILL BE A NO-OP FOR AN UNBOUND KEY**: a capture listener sits above every
+    keystroke in the page, so `takeChord` returning null MUST return without touching the event, or
+    the shell has quietly become the system's keyboard. `src/wm/taskbar.mjs` is the site and not
+    `src/wm/winhost.mjs`, which was the predicted one: `#keys` is the funnel both window kinds reach,
+    and by the time it runs the terminal's handler has already run.
+    **AND THE PHASE MOVES WHAT A HARNESS CAN SEE, WHICH IS A SECOND BILL AND NOT A COROLLARY.**
+    `defaultPrevented` cannot be read in the listener that might cancel the event, so a driver that
+    wants it reads it in a LATER listener — and `stopPropagation` on the capture phase means a
+    bubble-phase observer on `window` is never called at all. `bench/m22-switch/firefox-shell.py`'s
+    recorder is exactly that pair, and after the dispatcher moved to capture its
+    `theChordWasCancelledSoTheHostCannotHaveIt` reads `prevented: false` on a chord that WAS
+    cancelled, in a run whose `switches` moved and whose topmost window changed. **`prevented:
+    false` there is the absence of a reading, not a reading of absence** — the event object is
+    retained in the recorder's own `Map` and is still readable after the dispatch returns, which is
+    where the fact lives. A gate that reads a cancel downstream of a `stopPropagation` is measuring
+    its own listener's reachability.
+    **A SHELL CANNOT COUNT A TAKEN CHORD BY WHAT REACHED A WINDOW.** `WinHost.keyCounts()` sums the
+    keys that reached a WINDOW's widget and a taken chord reaches none, so the shell counts its own
+    (`stats.trustedChords` / `syntheticChords`, published in `report()`) and a check asserts the
+    SPLIT — four bound chords taken by the shell, two unbound ones still reaching a window. One
+    total cannot tell "the dispatcher ran" from "the dispatcher ate everything".
+
+316. **CONSTRAINT 14's "CLOSE FDS, DESTROY WINDOWS" IS TWO STEPS, AND THE SECOND ONE CANNOT BE
+    DELIVERED BY THE LAST `close` — BECAUSE FD INHERITANCE MEANS THE DYING PROCESS IS NOT THE LAST
+    HOLDER.** `F_WIN.close` runs on the last close of a DESCRIPTION, `spawnChild` inherits EVERY fd
+    of the caller into the child with window fds included, and one description held by two processes
+    has `refs === 2`. So a process with one living child is reaped with its window's `refs` above
+    zero, `F_WIN.close` never runs, `WinMgr.destroyTree` is never reached, and the frame, its
+    published rows and its tray icon stay on screen after the process behind them is gone. **This is
+    reachable from userland without trying**: `src/bin/desktop.mjs` spawns every program a reader
+    starts, so on the shipped desktop ANY running program kept the desktop's window alive.
+    Measured — `[{t: 'reaped', pid: 1, kind: 1}]` out of the kernel and **no `win-destroy`**,
+    `wentMs: -1`, with `theRowIsTheDesktopProcesses` and `theTrayDrewExactlyOneStatusIcon` both
+    GREEN, so the icon was present and the kill was aimed (`www/m22.html` PROOF 5).
+    **SO TEARDOWN MUST DESTROY THE WINDOWS THE DYING PROCESS CREATED, KEYED ON THE CREATOR AND NOT
+    ON THE HOLDERS.** `WinMgr.reapPid(pid)` is that step, called from `teardown()` in
+    `src/kernel/kernel.mjs` after the fd walk — one `destroyTree` per root so the documented owner
+    cascade still reaches another process's child windows, idempotent, counted apart as
+    `stats.reapedWindows` because `destroyed` cannot tell a window a program closed from one a death
+    took. The creator is the right key for the reason a surface is: nobody else can draw to the
+    window, read its events, answer its close request or publish its rows. An HEIR keeps its
+    inherited fd and the description keeps answering — a `WEV_DESTROYED` record and -EHOSTGONE
+    thereafter, which is the path an heir already owes for a frame the reader closed.
+    **AND THE DYING PROCESS'S PARK MUST BE PRUNED BEFORE THE -EHOSTGONE REPLIES GO OUT.** Teardown
+    answers the dying process's inflight call FIRST, so by the time its windows are destroyed the
+    `read` it was parked in has already been answered; replying to that slot again bumps SEQ and
+    decrements G_INFLIGHT a second time and breaks the `issued == replied` identity `check_syscall`
+    asserts. `Window.destroy` therefore calls `#prune()` — the same staleness test every other
+    reader path uses — before it walks `waitingReaders`. Without `reapPid` this path was unreachable,
+    which is why the defect arrived with the fix.
+
+317. **PIXELS MUST NOT TRAVEL INLINE IN A DISPLAY LIST. AN IMAGE OP NAMES A KERNEL-OWNED PAYLOAD BY
+    FD, AND THE KERNEL VALIDATES IT WITH THE HEADER CODEC IT ALREADY HAS — NOT WITH A DECODER.** A
+    display-list record is 32 bytes, of which six i32 arguments are reachable, so 24 bytes of
+    payload is **six pixels** — worse than one `DL_FILL_RECT` each, which is the 256-fill-rect icon
+    R26 exists to remove. `DL_BLIT: 8` therefore takes a **data-object fd** in `a2` and a signed
+    destination in `a0`, `a1`, and carries **no destination extent**: the extent is the payload's own
+    `BMP_W`/`BMP_H`. A data object's payload is already kernel-owned and refcounted (constraints 240,
+    241), so the lifetime problem is solved rather than new, and the bytes are where the renderer
+    needs them without the kernel ever knowing a format: it validates with `decodeBitmap`, which is
+    constraint 293's rule for a malformed text run applied unchanged.
+    **A BLIT HAS FIVE DISTINCT WAYS TO BE WRONG AND EACH OWES ITS OWN ERRNO**, because a single "it
+    refused" passes for a refusal for the wrong reason: **EBADF** no such fd (and a negative one),
+    **EINVAL** an fd on something that is not an `F_DATA`, **ENOTSUP** an object that never offered
+    `DOBJ_BITMAP`, **ENOENT** offered and never written, **EBADMSG** present and `decodeBitmap`
+    refuses it. `EBADMSG` is **9** here, WASI preview1's number and not Linux's (constraint 306). A
+    batch holding one bad blit is refused WHOLE and nothing reaches `WinMgr.draw`, and each fd is
+    resolved once per batch so one sprite drawn N times is one fetch.
+    **THE RENDERER OWES A SECOND COUNTER, AND IT IS THE ONLY SIGNAL THAT SEPARATES TWO IDENTICAL
+    PICTURES.** `Surface.blits` and `Surface.blitsUnbacked`: "the payload channel dropped the map"
+    and "the program drew nothing" are the same screen, and only the second counter tells them
+    apart. It earned itself at once — `bench/m23-files/probe.py` found a batch the kernel had
+    ACCEPTED with four blit ops in it, `blits: 0, blitsUnbacked: 4`, and named the three lines in
+    three files that had to agree (`src/kernel/calls.mjs` passing three arguments, `src/kernel/wins.mjs`
+    declaring two, `src/wm/winhost.mjs` calling `replay` with one). A validated batch that drew
+    nothing is neither the program's fault nor the validator's.
+    **AND A BLIT MUST GO THROUGH `drawImage`, NEVER `putImageData`.** `putImageData` ignores the
+    clip, the transform, the alpha and the composite, so a translucent payload over a known ground
+    is the one reading that tells a renderer that composites from one that overwrites — and it is a
+    registered clause for that reason.
+
+318. **A PROCESS CAN DECODE AN IMAGE, AND ONLY IN AN AWAITED TURN. `createImageBitmap` SURVIVES THE
+    REALM LOCKDOWN — IT IS NOT IN `TARGETS` — BUT A PRESENT BINDING IS NOT A USABLE ONE.** Measured
+    by `bench/m23-blit/`, which runs a real program on a real kernel in the realm M6 ships — both
+    halves confirmed live in the measured realm, 10 bindings stripped with 0 remaining and `eval`
+    refused by the CSP, and `scripts/serve.py --no-csp` flips that second reading to
+    `no: eval returned 2`, which is what makes it a measurement rather than an assumption.
+    A fresh decode of `/usr/share/logo.png` was started in each of the three states a process can be
+    in: **NOT while parked in a syscall** (406.81 ms park, nothing settled, and not after one
+    microtask either), **NOT while spinning** (400 ms), and **settled when awaited** — 0.30 ms in
+    Chrome 158.0.8127.88 at dpr 2 and 0.12–0.18 ms across runs in Firefox 156 at dpr 1 (the
+    committed artifact holds 0.12; a 2026-11-27 re-run read 0.18), with a COLD decode needing **7**
+    macrotask turns in Chrome and **5** in Firefox. The pixels come back BYTE-EXACT against this
+    repo's own `/usr/share/logo.rgba`, the same image already stored as a `DOBJ_BITMAP` payload:
+    maxDelta **0**, 256 of 256 opaque pixels identical, in both engines
+    (`bench/m23-blit/results-headless.json`, `results-firefox.json`).
+    **SO CONSTRAINT 219's SHAPE HOLDS FOR A PROMISE, AND IT IS A DESIGN CONSTRAINT AND NOT A
+    FOOTNOTE.** A decode MUST NOT be folded into a syscall reply; a thumbnail loop over a directory
+    MUST be `await`s between syscalls and a synchronous one cannot exist; a drawing path that wants
+    pictures is async end to end. `src/libos/syscall.mjs` needs no change and MUST NOT get one —
+    nothing here asks a parked process to observe anything. **A gap between "a promise settled" and
+    "a thumbnail exists" is closed by reading the pixels back**, which is what the byte-exactness
+    above is: `createImageBitmap` resolving says only that the platform accepted the bytes.
+    **AND A REJECTION IS THE ERROR PATH R26's FALLBACK IS REACHED THROUGH.** `createImageBitmap`
+    rejects on a format the platform will not take and on corrupt bytes, recorded as
+    `rejected: <message>` rather than as a fault, so "a picture falls back to its type icon" is owed
+    for an UNDECODABLE file and not for a format nothing can read.
+    **ONE NAMING TRAP, PAID FOR ONCE.** `src/libos/process.mjs` owns the key `realm` on every result
+    row and spreads the program's `data` FIRST, so a program field of that name is silently
+    overwritten: the first run of this measurement reported `createImageBitmap` ABSENT in a realm
+    that had just used it. A program reporting through a result row MUST avoid `realm`, `clock`,
+    `abiFingerprint`, `isolated`, `exiting`, `envKeys`, `envKinds`, `pid`, `calls`, `replies`,
+    `errors`, `sinkBytes`, `sinkSum`, `sinkWrites`.
+
+319. **AN OP WITH NO DESTINATION EXTENT MEANS THE SIZE IS CHOSEN AT DECODE TIME, NOT AT DRAW TIME —
+    SO A THUMBNAIL IS PRODUCED AT `cell × dpr` DEVICE PIXELS AND A RATIO ENTERS THE PAYLOAD, NOT THE
+    OP.** `DL_BLIT` draws the payload's own `BMP_W`/`BMP_H`, so a caller wanting a 32×32 thumbnail
+    must produce a 32×32 payload, and on a dpr-2 surface a 96 CSS px cell wants 192 device px — the
+    ratio `WEV_CLIENT` handed the process (constraint 264's bill, moved one layer). Measured in
+    Firefox 156 across three ratios: a 16×16 source produces a 16×16 / 24×24 / 32×32 payload at
+    dpr 1 / 1.5 / 2 and the blit lands at `plate.{x,y} + round((plateSide − fit)/2)` in all three,
+    with the two decode routes — a `.png` through the platform decoder and a `.rgba` through
+    `decodeBitmap` — producing the SAME extent. The gate asserts that agreement and not each route
+    alone (`bench/m23-blit/firefox-views.py`).
+    **A CHECK MUST THEREFORE RECOMPUTE THE EXTENT FROM THE PROGRAM'S OWN FUNCTION**, which is
+    `FILES_METRICS.thumbFit`: a clause restating "where the payload is and what colour it should be"
+    is right at dpr 1 and wrong by the ratio everywhere else, with every expectation green — the
+    shape of M11's, M12's and M16's bills.
+    **AND THE SAME RULE IS WHY `DL_BLIT` CANNOT REPLACE AN INTEGER UPSCALE.** `src/bin/imgview.mjs`'s
+    whole picture is `drawnBox`'s upscale of a small bitmap, and at the 496×448 client it works
+    through (scale 28, extent 448×448) a payload is **802,824 bytes per repaint** against **8,224
+    bytes** of fill-rects for the same picture. The op that program wants is a blit WITH a
+    destination extent, which is an ABI change and not a call site — so it keeps its fill-rects and
+    the ABI keeps one unambiguous unit.
+    **THE CEILINGS ARE DERIVED, NEVER WRITTEN.** `MAX_INLINE` (65,404) less `BITMAP_HEADER` (8) is
+    **16,349 pixels per `dataobj_set` call**, so **127×127** (64,524 B) is the largest SQUARE one
+    call carries and above it `dataobj_set` is a short-count loop with `DOBJ_F_APPEND`;
+    `DOBJ_MAX_BYTES` (1,048,576) gives `THUMB_MAX_SIDE` **511**, and `DOBJ_BUDGET_BYTES` (8,388,608)
+    is ~8 one-megabyte thumbnails for the WHOLE system, which is why `THUMB_CAP` holds a reserve for
+    the clipboard and a drag rather than spending the budget on a listing.

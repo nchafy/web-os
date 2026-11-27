@@ -1074,6 +1074,11 @@ function teardown(slot) {
       }
     }
   }
+  // AND THE WINDOWS IT CREATED, which the walk above does NOT cover. Constraint 14's "close fds,
+  // destroy windows" is two steps: `F_WIN.close` runs on the last close of a DESCRIPTION, and
+  // `spawnChild` inherits every fd into every child, so a process with one living child is reaped
+  // with its window's `refs` above zero and its frame still on screen. See `WinMgr.reapPid`.
+  if (WINDOWS) WINDOWS.reapPid(slot.pid);
   // Any parent parked in waitpid is answered with (child.pid, status).
   if (slot.ppid) {
     const parent = table.get(slot.ppid);

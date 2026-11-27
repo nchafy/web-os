@@ -1,0 +1,295 @@
+{
+  "ok": true,
+  "verdict": {
+    "lockdownRanInThisProcess": true,
+    "cspOnTheProcessRealmIsLive": "yes: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n",
+    "createImageBitmapIsInLockdownTARGETS": false,
+    "presentInAProcessRealm": true,
+    "settledWhileParkedInASyscall": false,
+    "settledWhileSpinning": false,
+    "settledWhenAwaited": false,
+    "coldDecodeTurnsAndMs": [
+      7,
+      0.47
+    ],
+    "macrotaskTurnsNeededAfterUnparking": 1,
+    "awaitLatencyMs": -1,
+    "pixelsCameBack": false,
+    "controlsCanTellSettledFromUnsettled": true,
+    "payloadCeiling": {
+      "maxInline": 65404,
+      "header": 8,
+      "pixelsInOneSetCall": 16349,
+      "largestSquareInOneSetCall": 127,
+      "bytesForThatSquare": 64524
+    },
+    "M23": "CONTROL: the subject was a promise that never settles, and the awaited phase read 'unsettled'"
+  },
+  "measured": {
+    "mode": "m23-decode",
+    "controlNever": true,
+    "realmHas": {
+      "createImageBitmap": "function",
+      "OffscreenCanvas": "function",
+      "Blob": "function",
+      "ImageData": "function",
+      "fetch": "undefined",
+      "createObjectURL": "undefined",
+      "cspRefusesEval": "yes: Evaluating a string as JavaScript violates the following Content Security Policy directive because 'unsafe-eval' is not an allowed source of script: script-src 'self' blob:\".\n"
+    },
+    "payloadCeiling": {
+      "maxInline": 65404,
+      "header": 8,
+      "pixelsInOneSetCall": 16349,
+      "largestSquareInOneSetCall": 127,
+      "bytesForThatSquare": 64524
+    },
+    "parkMs": 400,
+    "spinMs": 400,
+    "watchdogMs": 1500,
+    "notes": [],
+    "pngBytes": 146,
+    "referenceBitmap": {
+      "w": 16,
+      "h": 16,
+      "header": 8,
+      "bytes": 1032
+    },
+    "cold": {
+      "turns": 7,
+      "latencyMs": 0.47,
+      "error": ""
+    },
+    "park": {
+      "requestedMs": 400,
+      "elapsedMs": 403.73,
+      "nanosleep": 0,
+      "settledDuringPark": false,
+      "settledAfterOneMicrotask": false,
+      "turnsAfterTheParkEnded": 1,
+      "observedAfterTheParkEndedMs": 0.27,
+      "totalLatencyMs": 404.08,
+      "error": ""
+    },
+    "spin": {
+      "requestedMs": 400,
+      "elapsedMs": 400,
+      "settledDuringSpin": false,
+      "turnsAfterTheSpinEnded": 1,
+      "observedAfterTheSpinEndedMs": 0.225,
+      "error": ""
+    },
+    "awaited": {
+      "verdict": "unsettled",
+      "latencyMs": -1,
+      "kind": "",
+      "error": ""
+    },
+    "controls": {
+      "aPromiseThatSettlesReads": "settled",
+      "aPromiseThatNeverSettlesReads": "unsettled",
+      "canTellThemApart": true
+    },
+    "pixels": {
+      "skipped": "the awaited phase read unsettled"
+    },
+    "rows": [
+      {
+        "label": "cold",
+        "calledAt": 82.33500003814697,
+        "settledAt": 82.8050000667572,
+        "error": "",
+        "kind": "ImageBitmap"
+      },
+      {
+        "label": "park",
+        "calledAt": 88.60000002384186,
+        "settledAt": 492.6800000667572,
+        "error": "",
+        "kind": "ImageBitmap"
+      },
+      {
+        "label": "spin",
+        "calledAt": 497.2000000476837,
+        "settledAt": 897.5149999856949,
+        "error": "",
+        "kind": "ImageBitmap"
+      },
+      {
+        "label": "await",
+        "calledAt": 901.7300000190735,
+        "settledAt": -1,
+        "error": "",
+        "kind": ""
+      },
+      {
+        "label": "control-resolved",
+        "calledAt": 2403.0099999904633,
+        "settledAt": 2403.0500000715256,
+        "error": "",
+        "kind": "Number",
+        "value": 1
+      },
+      {
+        "label": "control-never",
+        "calledAt": 2403.024999976158,
+        "settledAt": -1,
+        "error": "",
+        "kind": ""
+      }
+    ],
+    "exit": 0,
+    "clock": {
+      "n": 200000,
+      "quantumMs": 0.004999995231628418,
+      "zeroFraction": 0.9776,
+      "meanMs": 0.00011372500002384186,
+      "maxMs": 0.20000004768371582,
+      "distinct": [
+        [
+          0,
+          195520
+        ],
+        [
+          0.004999995231628418,
+          4291
+        ],
+        [
+          0.005000114440917969,
+          179
+        ],
+        [
+          0.009999990463256836,
+          3
+        ],
+        [
+          0.010000109672546387,
+          1
+        ],
+        [
+          0.014999985694885254,
+          3
+        ],
+        [
+          0.039999961853027344,
+          1
+        ],
+        [
+          0.06999993324279785,
+          1
+        ]
+      ]
+    },
+    "realm": {
+      "skipped": false,
+      "stripped": [
+        "global.fetch",
+        "global.XMLHttpRequest",
+        "global.importScripts",
+        "global.indexedDB",
+        "global.caches",
+        "global.WebSocket",
+        "global.Worker",
+        "navigator.storage",
+        "URL.createObjectURL",
+        "URL.revokeObjectURL"
+      ],
+      "absent": [
+        "global.SharedWorker"
+      ],
+      "remaining": [],
+      "where": {
+        "global.fetch": [
+          "WorkerGlobalScope"
+        ],
+        "global.XMLHttpRequest": [
+          "DedicatedWorkerGlobalScope"
+        ],
+        "global.importScripts": [
+          "WorkerGlobalScope"
+        ],
+        "global.indexedDB": [
+          "WorkerGlobalScope"
+        ],
+        "global.caches": [
+          "WorkerGlobalScope"
+        ],
+        "global.WebSocket": [
+          "DedicatedWorkerGlobalScope"
+        ],
+        "global.Worker": [
+          "DedicatedWorkerGlobalScope"
+        ],
+        "navigator.storage": [
+          "WorkerNavigator"
+        ],
+        "URL.createObjectURL": [
+          "Function"
+        ],
+        "URL.revokeObjectURL": [
+          "Function"
+        ]
+      }
+    },
+    "abiFingerprint": 2316547334,
+    "isolated": true,
+    "exiting": false,
+    "envKeys": [
+      "syscall",
+      "write",
+      "r1of",
+      "rawWriteLength",
+      "probeNotEqual",
+      "samples",
+      "resetSamples",
+      "observeHeartbeat",
+      "barrierArrive",
+      "barrierDepart",
+      "barrierCounters",
+      "publishProgress",
+      "fs",
+      "proc",
+      "tty",
+      "win",
+      "data",
+      "std",
+      "shlex",
+      "pid",
+      "index",
+      "argv",
+      "envp"
+    ],
+    "envKinds": [
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "function",
+      "plain",
+      "plain",
+      "plain",
+      "plain",
+      "plain",
+      "plain",
+      "plain",
+      "number",
+      "number",
+      "plain",
+      "plain"
+    ],
+    "pid": 1,
+    "calls": 9,
+    "replies": 9,
+    "errors": 0,
+    "sinkBytes": 0,
+    "sinkSum": 2166136261,
+    "sinkWrites": 0
+  }
+}

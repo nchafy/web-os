@@ -1,0 +1,590 @@
+{
+ "subject": "editor",
+ "pinsPath": "/Users/Default/.taskbar-pins",
+ "control": false,
+ "fresh": {
+  "state": "done",
+  "isolated": true,
+  "publishedPins": [
+   {
+    "index": 11,
+    "label": "files",
+    "flags": 130
+   },
+   {
+    "index": 30,
+    "label": "term",
+    "flags": 130
+   }
+  ],
+  "publishedTray": [
+   {
+    "index": 48,
+    "label": "Task Manager",
+    "flags": 128
+   }
+  ],
+  "menuLabels": [
+   "Computer",
+   "Terminal",
+   "cat (in a terminal)",
+   "clip (in a terminal)",
+   "cp (in a terminal)",
+   "df (in a terminal)",
+   "echo (in a terminal)",
+   "editor",
+   "files",
+   "grep (in a terminal)",
+   "head (in a terminal)",
+   "imgview",
+   "kill (in a terminal)",
+   "ls (in a terminal)",
+   "mkdir (in a terminal)",
+   "mv (in a terminal)",
+   "paint",
+   "ps (in a terminal)",
+   "pwd (in a terminal)",
+   "rm (in a terminal)",
+   "rmdir (in a terminal)",
+   "sh (in a terminal)",
+   "sleep (in a terminal)",
+   "sort (in a terminal)",
+   "stat (in a terminal)",
+   "tail (in a terminal)",
+   "taskmgr",
+   "term",
+   "touch (in a terminal)",
+   "true (in a terminal)",
+   "uniq (in a terminal)",
+   "wc (in a terminal)",
+   "winopen",
+   "yes (in a terminal)",
+   "",
+   "Refresh the desktop",
+   "",
+   "Pin editor",
+   "Unpin files",
+   "Pin imgview",
+   "Pin paint",
+   "Pin taskmgr",
+   "Unpin term",
+   "Pin winopen"
+  ],
+  "pinned": [
+   {
+    "label": "files",
+    "index": 11
+   },
+   {
+    "label": "term",
+    "index": 30
+   }
+  ],
+  "tray": [
+   {
+    "label": "Task Manager",
+    "icon": 4,
+    "win": 1,
+    "index": 48,
+    "pid": 1
+   }
+  ],
+  "pins": 1,
+  "pinButtons": [
+   "files"
+  ],
+  "taskButtons": [
+   "term"
+  ],
+  "trayIcons": 1,
+  "traySpot": {
+   "at": {
+    "x": 1175,
+    "y": 754
+   },
+   "w": 20,
+   "h": 20,
+   "onTop": true
+  },
+  "frames": 2
+ },
+ "freshFile": "cat /Users/Default/.taskbar-pins\ncat: /Users/Default/.taskbar-pins: ENOENT\n~$ ",
+ "gesture": {
+  "found": true,
+  "aim": {
+   "found": true,
+   "at": {
+    "x": 141,
+    "y": 645
+   },
+   "shown": 42,
+   "onTop": true
+  },
+  "clicked": true
+ },
+ "afterPin": {
+  "state": "done",
+  "isolated": true,
+  "publishedPins": [
+   {
+    "index": 10,
+    "label": "editor",
+    "flags": 130
+   },
+   {
+    "index": 11,
+    "label": "files",
+    "flags": 130
+   },
+   {
+    "index": 30,
+    "label": "term",
+    "flags": 130
+   }
+  ],
+  "publishedTray": [
+   {
+    "index": 48,
+    "label": "Task Manager",
+    "flags": 128
+   }
+  ],
+  "menuLabels": [
+   "Computer",
+   "Terminal",
+   "cat (in a terminal)",
+   "clip (in a terminal)",
+   "cp (in a terminal)",
+   "df (in a terminal)",
+   "echo (in a terminal)",
+   "editor",
+   "files",
+   "grep (in a terminal)",
+   "head (in a terminal)",
+   "imgview",
+   "kill (in a terminal)",
+   "ls (in a terminal)",
+   "mkdir (in a terminal)",
+   "mv (in a terminal)",
+   "paint",
+   "ps (in a terminal)",
+   "pwd (in a terminal)",
+   "rm (in a terminal)",
+   "rmdir (in a terminal)",
+   "sh (in a terminal)",
+   "sleep (in a terminal)",
+   "sort (in a terminal)",
+   "stat (in a terminal)",
+   "tail (in a terminal)",
+   "taskmgr",
+   "term",
+   "touch (in a terminal)",
+   "true (in a terminal)",
+   "uniq (in a terminal)",
+   "wc (in a terminal)",
+   "winopen",
+   "yes (in a terminal)",
+   "",
+   "Refresh the desktop",
+   "",
+   "Unpin editor",
+   "Unpin files",
+   "Pin imgview",
+   "Pin paint",
+   "Pin taskmgr",
+   "Unpin term",
+   "Pin winopen"
+  ],
+  "pinned": [
+   {
+    "label": "editor",
+    "index": 10
+   },
+   {
+    "label": "files",
+    "index": 11
+   },
+   {
+    "label": "term",
+    "index": 30
+   }
+  ],
+  "tray": [
+   {
+    "label": "Task Manager",
+    "icon": 4,
+    "win": 1,
+    "index": 48,
+    "pid": 1
+   }
+  ],
+  "pins": 2,
+  "pinButtons": [
+   "editor",
+   "files"
+  ],
+  "taskButtons": [
+   "term"
+  ],
+  "trayIcons": 1,
+  "traySpot": {
+   "at": {
+    "x": 1175,
+    "y": 754
+   },
+   "w": 20,
+   "h": 20,
+   "onTop": true
+  },
+  "frames": 2
+ },
+ "afterPinFile": "cat /Users/Default/.taskbar-pins\nfiles\nterm\neditor\n~$ ",
+ "afterReload": {
+  "state": "done",
+  "isolated": true,
+  "publishedPins": [
+   {
+    "index": 10,
+    "label": "editor",
+    "flags": 130
+   },
+   {
+    "index": 11,
+    "label": "files",
+    "flags": 130
+   },
+   {
+    "index": 30,
+    "label": "term",
+    "flags": 130
+   }
+  ],
+  "publishedTray": [
+   {
+    "index": 48,
+    "label": "Task Manager",
+    "flags": 128
+   }
+  ],
+  "menuLabels": [
+   "Computer",
+   "Terminal",
+   "cat (in a terminal)",
+   "clip (in a terminal)",
+   "cp (in a terminal)",
+   "df (in a terminal)",
+   "echo (in a terminal)",
+   "editor",
+   "files",
+   "grep (in a terminal)",
+   "head (in a terminal)",
+   "imgview",
+   "kill (in a terminal)",
+   "ls (in a terminal)",
+   "mkdir (in a terminal)",
+   "mv (in a terminal)",
+   "paint",
+   "ps (in a terminal)",
+   "pwd (in a terminal)",
+   "rm (in a terminal)",
+   "rmdir (in a terminal)",
+   "sh (in a terminal)",
+   "sleep (in a terminal)",
+   "sort (in a terminal)",
+   "stat (in a terminal)",
+   "tail (in a terminal)",
+   "taskmgr",
+   "term",
+   "touch (in a terminal)",
+   "true (in a terminal)",
+   "uniq (in a terminal)",
+   "wc (in a terminal)",
+   "winopen",
+   "yes (in a terminal)",
+   "",
+   "Refresh the desktop",
+   "",
+   "Unpin editor",
+   "Unpin files",
+   "Pin imgview",
+   "Pin paint",
+   "Pin taskmgr",
+   "Unpin term",
+   "Pin winopen"
+  ],
+  "pinned": [
+   {
+    "label": "editor",
+    "index": 10
+   },
+   {
+    "label": "files",
+    "index": 11
+   },
+   {
+    "label": "term",
+    "index": 30
+   }
+  ],
+  "tray": [
+   {
+    "label": "Task Manager",
+    "icon": 4,
+    "win": 1,
+    "index": 48,
+    "pid": 1
+   }
+  ],
+  "pins": 2,
+  "pinButtons": [
+   "editor",
+   "files"
+  ],
+  "taskButtons": [
+   "term"
+  ],
+  "trayIcons": 1,
+  "traySpot": {
+   "at": {
+    "x": 1175,
+    "y": 754
+   },
+   "w": 20,
+   "h": 20,
+   "onTop": true
+  },
+  "frames": 2
+ },
+ "afterReloadFile": "cat /Users/Default/.taskbar-pins\nfiles\nterm\neditor\n~$ ",
+ "unpin": {
+  "found": true,
+  "aim": {
+   "found": true,
+   "at": {
+    "x": 141,
+    "y": 645
+   },
+   "shown": 42,
+   "onTop": true
+  },
+  "clicked": true
+ },
+ "afterUnpin": {
+  "state": "done",
+  "isolated": true,
+  "publishedPins": [
+   {
+    "index": 11,
+    "label": "files",
+    "flags": 130
+   },
+   {
+    "index": 30,
+    "label": "term",
+    "flags": 130
+   }
+  ],
+  "publishedTray": [
+   {
+    "index": 48,
+    "label": "Task Manager",
+    "flags": 128
+   }
+  ],
+  "menuLabels": [
+   "Computer",
+   "Terminal",
+   "cat (in a terminal)",
+   "clip (in a terminal)",
+   "cp (in a terminal)",
+   "df (in a terminal)",
+   "echo (in a terminal)",
+   "editor",
+   "files",
+   "grep (in a terminal)",
+   "head (in a terminal)",
+   "imgview",
+   "kill (in a terminal)",
+   "ls (in a terminal)",
+   "mkdir (in a terminal)",
+   "mv (in a terminal)",
+   "paint",
+   "ps (in a terminal)",
+   "pwd (in a terminal)",
+   "rm (in a terminal)",
+   "rmdir (in a terminal)",
+   "sh (in a terminal)",
+   "sleep (in a terminal)",
+   "sort (in a terminal)",
+   "stat (in a terminal)",
+   "tail (in a terminal)",
+   "taskmgr",
+   "term",
+   "touch (in a terminal)",
+   "true (in a terminal)",
+   "uniq (in a terminal)",
+   "wc (in a terminal)",
+   "winopen",
+   "yes (in a terminal)",
+   "",
+   "Refresh the desktop",
+   "",
+   "Pin editor",
+   "Unpin files",
+   "Pin imgview",
+   "Pin paint",
+   "Pin taskmgr",
+   "Unpin term",
+   "Pin winopen"
+  ],
+  "pinned": [
+   {
+    "label": "files",
+    "index": 11
+   },
+   {
+    "label": "term",
+    "index": 30
+   }
+  ],
+  "tray": [
+   {
+    "label": "Task Manager",
+    "icon": 4,
+    "win": 1,
+    "index": 48,
+    "pid": 1
+   }
+  ],
+  "pins": 1,
+  "pinButtons": [
+   "files"
+  ],
+  "taskButtons": [
+   "term"
+  ],
+  "trayIcons": 1,
+  "traySpot": {
+   "at": {
+    "x": 1175,
+    "y": 754
+   },
+   "w": 20,
+   "h": 20,
+   "onTop": true
+  },
+  "frames": 2
+ },
+ "afterUnpinFile": "cat /Users/Default/.taskbar-pins\nfiles\nterm\n~$ ",
+ "afterTray": {
+  "state": "done",
+  "isolated": true,
+  "publishedPins": [
+   {
+    "index": 11,
+    "label": "files",
+    "flags": 130
+   },
+   {
+    "index": 30,
+    "label": "term",
+    "flags": 130
+   }
+  ],
+  "publishedTray": [
+   {
+    "index": 48,
+    "label": "Task Manager",
+    "flags": 128
+   }
+  ],
+  "menuLabels": [
+   "Computer",
+   "Terminal",
+   "cat (in a terminal)",
+   "clip (in a terminal)",
+   "cp (in a terminal)",
+   "df (in a terminal)",
+   "echo (in a terminal)",
+   "editor",
+   "files",
+   "grep (in a terminal)",
+   "head (in a terminal)",
+   "imgview",
+   "kill (in a terminal)",
+   "ls (in a terminal)",
+   "mkdir (in a terminal)",
+   "mv (in a terminal)",
+   "paint",
+   "ps (in a terminal)",
+   "pwd (in a terminal)",
+   "rm (in a terminal)",
+   "rmdir (in a terminal)",
+   "sh (in a terminal)",
+   "sleep (in a terminal)",
+   "sort (in a terminal)",
+   "stat (in a terminal)",
+   "tail (in a terminal)",
+   "taskmgr",
+   "term",
+   "touch (in a terminal)",
+   "true (in a terminal)",
+   "uniq (in a terminal)",
+   "wc (in a terminal)",
+   "winopen",
+   "yes (in a terminal)",
+   "",
+   "Refresh the desktop",
+   "",
+   "Pin editor",
+   "Unpin files",
+   "Pin imgview",
+   "Pin paint",
+   "Pin taskmgr",
+   "Unpin term",
+   "Pin winopen"
+  ],
+  "pinned": [
+   {
+    "label": "files",
+    "index": 11
+   },
+   {
+    "label": "term",
+    "index": 30
+   }
+  ],
+  "tray": [
+   {
+    "label": "Task Manager",
+    "icon": 4,
+    "win": 1,
+    "index": 48,
+    "pid": 1
+   }
+  ],
+  "pins": 1,
+  "pinButtons": [
+   "files"
+  ],
+  "taskButtons": [
+   "term",
+   "taskmgr"
+  ],
+  "trayIcons": 1,
+  "traySpot": {
+   "at": {
+    "x": 1175,
+    "y": 754
+   },
+   "w": 20,
+   "h": 20,
+   "onTop": true
+  },
+  "frames": 3
+ },
+ "trayFrames": {
+  "before": 2,
+  "after": 3
+ }
+}

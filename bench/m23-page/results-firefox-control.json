@@ -1,0 +1,441 @@
+{
+ "url": "http://127.0.0.1:56158/www/m23.html?no_payloads=1",
+ "proveFailure": true,
+ "windows": {
+  "m23blit": {
+   "batch": {
+    "win": 3,
+    "batches": 2,
+    "texts": [],
+    "blits": [
+     {
+      "fd": 3,
+      "raw": 3,
+      "x": 16,
+      "y": 16
+     },
+     {
+      "fd": 4,
+      "raw": 4,
+      "x": 16,
+      "y": 48
+     }
+    ],
+    "surface": {
+     "w": 320,
+     "h": 200,
+     "ops": 4,
+     "batches": 2,
+     "unknown": 0,
+     "text": 0,
+     "clips": 0,
+     "clipResets": 0,
+     "blits": 0,
+     "blitsUnbacked": 2,
+     "extent": {
+      "cssW": 308,
+      "cssH": 194,
+      "clientW": 308,
+      "clientH": 194
+     }
+    }
+   },
+   "readback": [
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 0,
+     "at": {
+      "x": 16,
+      "y": 16
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 4,
+     "dy": 0,
+     "at": {
+      "x": 20,
+      "y": 16
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,122,74,255)",
+     "wouldBeCss": "rgba(216,122,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 7,
+     "dy": 0,
+     "at": {
+      "x": 23,
+      "y": 16
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,122,74,255)",
+     "wouldBeCss": "rgba(216,122,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 4,
+     "at": {
+      "x": 16,
+      "y": 20
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(159,212,168,255)",
+     "wouldBeCss": "rgba(159,212,168,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 4,
+     "dy": 4,
+     "at": {
+      "x": 20,
+      "y": 20
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 7,
+     "dy": 4,
+     "at": {
+      "x": 23,
+      "y": 20
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 7,
+     "at": {
+      "x": 16,
+      "y": 23
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(159,212,168,255)",
+     "wouldBeCss": "rgba(159,212,168,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 4,
+     "dy": 7,
+     "at": {
+      "x": 20,
+      "y": 23
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 7,
+     "dy": 7,
+     "at": {
+      "x": 23,
+      "y": 23
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    }
+   ]
+  },
+  "files": {
+   "batch": {
+    "win": 2,
+    "batches": 4,
+    "texts": [
+     "3 items",
+     "/",
+     "usr",
+     "share",
+     "Search",
+     "Large icons \u00b7 sorted by Name",
+     "logo.png",
+     "png \u00b7 1 KB",
+     "logo.rgba",
+     "bitmap \u00b7 2 KB",
+     "readme.txt",
+     "text \u00b7 1 KB"
+    ],
+    "blits": [
+     {
+      "fd": 3,
+      "raw": 3,
+      "x": 58,
+      "y": 96
+     },
+     {
+      "fd": 4,
+      "raw": 4,
+      "x": 184,
+      "y": 96
+     }
+    ],
+    "surface": {
+     "w": 608,
+     "h": 264,
+     "ops": 37,
+     "batches": 1,
+     "unknown": 0,
+     "text": 12,
+     "clips": 1,
+     "clipResets": 0,
+     "blits": 0,
+     "blitsUnbacked": 2,
+     "extent": {
+      "cssW": 608,
+      "cssH": 264,
+      "clientW": 608,
+      "clientH": 264
+     }
+    }
+   },
+   "readback": [
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 0,
+     "at": {
+      "x": 58,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 8,
+     "dy": 0,
+     "at": {
+      "x": 66,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 15,
+     "dy": 0,
+     "at": {
+      "x": 73,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 8,
+     "at": {
+      "x": 58,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 8,
+     "dy": 8,
+     "at": {
+      "x": 66,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 15,
+     "dy": 8,
+     "at": {
+      "x": 73,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 0,
+     "dy": 15,
+     "at": {
+      "x": 58,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 8,
+     "dy": 15,
+     "at": {
+      "x": 66,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 3,
+     "dx": 15,
+     "dy": 15,
+     "at": {
+      "x": 73,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 0,
+     "dy": 0,
+     "at": {
+      "x": 184,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(216,209,74,255)",
+     "wouldBeCss": "rgba(216,209,74,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 8,
+     "dy": 0,
+     "at": {
+      "x": 192,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 15,
+     "dy": 0,
+     "at": {
+      "x": 199,
+      "y": 96
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 0,
+     "dy": 8,
+     "at": {
+      "x": 184,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 8,
+     "dy": 8,
+     "at": {
+      "x": 192,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 15,
+     "dy": 8,
+     "at": {
+      "x": 199,
+      "y": 104
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 0,
+     "dy": 15,
+     "at": {
+      "x": 184,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 8,
+     "dy": 15,
+     "at": {
+      "x": 192,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(74,155,216,255)",
+     "wouldBeCss": "rgba(74,155,216,1)"
+    },
+    {
+     "fd": 4,
+     "dx": 15,
+     "dy": 15,
+     "at": {
+      "x": 199,
+      "y": 111
+     },
+     "read": "rgba(26,32,39,255)",
+     "want": "rgba(242,244,248,255)",
+     "wouldBeCss": "rgba(242,244,248,1)"
+    }
+   ]
+  }
+ },
+ "page": {
+  "state": "done",
+  "phase": "live",
+  "why": "",
+  "dpr": 1,
+  "notes": [
+   "no_payloads: Surface.prototype.replay was wrapped to drop the blit payload map, so every DL_BLIT counts as blitsUnbacked and draws nothing. The pixel clauses MUST fail and every errno clause MUST hold: the refusals are the kernel's and this world is the renderer's."
+  ]
+ },
+ "clauses": {
+  "theDesktopReachedLiveWithNoThrownModule": true,
+  "m23blitDrewEveryBlitItWasSent": false,
+  "m23blitPixelsAreItsPayloadsOwn": false,
+  "filesDrewEveryBlitItWasSent": false,
+  "filesPixelsAreItsPayloadsOwn": false
+ }
+}

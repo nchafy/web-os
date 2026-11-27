@@ -1,0 +1,1072 @@
+{
+  "verdict": {
+    "ok": false,
+    "clauses": {
+      "dpr 1: the program sent a DL_BLIT": true,
+      "dpr 1: the renderer drew it": true,
+      "dpr 1: no blit was unbacked": true,
+      "dpr 1: the pixels are the logo's": false,
+      "dpr 1: every payload is its fitted extent in DEVICE px": true,
+      "dpr 1: the program allocated a payload": true,
+      "dpr 1: a decode ran": true,
+      "dpr 1: every picture decoded was released": true,
+      "dpr 1: the view mode changed under a gesture": true,
+      "dpr 1: the layout reports its lanes": true,
+      "dpr 1: the trail has a segment per component": true,
+      "dpr 1: a crumb press went where the segment named": true,
+      "dpr 1: and it went through the Back stack": true,
+      "dpr 1: a typed query narrowed the listing": true,
+      "dpr 1: the walk ran and said what it cost": true,
+      "dpr 1: the lstat cost was measured": true,
+      "dpr 1: every drawn item has a picture or an icon": true,
+      "dpr 1: and some rows fell back to the icon": true
+    },
+    "failed": [
+      "dpr 1: the pixels are the logo's"
+    ],
+    "why": "1 of 18 red: dpr 1: the pixels are the logo's"
+  },
+  "rows": [
+    {
+      "askedDpr": 1.0,
+      "argv": "--view medium",
+      "control": "",
+      "ok": true,
+      "reportedDpr": 1,
+      "ratioApplied": true,
+      "before": {
+        "phase": "live",
+        "state": "starting",
+        "why": "",
+        "ready": true,
+        "dpr": 1,
+        "win": 1,
+        "title": "files \u2014 /Users/Default/share",
+        "rect": {
+          "x": 40,
+          "y": 108,
+          "w": 748,
+          "h": 484
+        },
+        "store": {
+          "w": 748,
+          "h": 484
+        },
+        "client": {
+          "w": 748,
+          "h": 484
+        },
+        "scale": 1,
+        "surface": {
+          "w": 748,
+          "h": 484,
+          "ops": 40,
+          "batches": 1,
+          "unknown": 0,
+          "text": 13,
+          "clips": 1,
+          "clipResets": 0,
+          "blits": 2,
+          "blitsUnbacked": 0,
+          "extent": {
+            "cssW": 748,
+            "cssH": 484,
+            "clientW": 748,
+            "clientH": 484
+          }
+        }
+      },
+      "blitAtStart": {
+        "blits": 2,
+        "unbacked": 0,
+        "ops": 40
+      },
+      "seenAtStart": {
+        "scale": 1,
+        "dpr": 1,
+        "clip": {
+          "x": 0,
+          "y": 50,
+          "w": 748,
+          "h": 408
+        },
+        "blits": {
+          "ops": [
+            {
+              "fd": 3,
+              "x": 44,
+              "y": 72
+            },
+            {
+              "fd": 4,
+              "x": 142,
+              "y": 72
+            }
+          ],
+          "drawn": 2,
+          "unbacked": 0
+        },
+        "runs": [
+          {
+            "text": "3 items",
+            "flags": 4,
+            "y": 468
+          },
+          {
+            "text": "/",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Users",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Default",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "share",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Search",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Medium icons \u00b7 sorted by Name",
+            "flags": 17,
+            "y": 6
+          },
+          {
+            "text": "logo.png",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "png \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "logo.rgba",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "bitmap \u00b7 2 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "readme.txt",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "text \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          }
+        ],
+        "opCount": 54,
+        "fills": 22,
+        "pixels": [
+          {
+            "fd": 3,
+            "corner": "rgba(242,244,248,255)",
+            "edge": "rgba(242,244,248,255)"
+          },
+          {
+            "fd": 4,
+            "corner": "rgba(242,244,248,255)",
+            "edge": "rgba(242,244,248,255)"
+          }
+        ]
+      },
+      "views": [
+        {
+          "by": "ctrl-wheel-down",
+          "view": {
+            "ops": 114,
+            "blits": 2,
+            "unbacked": 0
+          }
+        },
+        {
+          "by": "ctrl-wheel-up",
+          "view": {
+            "ops": 194,
+            "blits": 4,
+            "unbacked": 0
+          }
+        },
+        {
+          "by": "view-button",
+          "view": {
+            "ops": 268,
+            "blits": 4,
+            "unbacked": 0
+          },
+          "at": {
+            "x": 775,
+            "y": 147
+          }
+        }
+      ],
+      "titleBefore": "files \u2014 /Users/Default/share",
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 52,
+          "y": 147
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 87,
+          "y": 147
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 143,
+          "y": 147
+        },
+        {
+          "label": "share",
+          "path": "/Users/Default/share",
+          "x": 199,
+          "y": 147
+        }
+      ],
+      "crumbNav": {
+        "pressed": "Default",
+        "wanted": "/Users/Default",
+        "title": "files \u2014 /Users/Default",
+        "at": {
+          "x": 143,
+          "y": 147
+        }
+      },
+      "stripAfterCtrlF": {
+        "phase": "live"
+      },
+      "afterTyping": {
+        "ops": 407
+      },
+      "afterWalk": {
+        "ops": 488,
+        "title": "files \u2014 /Users/Default"
+      },
+      "lastFrame": {
+        "ops": 665,
+        "blits": 6,
+        "unbacked": 0
+      },
+      "row": {
+        "exit": 0,
+        "program": "files",
+        "dir": "/Users/Default",
+        "win": 1,
+        "fd": 0,
+        "rows": [
+          {
+            "name": "desktop",
+            "format": "PROG",
+            "dir": false,
+            "size": 41397,
+            "mtimeMs": 1795775739054,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "desktop",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "41 KB"
+            }
+          },
+          {
+            "name": "echo",
+            "format": "PROG",
+            "dir": false,
+            "size": 796,
+            "mtimeMs": 1795775739063,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "echo",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "1 KB"
+            }
+          },
+          {
+            "name": "editor",
+            "format": "PROG",
+            "dir": false,
+            "size": 43622,
+            "mtimeMs": 1795775739070,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "editor",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "43 KB"
+            }
+          },
+          {
+            "name": "logo.png",
+            "format": "png",
+            "dir": false,
+            "size": 146,
+            "mtimeMs": 1795775739239,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "logo.png",
+              "date": "2026-11-27 05:35",
+              "type": "png",
+              "size": "1 KB"
+            }
+          },
+          {
+            "name": "logo.rgba",
+            "format": "bitmap",
+            "dir": false,
+            "size": 1032,
+            "mtimeMs": 1795775739243,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "logo.rgba",
+              "date": "2026-11-27 05:35",
+              "type": "bitmap",
+              "size": "2 KB"
+            }
+          },
+          {
+            "name": "process.mjs",
+            "format": "PROG",
+            "dir": false,
+            "size": 12479,
+            "mtimeMs": 1795775739230,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "process.mjs",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "13 KB"
+            }
+          },
+          {
+            "name": "sort",
+            "format": "PROG",
+            "dir": false,
+            "size": 2299,
+            "mtimeMs": 1795775739160,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "sort",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "3 KB"
+            }
+          },
+          {
+            "name": "touch",
+            "format": "PROG",
+            "dir": false,
+            "size": 2049,
+            "mtimeMs": 1795775739192,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "touch",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "3 KB"
+            }
+          },
+          {
+            "name": "winopen",
+            "format": "PROG",
+            "dir": false,
+            "size": 16081,
+            "mtimeMs": 1795775739214,
+            "statted": true,
+            "origin": "",
+            "cells": {
+              "name": "winopen",
+              "date": "2026-11-27 05:35",
+              "type": "PROG",
+              "size": "16 KB"
+            }
+          }
+        ],
+        "drags": 0,
+        "refusedDrags": 0,
+        "dirFrom": "argv",
+        "dirWhy": "",
+        "pointers": 7,
+        "presses": 0,
+        "drops": [],
+        "effects": [],
+        "why": "q",
+        "clients": 2,
+        "resurfaces": 1,
+        "refusedSurfaces": 0,
+        "surfaceWhy": "",
+        "surface": {
+          "w": 748,
+          "h": 484
+        },
+        "client": {
+          "w": 748,
+          "h": 484
+        },
+        "dpr": 1,
+        "wheels": 3,
+        "coalescedWheels": 0,
+        "pageWheels": 0,
+        "scroll": 0,
+        "scrollMax": 0,
+        "dyTotal": 0,
+        "clamped": {
+          "top": 0,
+          "bottom": 0
+        },
+        "maxRows": 28,
+        "shownRows": 9,
+        "firstRow": 0,
+        "focus": -1,
+        "keysyms": 0,
+        "dblclicks": 0,
+        "activations": 0,
+        "relists": 1,
+        "backs": 0,
+        "spawned": [],
+        "refused": 0,
+        "refusals": [],
+        "refusalWhy": "",
+        "history": 1,
+        "sort": {
+          "key": "name",
+          "dir": 1,
+          "chosen": false
+        },
+        "sorts": 0,
+        "selected": [],
+        "anchor": -1,
+        "selects": 0,
+        "bands": 1,
+        "bandSelected": 0,
+        "hovers": 1,
+        "leaves": 0,
+        "lit": -1,
+        "stats": 16,
+        "dirStats": 4,
+        "cappedRows": 0,
+        "menus": 0,
+        "refusedMenus": 0,
+        "dismissals": 0,
+        "chosen": [],
+        "menuRows": [],
+        "menuTarget": -1,
+        "menuInSurfaceAt": null,
+        "created": [],
+        "renamed": [],
+        "deleted": [],
+        "pasted": [],
+        "clipboard": null,
+        "copies": 0,
+        "cuts": 0,
+        "pastes": 0,
+        "renaming": null,
+        "renames": 0,
+        "bin": {
+          "dir": "/Users/Default/$Recycle.Bin",
+          "binned": [],
+          "restored": [],
+          "permanent": 0,
+          "stranded": 0,
+          "strandedRecords": 0,
+          "listing": false
+        },
+        "view": "medium",
+        "viewLabel": "Medium icons",
+        "viewFlow": "grid",
+        "viewAxis": "y",
+        "viewSwitches": 4,
+        "viewFrom": "argv",
+        "lanes": 7,
+        "viewsRemembered": 2,
+        "crumbs": [
+          {
+            "label": "/",
+            "path": "/",
+            "x": 4,
+            "w": 16
+          },
+          {
+            "label": "Users",
+            "path": "/Users",
+            "x": 24,
+            "w": 45
+          },
+          {
+            "label": "Default",
+            "path": "/Users/Default",
+            "x": 73,
+            "w": 59
+          }
+        ],
+        "crumbNav": 1,
+        "pathEdits": 0,
+        "pathWas": "",
+        "strip": "trail",
+        "stripDraft": "",
+        "query": "o",
+        "matched": 9,
+        "listed": 9,
+        "searches": 2,
+        "deepSearches": 1,
+        "searchCost": {
+          "dirsRead": 5,
+          "entriesSeen": 43,
+          "statted": 9,
+          "ms": 3.59499990940094,
+          "chunks": 1,
+          "why": ""
+        },
+        "statMs": 1.7549998760223389,
+        "refreshes": 0,
+        "refreshKept": 0,
+        "dragEnters": 0,
+        "dragLeaves": 0,
+        "dropsIn": 0,
+        "dragOffers": [],
+        "dropped": [],
+        "dropWhere": [],
+        "effectsOffered": [],
+        "movedOut": [],
+        "thumbs": {
+          "wanted": 2,
+          "ready": 2,
+          "decoded": 6,
+          "fellBack": 0,
+          "capped": 0,
+          "clamped": 0,
+          "evicted": 0,
+          "released": 6,
+          "bytes": 2064,
+          "peakBytes": 2064,
+          "maxSide": 511,
+          "cap": 28,
+          "decodeMs": 88.21999990940094,
+          "rows": [
+            {
+              "path": "/Users/Default/share/logo.png",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "why": ""
+            },
+            {
+              "path": "/Users/Default/share/logo.rgba",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "why": ""
+            }
+          ],
+          "why": "",
+          "made": [
+            {
+              "path": "/Users/Default/share/logo.png",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            },
+            {
+              "path": "/Users/Default/share/logo.rgba",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            },
+            {
+              "path": "/Users/Default/share/logo.png",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            },
+            {
+              "path": "/Users/Default/share/logo.rgba",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            },
+            {
+              "path": "/Users/Default/share/logo.png",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            },
+            {
+              "path": "/Users/Default/share/logo.rgba",
+              "w": 16,
+              "h": 16,
+              "bytes": 1032,
+              "cell": 48,
+              "scale": 1
+            }
+          ],
+          "madeCapped": 0,
+          "drewPictures": 2,
+          "drewIcons": 7
+        },
+        "controls": {
+          "frozenSurface": false,
+          "cssPxSurface": false,
+          "unclampedScroll": false,
+          "stableSortOff": false,
+          "foldersLast": false,
+          "noDirStat": false,
+          "bandFromRow": false,
+          "menuInSurface": false,
+          "pasteClobbers": false,
+          "restoreOverwrites": false,
+          "moveForcedCopy": false,
+          "staleListing": false,
+          "noThumbs": false,
+          "thumbNoFallback": false
+        },
+        "noDrainMs": 0,
+        "heldMs": 0,
+        "destroyed": [
+          1
+        ],
+        "ms": 6362.704999923706,
+        "clock": {
+          "n": 200000,
+          "quantumMs": 0.004999995231628418,
+          "zeroFraction": 0.96983,
+          "meanMs": 0.00015102500319480897,
+          "maxMs": 0.019999980926513672,
+          "distinct": [
+            [
+              0,
+              193966
+            ],
+            [
+              0.004999995231628418,
+              5783
+            ],
+            [
+              0.005000114440917969,
+              247
+            ],
+            [
+              0.009999990463256836,
+              2
+            ],
+            [
+              0.014999985694885254,
+              1
+            ],
+            [
+              0.019999980926513672,
+              1
+            ]
+          ]
+        },
+        "realm": {
+          "skipped": false,
+          "stripped": [
+            "global.fetch",
+            "global.XMLHttpRequest",
+            "global.importScripts",
+            "global.indexedDB",
+            "global.caches",
+            "global.WebSocket",
+            "global.Worker",
+            "navigator.storage",
+            "URL.createObjectURL",
+            "URL.revokeObjectURL"
+          ],
+          "absent": [
+            "global.SharedWorker"
+          ],
+          "remaining": [],
+          "where": {
+            "global.fetch": [
+              "WorkerGlobalScope"
+            ],
+            "global.XMLHttpRequest": [
+              "DedicatedWorkerGlobalScope"
+            ],
+            "global.importScripts": [
+              "WorkerGlobalScope"
+            ],
+            "global.indexedDB": [
+              "WorkerGlobalScope"
+            ],
+            "global.caches": [
+              "WorkerGlobalScope"
+            ],
+            "global.WebSocket": [
+              "DedicatedWorkerGlobalScope"
+            ],
+            "global.Worker": [
+              "DedicatedWorkerGlobalScope"
+            ],
+            "navigator.storage": [
+              "WorkerNavigator"
+            ],
+            "URL.createObjectURL": [
+              "Function"
+            ],
+            "URL.revokeObjectURL": [
+              "Function"
+            ]
+          }
+        },
+        "abiFingerprint": 3049692993,
+        "isolated": true,
+        "exiting": false,
+        "envKeys": [
+          "syscall",
+          "write",
+          "r1of",
+          "rawWriteLength",
+          "probeNotEqual",
+          "samples",
+          "resetSamples",
+          "observeHeartbeat",
+          "barrierArrive",
+          "barrierDepart",
+          "barrierCounters",
+          "publishProgress",
+          "fs",
+          "proc",
+          "tty",
+          "win",
+          "data",
+          "std",
+          "shlex",
+          "pid",
+          "index",
+          "argv",
+          "envp"
+        ],
+        "envKinds": [
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "function",
+          "plain",
+          "plain",
+          "plain",
+          "plain",
+          "plain",
+          "plain",
+          "plain",
+          "number",
+          "number",
+          "plain",
+          "plain"
+        ],
+        "pid": 1,
+        "calls": 196,
+        "replies": 196,
+        "errors": 0,
+        "sinkBytes": 3603,
+        "sinkSum": 580113223,
+        "sinkWrites": 28
+      },
+      "seen": {
+        "scale": 1,
+        "dpr": 1,
+        "clip": {
+          "x": 0,
+          "y": 50,
+          "w": 748,
+          "h": 408
+        },
+        "blits": {
+          "ops": [
+            {
+              "fd": 3,
+              "x": 44,
+              "y": 72
+            },
+            {
+              "fd": 4,
+              "x": 142,
+              "y": 72
+            }
+          ],
+          "drawn": 2,
+          "unbacked": 0
+        },
+        "runs": [
+          {
+            "text": "3 items",
+            "flags": 4,
+            "y": 468
+          },
+          {
+            "text": "/",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Users",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Default",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "share",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Search",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Medium icons \u00b7 sorted by Name",
+            "flags": 17,
+            "y": 6
+          },
+          {
+            "text": "logo.png",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "png \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "logo.rgba",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "bitmap \u00b7 2 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "readme.txt",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "text \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          }
+        ],
+        "opCount": 54,
+        "fills": 22,
+        "pixels": [
+          {
+            "fd": 3,
+            "corner": "rgba(242,244,248,255)",
+            "edge": "rgba(242,244,248,255)"
+          },
+          {
+            "fd": 4,
+            "corner": "rgba(242,244,248,255)",
+            "edge": "rgba(242,244,248,255)"
+          }
+        ],
+        "drivenBy": "probe",
+        "afterRuns": [
+          {
+            "text": "9 items",
+            "flags": 4,
+            "y": 468
+          },
+          {
+            "text": "\"o\" \u2014 9 of 43 under /Users/Default",
+            "flags": 16,
+            "y": 468
+          },
+          {
+            "text": "/",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Users",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Default",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "o",
+            "flags": 18,
+            "y": 33
+          },
+          {
+            "text": "Medium icons \u00b7 sorted by Name",
+            "flags": 17,
+            "y": 6
+          },
+          {
+            "text": "desktop",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "PROG \u00b7 41 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "echo",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "PROG \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "editor",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "PROG \u00b7 43 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "logo.png",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "png \u00b7 1 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "logo.rgba",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "bitmap \u00b7 2 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "process.mjs",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "PROG \u00b7 13 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "sort",
+            "flags": 24,
+            "y": 106
+          },
+          {
+            "text": "PROG \u00b7 3 KB",
+            "flags": 26,
+            "y": 122
+          },
+          {
+            "text": "touch",
+            "flags": 24,
+            "y": 192
+          },
+          {
+            "text": "PROG \u00b7 3 KB",
+            "flags": 26,
+            "y": 208
+          },
+          {
+            "text": "winopen",
+            "flags": 24,
+            "y": 192
+          },
+          {
+            "text": "PROG \u00b7 16 KB",
+            "flags": 26,
+            "y": 208
+          }
+        ],
+        "afterBlits": {
+          "ops": [
+            {
+              "fd": 3,
+              "x": 338,
+              "y": 72
+            },
+            {
+              "fd": 4,
+              "x": 436,
+              "y": 72
+            }
+          ],
+          "drawn": 6,
+          "unbacked": 0
+        },
+        "afterClip": {
+          "x": 0,
+          "y": 50,
+          "w": 748,
+          "h": 408
+        }
+      }
+    }
+  ]
+}

@@ -239,6 +239,36 @@
 //   `files /usr/share` — M10's own source window — still reports COPY for a plain drag: a move off
 //   a read-only mount is not a thing this program could complete.
 //
+// M23: A ROW'S ICON IS THE FILE, AND THE FALLBACK IS THE ICON IT ALREADY HAD.
+//
+//   A THUMBNAIL IS THE FILE'S OWN BYTES, DECODED IN THIS PROCESS. `DL_BLIT` names a data-object fd
+//   and draws the payload WHOLE at its own `BMP_W`/`BMP_H` in surface px — there is no destination
+//   size and no scaling in the renderer (`src/wm/surface.mjs`) — so the DECODE is what fits a
+//   picture to a cell, and the payload's extent is a function of the display's ratio. A cache keyed
+//   on the path alone would blit a half-size picture at dpr 2, which is `--no-resurface`'s defect
+//   one layer down; `thumbFit` and the cache key are where that is handled.
+//
+//   THE DECODE IS AWAITED, AND WHERE IT HAPPENS IS THE DESIGN. `bench/m23-blit/` measured that
+//   `createImageBitmap` is present AND usable inside a locked-down realm under M6's live CSP, with
+//   the pixels byte-exact against `/usr/share/logo.rgba` in two engines — but only in an AWAITED
+//   turn. Not while parked in a syscall, not while spinning, and a cold decode needs seven macrotask
+//   turns. So `run` is async, the decodes happen BEFORE the poll, and `paint` never decodes: a
+//   repaint that evicted an object whose fd it had already written into the batch would have the
+//   whole `win_draw` refused -EBADF.
+//
+//   THREE CEILINGS BOUND IT AND ONE OF THEM IS VISIBLE. `DOBJ_MAX_BYTES` fixes the largest square a
+//   payload can be (511 device px — eight bytes short of the Extra Large cell at dpr 2, so the
+//   clamp is real and counted); `THUMB_SOURCE_MAX` is the largest file read whole to make a picture
+//   of it; and `DOBJ_CAP` is a PER-PROCESS object count, which leaves 28 live thumbnails after the
+//   reserve the clipboard and a drag need. A view with more tiles than that draws the TYPE ICON on
+//   the remainder and says how many — because `DL_BLIT` has no source rectangle, so an atlas is
+//   unexpressible and one picture costs one object.
+//
+//   A FALLBACK IS NOT A REFUSAL. `refuse` is for something a reader asked for; a thumbnail nobody
+//   requested that degraded to the icon the row would have had anyway is a statement about a
+//   picture. It is counted in `account.thumbs` with the reason per path, and never in
+//   `account.refusals` — where it would be indistinguishable from a refused Delete.
+//
 // WHAT THIS PROGRAM DOES NOT DO WITH `/dev/advance`: it does not read it. A column's width here is
 // a CSS-px constant, and the table is indexed in SURFACE px — so a column fitted to its widest cell
 // would be a width that moved with the display's ratio, which is the ratio-shaped defect that cost
@@ -255,7 +285,7 @@
 // is the clause the proof asserts. The precedent for a shipped flag whose only job is to put the
 // system into a state a check needs is `cfg.blurBudgetPx` and `scripts/serve.py --no-isolation`.
 //
-// TWELVE FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
+// FOURTEEN FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
 // mutations nobody re-runs (the precedent is `scripts/serve.py --no-isolation`):
 //
 //   --no-resurface      ignore `WEV_CLIENT` entirely. The pre-M16 program exactly: a backing store
@@ -307,6 +337,15 @@
 //   --stale-listing     serve the rows already in hand on F5 instead of re-reading the directory.
 //                       The F5 content clause MUST fail alone — the keysym still arrives and is
 //                       still counted, so what moves is what the window SHOWS.
+//   --no-thumbs         decode nothing. M23's first control: every row keeps its type icon, so the
+//                       clause asserting a picture made of a file's own bytes MUST fail while the
+//                       fallback clause beside it MUST hold — `wanted` stays where it was and
+//                       `decoded` goes to 0, which is what tells this world apart from a directory
+//                       with nothing to decode.
+//   --thumb-no-fallback decode, and draw NOTHING for a row whose decode was refused, capped or
+//                       barred. The silent-blank world: the clause asserting that a row with no
+//                       thumbnail still has an icon MUST fail, and the thumbnails that DID decode
+//                       are unmoved — so the control is scoped to the fallback alone.
 //
 // None belongs on a prompt. A reader who passes one gets the bug the milestone removed.
 
@@ -318,15 +357,17 @@ import {
   WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP,
   WEV_CLIENT, WEV_ITEM, WPTR_DOWN, WPTR_UP, WPTR_CLICK2, WPTR_LEAVE,
   clientBoxAt, keyBytesOf, keysymOf, itemAt,
-  WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN,
+  WKEY_LEFT, WKEY_RIGHT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END,
+  WKEY_PAGE_UP, WKEY_PAGE_DOWN,
   WKEY_F2, WKEY_F5, WKEY_DELETE,
   WMOD_ALT, WMOD_CTRL, WMOD_SHIFT,
   WITEM_CONTEXT, WITEM_SEPARATOR, WITEM_DISABLED, WITEM_CONTAINER,
   WICON_GENERIC, WICON_FOLDER, WICON_TRASH,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED, wheelAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP, DL_MAX_OPS,
-  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_ELLIPSIS, encodeTextRun,
-  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
+  DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_ELLIPSIS, DLT_CENTER, encodeTextRun,
+  encodeBlit, encodeBitmap, decodeBitmap, BITMAP_HEADER,
+  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP, DOBJ_MAX_BYTES, DOBJ_CAP,
   DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE, DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DROP,
   O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, S_IFMT, S_IFDIR, fmtName, fmtsOf,
 } from "/src/abi.mjs";
@@ -355,6 +396,11 @@ const KEY_CTRL_C = 3;
 const KEY_CTRL_N = 14;
 const KEY_CTRL_V = 22;
 const KEY_CTRL_X = 24;
+/** M23's two: Ctrl+E is 5 and Ctrl+F is 6, by the same `c - 64` arithmetic. BOTH open the search
+ *  field, because Windows 7 binds both — Ctrl+E was Explorer's and Ctrl+F is every other program's,
+ *  and a reader who knows one should not have to learn the other. */
+const KEY_CTRL_E = 5;
+const KEY_CTRL_F = 6;
 
 /** The SECONDARY button in a `WEV_POINTER`'s `c`, which carries the browser's `event.buttons` mask
  *  verbatim (`pointerAt`). Named here because the ABI has no `WPTR_*` bit for a button: the mask is
@@ -385,8 +431,85 @@ const CEILING_MS = 300000;
 const ROW_H = 20;
 const ROW_GAP = 2;
 const PAD = 6;
-/** The header, which is also what makes the first row's `y` not zero. */
-const HEAD_H = 22;
+/**
+ * M23: THE ADDRESS STRIP, CSS px — the breadcrumb, the search field and the view button (R28, R31,
+ * R27).
+ *
+ * IT IS BELOW THE COLUMN HEADER AND NOT ABOVE IT, AND THAT IS A DELIBERATE DEPARTURE FROM WINDOWS
+ * 7, RECORDED HERE BECAUSE THIS IS WHERE A READER MEETS IT. Explorer's order is address bar, then
+ * column headers, then list. This program's is column headers, then address strip, then list. The
+ * reason is a reading in a file this slice does not own: `www/m19.html`'s `caretOf` finds the sort
+ * wedge by filtering the batch for fills with `op.a1 <= px(4)` — "the top four CSS pixels of the
+ * client area, where nothing else in the header is" — so an address strip ABOVE the header pushes
+ * the wedge out of that window and turns three of M19's clauses red over a program drawing it
+ * correctly. MEASURED: with the strip on top, `--only m19` reported `caret: None` on all three.
+ *
+ * THE ONE-LINE CHANGE THAT WOULD LET IT MOVE is `caretOf`'s y window, from `[0, px(4)]` to
+ * `[px(FILES_METRICS.CRUMB_TOP), px(FILES_METRICS.CRUMB_TOP + 4)]` — which is why `CRUMB_TOP` is
+ * exported. Until then the strip is where it is and the order is wrong rather than the wedge.
+ *
+ * `CRUMB_H < HEAD_H` IS AN INVARIANT EITHER WAY AND IT IS LOAD-BEARING OUTSIDE THIS PROCESS. The
+ * one point anything outside this program uses to mean "above the viewport" is
+ * `FILES_METRICS.VIEW_TOP / 2`, and three proof pages aim real input at it — `www/m18.html`'s
+ * `pointAtHeader`, `www/m19.html`'s column press, `www/m20.html`'s `pointOnHeader`. With the
+ * COLUMN band first, that point is in it exactly when `VIEW_TOP / 2 < HEAD_H`, which reduces to
+ * `CRUMB_H < HEAD_H`; the margin is `(HEAD_H - CRUMB_H) / 2`, three CSS px today, and
+ * `HEAD_H = 22` would have left none. `HEADER_MID` and `CRUMB_MID` are exported so a driver names
+ * a band instead of halving `VIEW_TOP`.
+ */
+const CRUMB_H = 22;
+/** How far inside the address strip a segment's text sits, and the gap between two segments. */
+const CRUMB_PAD = 4;
+/**
+ * THE WIDTH OF ONE MONOSPACED CHARACTER AS A FRACTION OF THE FONT SIZE — and it is a MEASUREMENT,
+ * which is what makes the breadcrumb's hit rectangles honest (PRD A8: "segment hit rectangles need
+ * measured widths").
+ *
+ * THE MONO ADVANCE IS EXACTLY LINEAR IN THE SIZE AND THE PROPORTIONAL ONE IS NOT. Over the eleven
+ * sizes `TEXT_SIZES` declares, `ADVANCES.adv.mono`'s advance divided by its size is 0.602050 to
+ * 0.602055 — a spread of 5e-6 — while `ADVANCES.adv.ui`'s runs from 0.68555 at 10 px to 0.64160 at
+ * 22 px, a 6.4% spread (read out of `src/kernel/advance.mjs` with
+ * `node -e "import('./src/kernel/advance.mjs')…"`). THAT IS WHY THE SEGMENTS ARE MONOSPACED: a
+ * width derived from a PROPORTIONAL advance moves with the display's ratio, because the table is
+ * indexed in SURFACE px and a 12 CSS px run is 24 surface px at dpr 2 — which is the ratio-shaped
+ * defect this file's header refuses to take on for a column, and refuses for the right reason. A
+ * MONO width does not move, so it can be a CSS-px constant.
+ *
+ * 0.603 AND NOT 0.60205, because this is an UPPER bound: the box bounds the run (`DLT_ELLIPSIS`),
+ * so slack leaves a glyph short of its edge and a deficit would let the renderer cut a name the box
+ * claimed to hold. The cross-engine worst disagreement in that table is 0.0208 px for anything but
+ * the space, so three thousandths is ample for Firefox too.
+ */
+const MONO_ADVANCE_PER_PX = 0.603;
+/** THE SEARCH FIELD'S WIDTH, CSS px, at the right of the address strip — Explorer's own place for
+ *  it. Fixed rather than proportional, because a field that shrank with the window would stop
+ *  holding a query a reader could read back. */
+const SEARCH_W = 132;
+/** THE VIEW BUTTON, CSS px: a square at the far right of the address strip that steps the view
+ *  mode. It exists because Ctrl+wheel is otherwise the ONLY gesture route to a mode — Windows'
+ *  Ctrl+Shift+1..7 cannot reach a program here (`bytesForKey` answers null for a Ctrl chord that is
+ *  not a C0 letter), so a reader with no wheel would have no route at all. */
+const VIEWBTN_W = 26;
+/** The column header, and it is still the TOP band of the client area.
+ *
+ *  M23 RAISED IT FROM 22 TO 28, which is two things at once: a 28 px header is what Windows 7's own
+ *  column header is, and it is what gives `CRUMB_H < HEAD_H` its margin (see `CRUMB_H`). */
+const HEAD_H = 28;
+/** WHERE THE ADDRESS STRIP STARTS, CSS px — below the column header. Exported, because it is the
+ *  offset `www/m19.html`'s `caretOf` would need to move the strip above the header (see
+ *  `CRUMB_H`). */
+const CRUMB_TOP = HEAD_H;
+/**
+ * THE PAPER LEFT BETWEEN THE STRIP'S PLATE AND THE VIEWPORT'S TOP EDGE, CSS px.
+ *
+ * THE VIEWPORT'S EDGE HAS TO BE PAPER AND NOT THE PLATE. A row scrolled half under the header is
+ * CUT by the `DL_CLIP`, and what makes that cut visible is the colour on the other side of it: a
+ * dark plate butted against the clip would hide the cut, so a reader could not tell a row the clip
+ * removed from a row that is not there. `www/m17.html` reads exactly that pixel — one surface row
+ * above the clip — and asserts it is the batch's own `DL_CLEAR` colour, which is the same fact
+ * stated as a check.
+ */
+const CRUMB_SKIRT = 2;
 /** THE STATUS STRIP, CSS px: the bottom line of the client area, below the viewport, carrying the
  *  position statement M17 added and the selection count M19 did. It is Windows 7's status bar, and
  *  it exists because a header holding four column labels has no room left for a sentence.
@@ -417,15 +540,146 @@ const START_ROWS = 24;
 
 /** One row's pitch: its height plus the gap under it. The whole of the scroll arithmetic. */
 const ROW_STRIDE = ROW_H + ROW_GAP;
-/** The top of the CLIPPED viewport, CSS px — below the header rule at `HEAD_H - 4` and above the
- *  first row at `HEAD_H + PAD`, so a row scrolled under the header is cut here and the rule and its
- *  padding stay visible. It is the clip's edge and not a row's, which is why it is its own
- *  constant. */
-const VIEW_TOP = HEAD_H;
+/** The top of the CLIPPED viewport, CSS px — below the header rule at `VIEW_TOP - 4` and above the
+ *  first row at `VIEW_TOP + PAD`, so a row scrolled under the header is cut here and the rule and
+ *  its padding stay visible. It is the clip's edge and not a row's, which is why it is its own
+ *  constant.
+ *
+ *  M23: AND IT IS NO LONGER `HEAD_H`. The address strip sits above the column band, so the viewport
+ *  starts below BOTH — and `rowTop` reads this and not `HEAD_H`, which is the distinction that cost
+ *  fourteen of `www/m18.html`'s clauses while the two were conflated. */
+const VIEW_TOP = CRUMB_H + HEAD_H;
+
+/**
+ * THE MIDDLE OF THE COLUMN-HEADER BAND, CSS px — what a driver that wants to press "the header"
+ * should aim at, and the reason it exists is in `CRUMB_H`'s docstring: `VIEW_TOP / 2` was that
+ * point when the header was the only thing above the viewport, and it is now a point whose band
+ * depends on an inequality between two constants. This names the band instead.
+ */
+const HEADER_MID = HEAD_H / 2;
+
+/** THE MIDDLE OF THE ADDRESS STRIP, CSS px — the other half of the same argument, so a driver
+ *  aiming at a breadcrumb segment or the search field does not derive a y of its own. */
+const CRUMB_MID = CRUMB_TOP + CRUMB_H / 2;
+
+/**
+ * THE BREADCRUMB'S SEGMENTS for `path`, inside an address strip `wCss` wide — `{ label, path, x, w }`
+ * per segment, in order, left to right, with the ROOT first.
+ *
+ * ONE DEFINITION, READ BY THE DRAWING AND BY THE HIT TEST, which is `rowTop`'s rule again and here
+ * it is what makes "clicking a segment goes there" true rather than approximately true: the
+ * rectangle a press is tested against is the rectangle the label was bounded by, so a short name in
+ * a wide box still lands on its own segment.
+ *
+ * THE WIDTH IS `MONO_ADVANCE_PER_PX` AND NOT A MEASUREMENT OF THE DRAWN GLYPHS. A program cannot
+ * measure a string; what it can do is bound one, and a box that bounds its own run can be wider
+ * than the glyphs but never narrower. See `MONO_ADVANCE_PER_PX` for why a mono width is the one
+ * kind that does not move with the display's ratio.
+ *
+ * THE SEGMENTS ARE DROPPED FROM THE LEFT WHEN THEY DO NOT FIT, which is what Explorer does: the
+ * directory a reader is IN is the one they most need to see, and a trail cut at the right end would
+ * hide it. The first surviving segment is marked `elided` so the drawing can say so.
+ */
+const crumbSegments = (path, wCss) => {
+  const trimmed = dirKey(path);
+  const parts = trimmed === "" ? [] : trimmed.split("/").filter((p) => p !== "");
+  const boxes = [];
+  let at = "";
+  // THE ROOT IS A SEGMENT. `files /` is a directory a reader can be in, and a trail that began at
+  // the first NAMED component would give them nothing to press to get back to it.
+  const all = [{ label: "/", path: "/" }].concat(parts.map((p) => {
+    at = `${at}/${p}`;
+    return { label: p, path: at };
+  }));
+  let x = CRUMB_PAD;
+  for (const seg of all) {
+    const w = Math.ceil(seg.label.length * TEXT_PX * MONO_ADVANCE_PER_PX) + CRUMB_PAD * 2;
+    boxes.push({ ...seg, x, w });
+    x += w + CRUMB_PAD;
+  }
+  const room = Math.max(0, wCss - SEARCH_W - VIEWBTN_W - CRUMB_PAD);
+  let drop = 0;
+  while (drop < boxes.length - 1 && boxes[boxes.length - 1].x + boxes[boxes.length - 1].w
+    - boxes[drop].x + CRUMB_PAD > room) drop += 1;
+  const shift = boxes[drop] ? boxes[drop].x - CRUMB_PAD : 0;
+  return boxes.slice(drop).map((b, n) => ({
+    ...b, x: b.x - shift, elided: drop > 0 && n === 0,
+  }));
+};
+
+/**
+ * WHAT A CSS-PX POINT IN THE ADDRESS STRIP IS AIMED AT: `{ kind, index }`, where `kind` is
+ * `"segment"`, `"search"`, `"view"` or `"empty"` and `index` is the segment's.
+ *
+ * `"empty"` IS A REAL ANSWER AND NOT A MISS, because R28's second half is that a click in the empty
+ * strip turns the trail into an editable path. The order of the tests is the order the strip is
+ * drawn in from the right, so a segment can never sit under the search field: the segments are laid
+ * out inside `wCss - SEARCH_W - VIEWBTN_W` and the two controls own the remainder outright.
+ */
+const crumbHit = (xCss, path, wCss) => {
+  if (xCss >= wCss - VIEWBTN_W) return { kind: "view", index: -1 };
+  if (xCss >= wCss - VIEWBTN_W - SEARCH_W) return { kind: "search", index: -1 };
+  const segs = crumbSegments(path, wCss);
+  const at = segs.findIndex((s) => xCss >= s.x && xCss < s.x + s.w);
+  return at < 0 ? { kind: "empty", index: -1 } : { kind: "segment", index: at };
+};
+
+/* ---- M23: SEARCH, AND EXACTLY WHAT IT LOOKS AT ------------------------------------------- */
+
+/**
+ * WHETHER `name` MATCHES `query` — a CASE-FOLDED SUBSTRING, and nothing cleverer.
+ *
+ * NOT A GLOB AND NOT A REGULAR EXPRESSION, and that is a decision rather than an omission: a reader
+ * typing into a box expects every keystroke to narrow what they are looking at, and an incomplete
+ * glob (`*.tx`) matches nothing while an incomplete substring matches more. A regular expression
+ * built from a reader's typing is also a way to spend unbounded time on a 40-character directory
+ * name, which is a cost nothing here could bound.
+ *
+ * `toLowerCase` AND NOT A LOCALE FOLD. `toLocaleLowerCase` answers differently per host locale,
+ * which would make the same query match different files on two machines — and a filter nobody can
+ * predict is a filter a check cannot assert.
+ */
+const searchMatch = (name, query) =>
+  query === "" || String(name).toLowerCase().includes(query.toLowerCase());
+
+/**
+ * HOW DEEP A SEARCH WALK MAY GO, and HOW MANY ENTRIES IT MAY READ. Both are hard refusals with the
+ * figure named, never a silent stop.
+ *
+ * 64 IS THE DEPTH `src/bin/rm.mjs` AND `src/bin/cp.mjs` ALREADY USE, each with its own copy of the
+ * number (PRD R31 records both). This is a THIRD copy and it should not be: the PRD's answer is a
+ * shared bounded walk in `src/libos/std.mjs`, which is not this slice's file — reported rather than
+ * made.
+ *
+ * THE ENTRY CEILING IS WHAT MAKES THE WALK FINITE IN PRACTICE. Depth alone bounds nothing useful: a
+ * tree 3 deep and 10,000 wide is inside every depth limit and is 10,000 `readdir` entries plus one
+ * `lstat` per MATCH. 20,000 at roughly 85 µs per directory component (constraint 24) is the figure
+ * the strip reports; a reader who hits it is told, with the count.
+ */
+const SEARCH_MAX_DEPTH = 64;
+const SEARCH_MAX_ENTRIES = 20000;
+/**
+ * How many entries one chunk of the walk reads before it returns to the event loop. R31 requires
+ * the walk be chunked "so the window keeps servicing input", and this is the grain.
+ *
+ * THE GRAIN IS A DIRECTORY AND NOT AN ENTRY, which this number states rather than enforces: the
+ * budget is checked between directories, so a chunk reads AT LEAST one whole directory and stops
+ * once it has seen this many entries. A single directory of ten thousand entries is therefore one
+ * chunk. The alternative — stopping mid-directory — needs a resume point inside a `readdir`, and
+ * `std.listDir` returns a whole listing; a walker that re-read the directory to resume would pay
+ * for it twice and could see it change between the two reads.
+ */
+const SEARCH_CHUNK = 256;
 
 /** The y of a row's top, CSS px, measured inside the client area and MINUS THE SCROLL OFFSET.
  *  `scroll` defaults to 0, which is the unscrolled layout every caller before M17 asked for. */
-const rowTop = (i, scroll = 0) => HEAD_H + PAD + i * ROW_STRIDE - scroll;
+/* M23: `VIEW_TOP` AND NOT `HEAD_H`, AND THE TWO WERE THE SAME NUMBER UNTIL THE ADDRESS STRIP
+ * ARRIVED. `VIEW_TOP` is the top of the clipped viewport and the first row sits `PAD` below it;
+ * `HEAD_H` is only the COLUMN BAND'S height. Leaving `HEAD_H` here put the rows 22 CSS px above the
+ * viewport that bounds them, so `inViewport` rejected a press aimed at `rowMid` and a driven
+ * double-click reached no row at all — measured as `dblclicks: 0` and `relists: 0` across fourteen
+ * of `www/m18.html`'s clauses. */
+const rowTop = (i, scroll = 0) => VIEW_TOP + PAD + i * ROW_STRIDE - scroll;
 /** The middle of a row, CSS px: where a driver outside the process aims. */
 const rowMid = (i, scroll = 0) => rowTop(i, scroll) + ROW_H / 2;
 
@@ -545,6 +799,282 @@ const bandRows = (band, n, wCss) => {
 /** A CSS-px length as a surface coordinate, rounded: `encodeDrawOp` truncates (`a0: op.a0 | 0`),
  *  and a truncated edge is a half-pixel seam at a fractional ratio. */
 const toSurface = (vCss, scale) => Math.round(vCss * scale);
+
+/* ---- M23: THE SEVEN VIEW MODES, AS DATA -------------------------------------------------- */
+
+/**
+ * THREE FLOWS AND NOT SEVEN LAYOUTS. Windows 7 ships seven view modes on a continuum, and the thing
+ * that actually differs between them is the CELL and which way the overflow runs:
+ *
+ *   `rows`    one item per line, the full width of the viewport: Details, and only Details, because
+ *             it is the only mode with columns. Its arithmetic is `rowTop`/`rowAt`, unchanged and
+ *             still exported — every generalised function below DELEGATES to them in this flow
+ *             rather than restating the formula, so the Details layout has one definition and the
+ *             three proof pages that aim at it need no change.
+ *   `grid`     cells left to right, wrapping down, scrolling DOWN: the four icon sizes and Tiles.
+ *   `columns`  cells top to bottom, wrapping ACROSS, scrolling ACROSS: List, and nothing else.
+ *              That is the whole distinction between List and Small icons (PRD R27) — the same
+ *              cell, the other flow — and it is why `scroll` is an offset along the MODE'S OWN
+ *              AXIS and not a `y`.
+ */
+const FLOW_ROWS = "rows";
+const FLOW_GRID = "grid";
+const FLOW_COLUMNS = "columns";
+
+const VIEW_XLARGE = "xlarge";
+const VIEW_LARGE = "large";
+const VIEW_MEDIUM = "medium";
+const VIEW_SMALL = "small";
+const VIEW_LIST = "list";
+const VIEW_DETAILS = "details";
+const VIEW_TILES = "tiles";
+
+/** The gutter between two cells, CSS px. Both axes, so a grid's spacing does not depend on which
+ *  way it flows. `ROW_GAP` is the `rows` flow's own and stays what it was. */
+const CELL_GAP = 6;
+/** One line of label under or beside an icon, CSS px — `TEXT_PX` plus the leading a 12 px run needs
+ *  to sit clear of the line below it. */
+const LABEL_H = 16;
+
+/**
+ * THE SEVEN MODES. One row each: what it is called, how it flows, how big its icon is, how wide its
+ * cell is, whether a picture is drawn in it, how many label lines it has, and whether the label sits
+ * BELOW the icon or beside it.
+ *
+ * THE ORDER IS THE SLIDER'S, largest first, which is Windows' own order in the View menu and the
+ * direction Ctrl+wheel steps: a wheel AWAY from the reader makes the icons bigger. Adding a mode is
+ * adding a row here and nothing else (CLAUDE.md: adding the next case should be adding data).
+ *
+ * `thumbs` IS R26'S SCOPE AND NOT A PREFERENCE. The PRD says "thumbnails at Medium icons and
+ * larger", which is Windows' own rule: Details, Small icons and List show the TYPE ICON, because a
+ * 16 CSS px picture of a photograph is less informative than the icon that says what it is. It is
+ * also what keeps a `files` window in the default mode holding no data object at all, which matters
+ * beyond the look — see `fillThumbs`.
+ *
+ * `cellW` IS DECLARED AND `cellH` IS DERIVED (`cellHOf`), because the height is a function of the
+ * icon and the label lines while the width is a judgement about how much room a name needs.
+ */
+const VIEWS = Object.freeze([
+  Object.freeze({ id: VIEW_XLARGE, label: "Extra large icons", flow: FLOW_GRID,
+    icon: 256, cellW: 268, thumbs: true, lines: 2, below: true }),
+  Object.freeze({ id: VIEW_LARGE, label: "Large icons", flow: FLOW_GRID,
+    icon: 96, cellW: 120, thumbs: true, lines: 2, below: true }),
+  Object.freeze({ id: VIEW_MEDIUM, label: "Medium icons", flow: FLOW_GRID,
+    icon: 48, cellW: 92, thumbs: true, lines: 2, below: true }),
+  Object.freeze({ id: VIEW_SMALL, label: "Small icons", flow: FLOW_GRID,
+    icon: GLYPH_W, cellW: 172, thumbs: false, lines: 1, below: false }),
+  Object.freeze({ id: VIEW_LIST, label: "List", flow: FLOW_COLUMNS,
+    icon: GLYPH_W, cellW: 172, thumbs: false, lines: 1, below: false }),
+  Object.freeze({ id: VIEW_DETAILS, label: "Details", flow: FLOW_ROWS,
+    icon: GLYPH_W, cellW: 0, thumbs: false, lines: 1, below: false }),
+  Object.freeze({ id: VIEW_TILES, label: "Tiles", flow: FLOW_GRID,
+    icon: 48, cellW: 212, thumbs: true, lines: 2, below: false }),
+]);
+
+/**
+ * id -> row. A mode named by argv or by a remembered folder is looked up here and an unknown one
+ * is refused by name rather than silently defaulted.
+ *
+ * `Object.create(null)` AND NOT `Object.fromEntries`, which is a fix and not a style. A plain
+ * object inherits `Object.prototype`, so `VIEW_BY_ID["toString"]` is a FUNCTION — truthy — and
+ * `--view toString` passed the usage guard, became `view`, and gave `cellHOf` a row with no `flow`
+ * and no `icon`: a NaN geometry and a window that draws nothing, from an argument the guard was
+ * written to refuse by name. A prototype-less map has no key but the seven.
+ */
+const VIEW_BY_ID = Object.freeze(Object.assign(Object.create(null),
+  Object.fromEntries(VIEWS.map((v) => [v.id, v]))));
+
+/** THE MODE A WINDOW OPENS IN, and it is Details for the reason every file manager opens in it: it
+ *  is the only mode that shows a date, a type and a size, which is what a reader opening a folder
+ *  they do not know is looking for (PRD R7). */
+const VIEW_DEFAULT = VIEW_DETAILS;
+
+/**
+ * ONE CELL'S HEIGHT, CSS px, DERIVED from the icon and the label.
+ *
+ * `below` STACKS AND BESIDE DOES NOT: a label under an icon adds its lines to the icon's height,
+ * while a label beside one shares it — so a Tiles cell is as tall as the taller of its two halves
+ * and a Large icons cell is the sum. The `rows` flow has no cell of its own: `ROW_H` is its height
+ * and `ROW_STRIDE` its pitch, which is the one geometry the Details view has always had.
+ */
+const cellHOf = (view) => (view.flow === FLOW_ROWS ? ROW_H
+  : (view.below ? view.icon + view.lines * LABEL_H
+    // `ROW_H` IS THE FLOOR FOR A LABEL BESIDE AN ICON, because a one-line cell with a name in it IS
+    // a row — a 16 px cell holding a 12 px run leaves two pixels above and below, which reads as
+    // text jammed against its neighbours. Small icons and List are that cell, and `ROW_H` is the
+    // height the Details view already gives one line of a name.
+    : Math.max(ROW_H, view.icon, view.lines * LABEL_H)));
+
+/**
+ * HOW MANY CELLS FIT ALONG THE FIXED AXIS, and the pitch on both — for `view` in a viewport `box`.
+ *
+ * `lanes` IS COLUMNS FOR A GRID AND ROWS FOR THE LIST, which is what makes one function answer for
+ * both flows: a lane is the run of cells that fills before the layout wraps. At least one, because
+ * a window narrower than one cell still owes a reader that cell rather than nothing — the canvas
+ * cuts it, which is what Explorer does.
+ *
+ * THE `rows` FLOW HAS ONE LANE AND ITS PITCH IS `ROW_STRIDE`. Everything below it then falls out of
+ * the same arithmetic the Details view already used, which is why `itemBox` and `itemAtPoint` can
+ * delegate to `rowTop` and `rowAt` instead of agreeing with them.
+ */
+const lanesOf = (view, box) => {
+  if (view.flow === FLOW_ROWS) {
+    return { lanes: 1, pitchW: Math.max(0, box.w - PAD * 2), pitchH: ROW_STRIDE };
+  }
+  const pitchW = view.cellW + CELL_GAP;
+  const pitchH = cellHOf(view) + CELL_GAP;
+  const along = view.flow === FLOW_COLUMNS ? box.h : box.w;
+  const pitch = view.flow === FLOW_COLUMNS ? pitchH : pitchW;
+  // `+ CELL_GAP` BECAUSE THE LAST CELL IN A LANE NEEDS NO GUTTER AFTER IT: without it a viewport
+  // exactly wide enough for three cells fits two, and a reader sees a column of empty paper.
+  return { lanes: Math.max(1, Math.floor((along - PAD * 2 + CELL_GAP) / pitch)), pitchW, pitchH };
+};
+
+/** WHICH WAY A MODE SCROLLS: `"x"` for the List and `"y"` for everything else. The one place that
+ *  is decided, because `scroll` is an offset along this axis and a second opinion about which axis
+ *  it is would scroll the content one way and hit-test it the other. */
+const axisOf = (view) => (view.flow === FLOW_COLUMNS ? "x" : "y");
+
+/**
+ * WHERE ITEM `i` SITS, CSS px, with `scroll` taken off the mode's own axis — the ONE definition,
+ * read by the drawing, by the hit test, by the band and by anything outside the process.
+ *
+ * THE `rows` FLOW IS `rowTop` AND NOT A COPY OF IT. That is the whole reason this function has a
+ * branch rather than a formula: the Details layout is exported, three proof pages aim at it, and a
+ * second spelling of `VIEW_TOP + PAD + i * ROW_STRIDE` is how the two come to disagree by a pixel.
+ */
+const itemBox = (view, i, scroll, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) {
+    return { x: PAD, y: rowTop(i, scroll), w: Math.max(0, wCss - PAD * 2), h: ROW_H };
+  }
+  const box = viewBox(wCss, hCss);
+  const { lanes, pitchW, pitchH } = lanesOf(view, box);
+  const lane = i % lanes;
+  const run = Math.floor(i / lanes);
+  const across = view.flow === FLOW_COLUMNS ? run : lane;
+  const down = view.flow === FLOW_COLUMNS ? lane : run;
+  const dx = view.flow === FLOW_COLUMNS ? scroll : 0;
+  const dy = view.flow === FLOW_COLUMNS ? 0 : scroll;
+  return {
+    x: PAD + across * pitchW - dx,
+    y: box.y + PAD + down * pitchH - dy,
+    w: view.cellW,
+    h: cellHOf(view),
+  };
+};
+
+/**
+ * THE ITEM UNDER A CSS-PX POINT, or `-1` — THE DECLARED INVERSE OF `itemBox`, which is what makes a
+ * press land on the cell a reader is looking at.
+ *
+ * UNBOUNDED BY THE ITEM COUNT, like `rowAt`, because the count is live and this is a pure function;
+ * the caller bounds it (`rowUnder` in `run`). THE GUTTER BELONGS TO NEITHER CELL, for `rowAt`'s own
+ * reason: a press in the gap selects nothing rather than a neighbour by rounding.
+ */
+const itemAtPoint = (view, xCss, yCss, scroll, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) return rowAt(yCss, scroll);
+  const box = viewBox(wCss, hCss);
+  const { lanes, pitchW, pitchH } = lanesOf(view, box);
+  const dx = view.flow === FLOW_COLUMNS ? scroll : 0;
+  const dy = view.flow === FLOW_COLUMNS ? 0 : scroll;
+  const ax = xCss + dx - PAD;
+  const ay = yCss + dy - (box.y + PAD);
+  if (ax < 0 || ay < 0) return -1;
+  const across = Math.floor(ax / pitchW);
+  const down = Math.floor(ay / pitchH);
+  if (ax - across * pitchW >= view.cellW) return -1;
+  if (ay - down * pitchH >= cellHOf(view)) return -1;
+  const lane = view.flow === FLOW_COLUMNS ? down : across;
+  const run = view.flow === FLOW_COLUMNS ? across : down;
+  if (lane >= lanes) return -1;
+  return run * lanes + lane;
+};
+
+/**
+ * HOW FAR THE CONTENT RUNS ALONG THE SCROLL AXIS, CSS px, measured from the viewport's own edge.
+ *
+ * `PAD` AT THE NEAR END AND NONE AT THE FAR ONE, because the last cell's gutter is not content —
+ * which is what makes `scrollMaxFor` put the last cell's edge exactly on the viewport's, the same
+ * promise `scrollMax` already makes for a row.
+ */
+const contentLength = (view, n, wCss, hCss) => {
+  const box = viewBox(wCss, hCss);
+  const { lanes, pitchW, pitchH } = lanesOf(view, box);
+  const runs = n > 0 ? Math.ceil(n / lanes) : 0;
+  const pitch = axisOf(view) === "x" ? pitchW : pitchH;
+  const cell = axisOf(view) === "x" ? view.cellW : cellHOf(view);
+  return runs > 0 ? PAD + (runs - 1) * pitch + cell : 0;
+};
+
+/** THE LARGEST LEGAL OFFSET for `view`, CSS px. `scrollMax` IS CALLED for the `rows` flow rather
+ *  than reproduced, so the Details clamp a check asserts against the export is the clamp the
+ *  program applies. Zero when everything fits, which is both clamps being the same number. */
+const scrollMaxFor = (view, n, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) return scrollMax(n, hCss);
+  const box = viewBox(wCss, hCss);
+  const room = axisOf(view) === "x" ? box.w : box.h;
+  /* `contentLength - room` AND NOTHING ADDED, which is `scrollMax`'s own arithmetic rewritten in
+   * the viewport's terms: `scrollMax(n, hCss)` expands to exactly this once `viewBox`'s `- PAD -
+   * FOOT_H` is substituted, which is how the two flows are known to clamp the same way rather than
+   * hoped to. */
+  return Math.max(0, contentLength(view, n, wCss, hCss) - room);
+};
+
+/** HOW MANY ITEMS A PAGE KEY MOVES: everything the viewport holds. `rowsThatFit` IS CALLED for the
+ *  `rows` flow, for `scrollMaxFor`'s reason. At least one — a Page key that moved nothing would be
+ *  a key a reader presses and watches do nothing. */
+const pageStepFor = (view, n, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) return rowsThatFit(hCss);
+  const box = viewBox(wCss, hCss);
+  const { lanes, pitchW, pitchH } = lanesOf(view, box);
+  const room = axisOf(view) === "x" ? box.w : box.h;
+  const pitch = axisOf(view) === "x" ? pitchW : pitchH;
+  return Math.max(1, lanes * Math.max(1, Math.floor(room / pitch)));
+};
+
+/** HOW FAR ONE ARROW KEY MOVES ACROSS THE FLOW: one lane. In the `rows` flow there is one lane and
+ *  Up/Down move by one item, which is what they have always done; in a grid they move by a whole
+ *  row of cells, and Left/Right move by one. The List is the transpose of that. */
+const laneStepFor = (view, wCss, hCss) =>
+  (view.flow === FLOW_ROWS ? 1 : lanesOf(view, viewBox(wCss, hCss)).lanes);
+
+/**
+ * THE KEYBOARD CURSOR'S RING for `view`, CSS px. `focusBox` IS CALLED for the `rows` flow, so the
+ * ring three proof pages read out of the export is the ring this program strokes; a cell's ring is
+ * its own box inset by the same one pixel, for the same reason — a row that is both selected and
+ * focused shows both marks.
+ */
+const focusBoxFor = (view, i, scroll, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) return focusBox(i, scroll, wCss);
+  const cell = itemBox(view, i, scroll, wCss, hCss);
+  return {
+    x: cell.x + FOCUS_INSET,
+    y: cell.y + FOCUS_INSET,
+    w: Math.max(0, cell.w - FOCUS_INSET * 2),
+    h: Math.max(0, cell.h - FOCUS_INSET * 2),
+  };
+};
+
+/**
+ * THE ITEMS A BAND TOUCHES in `view`, by intersection. `bandRows` IS CALLED for the `rows` flow.
+ *
+ * THE BAND'S CORNERS ARE CONTENT COORDINATES ON THE SCROLL AXIS and window coordinates on the
+ * other, which is what lets a band keep hold of what it was drawn over while the list scrolls — so
+ * the comparison is made against each cell AT OFFSET ZERO, which is what `itemBox(view, i, 0, …)`
+ * is. A band compared against the scrolled boxes would select whatever slid under it.
+ */
+const bandItems = (view, band, n, wCss, hCss) => {
+  if (view.flow === FLOW_ROWS) return bandRows(band, n, wCss);
+  const r = bandBox(band);
+  const hit = new Set();
+  if (r.w <= 0 || r.h <= 0) return hit;
+  for (let i = 0; i < n; i += 1) {
+    const cell = itemBox(view, i, 0, wCss, hCss);
+    if (r.x < cell.x + cell.w && r.x + r.w > cell.x
+      && r.y < cell.y + cell.h && r.y + r.h > cell.y) hit.add(i);
+  }
+  return hit;
+};
 
 /**
  * WHAT A ROW IS: `DIR`, a format name, `PROG`, or a dash — in that order of specificity, and in
@@ -861,6 +1391,110 @@ const baseNameOf = (path) => {
   return cut < 0 ? trimmed : trimmed.slice(cut + 1);
 };
 
+/* ---- M23: THUMBNAILS, AND THE THREE CEILINGS THAT BOUND THEM ------------------------------ */
+
+/**
+ * WHICH FORMATS BECOME A PICTURE, as data — the only table in this program that says a file's bytes
+ * can be drawn.
+ *
+ * TWO ENTRIES AND THEY ARRIVE BY DIFFERENT ROUTES. `DOBJ_PNG` goes through the PLATFORM's decoder,
+ * which `bench/m23-blit/` measured is reachable from inside a locked-down process realm and only in
+ * an AWAITED turn; `DOBJ_BITMAP` is this system's own `.rgba`, which is already an `encodeBitmap`
+ * payload and needs `decodeBitmap` and no decoder at all. A format absent from this table is not a
+ * failure and is not reported as one: there is nothing to decode, so the row keeps its type icon.
+ *
+ * THE KEYS ARE `src/libos/std.mjs`'S FORMAT IDS, which is the same association `formatForPath` and
+ * `iconForPath` already read, so a `.png` here and a `.png` on the desktop are the same file.
+ */
+const THUMBNAILED = Object.freeze({
+  [DOBJ_PNG]: "platform",
+  [DOBJ_BITMAP]: "payload",
+});
+
+/**
+ * THE LARGEST SQUARE ONE DATA OBJECT CAN HOLD, DEVICE px — DERIVED from the object ceiling and the
+ * bitmap header, never written. 511 today.
+ *
+ * IT BINDS AT THE TOP OF THE VIEW-MODE RANGE AND NOT IN THEORY. `DOBJ_MAX_BYTES` is 1 MiB and a
+ * pixel is four bytes, so a 512x512 payload is EIGHT BYTES over the ceiling — which is exactly the
+ * Extra Large cell (256 CSS px) at dpr 2. A decode is clamped to this and the clamp is COUNTED,
+ * because a thumbnail silently one pixel short of the cell it was asked for is a picture whose size
+ * no reader could account for.
+ */
+const THUMB_MAX_SIDE = Math.floor(Math.sqrt((DOBJ_MAX_BYTES - BITMAP_HEADER) / 4));
+
+/**
+ * HOW MANY LIVE DATA OBJECTS THIS PROGRAM KEEPS BACK FOR ITS OWN GESTURES. A Cut, a Copy and a drag
+ * each create one, and `DOBJ_CAP` is a PER-PROCESS count (`src/abi.mjs`) — so a thumbnail cache
+ * allowed to fill it would make the next Copy answer -EMFILE, which is a file manager that stopped
+ * being able to copy because a reader scrolled.
+ *
+ * FOUR AND NOT TWO: each of those three closes its fd inside the call that made it, so two would
+ * do — the extra pair is headroom for a gesture that overlaps a repaint.
+ */
+const DOBJ_RESERVE = 4;
+
+/**
+ * HOW MANY THUMBNAILS MAY BE LIVE AT ONCE — `DOBJ_CAP` less the reserve, so 28.
+ *
+ * THIS IS THE ONE LIMIT A READER CAN SEE, and it is an ABI limit rather than a choice: `DL_BLIT`
+ * draws a payload WHOLE and has no source rectangle, so an atlas is unexpressible and a picture
+ * costs an object. A view showing more tiles than this draws the type icon on the remainder and
+ * says how many — see `account.thumbs.capped`.
+ */
+const THUMB_CAP = DOBJ_CAP - DOBJ_RESERVE;
+
+/**
+ * THE LARGEST FILE THIS PROGRAM WILL READ WHOLE TO MAKE A PICTURE OF IT, bytes.
+ *
+ * A thumbnail needs the file's every byte — a decoder cannot start in the middle — and those bytes
+ * cross the SAB `MAX_INLINE` at a time, so a 40 MiB PNG is 640 syscalls and 40 MiB of process heap
+ * spent on a 16-pixel glyph. Above this the TYPE ICON is the honest answer and the size is said.
+ * The row's own `lstat` already has the figure, so nothing is read to find out.
+ */
+const THUMB_SOURCE_MAX = 4 * 1024 * 1024;
+
+/** How many payloads `account.thumbs.made` records before it starts counting instead. A reader
+ *  scrolling a directory of four thousand images would otherwise carry four thousand rows out of
+ *  the process; `madeCapped` is what says the list is short because of this and not because the run
+ *  was. */
+const THUMB_MADE_CAP = 64;
+
+/**
+ * THE DEVICE-PIXEL EXTENT A DECODE MUST PRODUCE for an `imgW` x `imgH` image in a `cellCss` square
+ * at ratio `scale`. `{ w, h, clamped }`, both sides at least 1.
+ *
+ * IT IS THE PAYLOAD'S SIZE AND THEREFORE THE DRAWN SIZE, because `DL_BLIT` carries no destination
+ * width or height — the renderer draws `BMP_W` x `BMP_H` surface pixels and scales nothing
+ * (`src/wm/surface.mjs`). So the decode, and not the renderer, is what fits a picture to a cell,
+ * and a dpr change invalidates every payload: a 16 CSS px glyph is 16 device px at dpr 1 and 32 at
+ * dpr 2, and a cache that ignored the ratio would blit a half-size picture on half the displays —
+ * the exact shape of defect that cost M11, M12 and M16 (CLAUDE.md).
+ *
+ * AN IMAGE PIXEL IS A CSS PIXEL UNTIL THE CELL IS SMALLER, which is the rule that decides what
+ * "fit" means here: a 16x16 logo fills a 16 CSS px glyph box exactly and is NOT blown up to 256 in
+ * the Extra Large view, because four hundred device pixels of interpolated 16x16 is a worse picture
+ * than the icon it replaced. Only shrinking is a fit; growing is a guess.
+ *
+ * THE ASPECT RATIO IS KEPT. A letterboxed thumbnail is Explorer's own behaviour and the alternative
+ * is a stretched one, which misreports the picture's shape — the one thing a thumbnail exists to
+ * say.
+ */
+const thumbFit = (imgW, imgH, cellCss, scale) => {
+  const longest = Math.max(1, imgW, imgH);
+  const sideCss = Math.min(cellCss, longest);
+  const toCell = sideCss / longest;
+  let w = Math.max(1, Math.round(imgW * toCell * scale));
+  let h = Math.max(1, Math.round(imgH * toCell * scale));
+  // THE OBJECT CEILING, APPLIED LAST AND REPORTED. It binds only at the top of the view-mode range
+  // (see `THUMB_MAX_SIDE`), and a clamp nobody counted is a picture a reader cannot account for.
+  const over = Math.max(w, h) / THUMB_MAX_SIDE;
+  if (over <= 1) return { w, h, clamped: false };
+  w = Math.max(1, Math.floor(w / over));
+  h = Math.max(1, Math.floor(h / over));
+  return { w, h, clamped: true };
+};
+
 /** THE IN-SURFACE MENU'S GEOMETRY, CSS px, and it exists ONLY for `--menu-in-surface`. The real
  *  menu is the page's popup and its metrics are the shell's; these are what the control draws with,
  *  exported so a check can predict the rectangle rather than restate it. */
@@ -935,6 +1569,36 @@ export const FILES_METRICS = Object.freeze({
    * asserting that a delete left a payload AND an origin record has to name both paths, and a
    * driver that restated either would assert against a Bin this program does not have. */
   BIN_NAME, ORIGIN_SUFFIX, binDirIn, originRecordOf, freeFrom,
+  /* M23. THE THUMBNAIL'S THREE CEILINGS AND ITS FIT, for `rowTop`'s reason: a check asserting that
+   * a blit drew the picture a reader asked for has to name the payload's EXTENT, and that extent is
+   * a function of the ratio — so a driver restating it is a driver asserting the wrong rectangle at
+   * every dpr but its own. `THUMB_CAP` is here because it is the one limit a reader can SEE: a view
+   * with more tiles than this has type icons on the remainder, by construction and not by failure.
+   *
+   * `THUMB_FORMATS` is the ids of `THUMBNAILED`'s rows, as numbers, so a driver can tell a row with
+   * nothing to decode from one whose decode was refused without restating the table. */
+  THUMB_MAX_SIDE, THUMB_CAP, THUMB_SOURCE_MAX, thumbFit,
+  THUMB_FORMATS: Object.freeze(Object.keys(THUMBNAILED).map(Number)),
+  /* M23. THE VIEW MODES AND THE GENERALISED GEOMETRY, for `rowTop`'s reason once more — and with
+   * one extra obligation this time. The six functions below each DELEGATE to the exported Details
+   * function in the `rows` flow (`itemBox`→`rowTop`, `itemAtPoint`→`rowAt`, `scrollMaxFor`→
+   * `scrollMax`, `pageStepFor`→`rowsThatFit`, `focusBoxFor`→`focusBox`, `bandItems`→`bandRows`), so
+   * a driver that already aims with the old names is aiming at the same pixels and a driver in
+   * another mode has one place to ask. The `VIEWS` table is the data: `label` is what a reader is
+   * shown, `thumbs` is R26's scope, and `id` is what `--view` takes and `account.view` reports. */
+  VIEWS, VIEW_BY_ID, VIEW_DEFAULT, CELL_GAP, LABEL_H,
+  FLOW_ROWS, FLOW_GRID, FLOW_COLUMNS,
+  cellHOf, lanesOf, axisOf, itemBox, itemAtPoint, contentLength, scrollMaxFor, pageStepFor,
+  laneStepFor, focusBoxFor, bandItems,
+  /* M23. THE ADDRESS STRIP AND THE SEARCH FIELD, for `rowTop`'s reason and one more: `HEADER_MID`
+   * and `CRUMB_MID` exist so that nothing outside this process has to halve `VIEW_TOP` to name a
+   * band. That arithmetic was right while the column header was the only thing above the viewport
+   * and is now a point whose band depends on `CRUMB_H < HEAD_H` — see `CRUMB_H`. `crumbSegments` is
+   * the rectangle a segment press must be aimed at and `crumbHit` is its declared inverse. */
+  CRUMB_H, CRUMB_TOP, CRUMB_SKIRT, CRUMB_PAD, CRUMB_MID, HEADER_MID, SEARCH_W, VIEWBTN_W,
+  MONO_ADVANCE_PER_PX,
+  crumbSegments, crumbHit,
+  searchMatch, SEARCH_MAX_DEPTH, SEARCH_MAX_ENTRIES, SEARCH_CHUNK,
 });
 
 const PAPER = 0x12161cff;
@@ -980,6 +1644,16 @@ const LIT_FILL = 0x1e2630ff;
  *  low byte and `cssColor` is what turns it into a canvas `rgba()` (constraint 224). */
 const BAND_WASH = 0x4a9bd83c;
 const BAND_EDGE = 0x8fd0ffff;
+/** M23. THE ADDRESS STRIP'S OWN TWO TONES: the strip is one step off the paper so a reader can see
+ *  where it ends, and a segment under the pointer is one step off that. `CRUMB_FILL` doubles as the
+ *  search field's and the view button's ground, because they are the same strip. */
+const CRUMB_FILL = 0x1a2027ff;
+const CRUMB_LIT = 0x27313cff;
+/** M23. WHAT A LETTERBOXED THUMBNAIL SITS ON. `thumbFit` keeps the aspect ratio, so a non-square
+ *  picture leaves bars inside its cell — and a bar of `PAPER` makes a 64x16 strip read as a drawing
+ *  that stopped rather than as the shape of the image. One step off the paper, like `LIT_FILL`:
+ *  a plate is a statement about the cell, not a second selection colour. */
+const THUMB_PLATE = 0x1a2027ff;
 
 /**
  * HOW FAR THE POINTER MUST MOVE BEFORE A PRESS BECOMES A DRAG, in CSS pixels.
@@ -1017,7 +1691,21 @@ function readFile(env, path) {
   }
 }
 
-export function run(env) {
+/**
+ * M23 MADE THIS ASYNC, AND THE REASON IS A MEASUREMENT RATHER THAN A STYLE.
+ *
+ * A thumbnail needs a decode, and `bench/m23-blit/` measured that a decode promise settles inside a
+ * real process in M6's stripped realm under its live CSP — but ONLY in an awaited turn: not while
+ * the process is parked in `nanosleep` (406 ms, nothing settled), not while it spins (400 ms), and
+ * a cold decode needs seven macrotask turns in Chrome. So the decode cannot be folded into a
+ * syscall reply — constraint 219's shape, which M8 established for a transferred `OffscreenCanvas`,
+ * holds for a promise too — and the only honest place for it is BETWEEN two syscalls, as an `await`
+ * the event loop can reach. `src/libos/process.mjs` already awaits a program's `run`.
+ *
+ * NOTHING ELSE IN HERE BECAME ASYNCHRONOUS. Every syscall is still the blocking call it was; the
+ * only suspension points are `fillThumbs`'s, and they are all before the poll.
+ */
+export async function run(env) {
   const argv = (env.argv || []).map(String);
   /* THE TWO CONTROLS COME OFF ARGV BEFORE `getopt`, which knows single letters only — a
    * `--no-resurface` reaching it is refused as an unknown `-`. `--` still ends the options, so a
@@ -1035,10 +1723,21 @@ export function run(env) {
   let restoreOverwrites = false;
   let moveForcedCopy = false;
   let staleListing = false;
+  /** M23's two thumbnail controls. `noThumbs` decodes nothing; `thumbNoFallback` decodes and then
+   *  draws NOTHING where a decode was refused or capped, which is the silent-blank world R26's
+   *  "stated fallback" clause is about. */
+  let noThumbs = false;
+  let thumbNoFallback = false;
   let noDrainMs = 0;
   /** `--bin`: open the Bin rather than the session tree. Resolved AFTER the options, because
    *  where the Bin is comes from `binDirIn` and not from the caller. */
   let openBin = false;
+  /** `--view ID`: the mode the window OPENS in. NOT a control and not a fixture — it is how a
+   *  reader, a desktop row or a driver names a view without a gesture, which the ABI cannot deliver
+   *  by keyboard (see `WHAT CANNOT BE BOUND` in this file's header). An unknown id is refused by
+   *  name rather than silently defaulted: a window that opened in Details because a word was
+   *  misspelled is a window that lies about what it was asked for. */
+  let openView = "";
   const rest = [];
   let endOfOptions = false;
   const args = argv.slice(1);
@@ -1069,6 +1768,21 @@ export function run(env) {
        * could not see it. */
       if (arg === "--bin") { openBin = true; continue; }
       if (arg === "--stale-listing") { staleListing = true; continue; }
+      if (arg === "--no-thumbs") { noThumbs = true; continue; }
+      if (arg === "--thumb-no-fallback") { thumbNoFallback = true; continue; }
+      if (arg === "--view") {
+        const raw = args[i + 1];
+        if (raw === undefined || !VIEW_BY_ID[raw]) {
+          return {
+            exit: env.std.complain(env, NAME, raw === undefined ? "--view" : String(raw),
+              `--view wants one of ${VIEWS.map((v) => v.id).join(", ")}`, env.std.EXIT_USAGE),
+            program: NAME,
+          };
+        }
+        openView = raw;
+        i += 1;
+        continue;
+      }
       if (arg === "--no-drain") {
         // Refused, not silently defaulted — `--ceiling`'s rule in src/bin/term.mjs: `Number(x) || d`
         // accepts both `0` and `abc`, and a fixture that silently did not hold is a check that
@@ -1125,6 +1839,25 @@ export function run(env) {
    *  already in the Bin. The second half is not a detail — a Bin that recycled its own rows would
    *  be a delete a reader could never finish. */
   const binnable = (path) => underDir(path, env.std.HOME_DIR) && !underDir(path, binRoot);
+  /* ---- M23: THE VIEW MODE, AND IT IS REMEMBERED PER FOLDER --------------------------------- */
+
+  /** THE MODE THIS WINDOW IS IN — a row of `VIEWS` and never an id, so nothing downstream has to
+   *  look one up and no call site can hold a string the table does not have. */
+  let view = VIEW_BY_ID[openView] || VIEW_BY_ID[VIEW_DEFAULT];
+  /**
+   * dirKey -> mode id. R27's "remembered per folder", and it is THIS PROCESS'S memory and says so.
+   *
+   * IN MEMORY AND NOT ON DISK, which is a limit rather than a shortcut: there is no agreed place for
+   * persisted shell configuration (`docs/PLAN-SHELL.md` §6 lists it as open), and inventing a dotfile
+   * here would be a second answer to a question R24's pin list asks too. So a reader who sets Large
+   * icons on a folder, walks away and comes back in the SAME window finds Large icons; a new window
+   * opens in the default. That is stated on stdout rather than implied.
+   *
+   * KEYED ON `dirKey` so a path with a trailing slash and the same path without one are one folder,
+   * which is the same normalisation `inBin` compares with.
+   */
+  const viewByDir = new Map();
+
   const account = {
     program: NAME, dir, win: 0, fd: 0, rows: [], drags: 0, refusedDrags: 0,
     /* M19a. WHO CHOSE THE DIRECTORY, and why it is not the session's tree when it is not: `dir`
@@ -1217,15 +1950,93 @@ export function run(env) {
       dir: binRoot, binned: [], restored: [], permanent: 0, stranded: 0, strandedRecords: 0,
       listing: false,
     },
+    /* M23. THE VIEW MODE, AND BOTH HALVES OF IT.
+     *
+     * `view` is the id a reader is in and `viewLabel` is the words they are shown, because a check
+     * asserting "the window says Large icons" and one asserting "the layout is the large grid" are
+     * two readings and a single field would make them one. `lanes` is how many cells fit across the
+     * fixed axis, which is the number a driver needs to know where the second row of a grid is;
+     * `viewAxis` is which way the mode scrolls, because `scroll` is an offset along it and the List
+     * is the one mode where that is an x.
+     *
+     * `viewsRemembered` is R27's per-folder memory as a COUNT of folders, so a check can tell a
+     * window that remembered from one that happened to open in the same mode.
+     */
+    view: view.id, viewLabel: view.label, viewFlow: view.flow, viewAxis: axisOf(view),
+    viewSwitches: 0, viewFrom: openView ? "argv" : "default", lanes: 1, viewsRemembered: 0,
+    /* M23. THE ADDRESS STRIP AND THE SEARCH.
+     *
+     * `crumbs` IS THE TRAIL AS DRAWN, label and path per segment, so a check asserts that pressing
+     * the third segment went to the path the third segment NAMED rather than to a path it worked
+     * out itself. `crumbNav` counts the navigations that came from one, apart from `relists` — a
+     * breadcrumb that silently did nothing and a breadcrumb that re-listed look the same in the
+     * row count alone.
+     *
+     * `query` AGAINST `matched` AND `listed` IS R31'S WHOLE CLAUSE: what was typed, how many rows
+     * survived it, and how many there were. `searchCost` is what the row asked to be said plainly —
+     * `dirsRead` and `entriesSeen` are what a WALK paid, and both are 0 for the free filter, which
+     * is the distinction R31 is about.
+     *
+     * `strip` is which of the three states the strip is in, because an open path field and an open
+     * search field take the keyboard and a check needs to know which one it is typing into.
+     */
+    crumbs: [], crumbNav: 0, pathEdits: 0, pathWas: "",
+    strip: "trail", stripDraft: "",
+    query: "", matched: 0, listed: 0, searches: 0, deepSearches: 0,
+    searchCost: { dirsRead: 0, entriesSeen: 0, statted: 0, ms: 0, chunks: 0, why: "" },
+    statMs: 0,
     refreshes: 0, refreshKept: 0,
     dragEnters: 0, dragLeaves: 0, dropsIn: 0,
     dragOffers: [], dropped: [], dropWhere: [],
     effectsOffered: [], movedOut: [],
+    /* M23. THE THUMBNAILS, AND THE FALLBACK IS COUNTED APART FROM THEM.
+     *
+     * `ready` AGAINST `fellBack` IS THE WHOLE OF R26: a row whose picture is its own bytes, and a
+     * row that was asked for one and got the TYPE ICON instead with the reason named. The two are
+     * separate counters because a single "no thumbnail" passes for a program that never tried —
+     * which is `--no-thumbs`, and which moves `decoded` to 0 while leaving `wanted` where it was.
+     *
+     * A FALLBACK IS NOT A REFUSAL AND IS NOT IN `account.refusals`. `refuse` is for something a
+     * reader ASKED FOR and did not get; a thumbnail nobody requested that degraded to the icon the
+     * row would have had anyway is a statement about a picture, not a declined command — and
+     * putting it in `refusals` would make every window over a directory of broken images report
+     * refusals a check cannot tell from a refused Delete.
+     *
+     * `rows` NAMES EACH ONE: the path, the payload's DEVICE extent and the reason it fell back, so
+     * a check reads the extent the program really produced rather than the one it computed.
+     */
+    thumbs: {
+      wanted: 0, ready: 0, decoded: 0, fellBack: 0, capped: 0, clamped: 0,
+      evicted: 0, released: 0,
+      /* `bytes` IS THE LAST FILL PASS'S AND `peakBytes` IS THE HIGH-WATER MARK, and the pair is
+       * needed rather than tidy: a reader who walks out of a directory of images leaves `bytes` at
+       * 0 while having held a megabyte, so a check that read only the live figure would be unable
+       * to tell that program from one that never decoded anything. */
+      bytes: 0, peakBytes: 0, maxSide: THUMB_MAX_SIDE, cap: THUMB_CAP, decodeMs: 0,
+      rows: [], why: "",
+      /* EVERY PAYLOAD EVER MADE, in order, capped — `{path, w, h, bytes}`.
+       *
+       * `rows` IS THE LIVE CACHE AND THIS IS THE CUMULATIVE RECORD, and the pair is needed for
+       * `peakBytes`'s reason: a window that walked out of the directory it decoded in has an empty
+       * `rows`, so nothing in the live reading says what extent a payload had. The EXTENT is the
+       * figure that matters — `thumbFit` is where the display's ratio enters, and a payload made at
+       * the wrong size is the whole class of defect that cost M11, M12 and M16.
+       *
+       * CAPPED, because a reader scrolling a directory of four thousand images would otherwise
+       * carry four thousand rows out of the process in the result. The cap is stated in
+       * `madeCapped`, so a short list is never mistaken for a short run. */
+      made: [], madeCapped: 0,
+      /* WHAT THE LAST FRAME DREW: pictures and type icons. Their SUM is how many items were drawn
+       * with a mark of either kind, so `drewPictures + drewIcons === shownRows` is R26's fallback
+       * clause as arithmetic — and `--thumb-no-fallback` is the world where it does not hold. */
+      drewPictures: 0, drewIcons: 0,
+    },
     controls: {
       frozenSurface, cssPxSurface, unclampedScroll,
       stableSortOff, foldersLast, noDirStat, bandFromRow,
       menuInSurface, pasteClobbers,
       restoreOverwrites, moveForcedCopy, staleListing,
+      noThumbs, thumbNoFallback,
     },
     // A FIXTURE AND NOT A CONTROL (see this file's header), so it is reported apart from them.
     noDrainMs, heldMs: 0,
@@ -1272,6 +2083,73 @@ export function run(env) {
     cells: Object.fromEntries(COLUMNS.map((c) => [c.key, cellOf(r, c.key)])),
   }));
 
+  /**
+   * ONE ROW, FROM A DIRECTORY `base` AND AN ENTRY NAME. The ONE place a `dirent` becomes a row —
+   * `buildRows` reads a directory with it and M23's search walk reads a whole TREE with it, so a
+   * search result and a listing row describe a file the same way. Two copies would be two opinions
+   * about what the Type cell says, and the type is what decides whether a row can be dragged.
+   *
+   * THE KIND, WHICH IS WHAT THE TYPE COLUMN SHOWS WHEN THERE IS NO FORMAT.
+   *
+   * It printed `fmt?0` for every row of `/usr/bin` — `fmtName(0)` for a file whose extension
+   * nothing maps, which is every program in the system. A column that reads `fmt?0` thirty-two
+   * times is a column carrying no information, and it was the first thing visible once the names
+   * were legible.
+   *
+   * One `lstat` per row buys it. That is 32 extra calls for a directory of 32 things, which is what
+   * `ls -l` already costs — and the alternative is a listing that cannot tell a program from a data
+   * file, which is the distinction a reader of `/usr/bin` most wants.
+   *
+   * M19: AND THE CALL IS PAID FOR A DIRECTORY TOO, which is what a Date modified column costs. It
+   * sat inside `if (!isDir)`, so a folder had no modification time at all and the column would have
+   * had an empty cell on every one of them — a column lying about half its rows. `--no-dir-stat` is
+   * that world, kept as a control: the folder DATE cells go empty and nothing else moves, so the
+   * clause it breaks is exactly the one that says the call happens.
+   *
+   * A REFUSED STAT LEAVES THE ROW, with its cells empty. A listing that dropped the rows it could
+   * not stat would be a file manager hiding files, which is the defect M14 removed from the other
+   * end. `statted` is what `cellOf` reads to tell an empty cell from an unknown one.
+   *
+   * M23: THE TIME IS MEASURED, which is what A10 asked for and all this slice could answer. A10's
+   * fix is a `readdir` that returns the stat beside the dirent, and that is `src/abi.mjs`,
+   * `src/kernel/calls.mjs` and `src/kernel/synth.mjs` — three files this slice does not own. What
+   * it can do is price the call that would go away: `account.statMs` against `account.stats`.
+   */
+  const makeRow = (base, name, isDir, { bin = false } = {}) => {
+    const format = isDir ? 0 : env.std.formatForPath(name);
+    const path = `${base}${name}`;
+    let exec = false;
+    let size = 0;
+    let mtimeMs = 0;
+    let statted = false;
+    if (!isDir || !noDirStat) {
+      account.stats += 1;
+      if (isDir) account.dirStats += 1;
+      const from = performance.now();
+      const st = env.fs.lstat(path);
+      account.statMs += performance.now() - from;
+      if (typeof st !== "number") {
+        statted = true;
+        exec = (st.mode & 0o111) !== 0;
+        size = Number(st.size);
+        // NANOSECONDS INTO MILLISECONDS, which is the unit `Date` takes and the unit the VFS
+        // stamped in the first place (`src/kernel/calls.mjs`). A BigInt would also not survive
+        // the account's trip out of this process.
+        mtimeMs = Number(st.mtimeNs / 1000000n);
+      }
+    }
+    /* M21. WHERE THIS ROW CAME FROM, read by `readlink` of the record beside it — the LOOKUP half
+     * of the Bin's join, paid once per row and only in the Bin. `""` is a payload whose origin
+     * record is not there: a row a reader can see and drag out of the Bin by hand, and cannot
+     * Restore, which `restoreOne` refuses by name rather than guessing a destination. */
+    let origin = "";
+    if (bin) {
+      const target = env.fs.readlink(originRecordOf(path));
+      if (typeof target === "string") origin = target;
+    }
+    return { name, dir: isDir, format, exec, size, mtimeMs, statted, path, origin };
+  };
+
   const buildRows = (path, order = sort) => {
     const entries = env.std.listDir(env, path);
     if (typeof entries === "number") return entries;
@@ -1296,81 +2174,48 @@ export function run(env) {
     account.bin.listing = bin;
     const built = entries
       .filter((e) => e.name !== "." && e.name !== ".." && !isRecord(e))
-      .map((e) => {
-        const isDir = e.type === DT_DIR;
-        const format = isDir ? 0 : env.std.formatForPath(e.name);
-        /* THE KIND, WHICH IS WHAT THE TYPE COLUMN SHOWS WHEN THERE IS NO FORMAT.
-         *
-         * It printed `fmt?0` for every row of `/usr/bin` — `fmtName(0)` for a file whose extension
-         * nothing maps, which is every program in the system. A column that reads `fmt?0`
-         * thirty-two times is a column carrying no information, and it was the first thing visible
-         * once the names were legible.
-         *
-         * One `lstat` per row buys it. That is 32 extra calls for a directory of 32 things, which
-         * is what `ls -l` already costs — and the alternative is a listing that cannot tell a
-         * program from a data file, which is the distinction a reader of `/usr/bin` most wants. */
-        /* M19: AND THE CALL IS NOW PAID FOR A DIRECTORY TOO, which is what a Date modified column
-         * costs. It sat inside `if (!isDir)`, so a folder had no modification time at all and the
-         * column would have had an empty cell on every one of them — a column lying about half its
-         * rows. `--no-dir-stat` is that world, kept as a control: the folder DATE cells go empty
-         * and nothing else moves, so the clause it breaks is exactly the one that says the call
-         * happens.
-         *
-         * A REFUSED STAT LEAVES THE ROW, with its cells empty. A listing that dropped the rows it
-         * could not stat would be a file manager hiding files, which is the defect M14 removed
-         * from the other end. */
-        let exec = false;
-        let size = 0;
-        let mtimeMs = 0;
-        /* WHETHER THE CALL WAS PAID AND ANSWERED, which is what `cellOf` reads to tell an empty
-         * cell from an unknown one. A REFUSED stat leaves it false and the row stays, with empty
-         * cells: a listing that dropped the rows it could not stat would be a file manager hiding
-         * files, which is the defect M14 removed from the other end. */
-        let statted = false;
-        if (!isDir || !noDirStat) {
-          account.stats += 1;
-          if (isDir) account.dirStats += 1;
-          const st = env.fs.lstat(`${base}${e.name}`);
-          if (typeof st !== "number") {
-            statted = true;
-            exec = (st.mode & 0o111) !== 0;
-            size = Number(st.size);
-            // NANOSECONDS INTO MILLISECONDS, which is the unit `Date` takes and the unit the VFS
-            // stamped in the first place (`src/kernel/calls.mjs`). A BigInt would also not survive
-            // the account's trip out of this process.
-            mtimeMs = Number(st.mtimeNs / 1000000n);
-          }
-        }
-        const path = `${base}${e.name}`;
-        /* M21. WHERE THIS ROW CAME FROM, read by `readlink` of the record beside it — the LOOKUP
-         * half of the Bin's join, paid once per row and only in the Bin. `""` is a payload whose
-         * origin record is not there: a row a reader can see and drag out of the Bin by hand, and
-         * cannot Restore, which `restoreOne` refuses by name rather than guessing a destination. */
-        let origin = "";
-        if (bin) {
-          const target = env.fs.readlink(originRecordOf(path));
-          if (typeof target === "string") origin = target;
-        }
-        return { name: e.name, dir: isDir, format, exec, size, mtimeMs, statted, path, origin };
-      });
+      .map((e) => makeRow(base, e.name, e.type === DT_DIR, { bin }));
     return sortRows(built, order);
   };
 
+  /**
+   * THE LISTING AS IT WAS READ, before any search narrowed it. M23 added it and `rows` kept its
+   * meaning, which is the whole design of the filter: `rows` IS WHAT IS DISPLAYED, so the
+   * selection, the cursor, the band, the drag, the menu target and every index in the account go on
+   * meaning a row a reader can see. A filter that left `rows` whole and kept a separate "visible
+   * set" would put an index into one list through a hit test on the other, which is the wrong-file
+   * class of defect this program has paid for twice.
+   */
+  let allRows = [];
   /** The rows, AND THEY ARE STATE SINCE M18: a re-list replaces the whole array rather than opening
    *  a second window, so everything that indexes it — the selection, the press, the cursor — is
    *  reset by `relist` and not by its callers. */
   let rows = buildRows(dir);
+  /* A BIN THAT IS NOT THERE YET IS AN EMPTY BIN, NOT AN ERROR. The Bin directory is created by the
+   * first delete, so on a fresh volume it does not exist — and `--bin` is how the desktop's Recycle
+   * Bin icon launches this program, so refusing here is a double-click that opens nothing.
+   * Measured: `bench/shell-landing/firefox-landing.py` reported `Recycle Bin 4->4 NOTHING` while
+   * every other icon opened, and no Chrome check drove that icon at all, so it was unmeasured
+   * rather than green. A reader who has deleted nothing still gets a window that says so. */
+  if (typeof rows === "number" && openBin) rows = [];
   if (typeof rows === "number") {
     return {
       exit: env.std.complainErrno(env, NAME, dir, rows), program: NAME, errno: -rows,
     };
   }
+  allRows = rows;
   account.rows = reportRows();
   /* AN EMPTY DIRECTORY ON THE COMMAND LINE IS STILL A REFUSAL, AND AN EMPTY ONE NAVIGATED INTO IS
    * NOT. The difference is whether there is a window to say it in: here there is none, so the only
    * honest place for the message is stdout and the only honest outcome is an exit. `relist` keeps
    * the window and draws a header reading `0 items`, which is where a reader meets the same fact. */
-  if (rows.length === 0) {
+  /* AND `--bin` IS THE CASE WHERE THERE IS SOMETHING TO SAY IT IN, which is the distinction the
+   * note above draws rather than an exception to it. A typed operand is a question and stdout is
+   * where its answer belongs; the Recycle Bin is a PLACE a reader clicked, and an empty one is its
+   * ordinary state rather than a mistake. So the window opens and `relist`'s `0 items` header is
+   * where the same fact is met — the behaviour the note already describes for a navigated-into
+   * empty directory. */
+  if (rows.length === 0 && !openBin) {
     return {
       exit: env.std.complain(env, NAME, dir, "this directory is empty"), program: NAME,
       ...account,
@@ -1490,8 +2335,9 @@ export function run(env) {
    *  one place a fraction may not survive. */
   let scroll = 0;
 
-  /** The bottom clamp for the live row count and client height. */
-  const maxScroll = () => FILES_METRICS.scrollMax(rows.length, clientH);
+  /** The far clamp for the live row count, client box AND VIEW MODE. `scrollMaxFor` calls
+   *  `FILES_METRICS.scrollMax` in the `rows` flow, so the Details clamp is the exported one. */
+  const maxScroll = () => scrollMaxFor(view, rows.length, clientW, clientH);
 
   /**
    * Move the offset by `dCss` and CLAMP IT AT BOTH ENDS, counting each end separately.
@@ -1560,22 +2406,47 @@ export function run(env) {
    *  draws the forty rows a reader can see, not four thousand the clip would throw away. */
   const visible = () => {
     const box = FILES_METRICS.viewBox(clientW, clientH);
-    if (box.h <= 0) return { first: 0, last: -1 };
+    if (box.h <= 0 || box.w <= 0) return { first: 0, last: -1 };
     /* FLOORED TO THE PITCH, which can name a row whose last pixel sits just above the viewport. The
      * clip discards that row and erring this way is how a PARTIALLY visible one is never missed;
      * erring the other way is a blank strip under the header on every fractional offset. */
-    const first = Math.max(0, Math.floor((scroll + VIEW_TOP - rowTop(0)) / ROW_STRIDE));
-    let last = first - 1;
-    while (last + 1 < rows.length && rowTop(last + 1, scroll) < box.y + box.h) last += 1;
-    return { first, last };
+    if (view.flow === FLOW_ROWS) {
+      const first = Math.max(0, Math.floor((scroll + VIEW_TOP - rowTop(0)) / ROW_STRIDE));
+      let last = first - 1;
+      while (last + 1 < rows.length && rowTop(last + 1, scroll) < box.y + box.h) last += 1;
+      return { first, last };
+    }
+    /* M23. A GRID'S RANGE IS A RANGE OF LANES, AND IT IS CONTIGUOUS IN INDEX ORDER BY CONSTRUCTION.
+     * A lane is filled before the layout wraps, so the items a viewport shows are
+     * `[firstRun * lanes, (lastRun + 1) * lanes - 1]` — one interval, which is what lets `paint`
+     * stay a single loop and `account.firstRow` keep meaning what it meant. A layout whose visible
+     * set was not an interval would need a second drawing path and a second way to be wrong. */
+    const { lanes, pitchW, pitchH } = lanesOf(view, box);
+    const pitch = axisOf(view) === "x" ? pitchW : pitchH;
+    const room = axisOf(view) === "x" ? box.w : box.h;
+    const firstRun = Math.max(0, Math.floor((scroll - PAD) / pitch));
+    const runs = Math.max(1, Math.ceil((room + (scroll - PAD - firstRun * pitch)) / pitch));
+    // NOT CLAMPED UP TO THE LAST ITEM: a `first` past the end must leave `first > last`, which is
+    // the empty range every caller already handles, and not name the final cell.
+    return {
+      first: firstRun * lanes,
+      last: Math.min(rows.length - 1, (firstRun + runs) * lanes - 1),
+    };
   };
 
   /* THE OPENING HEIGHT FITS WHAT IT CAN AND SCROLLS TO THE REST, which is the one line M17 changed
    * here: the window used to open at the height of the rows it would DRAW, with a slot for the
    * "+N more" line. `START_ROWS` is a ceiling on the opening HEIGHT and no longer on the list. */
+  /* M23: AND THE OPENING HEIGHT IS THE DETAILS VIEW'S WHATEVER MODE `--view` NAMED. `clientHeightFor`
+   * is `rowsThatFit`'s declared inverse for the `rows` flow and there is no inverse for a grid — how
+   * tall a grid of n cells is depends on how WIDE the window is, and the width is not known until
+   * the first `WEV_CLIENT`. So a window opened in Large icons opens at the height the same directory
+   * would need in Details and then scrolls, which is honest: the opening size is a guess either way
+   * (see `win.create` below) and the measurement that corrects it is one event away. */
   clientH = clientHeightFor(Math.min(rows.length, START_ROWS));
   account.scrollMax = maxScroll();
-  account.maxRows = rowsThatFit(clientH);
+  account.maxRows = pageStepFor(view, rows.length, clientW, clientH);
+  account.lanes = lanesOf(view, FILES_METRICS.viewBox(clientW, clientH)).lanes;
 
   const made = env.win.create({
     // THE FRAME IS THE CLIENT BOX PLUS A GUESS AT THE CHROME, and the guess is all it may be: what
@@ -1617,9 +2488,14 @@ export function run(env) {
    *  reader cannot see because it was clipped away is still at a `y` the arithmetic maps, and
    *  selecting it would be a press landing on a row nobody can see — the hit test and the clip must
    *  bound the same rectangle or one of them is lying. */
-  const rowUnder = (yCss) => {
+  const rowUnder = (yCss, xCss = PAD) => {
     if (!inViewport(yCss)) return -1;
-    const i = FILES_METRICS.rowAt(yCss, scroll);
+    /* M23. `itemAtPoint` CALLS `FILES_METRICS.rowAt` IN THE `rows` FLOW, so the Details hit test is
+     * still the exported inverse and still ignores `x` — a press anywhere across a row finds it.
+     * In a grid the `x` decides which lane, so the parameter is real; it defaults to `PAD` so the
+     * callers that have only a `y` (the drop, which carries one point) keep working in Details and
+     * find the first lane in a grid, which is the only lane a single-coordinate caller can mean. */
+    const i = itemAtPoint(view, xCss, yCss, scroll, clientW, clientH);
     return i >= 0 && i < rows.length ? i : -1;
   };
 
@@ -1632,12 +2508,444 @@ export function run(env) {
     return yCss >= box.y && yCss < box.y + box.h;
   };
 
+  /**
+   * ONE CORNER OF A RUBBER BAND, from a CSS-px point — the START corner, or the MOVING one when
+   * `moving` is set.
+   *
+   * THE SCROLL OFFSET GOES ON THE MODE'S OWN AXIS AND ON NO OTHER. A band's corners are CONTENT
+   * coordinates along the axis the list scrolls, so that a band held open while the list moves
+   * keeps the items it was drawn over (M19's rule); on the other axis nothing scrolls, so adding
+   * the offset there would slide the rectangle across lanes the reader never crossed. In Details
+   * that is `y + scroll`, which is exactly the arithmetic that was written inline here before.
+   */
+  /* ---- M23: THE ADDRESS STRIP'S THREE STATES ----------------------------------------------- */
+
+  /**
+   * WHAT THE ADDRESS STRIP IS DOING: `"trail"`, `"path"` or `"search"` — and only ONE of the three,
+   * which is what makes the keyboard unambiguous. R28's editable path and R31's search field are two
+   * text fields in one strip; a reader typing has to be typing into one of them, and a design where
+   * both could be open at once is a design where a keystroke has two destinations.
+   */
+  let strip = "trail";
+  /** The draft in whichever field is open, and `""` when none is. ONE buffer for both, because only
+   *  one field is ever open — two buffers would be two things to reset and one of them would be
+   *  missed. `stripWas` is what the field opened holding, so Esc can put it back. */
+  let stripDraft = "";
+  let stripWas = "";
+  /** THE QUERY THE LISTING IS NARROWED BY, `""` for none. It OUTLIVES the field being open: a reader
+   *  who types a query and presses Enter is still looking at the filtered list, which is what every
+   *  search box does. Cleared by Esc in the field and by a navigation. */
+  let query = "";
+  /** THE WALK IN FLIGHT, or null — `{ stack, seen, dirs, found, from, deep }`. R31's chunked search:
+   *  a resumable depth-first walk whose state is this object, stepped between polls so the window
+   *  goes on servicing input (R31's own requirement). `null` means the search is the free one — a
+   *  filter over the listing in hand, which costs no syscall at all. */
+  let walk = null;
+  /** THE QUERY A COMPLETED WALK PRODUCED THE LISTING WITH, `""` for none.
+   *
+   *  IT IS WHAT STOPS ESC UNDOING A SEARCH IT CANNOT UNDO. `closeStrip` puts the query back to what
+   *  the field opened holding, which is right while the listing is still this directory's — the
+   *  filter re-runs and the reader gets their folder back. After a WALK the listing is no longer
+   *  this directory's: `allRows` holds matches from all over the tree, and clearing the query would
+   *  leave a listing of files from nowhere in particular with nothing on screen to say why. So the
+   *  query stays, because it is the only description that listing has. Cleared by `relist`, which
+   *  is where the listing becomes a directory's again. */
+  let walked = "";
+
+  /**
+   * NARROW `allRows` BY `query` AND COMMIT IT AS `rows`. Answers nothing; the caller repaints.
+   *
+   * THE SELECTION AND THE CURSOR ARE DROPPED, because both are indices into the list being replaced
+   * — which is `relist`'s own rule and the same reason. A reader who filters and finds their
+   * selection still highlighted would be looking at a highlight on whatever row took that index.
+   */
+  const applyFilter = () => {
+    rows = query === "" ? allRows : allRows.filter((r) => searchMatch(r.name, query));
+    account.rows = reportRows();
+    account.query = query;
+    account.matched = rows.length;
+    account.listed = allRows.length;
+    sel = new Set();
+    anchor = -1;
+    reportSelection();
+    setFocus(-1);
+    setLit(-1);
+    band = null;
+    press = null;
+    dragging = false;
+    const limit = maxScroll();
+    if (scroll > limit && !unclampedScroll) scroll = limit;
+    account.scroll = scroll;
+    account.scrollMax = limit;
+  };
+
+  /** COMMIT A FRESHLY BUILT LISTING: it becomes `allRows`, and the filter decides `rows`. THE ONE
+   *  PLACE a listing enters this program after startup, so a re-read cannot forget the query a
+   *  reader has typed and show them the whole directory again. */
+  const commitRows = (built) => {
+    allRows = built;
+    rows = query === "" ? built : built.filter((r) => searchMatch(r.name, query));
+    account.query = query;
+    account.matched = rows.length;
+    account.listed = allRows.length;
+  };
+
+  const bandCorner = (at, moving = false) => {
+    const onX = axisOf(view) === "x";
+    return moving
+      ? { x1: at.x + (onX ? scroll : 0), y1: at.y + (onX ? 0 : scroll) }
+      : { x0: at.x + (onX ? scroll : 0), y0: at.y + (onX ? 0 : scroll) };
+  };
+
   /** Light row `i`, or nothing at `-1`. Answers whether it CHANGED, so a stream of hovers across
    *  one row costs one repaint and not one per sample. */
   const setLit = (i) => {
     if (i === lit) return false;
     lit = i;
     account.lit = i;
+    return true;
+  };
+
+  /* ---- M23: THE THUMBNAIL CACHE, AND THE ONE PLACE A DECODE HAPPENS ------------------------ */
+
+  /**
+   * path -> `{ key, fd, w, h, bytes, why, usedAt }`, one entry per picture this program is holding.
+   *
+   * `fd` IS THE WHOLE POINT: a `DL_BLIT` names a data-object fd and the payload is KERNEL-owned and
+   * refcounted (constraints 240, 241), so the picture outlives nothing of this program's except the
+   * descriptor — and closing the fd is what returns the bytes to the budget. A process still holds
+   * only integers (constraint 15).
+   *
+   * `key` CARRIES THE DEVICE EXTENT AND THE FILE'S OWN STAMP, which is what makes the entry
+   * invalidate rather than go stale: a dpr change needs a new payload at a new size (`thumbFit`),
+   * and a file rewritten under the window needs a new picture of new bytes. A cache keyed on the
+   * path alone is the same defect as `--no-resurface`, one layer down.
+   *
+   * `why` IS SET ON AN ENTRY WITH NO `fd`: the row fell back to its type icon, and this is the
+   * reason — kept so one broken PNG costs one decode and not one per frame.
+   */
+  const thumbs = new Map();
+  /** Payload bytes this program is holding, summed. Reported, so a reader can see what a view mode
+   *  costs the kernel's data-object budget. */
+  let thumbBytes = 0;
+  /**
+   * THE SQUARE A THUMBNAIL IS FITTED INTO, CSS px — the current mode's icon box, or `0` for a mode
+   * that has no thumbnails at all.
+   *
+   * `0` IS R26'S SCOPE AND IT IS LOAD-BEARING TWICE OVER. The PRD scopes thumbnails to "Medium
+   * icons and larger", so Details, Small icons and List show the type icon — which is Windows' own
+   * rule, and which also means a window in the DEFAULT mode creates no data object. That second
+   * consequence is not incidental: a `files` window holding live payloads raises the kernel's global
+   * `DataMgr.bytes`, and `www/m10.html` reads that global sum as its proxy for "the drop's payload
+   * was released". A thumbnail in Details would turn that clause red over a program behaving
+   * correctly — see this file's report to the lead.
+   */
+  const thumbCellCss = () => (view.thumbs ? view.icon : 0);
+  /** A monotonic stamp, bumped once per fill pass, so the eviction order is "least recently wanted
+   *  by the viewport" rather than insertion order. Not a clock: the pass number is the only ordering
+   *  that matters and constraint 72's argument against reading one applies here too. */
+  let thumbPass = 0;
+
+  /** Close one entry's object and give its bytes back. Idempotent: an entry that fell back holds no
+   *  fd, and dropping it twice must not close a descriptor this program no longer owns. */
+  const dropThumb = (path) => {
+    const held = thumbs.get(path);
+    if (!held) return;
+    if (held.fd > 0) {
+      env.fs.close(held.fd);
+      thumbBytes -= held.bytes;
+      account.thumbs.released += 1;
+    }
+    thumbs.delete(path);
+  };
+
+  /**
+   * Every picture, released. The listing is about to be replaced, so every path in the cache names
+   * a file this window is no longer showing — and a cache that outlived its directory would blit
+   * the previous folder's image beside a name from this one.
+   *
+   * IT TOUCHES NO REPORT FIELD, WHICH IS A FIX AND NOT A STYLE. It set `ready`, `bytes` and `rows`
+   * to zero, and the exit path calls it — so the account a check reads on the way out said this
+   * window had never had a thumbnail, which is exactly the clause R26 owes. A release is not a
+   * measurement: `released` counts what went, and `ready` goes on describing the last fill pass.
+   */
+  const dropAllThumbs = () => {
+    for (const path of [...thumbs.keys()]) dropThumb(path);
+  };
+
+  /** The entry to blit for `row`, or null. A cache read and nothing else: `paint` must not decode,
+   *  must not allocate and must not evict — a repaint that could invalidate an fd it is already
+   *  naming in the batch it is building is a `win_draw` refused WHOLE. */
+  const thumbFor = (row) => {
+    const held = thumbs.get(row.path);
+    return held && held.fd > 0 ? held : null;
+  };
+
+  /** Whether `row` is a candidate at all: a file, of a format `THUMBNAILED` names, small enough to
+   *  read whole. A directory is not a candidate — there are no bytes — and neither is a row whose
+   *  `lstat` was refused, because the size that bounds the read is unknown. */
+  const thumbnailable = (row) => !row.dir && !!THUMBNAILED[row.format]
+    && row.statted && Number(row.size) > 0 && Number(row.size) <= THUMB_SOURCE_MAX;
+
+  /** Why `row` cannot have one, or `""` — the reason a fallback is STATED rather than blank. Only
+   *  the two cases `thumbnailable` rejects that a reader could be surprised by: a format nothing
+   *  decodes is not one of them, because the row never asked. */
+  const thumbBar = (row) => {
+    if (!row.statted) return "its lstat was refused, so there is no size to bound a read by";
+    if (Number(row.size) > THUMB_SOURCE_MAX) {
+      return `${row.size} bytes is past the ${THUMB_SOURCE_MAX}-byte read ceiling`;
+    }
+    return "";
+  };
+
+  /**
+   * AN `ImageBitmap` OF `row`'S BYTES, or `{ why }`. THE ONLY `await` IN THIS PROGRAM, and the whole
+   * design rests on where it is: `bench/m23-blit/` measured that a decode promise settles inside a
+   * real process in a stripped realm — but NOT while the process is parked in a syscall and NOT
+   * while it spins, only in an AWAITED turn, and a cold one needs seven macrotask turns. So a
+   * decode MUST NOT be folded into a syscall reply (constraint 219's shape, for a promise) and this
+   * function is called between polls and never from `paint`.
+   *
+   * TWO ROUTES, FROM `THUMBNAILED`. A `.rgba` is already an `encodeBitmap` payload, so its header is
+   * checked with `decodeBitmap` — the same function the kernel validates a blit with (constraint
+   * 293's rule) — and its pixels go through `ImageData`, which needs no decoder at all. A `.png`
+   * goes through the platform's, which is what makes the realm measurement load-bearing.
+   */
+  const bitmapFor = async (row) => {
+    const bytes = env.std.readFileBytes(env, row.path, THUMB_SOURCE_MAX);
+    if (typeof bytes === "number") {
+      return { why: `read: ${env.std.errnoName(bytes)}` };
+    }
+    try {
+      if (row.format === DOBJ_BITMAP) {
+        const raw = decodeBitmap(bytes);
+        if (!raw) return { why: "the bytes do not match their own bitmap header" };
+        // A COPY AND NOT THE SUBARRAY: `ImageData` wants a `Uint8ClampedArray` of exactly w*h*4,
+        // and a view onto a longer buffer is not one.
+        const data = new ImageData(new Uint8ClampedArray(raw.pixels), raw.w, raw.h);
+        return { bmp: await createImageBitmap(data) };
+      }
+      return { bmp: await createImageBitmap(new Blob([bytes])) };
+    } catch (error) {
+      /* A REJECTION IS THE ERROR PATH R26 OWES, AND IT IS NOT A FAULT. `createImageBitmap` rejects
+       * on corrupt bytes and on a format the platform will not take, which is precisely the case
+       * "a PNG falls back to its type icon" was written for — so it is caught, named, and the row
+       * keeps the icon it already had. An uncaught rejection here would kill the window. */
+      return { why: `decode: ${(error && error.message) || String(error)}` };
+    }
+  };
+
+  /**
+   * ONE PICTURE, AS A LIVE DATA OBJECT. Answers the entry, or `{ why }`.
+   *
+   * THE READBACK IS THE SECOND PLATFORM CALL AND IT IS NOT OPTIONAL. An `ImageBitmap` is a handle,
+   * and a process holds only integers (constraint 15) — there is no transfer out — so the only
+   * route from a decode to `DL_BLIT` is the pixels as bytes, through `OffscreenCanvas` +
+   * `getImageData`. `bench/m23-blit/` measured the round trip BYTE-EXACT against this repo's own
+   * `/usr/share/logo.rgba` over every fully opaque pixel, in both engines.
+   *
+   * `drawImage` SCALES AND `putImageData` DOES NOT, which is why the fit happens here: the scratch
+   * canvas is the payload's own size and the bitmap is drawn INTO it, so what comes back out is
+   * already the extent `DL_BLIT` will draw.
+   */
+  const makeThumb = async (row, cellCss) => {
+    const got = await bitmapFor(row);
+    if (!got.bmp) return got;
+    const bmp = got.bmp;
+    const fit = thumbFit(bmp.width, bmp.height, cellCss, S);
+    let payload = null;
+    try {
+      const canvas = new OffscreenCanvas(fit.w, fit.h);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return { why: "OffscreenCanvas.getContext('2d') returned null" };
+      ctx.drawImage(bmp, 0, 0, bmp.width, bmp.height, 0, 0, fit.w, fit.h);
+      payload = encodeBitmap(fit.w, fit.h, ctx.getImageData(0, 0, fit.w, fit.h).data);
+    } catch (error) {
+      return { why: `readback: ${(error && error.message) || String(error)}` };
+    } finally {
+      // THE HANDLE IS RELEASED AS SOON AS ITS PIXELS ARE OUT. A process cannot be asked to hold one
+      // across a park, and an undisposed bitmap is renderer memory the process table cannot see.
+      if (typeof bmp.close === "function") bmp.close();
+    }
+    if (fit.clamped) account.thumbs.clamped += 1;
+    const object = env.data.create([DOBJ_BITMAP]);
+    if (typeof object === "number") {
+      return { why: `dataobj_create: ${env.std.errnoName(object)}` };
+    }
+    const granted = fmtsOf(object.offer);
+    if (!granted.includes(DOBJ_BITMAP)) {
+      env.fs.close(object.fd);
+      return { why: `the kernel granted only ${granted.map(fmtName).join(", ")}` };
+    }
+    const set = env.data.set(object.fd, DOBJ_BITMAP, payload);
+    if (set < 0) {
+      // THE FD GOES WITH THE REFUSAL. `dataobj_set` already undoes a partial write (`src/libos/
+      // syscall.mjs`), so what is left is a descriptor against `DOBJ_CAP` and nothing else.
+      env.fs.close(object.fd);
+      return { why: `dataobj_set: ${env.std.errnoName(set)}` };
+    }
+    return { fd: object.fd, w: fit.w, h: fit.h, bytes: payload.length };
+  };
+
+  /**
+   * DECODE WHAT THE VIEWPORT WANTS, AND RELEASE WHAT IT DOES NOT. Answers whether the cache changed,
+   * which is whether a repaint is owed.
+   *
+   * THE WANTED SET IS THE VISIBLE ROWS AND NOTHING MORE. A directory of four thousand images is
+   * forty decodes, which is the same argument `visible` makes for the drawing: the rows a reader can
+   * see are the rows that cost anything.
+   *
+   * EVICTION IS BY PASS NUMBER AND ONLY AGAINST A CEILING. `THUMB_CAP` is an ABI limit
+   * (`DOBJ_CAP`), so the cache may hold more than one screenful but never more than that — and a
+   * viewport wanting more than the cap leaves the remainder on its type icon and COUNTS it, because
+   * a view that silently showed 28 pictures and 12 icons would read as 12 broken files.
+   *
+   * ONE DECODE PER CALL IS NOT THE RULE. A pass decodes everything the viewport is missing, because
+   * the alternative is one picture per `POLL_MS` — twenty-eight tiles would take five and a half
+   * seconds to appear, and each decode is 0.3 ms plus a few macrotask turns
+   * (`bench/m23-blit/results-headless.json`). Input is not starved by it: the loop polls after this
+   * returns, and a pass is bounded by the viewport.
+   */
+  const fillThumbs = async () => {
+    if (noThumbs) {
+      /* `wanted` IS STILL COUNTED, which is what makes the control's discriminator real. The
+       * header says "`wanted` stays where it was and `decoded` goes to 0, which is what tells this
+       * world apart from a directory with nothing to decode" — and the first spelling returned
+       * before counting, so `wanted` was 0 and the two worlds were identical in the account. */
+      const seen = visible();
+      let candidates = 0;
+      for (let i = seen.first; i <= seen.last && i < rows.length; i += 1) {
+        if (!rows[i].dir && THUMBNAILED[rows[i].format]) candidates += 1;
+      }
+      account.thumbs.wanted = candidates;
+      account.thumbs.why = "--no-thumbs";
+      return false;
+    }
+    const cellCss = thumbCellCss();
+    if (cellCss === 0) {
+      /* THE MODE HAS NO PICTURES, SO EVERY ONE IN HAND IS RELEASED. A reader who steps from Large
+       * icons down to Details must not leave twenty-eight live payloads behind them: the cache
+       * would be unreachable — no mode wants it — and it would hold `DOBJ_CAP` slots the next Copy
+       * needs. `wanted` goes to 0 because nothing is wanted, which is what tells this state apart
+       * from `--no-thumbs` (where `wanted` stands and `decoded` is 0). */
+      if (thumbs.size > 0) {
+        dropAllThumbs();
+        account.thumbs.ready = 0;
+        account.thumbs.bytes = thumbBytes;
+        account.thumbs.rows = [];
+        account.thumbs.wanted = 0;
+        account.thumbs.why = `${view.label} draws type icons`;
+        return true;
+      }
+      account.thumbs.wanted = 0;
+      account.thumbs.why = `${view.label} draws type icons`;
+      return false;
+    }
+    thumbPass += 1;
+    const passFrom = performance.now();
+    const { first, last } = visible();
+    let changed = false;
+    let capped = 0;
+    let fellBack = 0;
+    let wanted = 0;
+    const live = new Set();
+    for (let i = first; i <= last && i < rows.length; i += 1) {
+      const row = rows[i];
+      if (!thumbnailable(row)) {
+        // A ROW WITH NOTHING TO DECODE IS NOT A FALLBACK, with one exception: a candidate format
+        // barred by its size or a refused stat IS one, and is said rather than left blank.
+        if (!row.dir && THUMBNAILED[row.format]) {
+          const bar = thumbBar(row);
+          if (bar) {
+            wanted += 1;
+            fellBack += 1;
+            if (!thumbs.has(row.path)) {
+              thumbs.set(row.path, { key: "", fd: 0, w: 0, h: 0, bytes: 0, why: bar, usedAt: 0 });
+              env.std.say(env, `${NAME}: ${row.name}: no thumbnail — ${bar}\n`);
+            }
+          }
+        }
+        continue;
+      }
+      wanted += 1;
+      live.add(row.path);
+      /* THE KEY IS THE CONTRACT WITH THE CACHE: the cell, the ratio and the file's own stamp and
+       * length. A dpr change, a resize into another view mode and a rewritten file each produce a
+       * different key, and a different key is a different picture. */
+      const key = `${cellCss}@${S}:${row.mtimeMs}:${row.size}`;
+      const held = thumbs.get(row.path);
+      if (held && held.key === key) {
+        held.usedAt = thumbPass;
+        /* A CACHED FAILURE IS STILL A FALLBACK, AND COUNTING IT ONLY ON THE PASS THAT TRIED WAS
+         * THE DEFECT. `fellBack` is a per-pass figure — it says how many of the rows a reader can
+         * see now are on their type icon — and a refused decode is cached WITH its key, so the
+         * second pass over the same viewport took this fast path and reported 0. By exit, R26's
+         * `ready` against `fellBack` said no row had ever fallen back. The cache stops the DECODE
+         * being repeated, not the statement. */
+        if (held.fd === 0) fellBack += 1;
+        continue;
+      }
+      if (held) dropThumb(row.path);
+      if (thumbs.size - countFallbacks() >= THUMB_CAP && !evictOne(live)) {
+        // NO ROOM AND NOTHING TO TAKE IT FROM: every live object is wanted by this same viewport.
+        capped += 1;
+        continue;
+      }
+      const made2 = await makeThumb(row, cellCss);
+      changed = true;
+      if (!made2.fd) {
+        fellBack += 1;
+        thumbs.set(row.path, { key, fd: 0, w: 0, h: 0, bytes: 0, why: made2.why, usedAt: thumbPass });
+        env.std.say(env, `${NAME}: ${row.name}: no thumbnail — ${made2.why}\n`);
+        continue;
+      }
+      thumbs.set(row.path, { key, ...made2, why: "", usedAt: thumbPass });
+      if (account.thumbs.made.length < THUMB_MADE_CAP) {
+        account.thumbs.made.push({
+          path: row.path, w: made2.w, h: made2.h, bytes: made2.bytes, cell: cellCss, scale: S,
+        });
+      } else {
+        account.thumbs.madeCapped += 1;
+      }
+      thumbBytes += made2.bytes;
+      if (thumbBytes > account.thumbs.peakBytes) account.thumbs.peakBytes = thumbBytes;
+      account.thumbs.decoded += 1;
+    }
+    account.thumbs.wanted = wanted;
+    account.thumbs.capped = capped;
+    account.thumbs.fellBack = fellBack;
+    account.thumbs.bytes = thumbBytes;
+    account.thumbs.ready = [...thumbs.values()].filter((t) => t.fd > 0).length;
+    account.thumbs.rows = [...thumbs.entries()]
+      .map(([path, t]) => ({ path, w: t.w, h: t.h, bytes: t.bytes, why: t.why }));
+    account.thumbs.why = capped > 0
+      ? `${capped} row(s) past the ${THUMB_CAP}-object cap`
+      : (fellBack > 0 ? "see thumbs.rows" : "");
+    /* SUMMED OVER EVERY PASS AND ONLY WHEN ONE DECODED. A pass that found the cache warm costs a
+     * `visible()` and a map walk, and folding those in would hide what a decode really costs behind
+     * however many times the loop turned. */
+    if (changed) account.thumbs.decodeMs += performance.now() - passFrom;
+    return changed;
+  };
+
+  /** How many cache entries hold no object. A fallback costs no `DOBJ_CAP` slot, so it must not be
+   *  counted against the cap — a directory of twenty-eight broken PNGs would otherwise stop the
+   *  twenty-ninth good one from ever being decoded. */
+  const countFallbacks = () => [...thumbs.values()].filter((t) => t.fd === 0).length;
+
+  /** Release the least recently wanted object that this pass does not want. Answers whether one
+   *  went. `live` is the set the current viewport is asking for, so eviction can never take a
+   *  picture out from under the frame that is about to be drawn. */
+  const evictOne = (live) => {
+    let victim = "";
+    let oldest = Infinity;
+    for (const [path, t] of thumbs) {
+      if (t.fd === 0 || live.has(path)) continue;
+      if (t.usedAt < oldest) { oldest = t.usedAt; victim = path; }
+    }
+    if (victim === "") return false;
+    dropThumb(victim);
+    account.thumbs.evicted += 1;
     return true;
   };
 
@@ -1700,16 +3008,81 @@ export function run(env) {
    * amber a reader learned to read as "directory" is still amber (`src/wm/icons.mjs` draws the
    * shell's folder in the same colour).
    */
-  const glyph = (ops, row, x, y, colour) => {
+  const glyph = (ops, row, x, y, colour, cell = GLYPH_W) => {
+    const k = cell / GLYPH_W;
     if (row.dir) {
-      fill(ops, x, y + 4, GLYPH_W, 10, colour);
-      fill(ops, x, y + 1, 7, 3, colour);
+      fill(ops, x, y + 4 * k, cell, 10 * k, colour);
+      fill(ops, x, y + 1 * k, 7 * k, 3 * k, colour);
       return;
     }
-    fill(ops, x + 2, y + 1, GLYPH_W - 5, 13, colour);
+    fill(ops, x + 2 * k, y + 1 * k, cell - 5 * k, 13 * k, colour);
     // The corner, cut back out in the paper colour: the display list has no path op, so a
     // notch is a fill of the background over a fill of the foreground.
-    fill(ops, x + GLYPH_W - 6, y + 1, 3, 3, PAPER);
+    fill(ops, x + cell - 6 * k, y + 1 * k, 3 * k, 3 * k, PAPER);
+  };
+
+  /**
+   * M23. A THUMBNAIL, CENTRED IN A `cell`-SQUARE WHOSE TOP-LEFT IS `x`, `y` (CSS px).
+   *
+   * THE CENTRING IS DONE IN DEVICE PIXELS AND THAT IS NOT FUSSINESS. The payload's extent is device
+   * px and `DL_BLIT` carries no destination size, so a CSS-px centre converted by `px` would put a
+   * picture of a measured width inside a box of a rounded one — half a device pixel off at every
+   * fractional ratio, which is where a letterboxed image shows a seam. `px(x)` and
+   * `px(x + cell) - px(x)` are the same two edges `fill` uses, so the plate below and the picture
+   * on it share them.
+   *
+   * ONE OP. A blit is the whole of a picture, against the 2-3 fills a type icon costs and the 256
+   * `DL_FILL_RECT`s a 16x16 image would have cost before `DL_BLIT` existed (PRD R26).
+   */
+  const blit = (ops, held, x, y, cell) => {
+    const left = px(x);
+    const top = px(y);
+    const side = px(x + cell) - left;
+    const down = px(y + cell) - top;
+    ops.push(encodeBlit(held.fd,
+      left + Math.round((side - held.w) / 2),
+      top + Math.round((down - held.h) / 2)));
+  };
+
+  /**
+   * THE PICTURE FOR ONE ROW: its own bytes if there is a thumbnail, else THE TYPE ICON.
+   *
+   * THE FALLBACK IS THE WHOLE OF R26'S SECOND HALF and it is the icon the row would have had anyway
+   * — a blank square would be a file manager that showed less for knowing more. `--thumb-no-fallback`
+   * is the world where it is blank, which is the clause this function exists to make assertable.
+   *
+   * A LETTERBOXED THUMBNAIL GETS A PLATE and a square one does not. `thumbFit` keeps the aspect
+   * ratio, so a wide image in a square cell leaves two bars of paper; the plate is what makes those
+   * read as the picture's shape rather than as a drawing that failed halfway.
+   */
+  const picture = (ops, row, x, y, cell, inkWhenIcon) => {
+    /* THE MODE DECIDES FIRST, AND READING THE CACHE WITHOUT ASKING WAS THE DEFECT. A view change
+     * repaints at once and the cache is released on the NEXT fill pass, so the frame drawn
+     * immediately after a step down into Details blitted a 96-device-px payload into a 16 CSS px
+     * glyph box — one frame of a picture four times the size of the row it was in. `view.thumbs`
+     * is R26's scope and it is the same test `thumbCellCss` makes, so a mode with no pictures can
+     * never draw one whatever the cache still holds. */
+    const held = view.thumbs ? thumbFor(row) : null;
+    if (held) {
+      if (held.w !== px(x + cell) - px(x) || held.h !== px(y + cell) - px(y)) {
+        fill(ops, x, y, cell, cell, THUMB_PLATE);
+      }
+      blit(ops, held, x, y, cell);
+      drewPictures += 1;
+      return;
+    }
+    /* `--thumb-no-fallback` IS SCOPED TO THE MODES THAT HAVE PICTURES, and that is a rescope rather
+     * than the first spelling. It was "no fallback where a decode was refused or barred", and over
+     * this repository's own fixture NOTHING is refused — `logo.png` and `logo.rgba` both decode —
+     * so the control turned nothing and verified nothing, which the base brief requires be rescoped
+     * and reported rather than shipped. The CLAUSE R26 owes is "a row with no thumbnail still has
+     * its type icon", and WHY it has no thumbnail does not change that clause: a format nothing
+     * decodes reaches it with the same fixture a corrupt PNG would. In a mode with no pictures at
+     * all — Details, Small icons, List — the flag does nothing, which is what keeps it clear of
+     * every registered check. */
+    if (thumbNoFallback && view.thumbs) return;
+    glyph(ops, row, x, y, inkWhenIcon, cell);
+    drewIcons += 1;
   };
 
   /**
@@ -1743,9 +3116,178 @@ export function run(env) {
     const mid = box.x + box.w / 2;
     for (let r = 0; r < 3; r += 1) {
       const w = dir > 0 ? 5 - r * 2 : 1 + r * 2;
+      /* AT THE TOP OF THE CLIENT AREA, which is also the top of the COLUMN BAND: the column
+       * header is the first band and the address strip is below it (see `CRUMB_H`).
+       * `www/m19.html`'s `caretOf` finds this wedge by filtering the batch for fills inside the top
+       * four CSS pixels, so this `1 + r` is a number two files agree on. */
       fill(ops, mid - w / 2, 1 + r, w, 1, HEAD_INK);
     }
   };
+
+  /**
+   * ONE DETAILS ROW. EXACTLY WHAT `paint` DREW INLINE BEFORE M23 — moved and not rewritten, because
+   * the Details view is what three proof pages read and a reflowed drawing is a pixel nobody meant
+   * to move.
+   */
+  const detailRow = (rowOps, i, row, selected, cols) => {
+    const top = rowTop(i, scroll);
+    /* A SELECTED ROW INVERTS, which is what a list view does and what makes the selection
+     * visible without a second colour to learn. The fill is the row's own KIND colour, so the
+     * amber/green distinction survives selection rather than being painted over by one
+     * highlight.
+     *
+     * THE HOVER'S BAND IS UNDER IT AND LOSES TO IT: a row that is both lit and selected reads as
+     * selected, because the selection is the reader's choice and the hover is only where their
+     * hand is. */
+    if (selected) {
+      fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H,
+        row.dir ? SELECT_FILL_DIR : SELECT_FILL);
+    } else if (i === lit) {
+      fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H, LIT_FILL);
+    }
+    const kind = row.dir ? BAND_DIR : (BAND[row.format] || BAND_UNKNOWN);
+    /* M23. THE ROW'S PICTURE, WHICH IS ITS OWN BYTES WHERE THERE ARE ANY. In the Details view the
+     * thumbnail takes the glyph's box exactly, so the fallback is the icon that was there before
+     * and nothing moves — which is what makes R26 a change to what a row SHOWS and not to where
+     * anything is. */
+    picture(rowOps, row, PAD + 2, top + 2, GLYPH_W, selected ? INK_SELECTED : kind);
+    /* M20. A CUT ROW IS DIMMED, which is Explorer's own statement that a move is pending — and
+     * the only one available: the clipboard cannot be asked "is this row's path on you" per
+     * frame, so the membership set `toClipboard` kept is what this reads. It changes the NAME's
+     * ink only, so "cut" and "selected" stay two readings the way "lit" and "selected" do. */
+    const cutOut = !!clip && clip.intent === V_CUT && clip.marked.has(row.path);
+    /* THE CELLS, ONE PER COLUMN AND IN COLUMN ORDER. `cellOf` decides every string and
+     * `columnBoxes` every rectangle, so the column a cell lands in is the column its header names.
+     * The NAME is drawn at the row's own size and the three metadata columns one pixel smaller and
+     * monospace, which is what makes a column of dates and sizes line its digits up. */
+    /* M20. AN OPEN RENAME REPLACES THE NAME CELL WITH A FIELD, and only for the row being
+     * renamed: the other three columns still describe the file, which is what tells a reader
+     * which row they are editing. */
+    const field = editing && editing.row === i ? cols[0] : null;
+    for (const box of cols) {
+      if (field && box.key === "name") continue;
+      cellRun(rowOps, box, cellOf(row, box.key), {
+        y: top + TEXT_DY,
+        size: box.key === "name" ? TEXT_PX : TEXT_PX - 1,
+        rgba: selected ? INK_SELECTED
+          : (box.key === "name" ? (cutOut ? INK_DIM : INK) : INK_DIM),
+        mono: box.mono,
+      });
+    }
+    if (field) {
+      /* THE FIELD, AND THE CARET IS AT ITS RIGHT EDGE AND NOT AFTER THE TEXT. A program cannot
+       * measure a string — the renderer has the font and a sum of published advances is only an
+       * upper bound for a proportional run (`advanceWidth` in src/abi.mjs) — so a caret drawn
+       * where the text is thought to end would sit in the wrong place at every size. The field's
+       * edge is a position both sides agree on.
+       *
+       * MONOSPACED, which is the one family whose width the advance table prices exactly, so a
+       * driver outside the process can predict where the draft's glyphs are. */
+      // FROM THE NAME'S TEXT ORIGIN AND NOT FROM THE COLUMN'S LEFT EDGE, so the row's glyph stays
+      // visible beside the field: the file being renamed is still the file, and hiding its icon
+      // under the box loses the one mark that says whether it is a folder.
+      const fx = field.textX - 2;
+      const fw = Math.max(1, field.right - fx);
+      fill(rowOps, fx, top, fw, ROW_H, PAPER);
+      stroke(rowOps, fx, top, fw, ROW_H, FOCUS_RING);
+      cellRun(rowOps, field, editing.draft, {
+        y: top + TEXT_DY, size: TEXT_PX, rgba: INK, mono: true,
+      });
+      fill(rowOps, field.right - PAD, top + 2, 1, ROW_H - 4, FOCUS_RING);
+    }
+    if (selected) {
+      stroke(rowOps, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
+    }
+    /* THE KEYBOARD CURSOR, LAST AND INSIDE THE ROW. Windows 7 draws a dotted focus rectangle and
+     * the display list has no dash pattern, so this is a hairline inset by one CSS pixel — which
+     * is what lets a row that is both focused and selected show both rings instead of one hiding
+     * the other. Its ink follows the row: `INK_SELECTED` on an inverted band, `FOCUS_RING` on
+     * paper, for the contrast reason the selected text already has. */
+    if (i === focus) {
+      const ring = FILES_METRICS.focusBox(i, scroll, clientW);
+      stroke(rowOps, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
+    }
+  };
+
+  /**
+   * ONE GRID OR LIST CELL: a picture, and the name under it or beside it.
+   *
+   * THE CELL IS `itemBox` AND NOTHING ELSE, so what a press finds and what a reader sees are one
+   * rectangle — `itemAtPoint` is its declared inverse, and a drawing that laid a cell out with
+   * arithmetic of its own is how a click comes to select the file next door.
+   *
+   * THE ICON IS CENTRED WHEN THE LABEL IS BELOW IT and flush left when the label is beside it,
+   * which is Windows' own pair of arrangements: icons under centred names read as a grid, icons
+   * before left-aligned names read as a list.
+   *
+   * THE LABEL IS ELLIPSIZED BY THE RENDERER AND NEVER CUT HERE. A program cannot measure a string
+   * and a sum of published advances is only an upper bound for a proportional run, so
+   * `DLT_ELLIPSIS` plus the room available is the ABI's answer (`cellRun` says it for a column).
+   *
+   * A SECOND LINE IS THE TYPE AND THE SIZE, in the modes that have two — which is the whole of what
+   * Explorer's Tiles view adds over Medium icons, and what makes a large grid usable at all: a
+   * picture with no words under it cannot say whether it is 2 KB or 2 MB.
+   */
+  const cellItem = (rowOps, i, row, selected) => {
+    const cell = itemBox(view, i, scroll, clientW, clientH);
+    /* THE BAND IS THE WHOLE CELL, which is what a selected tile looks like in Explorer and is also
+     * the only shape a reader can tell from a hover: the cells have gutters between them, so a band
+     * narrower than the cell would read as a second kind of mark. */
+    if (selected) {
+      fill(rowOps, cell.x, cell.y, cell.w, cell.h, row.dir ? SELECT_FILL_DIR : SELECT_FILL);
+    } else if (i === lit) {
+      fill(rowOps, cell.x, cell.y, cell.w, cell.h, LIT_FILL);
+    }
+    const kind = row.dir ? BAND_DIR : (BAND[row.format] || BAND_UNKNOWN);
+    const cutOut = !!clip && clip.intent === V_CUT && clip.marked.has(row.path);
+    const iconX = view.below ? cell.x + (cell.w - view.icon) / 2 : cell.x + 2;
+    const iconY = cell.y + (view.below ? 0 : (cell.h - view.icon) / 2);
+    picture(rowOps, row, iconX, iconY, view.icon, selected ? INK_SELECTED : kind);
+    const labelX = view.below ? cell.x + 2 : cell.x + view.icon + 6;
+    const labelW = view.below ? cell.w - 4 : Math.max(1, cell.w - view.icon - 8);
+    const labelY = view.below ? cell.y + view.icon : cell.y + (cell.h - view.lines * LABEL_H) / 2;
+    const ink = selected ? INK_SELECTED : (cutOut ? INK_DIM : INK);
+    /* AN OPEN RENAME REPLACES THE NAME with the field, in the cell's own label box. The icon stays,
+     * which is `detailRow`'s rule for the same reason: the file being renamed is still the file. */
+    const field = !!editing && editing.row === i;
+    if (field) {
+      fill(rowOps, labelX, labelY, labelW, LABEL_H, PAPER);
+      stroke(rowOps, labelX, labelY, labelW, LABEL_H, FOCUS_RING);
+    }
+    text(rowOps, field ? editing.draft : row.name, {
+      x: view.below ? cell.x + cell.w / 2 : labelX,
+      y: labelY + 2,
+      size: TEXT_PX,
+      rgba: field ? INK : ink,
+      flags: DLT_ELLIPSIS | (view.below ? DLT_CENTER : 0) | (field ? DLT_MONO : 0),
+      maxWidth: labelW,
+    });
+    if (view.lines > 1) {
+      const sized = sizeText(row);
+      text(rowOps, sized ? `${kindOf(row)} \u00b7 ${sized}` : kindOf(row), {
+        x: view.below ? cell.x + cell.w / 2 : labelX,
+        y: labelY + LABEL_H + 2,
+        size: TEXT_PX - 1,
+        rgba: selected ? INK_SELECTED : INK_DIM,
+        flags: DLT_ELLIPSIS | DLT_MONO | (view.below ? DLT_CENTER : 0),
+        maxWidth: labelW,
+      });
+    }
+    if (selected) stroke(rowOps, cell.x, cell.y, cell.w, cell.h, OUTLINE);
+    if (i === focus) {
+      const ring = focusBoxFor(view, i, scroll, clientW, clientH);
+      stroke(rowOps, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
+    }
+  };
+
+  /** WHAT THE LAST FRAME DREW PER ITEM: a PICTURE made of the file's own bytes, or the TYPE ICON.
+   *
+   *  THE PAIR IS R26'S WHOLE CLAUSE AS A COUNT, and it has to be per-frame rather than cumulative:
+   *  "every item has one or the other" is a statement about a drawing, and a cumulative counter
+   *  cannot say whether the frame on screen now has a blank square in it. Reset at the top of
+   *  `paint` for that reason. */
+  let drewPictures = 0;
+  let drewIcons = 0;
 
   /** One frame. EVERY NUMBER IN HERE IS A CSS PIXEL — `fill`, `stroke`, `text` and `cellRun` are
    *  what turn them into surface pixels, and they are the only things that do. */
@@ -1753,6 +3295,8 @@ export function run(env) {
     // `DL_CLEAR`'s `a0` IS A COLOUR AND NOT A COORDINATE, so it is pushed raw: scaling it would
     // produce a different colour, which is the one way this list could go silently wrong.
     const ops = [{ op: DL_CLEAR, a0: PAPER }];
+    drewPictures = 0;
+    drewIcons = 0;
     /* THE CLIP DECIDES WHETHER THERE IS A LIST AT ALL, so it is built before the account is
      * written: no viewport means no rows drawn, and reporting rows nobody drew is the harness
      * dishonesty CLAUDE.md names.
@@ -1793,8 +3337,117 @@ export function run(env) {
       x: clientW - PAD - TYPE_INSET, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK,
       flags: DLT_RIGHT,
     });
-    if (sel.size > 0) {
-      text(ops, `${sel.size} selected`, { x: PAD, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK });
+    /**
+     * M23. THE SELECTION'S COUNT AND ITS SUMMED SIZE — R29's Details pane, in the strip that is
+     * already there rather than in a fourth band.
+     *
+     * THE SUMMED SIZE IS THE ONE THING R29 SAYS ONLY THIS PLACE CAN SHOW: no column holds it,
+     * because a column describes one row. The sum is over the FILES in the selection — a directory's
+     * `st_size` is the size of its own entry table and not the size of what is in it (`sizeText`
+     * says the same thing for the cell), so folders are counted as items and not as bytes, and the
+     * statement says which: `3 selected · 2 files, 5 KB`.
+     *
+     * A SEARCH SAYS WHAT IT LOOKED AT AND WHAT IT COST, which is R31's own requirement spelled as a
+     * sentence a reader can read: the query, how many matched of how many, and for a WALK the
+     * directories read and the entries seen. The free filter reports zero for both, which is the
+     * distinction — one costs no syscall and the other costs one `readdir` per directory.
+     */
+    if (query !== "" || walk) {
+      const cost = account.searchCost;
+      const said = walk
+        ? `searching "${query}" — ${cost.dirsRead} dir(s), ${cost.entriesSeen} entries`
+        : (cost.entriesSeen > 0
+          ? `"${query}" — ${rows.length} of ${cost.entriesSeen} under ${dir}`
+            + `${cost.why ? ` (${cost.why})` : ""}`
+          : `"${query}" — ${rows.length} of ${allRows.length} here`);
+      text(ops, said, {
+        x: PAD, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK,
+        flags: DLT_ELLIPSIS, maxWidth: Math.max(1, clientW - PAD * 2 - 140),
+      });
+    } else if (sel.size > 0) {
+      const files = [...sel].filter((n) => n < rows.length && !rows[n].dir);
+      const bytes = files.reduce((n, at) => n + (Number(rows[at].size) || 0), 0);
+      text(ops, `${sel.size} selected`
+        + (files.length > 0
+          ? ` · ${files.length} file${files.length === 1 ? "" : "s"}, `
+            + `${bytes > 0 ? Math.max(1, Math.ceil(bytes / 1024)) : 0} KB`
+          : ""), {
+        x: PAD, y: footY, size: TEXT_PX - 1, rgba: HEAD_INK,
+        flags: DLT_ELLIPSIS, maxWidth: Math.max(1, clientW - PAD * 2 - 140),
+      });
+    }
+
+    /**
+     * M23. THE ADDRESS STRIP, FIRST AND ALSO BEFORE THE CLIP — the breadcrumb, the search field and
+     * the view button, in that order from the left.
+     *
+     * ONE GEOMETRY WITH THE HIT TEST. Every rectangle here comes out of `crumbSegments` and the two
+     * fixed widths `crumbHit` tests against, so a press lands on the thing a reader is pointing at —
+     * which is `rowTop`'s rule and here it is the whole of R28's "clicking a segment goes there".
+     *
+     * THE TRAIL AND THE PATH FIELD ARE THE SAME RECTANGLE IN TWO STATES, which is R28's dual
+     * nature: the strip either shows the trail or holds the text of the path, never both. The
+     * search field is beside it and keeps its own box, because a reader narrowing a listing has not
+     * stopped needing to know where they are.
+     */
+    fill(ops, 0, CRUMB_TOP, clientW, CRUMB_H - CRUMB_SKIRT, CRUMB_FILL);
+    const stripRoom = Math.max(0, clientW - SEARCH_W - VIEWBTN_W - CRUMB_PAD);
+    if (strip === "path") {
+      /* THE PATH FIELD. MONOSPACED for the reason the rename field is: it is the one family whose
+       * width is predictable from outside the process, so a driver can say where a character is —
+       * and the caret sits at the field's RIGHT EDGE rather than after the text, because a program
+       * cannot measure a string (`detailRow`'s field says the same thing). */
+      stroke(ops, CRUMB_PAD, CRUMB_TOP + 2, Math.max(1, stripRoom - CRUMB_PAD), CRUMB_H - 4,
+        FOCUS_RING);
+      text(ops, stripDraft, {
+        x: CRUMB_PAD * 2, y: CRUMB_TOP + 5, size: TEXT_PX, rgba: INK,
+        flags: DLT_MONO | DLT_ELLIPSIS, maxWidth: Math.max(1, stripRoom - CRUMB_PAD * 3),
+      });
+      fill(ops, stripRoom - CRUMB_PAD * 2, CRUMB_TOP + 4, 1, CRUMB_H - 8, FOCUS_RING);
+    } else {
+      const segs = crumbSegments(dir, clientW);
+      account.crumbs = segs.map((s) => ({ label: s.label, path: s.path, x: s.x, w: s.w }));
+      for (const seg of segs) {
+        if (seg.path === dir || dirKey(seg.path) === dirKey(dir)) {
+          fill(ops, seg.x, CRUMB_TOP + 2, seg.w, CRUMB_H - 4, CRUMB_LIT);
+        }
+        text(ops, seg.elided ? `…${seg.label}` : seg.label, {
+          x: seg.x + CRUMB_PAD, y: CRUMB_TOP + 5, size: TEXT_PX,
+          // THE DIRECTORY A READER IS IN IS THE BRIGHT ONE, and its ancestors are dim: a trail
+          // where every segment looked alike would not say which end of it is here.
+          rgba: dirKey(seg.path) === dirKey(dir) ? INK : INK_DIM,
+          flags: DLT_MONO | DLT_ELLIPSIS, maxWidth: Math.max(1, seg.w - CRUMB_PAD * 2),
+        });
+        // THE SEPARATOR IS A CHEVRON OUT OF TWO FILLS, because the display list has no path op —
+        // the same argument the folder glyph and the sort caret are drawn under.
+        if (seg.path !== segs[segs.length - 1].path) {
+          fill(ops, seg.x + seg.w + 1, CRUMB_MID - 3, 1, 3, INK_DIM);
+          fill(ops, seg.x + seg.w + 2, CRUMB_MID, 1, 3, INK_DIM);
+        }
+      }
+    }
+    /* THE SEARCH FIELD. It is drawn in every strip state, because a query outlives the field being
+     * open — a reader who typed and pressed Enter is still looking at a narrowed listing, and a box
+     * that emptied itself would leave them with no statement of why. */
+    const searchX = clientW - VIEWBTN_W - SEARCH_W;
+    stroke(ops, searchX, CRUMB_TOP + 2, SEARCH_W - CRUMB_PAD, CRUMB_H - 4,
+      strip === "search" ? FOCUS_RING : HEAD_RULE);
+    const inField = strip === "search" ? stripDraft : query;
+    text(ops, inField === "" ? "Search" : inField, {
+      x: searchX + CRUMB_PAD, y: CRUMB_TOP + 5, size: TEXT_PX,
+      rgba: inField === "" ? INK_DIM : INK,
+      flags: DLT_MONO | DLT_ELLIPSIS, maxWidth: SEARCH_W - CRUMB_PAD * 3,
+    });
+    if (strip === "search") {
+      fill(ops, searchX + SEARCH_W - CRUMB_PAD * 2, CRUMB_TOP + 4, 1, CRUMB_H - 8, FOCUS_RING);
+    }
+    /* THE VIEW BUTTON: four cells of a 2x2 grid, which is the picture Windows 7 puts on it. It
+     * steps the view mode, and it exists because Ctrl+wheel is otherwise the only gesture that
+     * reaches one — see `VIEWBTN_W`. */
+    const btnX = clientW - VIEWBTN_W;
+    fill(ops, btnX, CRUMB_TOP + 2, VIEWBTN_W - CRUMB_PAD, CRUMB_H - 4, CRUMB_LIT);
+    for (let q = 0; q < 4; q += 1) {
+      fill(ops, btnX + 4 + (q % 2) * 6, CRUMB_TOP + 7 + Math.floor(q / 2) * 6, 4, 4, HEAD_INK);
     }
 
     /* THE HEADER, ALSO BEFORE THE CLIP — which is the whole reason the clip exists. A scrolled
@@ -1807,19 +3460,36 @@ export function run(env) {
      * the hit test read one geometry (`columnBoxes`) and cannot disagree about which column a
      * reader pointed at. There is no scrollbar — a thumb is dragged, and a drag on one would be a
      * gesture this program cannot route. */
-    for (const box of cols) {
-      text(ops, box.label, {
-        // The `Name` label keeps the column's own text origin, because the rows' names are there
-        // and a label over its values is the point. The other three have no left text origin of
-        // their own — their cells hang off the right edge — so the label takes the box's left.
-        x: box.key === "name" ? box.textX : box.x + 2,
-        y: PAD,
-        size: TEXT_PX,
-        rgba: HEAD_INK,
+    /* M23. AND THE COLUMN LABELS BELONG TO THE DETAILS VIEW ALONE, because the columns do: a grid
+     * of icons has no Name column for a label to sit over, and a `Date modified` header above a
+     * row of pictures names nothing. WHAT REPLACES THEM IS A SORT STRIP, not blank paper — the
+     * header band keeps its height in every mode (see `VIEW_TOP`), so the space is there either
+     * way, and a reader in Large icons otherwise has no way at all to see which order they are
+     * looking at. A press on it still sorts, which keeps "a press above the viewport sorts" one
+     * rule in seven modes. */
+    if (view.flow === FLOW_ROWS) {
+      for (const box of cols) {
+        text(ops, box.label, {
+          // The `Name` label keeps the column's own text origin, because the rows' names are there
+          // and a label over its values is the point. The other three have no left text origin of
+          // their own — their cells hang off the right edge — so the label takes the box's left.
+          x: box.key === "name" ? box.textX : box.x + 2,
+          y: PAD,
+          size: TEXT_PX,
+          rgba: HEAD_INK,
+          flags: DLT_BOLD | DLT_ELLIPSIS,
+          maxWidth: Math.max(1, box.w - PAD),
+        });
+        if (box.key === sort.key) sortCaret(ops, box, sort.dir);
+      }
+    } else {
+      const named = COLUMNS.find((c) => c.key === sort.key);
+      text(ops, `${view.label} \u00b7 sorted by ${named ? named.label : sort.key}`, {
+        x: NAME_X, y: PAD, size: TEXT_PX, rgba: HEAD_INK,
         flags: DLT_BOLD | DLT_ELLIPSIS,
-        maxWidth: Math.max(1, box.w - PAD),
+        maxWidth: Math.max(1, clientW - NAME_X - PAD),
       });
-      if (box.key === sort.key) sortCaret(ops, box, sort.dir);
+      sortCaret(ops, { x: PAD, w: GLYPH_W }, sort.dir);
     }
     fill(ops, PAD, HEAD_H - 4, clientW - PAD * 2, 1, HEAD_RULE);
 
@@ -1835,96 +3505,40 @@ export function run(env) {
     let capped = 0;
     for (let i = first; i <= lastDrawn; i += 1) {
       const row = rows[i];
-      const top = rowTop(i, scroll);
       const selected = sel.has(i);
-      /* ONE ROW IS BUILT APART AND THEN MEASURED, WHICH IS WHAT `DL_MAX_OPS` COSTS. A batch over
+      /* ONE ITEM IS BUILT APART AND THEN MEASURED, WHICH IS WHAT `DL_MAX_OPS` COSTS. A batch over
        * the cap is refused WHOLE (`win_draw`), and a refused batch is a window that stopped
-       * repainting with no error a reader can see. Four columns is four text runs, and a run is a
-       * header plus one record per 24 bytes: a 255-byte name in a selected and focused row is 24
-       * ops, and ninety of those is 2,160 against a 2,048-op batch — reachable by a tall window
-       * over a directory of long names with everything selected. So the loop stops while there is
-       * still room and SAYS HOW MANY ROWS IT DROPPED, rather than sending a batch that draws
-       * nothing. */
-      const rowOps = [];
-      /* A SELECTED ROW INVERTS, which is what a list view does and what makes the selection
-       * visible without a second colour to learn. The fill is the row's own KIND colour, so the
-       * amber/green distinction survives selection rather than being painted over by one
-       * highlight.
+       * repainting with no error a reader can see. So the loop stops while there is still room and
+       * SAYS HOW MANY ITEMS IT DROPPED, rather than sending a batch that draws nothing.
        *
-       * THE HOVER'S BAND IS UNDER IT AND LOSES TO IT: a row that is both lit and selected reads as
-       * selected, because the selection is the reader's choice and the hover is only where their
-       * hand is. */
-      if (selected) {
-        fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H,
-          row.dir ? SELECT_FILL_DIR : SELECT_FILL);
-      } else if (i === lit) {
-        fill(rowOps, PAD, top, clientW - PAD * 2, ROW_H, LIT_FILL);
-      }
-      const kind = row.dir ? BAND_DIR : (BAND[row.format] || BAND_UNKNOWN);
-      glyph(rowOps, row, PAD + 2, top + 2, selected ? INK_SELECTED : kind);
-      /* M20. A CUT ROW IS DIMMED, which is Explorer's own statement that a move is pending — and
-       * the only one available: the clipboard cannot be asked "is this row's path on you" per
-       * frame, so the membership set `toClipboard` kept is what this reads. It changes the NAME's
-       * ink only, so "cut" and "selected" stay two readings the way "lit" and "selected" do. */
-      const cutOut = !!clip && clip.intent === V_CUT && clip.marked.has(row.path);
-      /* THE CELLS, ONE PER COLUMN AND IN COLUMN ORDER. `cellOf` decides every string and
-       * `columnBoxes` every rectangle, so the column a cell lands in is the column its header names.
-       * The NAME is drawn at the row's own size and the three metadata columns one pixel smaller and
-       * monospace, which is what makes a column of dates and sizes line its digits up. */
-      /* M20. AN OPEN RENAME REPLACES THE NAME CELL WITH A FIELD, and only for the row being
-       * renamed: the other three columns still describe the file, which is what tells a reader
-       * which row they are editing. */
-      const field = editing && editing.row === i ? cols[0] : null;
-      for (const box of cols) {
-        if (field && box.key === "name") continue;
-        cellRun(rowOps, box, cellOf(row, box.key), {
-          y: top + TEXT_DY,
-          size: box.key === "name" ? TEXT_PX : TEXT_PX - 1,
-          rgba: selected ? INK_SELECTED
-            : (box.key === "name" ? (cutOut ? INK_DIM : INK) : INK_DIM),
-          mono: box.mono,
-        });
-      }
-      if (field) {
-        /* THE FIELD, AND THE CARET IS AT ITS RIGHT EDGE AND NOT AFTER THE TEXT. A program cannot
-         * measure a string — the renderer has the font and a sum of published advances is only an
-         * upper bound for a proportional run (`advanceWidth` in src/abi.mjs) — so a caret drawn
-         * where the text is thought to end would sit in the wrong place at every size. The field's
-         * edge is a position both sides agree on.
-         *
-         * MONOSPACED, which is the one family whose width the advance table prices exactly, so a
-         * driver outside the process can predict where the draft's glyphs are. */
-        // FROM THE NAME'S TEXT ORIGIN AND NOT FROM THE COLUMN'S LEFT EDGE, so the row's glyph stays
-        // visible beside the field: the file being renamed is still the file, and hiding its icon
-        // under the box loses the one mark that says whether it is a folder.
-        const fx = field.textX - 2;
-        const fw = Math.max(1, field.right - fx);
-        fill(rowOps, fx, top, fw, ROW_H, PAPER);
-        stroke(rowOps, fx, top, fw, ROW_H, FOCUS_RING);
-        cellRun(rowOps, field, editing.draft, {
-          y: top + TEXT_DY, size: TEXT_PX, rgba: INK, mono: true,
-        });
-        fill(rowOps, field.right - PAD, top + 2, 1, ROW_H - 4, FOCUS_RING);
-      }
-      if (selected) {
-        stroke(rowOps, PAD, top, clientW - PAD * 2, ROW_H, OUTLINE);
-      }
-      /* THE KEYBOARD CURSOR, LAST AND INSIDE THE ROW. Windows 7 draws a dotted focus rectangle and
-       * the display list has no dash pattern, so this is a hairline inset by one CSS pixel — which
-       * is what lets a row that is both focused and selected show both rings instead of one hiding
-       * the other. Its ink follows the row: `INK_SELECTED` on an inverted band, `FOCUS_RING` on
-       * paper, for the contrast reason the selected text already has. */
-      if (i === focus) {
-        const ring = FILES_METRICS.focusBox(i, scroll, clientW);
-        stroke(rowOps, ring.x, ring.y, ring.w, ring.h, selected ? INK_SELECTED : FOCUS_RING);
-      }
+       * M23: AND THE TWO FLOWS COST DIFFERENT AMOUNTS. A Details row is four text runs plus its
+       * fills; a grid cell is ONE picture — a `DL_BLIT` is one op where a 16x16 image would have
+       * been 256 fills (PRD R26) — plus one or two label runs. The measurement is the same either
+       * way, which is why the cap is applied here and not inside the drawers. */
+      const rowOps = [];
+      /* THE MARK COUNTS ARE SNAPSHOTTED AND PUT BACK IF THE ITEM IS DISCARDED. `picture` raises one
+       * of them as it builds the ops, and the cap below can then throw those ops away — so without
+       * this the counters described an item nobody drew, and `drewPictures + drewIcons ===
+       * shownRows` (which is R26's fallback clause as arithmetic) was false by exactly the number
+       * the cap dropped. */
+      const pictureWas = drewPictures;
+      const iconWas = drewIcons;
+      if (view.flow === FLOW_ROWS) detailRow(rowOps, i, row, selected, cols);
+      else cellItem(rowOps, i, row, selected);
       // ONE op of headroom is kept for the band below, which is two ops and is drawn at most once.
-      if (ops.length + rowOps.length + 2 > DL_MAX_OPS) { capped = lastDrawn - i + 1; break; }
+      if (ops.length + rowOps.length + 2 > DL_MAX_OPS) {
+        capped = lastDrawn - i + 1;
+        drewPictures = pictureWas;
+        drewIcons = iconWas;
+        break;
+      }
       ops.push(...rowOps);
       shown += 1;
     }
     account.firstRow = shown > 0 ? first : 0;
     account.shownRows = shown;
+    account.thumbs.drewPictures = drewPictures;
+    account.thumbs.drewIcons = drewIcons;
     if (capped !== account.cappedRows) {
       account.cappedRows = capped;
       if (capped > 0) {
@@ -1981,7 +3595,11 @@ export function run(env) {
      * and nothing reads it as one now — `visible` bounds the drawn rows by the viewport itself, so
      * a count and a geometry cannot disagree. It stays in the account because "how much of this
      * directory can a reader see at once" is the question a resize is about. */
-    account.maxRows = rowsThatFit(h);
+    /* M23: `pageStepFor` CALLS `rowsThatFit` IN THE `rows` FLOW, so this is the same number it has
+     * always been in Details, and in a grid it is lanes times the rows that fit — which is what
+     * "how much of this directory can a reader see at once" means when a line holds four files. */
+    account.maxRows = pageStepFor(view, rows.length, w, h);
+    account.lanes = lanesOf(view, FILES_METRICS.viewBox(w, h)).lanes;
     account.client = { w, h };
     account.dpr = dpr;
     /* THE OFFSET IS RE-CLAMPED AGAINST THE NEW HEIGHT, which is the bottom clamp doing the work a
@@ -2076,11 +3694,20 @@ export function run(env) {
   const revealRow = (i) => {
     if (i < 0 || i >= rows.length) return false;
     const box = FILES_METRICS.viewBox(clientW, clientH);
-    if (box.h <= 0) return false;
-    const top = rowTop(i);
+    if (box.h <= 0 || box.w <= 0) return false;
+    /* M23. ALONG THE MODE'S OWN AXIS, which is what makes one function reveal a row in Details and
+     * a cell in the List — where "scroll to it" means sideways. The near edge, the far edge and the
+     * cell's extent are all read off the mode's geometry at offset ZERO, because the arithmetic is
+     * about where the content IS and not about where it currently sits. */
+    const axis = axisOf(view);
+    const cell = itemBox(view, i, 0, clientW, clientH);
+    const near = axis === "x" ? cell.x : cell.y;
+    const extent = axis === "x" ? cell.w : cell.h;
+    const edge = axis === "x" ? box.x : box.y;
+    const room = axis === "x" ? box.w : box.h;
     let next = scroll;
-    if (top - PAD - scroll < box.y) next = top - PAD - box.y;
-    else if (top + ROW_H + PAD - scroll > box.y + box.h) next = top + ROW_H + PAD - box.y - box.h;
+    if (near - PAD - scroll < edge) next = near - PAD - edge;
+    else if (near + extent + PAD - scroll > edge + room) next = near + extent + PAD - edge - room;
     next = Math.max(0, Math.min(maxScroll(), next));
     if (next === scroll) return false;
     scroll = next;
@@ -2138,6 +3765,377 @@ export function run(env) {
    * reader's place in a list is the FILE they were on: an index would leave the ring on whatever
    * happened to land in that slot.
    */
+  /* ---- M23: THE BREADCRUMB, THE PATH FIELD AND THE SEARCH ---------------------------------- */
+
+  /**
+   * GO TO A BREADCRUMB SEGMENT. R28's headline: clicking a segment goes there.
+   *
+   * IT GOES THROUGH `relist`, WHICH IS WHERE HISTORY LIVES — M18 built the Back stack and the row
+   * says so, so a crumb press pushes exactly as a double-click on a folder does and Backspace
+   * undoes it. A segment that navigated by some other route would be a navigation Back could not
+   * reach, which is the one thing a trail must not be.
+   *
+   * THE SEGMENT A READER IS ALREADY IN IS NOT A NAVIGATION. Pressing it re-lists nothing and pushes
+   * nothing: a history entry for "where I already was" makes Back a no-op the reader has to press
+   * twice.
+   */
+  const goToCrumb = (seg) => {
+    if (!seg) return false;
+    if (dirKey(seg.path) === dirKey(dir)) {
+      // AND IT CLEARS AN OPEN SEARCH, which is the one thing pressing "here" can usefully do: a
+      // reader looking at a filtered listing who presses the folder they are in means "show me it".
+      if (query === "" && strip === "trail" && walked === "") return false;
+      const hadWalked = walked !== "";
+      query = "";
+      walk = null;
+      walked = "";
+      strip = "trail";
+      stripDraft = "";
+      account.strip = strip;
+      account.stripDraft = "";
+      /* A WALK'S RESULT SET IS NOT THIS DIRECTORY, SO IT IS RE-READ AND NOT RE-COMMITTED. After a
+       * walk `allRows` holds matches from all over the tree; clearing the query and re-committing
+       * it left the window showing files from elsewhere AS IF they were in this directory, with
+       * nothing on screen to say why — which is the wrong-file class of defect this program has
+       * paid for twice. `reread` is what makes "show me this folder" mean this folder. */
+      if (hadWalked) return reread([]);
+      commitRows(allRows);
+      applyFilter();
+      return true;
+    }
+    if (!relist(seg.path)) return false;
+    account.crumbNav += 1;
+    return true;
+  };
+
+  /** OPEN THE PATH FIELD, holding the directory this window is in — R28's "becomes an editable path
+   *  on a click in the empty strip". The draft starts as the CURRENT path and not empty, because a
+   *  reader editing an address is almost always changing the end of it. */
+  const openPath = () => {
+    if (strip === "path") return false;
+    strip = "path";
+    stripWas = dir;
+    stripDraft = dir;
+    account.strip = strip;
+    account.stripDraft = stripDraft;
+    account.pathEdits += 1;
+    account.pathWas = stripWas;
+    // AN OPEN RENAME GOES: two text fields cannot both own the keyboard, which is `strip`'s whole
+    // reason for being one value rather than two booleans.
+    if (editing) cancelRename();
+    return true;
+  };
+
+  /** OPEN THE SEARCH FIELD, holding whatever query is already in force so a reader can narrow or
+   *  widen it rather than retype it. Alt+D opens the path field and Ctrl+F opens this one, which
+   *  are Windows' own two bindings. */
+  const openSearch = () => {
+    if (strip === "search") return false;
+    strip = "search";
+    stripWas = query;
+    stripDraft = query;
+    account.strip = strip;
+    account.stripDraft = stripDraft;
+    if (editing) cancelRename();
+    return true;
+  };
+
+  /** CLOSE WHICHEVER FIELD IS OPEN AND PUT BACK WHAT IT HELD. Esc's behaviour, and the reason the
+   *  draft and the original are two variables: a field abandoned must leave the listing exactly as
+   *  it was, which for the search field means re-applying the query that was in force. */
+  const closeStrip = ({ restore = true } = {}) => {
+    if (strip === "trail") return false;
+    const was = strip;
+    strip = "trail";
+    stripDraft = "";
+    account.strip = strip;
+    account.stripDraft = "";
+    /* AND A COMMITTED WALK IS NOT RESTORED OVER. See `walked`: the listing is no longer this
+     * directory's, so the query is the only thing that says what it is. */
+    if (restore && was === "search" && walked === "" && query !== stripWas) {
+      query = stripWas;
+      applyFilter();
+    }
+    return true;
+  };
+
+  /**
+   * TYPE A BYTE INTO WHICHEVER FIELD IS OPEN. Answers whether a repaint is owed.
+   *
+   * THE SEARCH FILTERS AS IT IS TYPED (R31) AND THE PATH DOES NOT. A path is not a prefix of a
+   * place — `/Users/Defaul` is not a directory — so re-listing per keystroke would be a `readdir`
+   * per character answering ENOENT; the path field commits on Enter. A query IS a prefix of a
+   * narrower query, so every keystroke is a legitimate narrower listing and costs no syscall at all:
+   * the filter runs over the rows already in hand.
+   */
+  const typeStrip = (b) => {
+    if (b === KEY_BACKSPACE) {
+      if (stripDraft === "") return false;
+      stripDraft = stripDraft.slice(0, -1);
+      account.stripDraft = stripDraft;
+      if (strip === "search") { query = stripDraft; applyFilter(); }
+      return true;
+    }
+    if (b < PRINTABLE_LO || b > PRINTABLE_HI) return false;
+    // COUNTED PER NARROWING AND NOT PER KEYSTROKE: `searches` is how many times the listing was
+    // narrowed by a new query, which is the figure that says the filter ran.
+    if (strip === "search") account.searches += 1;
+    /* BOUNDED, AND BY THE SAME CEILING THE RENAME FIELD USES. `NAME_MAX` is a byte count and these
+     * bytes are one each; a path may be longer than one component, so the path field gets four
+     * times the room and the search field one component's worth — which is what a name is. */
+    const cap = strip === "path" ? NAME_MAX * 4 : NAME_MAX;
+    if (stripDraft.length >= cap) return false;
+    stripDraft += String.fromCharCode(b);
+    account.stripDraft = stripDraft;
+    if (strip === "search") { query = stripDraft; applyFilter(); }
+    return true;
+  };
+
+  /**
+   * COMMIT WHICHEVER FIELD IS OPEN — Enter.
+   *
+   * THE PATH FIELD NAVIGATES, through `relist`, so a typed address is in the Back stack exactly as
+   * a crumb press and a double-click are. A path that cannot be read is REFUSED BY NAME with the
+   * kernel's own errno and the FIELD STAYS OPEN, which is the only useful thing to do with a typo:
+   * closing it would throw away what the reader typed and leave them to start again.
+   *
+   * THE SEARCH FIELD STARTS THE DEEP WALK. The filter has already run — every keystroke narrowed the
+   * listing — so Enter is the reader asking for the one thing the filter cannot give them: matches
+   * BELOW this directory. That is what `walk` is, and it is bounded and chunked and says what it
+   * cost.
+   */
+  const commitStrip = () => {
+    if (strip === "path") {
+      const want = stripDraft.trim();
+      if (want === "") return refuse("the address", "is empty");
+      if (dirKey(want) === dirKey(dir)) return closeStrip({ restore: false });
+      if (!relist(want)) return false;
+      // `relist` ALREADY CLOSED THE STRIP, because it resets everything a listing indexes and the
+      // field is one of them. Counted here, where the navigation is known to have happened.
+      account.crumbNav += 1;
+      return true;
+    }
+    if (strip === "search") {
+      if (stripDraft === "") return refuse("the search", "is empty, so there is nothing to look for");
+      return beginWalk();
+    }
+    return false;
+  };
+
+  /* ---- M23: THE BOUNDED, CHUNKED WALK (R31) ------------------------------------------------ */
+
+  /**
+   * START A DEEP SEARCH UNDER THE OPEN DIRECTORY.
+   *
+   * WHAT IT SEARCHES, PLAINLY: every entry's NAME, in this directory and in every directory under
+   * it, to a depth of `SEARCH_MAX_DEPTH` and a ceiling of `SEARCH_MAX_ENTRIES` entries. Not file
+   * CONTENTS — there is no index and no `grep`, and reading every byte of a tree to answer a
+   * keystroke is a cost nothing here could bound.
+   *
+   * WHAT IT COSTS, PLAINLY: one `readdir` per directory (which is `std.listDir`'s rounds, so a
+   * directory of 4,000 is several calls), plus ONE `lstat` PER MATCH AND NOT PER ENTRY. That second
+   * half is the one real cost decision in here and it is A10's argument applied where A10 cannot
+   * reach: a listing needs a stat for every row because the Date and Size columns describe every
+   * row, and a WALK needs one only for the rows it is going to show. A walk that statted every
+   * entry would pay 20,000 syscalls to display forty.
+   *
+   * THE RESULT REPLACES THE LISTING, and the rows carry paths from elsewhere in the tree — so the
+   * name cell is the file's name and the TYPE cell is still its type, which is what makes a search
+   * result a row a reader can act on with the same verbs.
+   */
+  const beginWalk = () => {
+    query = stripDraft;
+    walk = {
+      /* THE QUERY IS CAPTURED HERE AND READ FROM THE WALK, never from `query`: a chunk in flight
+       * must match what the reader pressed Enter on, and `query` is live state a keystroke moves. */
+      query,
+      stack: [{ path: dir, depth: 0 }],
+      seen: 0,
+      dirs: 0,
+      statted: 0,
+      found: [],
+      from: performance.now(),
+      chunks: 0,
+      why: "",
+    };
+    account.deepSearches += 1;
+    account.searches += 1;
+    account.query = query;
+    account.searchCost = { dirsRead: 0, entriesSeen: 0, statted: 0, ms: 0, chunks: 0, why: "" };
+    env.std.say(env, `${NAME}: searching ${dir} and below for "${query}" — names only, to depth `
+      + `${SEARCH_MAX_DEPTH} and ${SEARCH_MAX_ENTRIES} entries\n`);
+    return true;
+  };
+
+  /**
+   * ONE CHUNK OF THE WALK. Answers whether a repaint is owed, and clears `walk` when it is done.
+   *
+   * CHUNKED AT `SEARCH_CHUNK` ENTRIES, which is R31's own requirement — the window keeps servicing
+   * input because this returns to the event loop and the loop polls. A walk that ran to completion
+   * inside one turn would make a 20,000-entry tree an unresponsive window, and the only symptom
+   * would be a reader's keystroke arriving seconds late.
+   *
+   * BOTH CEILINGS REFUSE BY NAME AND NEITHER STOPS SILENTLY. `why` is what the status strip says, so
+   * a result list that is short because the walk was cut off is distinguishable from one that is
+   * short because the tree has little in it — which is the whole difference between a search a
+   * reader can trust and one they cannot.
+   */
+  const stepWalk = () => {
+    if (!walk) return false;
+    walk.chunks += 1;
+    let budget = SEARCH_CHUNK;
+    while (budget > 0 && walk.stack.length > 0) {
+      const at = walk.stack.pop();
+      const entries = env.std.listDir(env, at.path);
+      walk.dirs += 1;
+      if (typeof entries === "number") {
+        // A DIRECTORY THAT CANNOT BE READ IS SKIPPED AND COUNTED, not fatal: a walk that stopped at
+        // the first unreadable subtree would answer a reader's search with a silence that means
+        // "no matches" and is nothing of the kind.
+        continue;
+      }
+      const base = at.path.endsWith("/") ? at.path : `${at.path}/`;
+      for (const e of entries) {
+        if (e.name === "." || e.name === "..") continue;
+        walk.seen += 1;
+        budget -= 1;
+        if (walk.seen > SEARCH_MAX_ENTRIES) {
+          walk.why = `stopped at the ${SEARCH_MAX_ENTRIES}-entry ceiling`;
+          walk.stack.length = 0;
+          break;
+        }
+        const isDir = e.type === DT_DIR;
+        if (isDir && at.depth + 1 < SEARCH_MAX_DEPTH) {
+          walk.stack.push({ path: `${base}${e.name}`, depth: at.depth + 1 });
+        } else if (isDir && walk.why === "") {
+          walk.why = `stopped at depth ${SEARCH_MAX_DEPTH}`;
+        }
+        if (!searchMatch(e.name, walk.query)) continue;
+        // ONE `lstat` PER MATCH, which is this walk's cost decision (see `beginWalk`).
+        walk.statted += 1;
+        walk.found.push(makeRow(base, e.name, isDir));
+      }
+    }
+    const done = walk.stack.length === 0;
+    account.searchCost = {
+      dirsRead: walk.dirs,
+      entriesSeen: walk.seen,
+      statted: walk.statted,
+      ms: performance.now() - walk.from,
+      chunks: walk.chunks,
+      why: walk.why,
+    };
+    if (!done) return false;
+    /* THE RESULT IS COMMITTED AS THE LISTING AND THE FILTER IS NOT RE-APPLIED TO IT. Every row in
+     * `found` already matched, so filtering again would be the same test twice — and `commitRows`
+     * would apply it against `allRows`, which is now the result set. */
+    allRows = walk.found;
+    rows = walk.found;
+    walked = walk.query;
+    sortRows(rows);
+    account.rows = reportRows();
+    account.matched = rows.length;
+    account.listed = rows.length;
+    sel = new Set();
+    anchor = -1;
+    reportSelection();
+    setFocus(-1);
+    setLit(-1);
+    scroll = 0;
+    account.scroll = 0;
+    account.scrollMax = maxScroll();
+    dropAllThumbs();
+    account.thumbs.ready = 0;
+    account.thumbs.bytes = thumbBytes;
+    env.std.say(env, `${NAME}: ${rows.length} match(es) for "${query}" under ${dir} — `
+      + `${walk.dirs} directories read, ${walk.seen} entries seen, ${walk.statted} statted, `
+      + `${Math.round(account.searchCost.ms)} ms`
+      + `${walk.why ? `, ${walk.why}` : ""}\n`);
+    walk = null;
+    return true;
+  };
+
+  /* ---- M23: SWITCHING THE VIEW ------------------------------------------------------------- */
+
+  /**
+   * GO TO VIEW `id`. Answers whether a repaint is owed; refuses an unknown id by name.
+   *
+   * THE OFFSET IS RESET AND NOT CONVERTED, and that is a decision rather than laziness. The two
+   * flows scroll along different axes and the cells have different pitches, so there is no offset in
+   * Large icons that means what a given offset meant in Details — a conversion would be a guess
+   * dressed as arithmetic, and it would put a reader somewhere neither mode's arithmetic names.
+   * THE SELECTION AND THE CURSOR SURVIVE, because both are indices into `rows` and `rows` has not
+   * changed: what the reader chose is still what they chose, in a different picture. The cursor is
+   * then REVEALED, which is the one thing a reader needs after the layout moves under them.
+   *
+   * THE FOLDER REMEMBERS, which is R27's last clause. Written on the way OUT of a mode as well as
+   * in, so the entry is the mode the reader was last in here and not the mode they first picked.
+   */
+  const setView = (id) => {
+    const next = VIEW_BY_ID[id];
+    if (!next) {
+      return refuse(String(id), `is not a view (${VIEWS.map((v) => v.id).join(", ")})`);
+    }
+    if (next.id === view.id) return false;
+    view = next;
+    viewByDir.set(dirKey(dir), view.id);
+    account.view = view.id;
+    account.viewLabel = view.label;
+    account.viewFlow = view.flow;
+    account.viewAxis = axisOf(view);
+    account.viewSwitches += 1;
+    account.viewsRemembered = viewByDir.size;
+    account.lanes = lanesOf(view, FILES_METRICS.viewBox(clientW, clientH)).lanes;
+    scroll = 0;
+    account.scroll = 0;
+    account.scrollMax = maxScroll();
+    account.maxRows = pageStepFor(view, rows.length, clientW, clientH);
+    // A BAND AND A PRESS ARE IN THE OLD LAYOUT'S COORDINATES, so both go. A gesture that survived a
+    // view change would finish by selecting whatever cell the new layout put under a stale corner.
+    band = null;
+    press = null;
+    dragging = false;
+    setLit(-1);
+    // AN OPEN RENAME GOES TOO: the field is drawn in the name cell's rectangle, and the new mode
+    // puts that rectangle somewhere else — a box floating over a different file is the defect.
+    if (editing) cancelRename();
+    forgetMenu();
+    if (focus >= 0) revealRow(focus);
+    env.std.say(env, `${NAME}: ${view.label}${view.thumbs ? ", with thumbnails" : ""}, `
+      + `${account.lanes} across, scrolls ${axisOf(view) === "x" ? "sideways" : "down"}\n`);
+    return true;
+  };
+
+  /** STEP THE VIEW ALONG THE `VIEWS` TABLE — the slider A1 names, which is Ctrl+wheel. `by` is
+   *  POSITIVE towards smaller icons, because the table is largest-first and a wheel TOWARDS the
+   *  reader makes things smaller, which is the direction every zoom in every program uses.
+   *
+   *  IT STOPS AT BOTH ENDS RATHER THAN WRAPPING. A slider that jumped from Tiles back to Extra large
+   *  on one more notch is a reader's gesture producing the opposite of what it had been producing. */
+  const stepView = (by) => {
+    const at = VIEWS.findIndex((v) => v.id === view.id);
+    const to = Math.max(0, Math.min(VIEWS.length - 1, at + by));
+    if (to === at) return false;
+    return setView(VIEWS[to].id);
+  };
+
+  /**
+   * THE NEXT VIEW, WRAPPING — what the button in the address strip does, and the ONE place the
+   * button and the slider differ.
+   *
+   * A BUTTON CYCLES AND A SLIDER CLAMPS, and the asymmetry is the gestures' own. Ctrl+wheel is a
+   * continuous slider: wrapping it would make one more notch produce the opposite of what the
+   * previous notch produced, which is `stepView`'s stated reason for stopping at both ends. A
+   * BUTTON has one direction and no magnitude, so a button that clamped would be a control a
+   * reader can press once and then press for ever with no effect — which is what this was: from
+   * the Details default it reached Tiles and was INERT thereafter, so a reader with no wheel could
+   * never see an icon size at all. Windows 7's own view button cycles.
+   */
+  const cycleView = () => {
+    const at = VIEWS.findIndex((v) => v.id === view.id);
+    return setView(VIEWS[(at + 1) % VIEWS.length].id);
+  };
+
   const sortBy = (key) => {
     if (!COLUMNS.some((c) => c.key === key)) return refuse(String(key), "is not a column");
     const was = focus >= 0 && focus < rows.length ? rows[focus] : null;
@@ -2172,7 +4170,22 @@ export function run(env) {
     if (typeof built === "number") return refuse(next, env.std.errnoName(built));
     if (push) history.push(dir);
     dir = next;
-    rows = built;
+    /* M23. THE SEARCH GOES WITH THE DIRECTORY, AND THE WALK WITH IT. A query names files in the
+     * folder a reader has just left; carrying it into a new one would show them a filtered listing
+     * they never asked for and would make an empty directory indistinguishable from a query that
+     * matched nothing. A walk in flight is abandoned for the harder version of the same reason: its
+     * stack holds paths under the previous root. */
+    query = "";
+    walk = null;
+    walked = "";
+    strip = "trail";
+    stripDraft = "";
+    // THE ACCOUNT IS TOLD, which the first spelling forgot: a typed-path navigation closes the
+    // field through these locals, so `account.strip` went on reporting `path` for the rest of the
+    // run and a check reading it would believe a field was open that is not.
+    account.strip = strip;
+    account.stripDraft = "";
+    commitRows(built);
     sort = order;
     account.sort = { ...sort };
     account.dir = dir;
@@ -2196,6 +4209,32 @@ export function run(env) {
     editing = null;
     account.renaming = null;
     setFocus(-1);
+    /* M23. AND EVERY PICTURE GOES WITH THEM. Each cache entry is keyed by a PATH in the directory
+     * that is gone, so none of them can be wanted again — and a live data object nobody will ask
+     * for is a `DOBJ_CAP` slot the next directory's thumbnails cannot have, which is a cache that
+     * stops working after twenty-eight folders. A rebuild gets a clean slate (CLAUDE.md). */
+    dropAllThumbs();
+    account.thumbs.ready = 0;
+    account.thumbs.wanted = 0;
+    account.thumbs.rows = [];
+    account.thumbs.bytes = thumbBytes;
+    /* M23. AND THE NEW FOLDER'S OWN VIEW MODE IS RESTORED, which is R27's per-folder memory read
+     * back. A FOLDER NOBODY HAS SET KEEPS THE MODE THE READER IS IN rather than snapping to
+     * Details, which is Explorer's behaviour and the only one that makes sense of a reader who has
+     * just chosen Large icons and then opened a subfolder: the choice was about how they want to
+     * look at files, not about one directory. The SORT is reset here (above) and the view is not,
+     * and that asymmetry is deliberate — a sort names a COLUMN of a listing that is gone, while a
+     * view names a size of picture, which is a preference and not a fact about a directory. */
+    const remembered = viewByDir.get(dirKey(dir));
+    if (remembered && remembered !== view.id) {
+      view = VIEW_BY_ID[remembered];
+      account.view = view.id;
+      account.viewLabel = view.label;
+      account.viewFlow = view.flow;
+      account.viewAxis = axisOf(view);
+    }
+    account.lanes = lanesOf(view, FILES_METRICS.viewBox(clientW, clientH)).lanes;
+    account.scrollMax = maxScroll();
     // THE TITLE NAMES WHERE THE WINDOW IS, which is the only text outside the surface a reader has
     // and the one thing a driver outside the process can read without decoding a display list.
     env.win.setTitle(made.fd, `${NAME} — ${dir}`);
@@ -2280,7 +4319,10 @@ export function run(env) {
   const reread = (select = []) => {
     const built = buildRows(dir, sort);
     if (typeof built === "number") return refuse(dir, env.std.errnoName(built), built);
-    rows = built;
+    /* M23. THROUGH `commitRows`, SO A RE-READ KEEPS THE READER'S QUERY. A verb that re-listed the
+     * whole directory under an open search would answer a reader's Delete by showing them every
+     * file they had just filtered away. */
+    commitRows(built);
     account.rows = reportRows();
     const wanted = new Set(select);
     sel = new Set();
@@ -2970,6 +5012,17 @@ export function run(env) {
     + "arrows move, Enter or a double-click opens, Backspace goes back. q quits.\n");
   env.std.say(env, "click a column header to sort, again to reverse. shift or ctrl extend the "
     + "selection; drag from empty space to band-select.\n");
+  env.std.say(env, `ctrl+wheel steps the view: ${VIEWS.map((v) => v.label).join(" / ")}. `
+    + `--view ID opens in one (${VIEWS.map((v) => v.id).join(", ")}). thumbnails are drawn in `
+    + `${VIEWS.filter((v) => v.thumbs).map((v) => v.label).join(", ")}; the other modes draw the `
+    + "type icon, which is also the fallback for a file nothing here decodes. a folder remembers "
+    + "the mode it was last looked at in, for as long as this window is open.\n");
+  env.std.say(env, "the address strip: click a crumb to go there, the empty strip (or alt-D) to "
+    + "type a path, the box at the right (or ctrl-F) to search. a query filters THIS directory as "
+    + "you type and costs no syscall; Enter walks everything BELOW it by NAME — not by contents — "
+    + `to depth ${SEARCH_MAX_DEPTH} and ${SEARCH_MAX_ENTRIES} entries, one readdir per directory `
+    + "and one lstat per MATCH. esc or a press outside the strip closes the field. the button at "
+    + "the far right CYCLES the view; ctrl+wheel steps it and stops at both ends.\n");
   env.std.say(env, "right-click for a menu. F2 renames, Delete removes, ctrl-N makes a folder, "
     + "ctrl-X/C/V cut, copy and paste. F5 re-lists and keeps the selection.\n");
   env.std.say(env, `a delete inside ${env.std.HOME_DIR} goes to ${binRoot}, where Restore puts it `
@@ -3089,7 +5142,35 @@ export function run(env) {
       account.why = `ceiling ${CEILING_MS} ms reached`;
       break;
     }
-    const r = unInterrupted(() => env.tty.poll([{ fd: made.fd, events: POLLIN }], POLL_MS));
+    /* M23. THE DECODES, BEFORE THE POLL AND NOWHERE ELSE.
+     *
+     * HERE BECAUSE THIS IS THE ONE PLACE THE PROCESS IS NEITHER PARKED NOR SPINNING. The poll below
+     * parks it in `Atomics.wait` and nothing settles there (measured: 406 ms, zero promises); the
+     * event handlers below run between two syscalls but are reached from a drained batch, so a
+     * decode awaited inside one would suspend `run` with events still in hand. Before the poll, the
+     * cache is brought up to what the viewport wants and the window is repainted once for all of
+     * them — which is also why `paint` may never decode: a repaint that evicted an object whose fd
+     * it had already put in the batch would have the whole `win_draw` refused with -EBADF. */
+    if (await fillThumbs()) paint();
+    /* M23. ONE CHUNK OF A SEARCH WALK PER TURN, which is R31's "chunked so the window keeps
+     * servicing input" as code: the chunk runs, the loop polls, a keystroke is read. A walk that ran
+     * to completion in one turn would make a 20,000-entry tree an unresponsive window whose only
+     * symptom is a reader's key arriving seconds late.
+     *
+     * AND THE POLL IS NOT WAITED OUT WHILE ONE IS IN FLIGHT. `POLL_MS` is 200 ms, so polling between
+     * chunks would stretch a 79-chunk walk to sixteen seconds; `continue` takes the next chunk at
+     * once and the window still drains its queue, because a chunk is about 1.3 ms. */
+    if (walk) {
+      if (stepWalk()) paint();
+    }
+    /* AND THE POLL DOES NOT WAIT WHILE A WALK IS IN FLIGHT. `timeout 0` is a POLL and not a wait
+     * (`src/kernel/calls.mjs`), so the queue is drained between every chunk and a reader's Esc
+     * arrives within one chunk — about 1.3 ms. Waiting `POLL_MS` between chunks would stretch the
+     * 79 chunks of a full ceiling to sixteen seconds of a window that looks stuck; skipping the
+     * poll entirely would let a long walk lap a 256-record queue and drop the reader's newest
+     * event, which is the defect `WIN_EVENT_CAP`'s own docstring names. */
+    const waitMs = walk ? 0 : POLL_MS;
+    const r = unInterrupted(() => env.tty.poll([{ fd: made.fd, events: POLLIN }], waitMs));
     if (typeof r === "number") {
       if (r === -EINTR) continue;
       account.why = `poll: ${env.std.errnoName(r)}`;
@@ -3164,6 +5245,31 @@ export function run(env) {
          * whole of what the flag is for. So the delta is applied AS GIVEN and the flag is only
          * counted — there is nothing else to do with it, and that is the honest reading. */
         if (ev.mods & WWHEEL_COALESCED) account.coalescedWheels += 1;
+        /* M23. CTRL+WHEEL IS THE VIEW SLIDER (PRD A1), AND IT IS TESTED BEFORE THE SCROLL.
+         *
+         * IT IS THE ONLY GESTURE ROUTE TO A VIEW MODE, and that is an ABI fact rather than a choice:
+         * `bytesForKey` (`src/wm/terminal.mjs`) answers null for every Ctrl chord that is not a C0
+         * letter, so Windows' own Ctrl+Shift+1..7 cannot reach a program at all — the key event is
+         * dropped before `WEV_KEY` is built. The other two routes are the view button in the address
+         * strip and `--view` on argv; neither is a wheel.
+         *
+         * ONE STEP PER RECORD WHATEVER THE DELTA, which is the opposite of the scroll's rule below
+         * and right for the same reason: a scroll is a DISTANCE and a mode is a POSITION in a table
+         * of seven, so a coalesced run of four notches that scrolled four notches' worth must step
+         * the slider once — otherwise one flick of a trackpad crosses the whole table.
+         *
+         * THE SIGN IS THE SCROLL'S SIGN: a wheel towards the reader is a positive `dy` and makes
+         * the icons smaller, which is the direction every zoom in every program uses. */
+        if (ev.mods & WMOD_CTRL) {
+          /* A CTRL+WHEEL WITH NO VERTICAL DELTA STEPS NOTHING, and `w.dy > 0 ? 1 : -1` made it
+           * step towards LARGER icons — a horizontal flick on a trackpad under Ctrl changed the
+           * view mode, which is not a gesture anybody made. It does not fall through to the scroll
+           * either: the modifier says the reader asked for the slider, and a Ctrl+wheel that
+           * scrolled sideways instead would be one gesture with two meanings. Counted as a wheel
+           * above, so a reader looking at the account can see it arrived. */
+          if (w.dy !== 0 && stepView(w.dy > 0 ? 1 : -1)) repaint = true;
+          continue;
+        }
         /* SURFACE PIXELS INTO CSS PIXELS, the division `cssPointAt` does for a pointer. A delta read
          * unconverted scrolls twice as far as the reader's hand at dpr 2 — the same unit error as
          * the display side, on the way in (constraint 248). */
@@ -3191,7 +5297,7 @@ export function run(env) {
         // a press two rows off at dpr 2 — the same unit error as the display side, on the way in.
         const at = env.std.cssPointAt(ev, S);
         if (ev.mods & WPTR_DOWN) {
-          const i = rowUnder(at.y);
+          const i = rowUnder(at.y, at.x);
           /* M20. A PRESS OF ANY BUTTON CLOSES AN OPEN RENAME, AND IS SPENT DOING IT.
            *
            * CANCELLED AND NOT COMMITTED, which is a decision and not a shortcut: a commit renames a
@@ -3202,6 +5308,27 @@ export function run(env) {
             if (cancelRename()) repaint = true;
             // AND IT ARMS NOTHING. A press that is spent closing an edit must not leave a drag
             // threshold or a band behind it for the next move to pick up.
+            press = null;
+            band = null;
+            dragging = false;
+            continue;
+          }
+          /**
+           * M23. AND A PRESS OUTSIDE THE ADDRESS STRIP CLOSES AN OPEN FIELD, AND IS SPENT DOING IT
+           * — M20's rule above, applied to the other two text fields, and it was MISSING.
+           *
+           * `closeStrip` was reachable only from Esc, so a reader who opened the search box and
+           * then clicked a row was left with a field that still owned the whole keyboard: every
+           * keysym after that — Delete, F2, F5, every arrow — was swallowed by the handler that
+           * takes the keyboard for an open field, silently. A press in the strip itself is NOT
+           * this case: that is the reader moving between the two fields, and `openPath`/`openSearch`
+           * swap them.
+           *
+           * SPENT, for `cancelRename`'s own reason: a gesture that both abandoned a half-typed
+           * address and selected a different row would make one click two actions.
+           */
+          if (strip !== "trail" && !(at.y >= CRUMB_TOP && at.y < VIEW_TOP)) {
+            if (closeStrip()) repaint = true;
             press = null;
             band = null;
             dragging = false;
@@ -3245,8 +5372,13 @@ export function run(env) {
            * and a drag across its neighbours selects them and no drag session ever begins. */
           const inView = inViewport(at.y);
           press = i >= 0 && !bandFromRow ? { row: i, x: at.x, y: at.y } : null;
+          /* M23. THE BAND'S CORNERS ARE CONTENT COORDINATES ON THE MODE'S SCROLL AXIS and window
+           * coordinates on the other, which is `bandCorner`'s one definition — in Details that is
+           * `y + scroll` exactly as before, and in the List it is the `x` that carries the offset.
+           * A band that added the offset to the wrong axis would keep hold of a column it was never
+           * drawn over. */
           band = (i < 0 || bandFromRow) && inView
-            ? { x0: at.x, y0: at.y + scroll, x1: at.x, y1: at.y + scroll }
+            ? { ...bandCorner(at), ...bandCorner(at, true) }
             : null;
           dragging = false;
           if (setLit(-1)) repaint = true;
@@ -3254,8 +5386,35 @@ export function run(env) {
            * declared inverse of the geometry the labels were drawn with, so the column a reader
            * pointed at is the column that sorts. A press ABOVE the viewport that is not on a column
            * clears the selection and does no more, which is what it did before M19. */
-          if (at.y < VIEW_TOP) {
+          /* M23. A PRESS IN THE ADDRESS STRIP IS TESTED FIRST, AND IT IS A DIFFERENT BAND FROM THE
+           * COLUMN HEADER. `crumbHit` is `crumbSegments`'s declared inverse, so a press lands on the
+           * segment, the field or the button a reader can see. The four answers are exhaustive:
+           * `"empty"` is the strip's own background, and R28 says a click there turns the trail into
+           * an editable path. */
+          if (at.y >= CRUMB_TOP && at.y < VIEW_TOP) {
+            const hit = crumbHit(at.x, dir, clientW);
+            if (hit.kind === "view") { if (cycleView()) repaint = true; continue; }
+            if (hit.kind === "search") { if (openSearch()) repaint = true; continue; }
+            if (hit.kind === "segment") {
+              const seg = crumbSegments(dir, clientW)[hit.index];
+              if (goToCrumb(seg)) repaint = true;
+              continue;
+            }
+            if (openPath()) repaint = true;
+            continue;
+          }
+          if (at.y < CRUMB_TOP) {
             const key = columnAt(at.x, clientW);
+            /* M23: AND A PRESS IN A MODE WITH NO COLUMNS SORTS BY THE NEXT KEY. The band holds a
+             * sort strip there rather than four labels (`paint`), so there is no column under the
+             * pointer to name — and a header a reader can press that does nothing is the defect the
+             * disabled caption buttons exist to avoid. Cycling is the only honest reading of a
+             * single target that stands for four. */
+            if (view.flow !== FLOW_ROWS) {
+              const at2 = COLUMNS.findIndex((c) => c.key === sort.key);
+              if (sortBy(COLUMNS[(at2 + 1) % COLUMNS.length].key)) repaint = true;
+              continue;
+            }
             if (key !== null) { if (sortBy(key)) repaint = true; continue; }
             if (sel.size > 0) { selectOnly(-1); repaint = true; }
             continue;
@@ -3343,9 +5502,8 @@ export function run(env) {
          * nothing held — which is what makes a drag's own motion samples NOT hovers without this
          * program having to track whether a gesture is in flight. */
         if (band) {
-          band.x1 = at.x;
-          band.y1 = at.y + scroll;
-          const hit = bandRows(band, rows.length, clientW);
+          Object.assign(band, bandCorner(at, true));
+          const hit = bandItems(view, band, rows.length, clientW, clientH);
           if (hit.size !== sel.size || [...hit].some((r) => !sel.has(r))) {
             sel = hit;
             reportSelection();
@@ -3371,7 +5529,7 @@ export function run(env) {
         }
         if (press || (ev.c | 0) !== 0) continue;
         account.hovers += 1;
-        if (setLit(rowUnder(at.y))) repaint = true;
+        if (setLit(rowUnder(at.y, at.x))) repaint = true;
         continue;
       }
       /* M21. A DRAG ARRIVED OVER THIS WINDOW. THE OFFER COMES WITH THE ENTER, so a target can say
@@ -3409,7 +5567,7 @@ export function run(env) {
         account.dropsIn += 1;
         // SURFACE PIXELS INTO CSS PIXELS. `WinHost.#dropPointAt` hands a SURFACED window surface
         // px, which is `WEV_POINTER`'s unit and not the client box's (constraint 248).
-        const i = rowUnder(ev.b / S);
+        const i = rowUnder(ev.b / S, ev.a / S);
         const into = i >= 0 && rows[i].dir ? rows[i].path : dir;
         /* THIS WINDOW'S OWN DRAG, DROPPED BACK IN THE DIRECTORY IT CAME FROM, IS NOT A LANDING —
          * AND IT IS NOT A REFUSAL EITHER. A drag's own window is a legitimate target, so the kernel
@@ -3561,6 +5719,31 @@ export function run(env) {
          * the keysym is tested first and the byte reader below it never sees an arrow. Reading the
          * bytes first would be reading an empty array for every navigation key. */
         const sym = keysymOf(ev);
+        /**
+         * M23. AN OPEN ADDRESS OR SEARCH FIELD TAKES THE KEYBOARD, AND IT TAKES ALL OF IT — the
+         * same contract an open rename has below, for the same reason and tested FIRST because the
+         * two cannot be open together (`strip` is one value, not two booleans).
+         *
+         * EVERY KEYSYM IS SWALLOWED. A Delete key that reached the list while a reader was typing an
+         * address would delete the file the cursor happens to be on, and an arrow would move the
+         * cursor out from under the field they are looking at.
+         */
+        if (strip !== "trail") {
+          if (sym !== 0) { account.keysyms += 1; continue; }
+          const typed = keyBytesOf(ev);
+          if (typed.length !== 1) continue;
+          const b = typed[0];
+          if (b === KEY_ENTER) { if (commitStrip()) repaint = true; continue; }
+          if (b === KEY_ESCAPE) {
+            /* ESC CLEARS THE QUERY AS WELL AS CLOSING THE FIELD, when the field is the search one.
+             * `closeStrip` puts back what the field OPENED holding — which for a reader who opened
+             * an empty box and typed is the empty query, so this is one rule and not two. */
+            if (closeStrip()) repaint = true;
+            continue;
+          }
+          if (typeStrip(b)) repaint = true;
+          continue;
+        }
         /* M20. AN OPEN RENAME TAKES THE KEYBOARD FIRST, AND IT TAKES ALL OF IT. Enter commits, Esc
          * abandons, Backspace deletes a character and a printable byte is typed; everything else —
          * every keysym, every other chord — is SWALLOWED rather than passed through. A Delete key
@@ -3615,18 +5798,34 @@ export function run(env) {
             continue;
           }
           /* ALT+LEFT IS BACK, AND IT IS TESTED BEFORE THE BARE KEYSYM. The modifier changes the
-           * verb and not the key, so a plain Left — which this list has no use for, having no
-           * horizontal overflow — must not fall into it. */
+           * verb and not the key, so a plain Left must not fall into it.
+           *
+           * M23: AND A PLAIN LEFT NOW MEANS SOMETHING IN EVERY MODE BUT DETAILS. The Details view
+           * has one item per line and no horizontal overflow, so a bare Left there still does
+           * nothing — which is what it has always done and what `www/m18.html` drives. In a grid a
+           * line holds several files, so Left and Right are the across-the-line step and Up and Down
+           * are the whole-line one; the List is the transpose of that, because its lanes run down. */
+          /* A PAGE IS WHAT THE VIEWPORT HOLDS, read from the live client box and not from
+           * `START_ROWS`: a reader who made the window taller gets a longer page, which is the
+           * whole of what a page key means. `pageStepFor` calls `rowsThatFit` in the `rows` flow and
+           * already floors at one. */
+          const page = pageStepFor(view, rows.length, clientW, clientH);
+          /* THE TWO STEPS: one item, and one LANE. In Details the lane step is 1, so Up and Down
+           * move by a row exactly as they did; `laneStepFor` is the one place that is decided. */
+          const lane = laneStepFor(view, clientW, clientH);
+          const acrossStep = view.flow === FLOW_COLUMNS ? lane : 1;
+          const downStep = view.flow === FLOW_COLUMNS ? 1 : lane;
           if (sym === WKEY_LEFT) {
-            if ((ev.mods & WMOD_ALT) && goBack()) repaint = true;
+            if (ev.mods & WMOD_ALT) { if (goBack()) repaint = true; continue; }
+            if (view.flow !== FLOW_ROWS && moveFocus(-acrossStep)) repaint = true;
             continue;
           }
-          /* A PAGE IS WHAT THE VIEWPORT HOLDS, read from the live client height and not from
-           * `START_ROWS`: a reader who made the window taller gets a longer page, which is the
-           * whole of what a page key means. `rowsThatFit` already floors at one. */
-          const page = rowsThatFit(clientH);
-          if (sym === WKEY_DOWN && moveFocus(1)) repaint = true;
-          else if (sym === WKEY_UP && moveFocus(-1)) repaint = true;
+          if (sym === WKEY_RIGHT) {
+            if (view.flow !== FLOW_ROWS && moveFocus(acrossStep)) repaint = true;
+            continue;
+          }
+          if (sym === WKEY_DOWN && moveFocus(downStep)) repaint = true;
+          else if (sym === WKEY_UP && moveFocus(-downStep)) repaint = true;
           else if (sym === WKEY_PAGE_DOWN && moveFocus(page)) repaint = true;
           else if (sym === WKEY_PAGE_UP && moveFocus(-page)) repaint = true;
           else if (sym === WKEY_HOME && focusAt(0)) repaint = true;
@@ -3656,6 +5855,25 @@ export function run(env) {
             if (runVerb(V_NEW_FOLDER, focus)) repaint = true;
             continue;
           }
+          /* M23's TWO CHORDS, AND BOTH ARE WINDOWS' OWN BINDINGS.
+           *
+           * CTRL+F AND CTRL+E BOTH OPEN THE SEARCH FIELD, which is what Windows 7 does — two
+           * bindings for one box, because Ctrl+E was Explorer's and Ctrl+F is every other program's.
+           * They are C0 bytes (6 and 5), so `bytesForKey` delivers them; `keysymOf` answers 0.
+           *
+           * ALT+D FOCUSES THE ADDRESS BAR (R28's own clause) AND IT IS NOT A C0 BYTE. `bytesForKey`
+           * takes the Ctrl branch only when `ctrlKey && !altKey`, so an Alt chord falls through to
+           * `key.length === 1` and arrives as the PLAIN LETTER with `WMOD_ALT` in `mods` — which is
+           * why the modifier is tested here and the byte is `d` rather than 4. A reader typing a
+           * literal `d` into the list is not affected, because this branch requires the modifier. */
+          if ((ev.mods & WMOD_ALT) && String.fromCharCode(bytes[0]).toLowerCase() === "d") {
+            if (openPath()) repaint = true;
+            continue;
+          }
+          if (bytes[0] === KEY_CTRL_F || bytes[0] === KEY_CTRL_E) {
+            if (openSearch()) repaint = true;
+            continue;
+          }
           if (String.fromCharCode(bytes[0]) === "q") {
             account.why = "q";
             break;
@@ -3670,6 +5888,11 @@ export function run(env) {
     if (account.why) break;
   }
 
+  /* M23. EVERY PICTURE IS RELEASED BEFORE THE WINDOW GOES, AND NOT INSTEAD OF BY TEARDOWN. A
+   * process holds only integers and teardown closes its fds (constraint 14), so the budget is safe
+   * either way — what this buys is `released === ready`, which is the one statement that says THIS
+   * PROGRAM gave back what it took rather than that the kernel did it for a program that leaked. */
+  dropAllThumbs();
   const destroyed = env.win.destroy(made.fd);
   account.destroyed = Array.isArray(destroyed) ? destroyed : [];
   account.ms = performance.now() - t0;
@@ -3732,5 +5955,46 @@ export function run(env) {
     + `${account.refreshKept} selected row(s); ${account.dropsIn} drop(s) in from `
     + `${account.dragEnters} enter(s) landing ${account.dropped.length} file(s), `
     + `${account.movedOut.length} moved out\n`);
+  /* M23: THE THUMBNAILS, ON THEIR OWN LINE. `ready` against `fellBack` is R26's whole clause — a
+   * picture made of a file's own bytes, against a row that was asked for one and kept its type icon
+   * with the reason named. `decoded` is how many times the platform's decoder ran, which is what
+   * `evicted` is the other half of: a reader scrolling a long directory pays a decode per picture
+   * per visit and the cap is why. `bytes` is 0 here by `dropAllThumbs` above, and the figure that
+   * matters is `thumbs.bytes` read while the window is open. */
+  /* M23: THE VIEW MODE, ON ITS OWN LINE. `view` against `viewSwitches` is whether a reader got
+   * where they are by choosing or by opening; `lanes` and the axis are the layout's own statement
+   * of its shape, which is what a driver outside the process needs to find the second cell of a
+   * grid. */
+  env.std.say(env, `${NAME}: ${account.viewLabel} (${account.view}), `
+    + `${account.lanes} cell(s) across, scrolling ${account.viewAxis === "x" ? "sideways" : "down"}`
+    + `, from ${account.viewSwitches} switch(es), ${account.viewsRemembered} folder(s) `
+    + "remembered\n");
+  /* M23: THE ADDRESS STRIP AND THE SEARCH, ON THEIR OWN LINE. `crumbNav` is how many navigations
+   * came from the trail or the typed path, against `relists` which counts every navigation; `query`
+   * with `matched` of `listed` is R31's whole statement, and `searchCost` says plainly what it
+   * cost — a filter over the rows in hand reads 0 directories, a walk reads one per directory. */
+  env.std.say(env, `${NAME}: ${account.crumbs.length} crumb(s), ${account.crumbNav} navigation(s) `
+    + `from the address strip, ${account.pathEdits} path edit(s); `
+    + `${account.searches} narrowing(s) and ${account.deepSearches} walk(s), `
+    + `query ${account.query === "" ? "none" : `"${account.query}"`} matching `
+    + `${account.matched} of ${account.listed}, costing ${account.searchCost.dirsRead} `
+    + `directory read(s), ${account.searchCost.entriesSeen} entries and `
+    + `${Math.round(account.searchCost.ms)} ms`
+    + `${account.searchCost.why ? ` (${account.searchCost.why})` : ""}\n`);
+  /* M23: AND WHAT THE LISTING'S OWN `lstat`s COST, which is all A10 could be answered with from
+   * inside this program. One call per row is what R7's Date modified and Size columns are paid for;
+   * A10's fix is a `readdir` that returns the stat beside the dirent, which is `src/abi.mjs`,
+   * `src/kernel/calls.mjs` and `src/kernel/synth.mjs` — three files this slice does not own. The
+   * figure is what a reader of that change would be removing. */
+  env.std.say(env, `${NAME}: ${account.stats} lstat(s) in `
+    + `${account.statMs.toFixed(2)} ms`
+    + `${account.stats > 0 ? `, ${(account.statMs * 1000 / account.stats).toFixed(1)} µs each` : ""}`
+    + ` (A10's cost, measured)\n`);
+  env.std.say(env, `${NAME}: ${account.thumbs.ready} thumbnail(s) of `
+    + `${account.thumbs.wanted} wanted, ${account.thumbs.fellBack} on the type icon, `
+    + `${account.thumbs.capped} past the ${THUMB_CAP}-object cap; ${account.thumbs.decoded} `
+    + `decode(s) in ${Math.round(account.thumbs.decodeMs)} ms, ${account.thumbs.evicted} evicted, `
+    + `${account.thumbs.released} released, peak ${account.thumbs.peakBytes} B, `
+    + `${account.thumbs.clamped} clamped to ${THUMB_MAX_SIDE} px\n`);
   return { exit: 0, ...account };
 }

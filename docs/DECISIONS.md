@@ -1090,3 +1090,178 @@ assumed equal.
 
 *Evidence: a product decision for the WHAT; measured for every number above. Constraints 28, 306;
 `MILESTONES.md` M19a; `bench/m19a-seed/`, `bench/m19a-seed-firefox/`.*
+
+## D41 — the Alt+Tab substitute is Alt+\`, and the menu publishes the accelerator it listens for
+
+**Evidence class: a product decision, taken by the owner, over a measured candidate set.** The
+measurement priced the options and disqualified four of them; which of the fourteen survivors to
+take is a question about a reader's hands and not one a benchmark answers.
+
+**The question it settles.** `docs/PRD-SHELL.md` §10.3 left R22 to a human: Alt+Tab is the host's
+switcher on every platform, so taking it has a cost, and `docs/PLAN-SHELL.md` §M22 said the choice
+among the free candidates "is a human's, not this plan's."
+
+**The owner's rule, which decides the method and not just the chord:** pick whichever candidate the
+probe shows free in **both** engines, and **LABEL the real accelerator in the menu.** A menu showing
+an accelerator the system cannot receive is the live-looking-button defect, so the label is a
+requirement and not a nicety — the same rule that made M11's minimize and maximize drawn and
+*disabled* rather than live and inert.
+
+**What the measurement said.** `bench/m22-switch/probe.py` scored 25 candidates on five clauses in
+Chrome 158 and Firefox 156. Freedom turned out to be two readings and not one, which is constraint
+312: all 25 are *delivered* in both engines, and only a second run with the listener cancelling
+nothing separates a free chord from a borrowed one. **14 qualify** — Alt+\`, Ctrl+\`, Ctrl+F6,
+Alt+Shift+\`, Ctrl+Shift+\` and Alt+1..9.
+
+**The chord: Alt+\` forward, Alt+Shift+\` backward, with Alt+1..9 as the Superbar's direct-select
+set.** Ctrl+\` scores identically on every clause, so the choice between them is the part that is a
+judgement, and it is made on three facts about the reader rather than about the browser:
+
+1. **Windows 7's switcher is Alt-based**, so the modifier is the one a reader already associates
+   with switching windows.
+2. **\` is the key physically next to Tab**, which makes it the nearest gesture to Alt+Tab that the
+   host leaves alone — and the hand does not move.
+3. **macOS's own "next window within this application" is Cmd+\`**, the exact semantic analogue, so
+   on the platform this repository is developed and read on the gesture is already learned.
+
+It is also the only qualifying pair whose **reverse** is measured free without reaching for Ctrl,
+and a switcher with no reverse is half a gesture.
+
+**What it rejects.** **Alt+Tab itself**, which is delivered in both engines and would have worked
+— and which the host acts on unless the page cancels (`host: "stopped"`), so taking it is borrowing
+a binding that belongs to the window manager; it is in `BLOCKED` and MUST NOT be labelled anywhere.
+**F6 and Shift+F6**, Windows' own "next pane", on the measurement: F6 moves the browser's focus out
+of the page and Shift+F6 does so **even when the page cancels** (`free: false, host: "anyway"`).
+**Ctrl+Tab, Ctrl+Shift+Tab, Ctrl+Alt+Tab, Meta+Tab, Alt+Escape, Ctrl+Escape and Alt+Space** on
+their documented consumers rather than on a measurement — each is a gesture a reader already uses
+for something else, and a shell that answers Ctrl+Escape would be the second thing on screen
+claiming to be the Start menu. **And R22's one-engine fallback is not reached**: `docs/PLAN-SHELL.md`
+§M22 said that if every candidate were taken in one engine, R22 would ship as a chord that works in
+one and is labelled as such. Fourteen are free in both, so that branch was not built — a branch for
+a world the measurement ruled out is a branch no check can reach.
+
+### What was built, in M22
+
+**`src/wm/chords.mjs` is the one table**, and it is in `src/wm/` and not in `src/abi.mjs` for a
+reason worth stating: a chord is not a fact the kernel and a process must agree on. Both readers are
+page-side — the shell draws the label, `src/wm/winhost.mjs` dispatches the key — and
+`KeyboardEvent.code` is a browser string, where `src/abi.mjs` holds the integers both sides of the
+syscall channel share and nothing else. The **modifier** side *is* an ABI fact and is imported from
+there, so the bits the table compares are the bits `WinHost.modifierBits` produces.
+
+**THE BINDING IS ON `code`, WHICH IS CONSTRAINT 313 AND WAS NOT PREDICTED.** Firefox delivers
+Shift+Backquote as `key: "~"` and Chrome as ``key: "`"``; both deliver `code: "Backquote"`. A
+dispatcher matching `event.key` would have worked in Chrome, missed Alt+Shift+\` in Firefox, and left
+every Chrome expectation green — the shape of all five Chrome-only bills `CLAUDE.md` records. The
+disagreement was found by the probe and then reproduced through the real shell in Firefox
+(`bench/m22-switch/firefox-shell.py` → `keyDisagrees`), which is where it would have bitten.
+
+**`takeChord(event, mods)` MATCHES AND CANCELS IN ONE CALL.** Every chord in the table reads
+`host: "never"`, so nothing leaks today — but F6's `stopped` is the demonstration of what a missed
+`preventDefault` costs on a chord the host binds, and a matched chord is the page's. The match is on
+an **exact** modifier word: a superset match would make Alt+Shift+\` fire the forward chord and the
+reverse unreachable.
+
+**`BLOCKED` IS DATA AND IS ASSERTED AT MODULE LOAD.** `selfTest` refuses to load the module if a
+bound row collides with a disqualified chord **or wears its label**, the second half being the one
+that catches a hand-written string: a row bound to Backquote and labelled "Alt+Tab" passes every
+other clause. `labelFor` is the only place a `code` becomes a printable name, so the shell's menus
+and the band's buttons publish the accelerator the dispatcher listens for by construction and not by
+agreement. The modifier order is Ctrl, Alt, Shift, Meta — Windows' own written order, because a menu
+is read against the reader's memory of other menus.
+
+### The correction this implementation makes to the decision
+
+**THE DISPATCHER IS ON THE CAPTURE PHASE, AND THE PHASE — NOT THE CALL — IS WHAT THIS DECISION DID
+NOT ANTICIPATE.** The table shipped with no dispatcher at all, and the predicted site was wrong: the
+contract was written against `src/wm/winhost.mjs`'s `#keys`, the funnel both window kinds reach, and
+by the time `#keys` runs `src/wm/terminal.mjs` has already turned the keystroke into bytes — it
+listens on its own `pre`, deeper in the tree and therefore earlier in the bubble. Measured with the
+dispatcher first written bubble-phase: `prevented: true`, `switches: 0`, `where: 'terminal'`,
+`screenGrew: 1`. The chord was matched, it was cancelled, and the reader got a backtick.
+**`preventDefault` STOPS THE BROWSER AND NOT THE PAGE**, so the cancel this decision rested on says
+nothing about a widget in the same document. The dispatcher is a capture-phase listener on
+`src/wm/taskbar.mjs`'s own container with `stopPropagation` beside the match — capture runs
+ancestor-first, so the shell sees the chord before any window can. Constraint **315** carries it,
+with the corollary a capture listener owes: an unbound key MUST leave the event untouched, or the
+shell has quietly become the system's keyboard.
+
+**AND A TAKEN CHORD CANNOT BE COUNTED BY WHAT REACHED A WINDOW.** `WinHost.keyCounts()` sums the
+keys that reached a window's widget and a taken chord reaches none, so the shell counts its own
+(`stats.trustedChords` / `syntheticChords`, published in `report()`) and the check asserts the
+SPLIT — four bound chords taken by the shell, two unbound ones still reaching a window. A single
+total cannot tell a working dispatcher from one that ate everything. `scripts/check.py --only m22`
+is **73 expectations, all green**; `bench/m22-switch/firefox-shell.py`'s own five clauses go with
+it. **A labelled accelerator that does nothing is the defect this decision exists to prevent**, and
+it was reported as exactly that until the call landed rather than being weakened into a pass.
+
+**FORWARD-THEN-BACK DOES NOT RETURN A READER TO WHERE THEY WERE, which the decision did not
+anticipate having to say.** A raise re-orders the kernel's stack, so Alt+\` then Alt+Shift+\` walks
+`4 → 3 → 2` and not `4 → 3 → 4`. Each direction is asserted against the stack **as it was at that
+press**, which is honest about what was built; Windows 7's own held-Alt transient order is a
+different design and would live in `src/wm/taskbar.mjs`.
+
+*Evidence: a product decision for the CHOICE; measured for the candidate set and for every
+engine-shaped fact above. Constraints 312, 313, 315; `docs/PRD-SHELL.md` R22/§10.3;
+`MILESTONES.md` M22; `bench/m22-switch/`.*
+
+---
+
+## D42 — a picture is decoded IN THE PROCESS, and the kernel never learns an image format
+
+**Evidence class: measured, and the measurement ran before `DL_BLIT` had a caller.**
+`bench/m23-blit/` is the probe; `docs/PLAN-SHELL.md` §M23 asked the question as "a decode performed
+where a decoder exists", listed three candidate sites, and got one of its own premises wrong.
+
+**The question it settles.** R26 makes an image file's icon the image, and **nothing in this system
+decodes a PNG** — `src/bin/imgview.mjs` reads the signature and the IHDR and says so in capitals.
+The decode has to happen somewhere, and there were three places it could: **(a)** the process,
+**(b)** the kernel, **(c)** nowhere, with `.rgba` payloads only and a PNG falling back to its type
+icon.
+
+**(a) IS TAKEN, AND IT IS THE ONLY SITE THE EVIDENCE NEEDS.** `createImageBitmap` is **not among the
+11 entries in `TARGETS`** in `src/libos/lockdown.mjs`, so a process realm is not stripped of it —
+checked by importing the exported data in the measuring page rather than by grepping the file, which
+is this repository's own rule for that table. A decode promise settles inside a real program on a
+real kernel in the realm M6 ships, under M6's live CSP, and the pixels come back **byte-exact**
+against this repo's own `/usr/share/logo.rgba`: maxDelta 0, 256 of 256 opaque pixels identical, in
+Chrome and in Firefox.
+
+**BUT ONLY IN AN AWAITED TURN, AND THAT IS A DESIGN CONSTRAINT AND NOT A FOOTNOTE.** A present
+binding is not a usable one — constraint 219 is the precedent, and the shape holds for a promise. Not
+while parked in `nanosleep` (406.81 ms, nothing settled, and not after one microtask either), not
+while spinning (400 ms), and a cold decode needs 7 macrotask turns in Chrome and 5 in Firefox. So a
+decode MUST NOT be folded into a syscall reply, a thumbnail loop over a directory MUST be `await`s
+between syscalls, and `src/libos/syscall.mjs` needs no change and MUST NOT get one. Constraint
+**318**.
+
+**(b) THE KERNEL IS AVAILABLE AND IS THE WRONG PLACE — REJECTED.** The kernel is a Worker that
+awaits macrotasks, so it *could* decode. What that hands it is an **image-format parser over
+untrusted bytes in the only privileged realm in the system**: the exact direction M6 exists to
+reverse, and the direction `src/fs/`'s purity rule exists to keep a fuzz target out of. And
+`DL_BLIT` taking a data-object fd makes it **unnecessary** — a payload is already kernel-owned and
+refcounted (constraints 240, 241), so the bytes are where the renderer needs them without the kernel
+knowing a format. It validates with `decodeBitmap`, which it already has, which is constraint 293's
+rule for a text run applied unchanged, and which is a header check and not a decoder.
+
+**(c) SURVIVES AS THE ERROR PATH, NOT AS THE DESIGN.** `createImageBitmap` **rejects** on a format
+the platform will not take and on corrupt bytes, recorded as `rejected: <message>` rather than as a
+fault. So "a picture falls back to its type icon" is still owed — for an **undecodable file**,
+reached through a rejected promise — and R26 MUST NOT ship `.rgba`-only on the strength of the
+plan's claim. `files --thumb-no-fallback` is the world where that fallback is absent.
+
+**THE CORRECTION THIS DECISION MAKES TO THE PLAN.** `docs/PLAN-SHELL.md` §M23's "If the assumption
+is wrong" states that *"a locked-down realm has no `createImageBitmap` (src/libos/lockdown.mjs)"*.
+**That is FALSE, in both engines.** The paragraph's first sentence is true and unaffected:
+`src/bin/imgview.mjs` is not a decoder. The row is kept and corrected beneath, per this
+repository's rule.
+
+**WHAT THE SECOND ENGINE IS A GATE ON HERE IS AGREEMENT AND NOT THE ANSWER.**
+`bench/m23-blit/firefox-decode.py` re-asks the whole thing over WebDriver BiDi at dpr 1 and exits 4
+on **engine disagreement** rather than on a verdict, because a decode site that is only available in
+Chrome is not a decode site. Both engines: present in the realm, refused `eval`, nothing settled
+parked or spinning, settled awaited, pixels exact.
+
+*Evidence: measured. `bench/m23-blit/results-headless.json`, `results-firefox.json`,
+`results-control-headless.json`; constraints 317, 318, 319; `docs/PRD-SHELL.md` R26;
+`docs/PLAN-SHELL.md` §M23; `MILESTONES.md` M23.*

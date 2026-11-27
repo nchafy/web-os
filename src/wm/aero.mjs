@@ -132,6 +132,22 @@ export const TASKBAR_H = 40;
 export const TASK_BTN_H = TASKBAR_H - 6;
 export const TASK_BTN_W = 160;
 
+/**
+ * THE SHRINK FLOOR, in CSS px: how narrow a Superbar button is allowed to get before the band stops
+ * shrinking and starts scrolling.
+ *
+ * Windows 7 narrows its buttons and then groups them, and narrowing to nothing is how a label
+ * becomes unreadable — so this is a floor and not a minimum-nice-size. It is exported because the
+ * floor and the overflow mechanism are one decision: `Taskbar` reads it to say how many buttons the
+ * band can hold at its current width, which is what makes "past the floor" a measured state rather
+ * than a guess. 42 px is the icon plus its gutters, which is a button with no label at all.
+ */
+export const TASK_BTN_MIN_W = 42;
+
+/** A band scroll chevron, in CSS px. Windows 7 puts a two-arrow pane at the end of an overflowing
+ *  bar; this is one pane per direction, sized to the bar the way `show-desktop` is. */
+export const BAND_CHEV_W = 15;
+
 /** The start orb: round, and wider than it is tall because it carries the bar's full height. */
 export const ORB = TASKBAR_H - 4;
 
@@ -581,12 +597,69 @@ export function styleSheet() {
 }
 .aero-desktop .taskbar-start .wicon { filter: drop-shadow(0 1px 1px rgba(0,0,0,.5)) }
 
-/* The band of program buttons. It SCROLLS RATHER THAN SHRINKS past its width: Windows 7 narrows
-   its buttons and then groups them, and narrowing to nothing is how a label becomes unreadable. */
+/* The band of program buttons, and the two chevrons that reach past it.
+
+   IT SHRINKS FIRST AND THEN SCROLLS: Windows 7 narrows its buttons to a floor and then gives the
+   bar a scroll pane, and narrowing to nothing is how a label becomes unreadable. TASK_BTN_MIN_W
+   is that floor, and overflow-x: auto is what makes the overflow past it REACHABLE rather than
+   clipped — which it was, under an overflow: hidden whose own comment claimed it scrolled.
+
+   THE SCROLLBAR IS HIDDEN AND THE CHEVRONS ARE THE AFFORDANCE. A horizontal scrollbar inside a
+   40 px bar takes its height from the buttons, and on macOS it is an overlay a reader cannot see
+   until they are already scrolling. Measured in Chrome 157: a mouseWheel with deltaX: 120 over
+   this element moves scrollLeft to 120 and the same event with deltaY: 120 moves it to 0, so a
+   plain vertical-wheel mouse has no native route at all and the chevrons are not decoration.
+
+   .is-clipped IS M22's band-clips CONTROL — the world this element used to be in. */
+.aero-desktop .taskbar-bandwrap {
+  flex: 1 1 auto; min-width: 0;
+  display: flex; align-items: center; gap: 2px;
+}
 .aero-desktop .taskbar-band {
   flex: 1 1 auto; min-width: 0;
   display: flex; align-items: center; gap: 3px;
-  overflow: hidden;
+  overflow-x: auto; overflow-y: hidden;
+  /* A SWIPE PAST THE END MUST NOT SCROLL THE DESKTOP BEHIND IT. */
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.aero-desktop .taskbar-band::-webkit-scrollbar { height: 0; width: 0 }
+.aero-desktop .taskbar-band.is-clipped { overflow: hidden }
+
+/* A chevron pane: the same thin glass the Show desktop button is, because it does the same kind of
+   job — a bar-level control that is not a window. */
+.aero-desktop .band-chev {
+  flex: 0 0 auto;
+  width: ${BAND_CHEV_W}px; height: ${TASK_BTN_H}px;
+  border-radius: 2px;
+  border: 1px solid rgba(255,255,255,.3);
+  background: linear-gradient(rgba(255,255,255,.18), rgba(255,255,255,.05));
+  color: #eaf4ff;
+  font: ${FONT_PX + 2}px/1 ${UI_FONT};
+  text-shadow: 0 1px 1px rgba(0,16,38,.85);
+  display: grid; place-items: center;
+  cursor: pointer; padding: 0;
+}
+.aero-desktop .band-chev:hover:not(:disabled) {
+  background: linear-gradient(rgba(190,235,255,.5), rgba(255,255,255,.12));
+  border-color: rgba(190,235,255,.6);
+}
+/* AT AN END, THE CHEVRON IS DRAWN AND DISABLED — this project's standing rule for an inapplicable
+   command (the caption's Minimize before M14 had a taskbar), and the alternative is a button that
+   moves nothing and says nothing. */
+.aero-desktop .band-chev:disabled { opacity: .35; cursor: default }
+.aero-desktop .band-chev[hidden] { display: none }
+
+/* A PINNED PROGRAM WITH NO WINDOW: the same button, drawn as an outline rather than a pane, so
+   "installed and here" reads differently from "running". Windows 7's own distinction. */
+.aero-desktop .task-btn.is-pinned {
+  background: none;
+  border-color: rgba(255,255,255,.14);
+  color: #d7e6f4;
+}
+.aero-desktop .task-btn.is-pinned:hover {
+  background: linear-gradient(rgba(255,255,255,.18), rgba(255,255,255,.06));
+  border-color: rgba(190,235,255,.5);
 }
 
 /* A Superbar button: a glass pane with a lit left edge, the icon, the label, and a stack edge when
@@ -594,7 +667,7 @@ export function styleSheet() {
 .aero-desktop .task-btn {
   flex: 0 1 ${TASK_BTN_W}px;
   height: ${TASK_BTN_H}px;
-  min-width: 42px;
+  min-width: ${TASK_BTN_MIN_W}px;
   display: flex; align-items: center; gap: 6px;
   padding: 0 8px;
   border-radius: 3px;
@@ -651,6 +724,27 @@ export function styleSheet() {
   padding: 0 2px 0 8px;
   border-left: 1px solid rgba(255,255,255,.18);
 }
+/* M22: THE NOTIFICATION AREA. A strip of 16 px icons between the band and the clock, which is
+   where Windows 7 puts it. It takes no width when no process has published one, so a desktop with
+   an empty tray looks exactly like the one that had no tray at all. */
+.aero-desktop .tray-icons {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 3px;
+}
+.aero-desktop .tray-icon {
+  flex: 0 0 auto;
+  width: 20px; height: 20px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  background: none;
+  display: grid; place-items: center;
+  cursor: pointer; padding: 0;
+}
+.aero-desktop .tray-icon:hover:not(:disabled) {
+  border-color: rgba(190,235,255,.55);
+  background: linear-gradient(rgba(255,255,255,.2), rgba(255,255,255,.06));
+}
+.aero-desktop .tray-icon:disabled { opacity: .45; cursor: default }
 .aero-desktop .clock {
   font: ${FONT_PX}px/1.15 ${UI_FONT};
   text-align: center; color: #f2f8ff;
@@ -724,6 +818,17 @@ export function styleSheet() {
 .aero-desktop .shell-row .shell-label {
   flex: 1 1 auto; min-width: 0;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+/* M22: A14's ACCELERATOR, right of the label. DIMMER AND NOT GREY-AS-DISABLED — it names a live
+   binding, and this project draws an inapplicable command greyed, so the two must not look alike.
+   flex: 0 0 auto because the LABEL is what truncates: a chord cut to "Alt+Shi…" advertises a
+   gesture nothing listens for. */
+.aero-desktop .shell-row .shell-accel {
+  flex: 0 0 auto;
+  margin-left: 12px;
+  font: ${FONT_PX - 1}px/1.2 ${UI_FONT};
+  color: rgba(226,241,255,.72);
+  white-space: nowrap;
 }
 .aero-desktop .shell-sep {
   height: 1px; margin: 3px 6px;

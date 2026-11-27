@@ -1,0 +1,1315 @@
+{
+ "state": "done",
+ "verdict": "bad: blit, refuse",
+ "why": "",
+ "dpr": 1,
+ "notes": [],
+ "errors": [],
+ "faults": [],
+ "groundTruth": {
+  "w": 16,
+  "h": 16,
+  "bytes": 1032
+ },
+ "proofs": {
+  "blit": {
+   "ok": false,
+   "evidence": {
+    "why": "",
+    "dpr": 1,
+    "account": {
+     "why": "",
+     "exit": 0,
+     "win": 1,
+     "surface": {
+      "w": 320,
+      "h": 200
+     },
+     "pattern": {
+      "clear": 185405951,
+      "blit": {
+       "at": {
+        "x": 16,
+        "y": 16
+       },
+       "w": 8,
+       "h": 8,
+       "samples": [
+        {
+         "dx": 0,
+         "dy": 0,
+         "rgba": 1251727615
+        },
+        {
+         "dx": 7,
+         "dy": 0,
+         "rgba": 3631893247
+        },
+        {
+         "dx": 0,
+         "dy": 7,
+         "rgba": 2681514239
+        },
+        {
+         "dx": 7,
+         "dy": 7,
+         "rgba": 3637594879
+        },
+        {
+         "dx": 3,
+         "dy": 3,
+         "rgba": 1251727615
+        },
+        {
+         "dx": 4,
+         "dy": 3,
+         "rgba": 3631893247
+        },
+        {
+         "dx": 3,
+         "dy": 4,
+         "rgba": 2681514239
+        },
+        {
+         "dx": 4,
+         "dy": 4,
+         "rgba": 3637594879
+        }
+       ],
+       "outside": {
+        "dx": 8,
+        "dy": 8,
+        "rgba": 185405951
+       }
+      },
+      "over": {
+       "at": {
+        "x": 16,
+        "y": 48
+       },
+       "w": 4,
+       "h": 4,
+       "ground": 4076140799,
+       "src": 1251727488
+      }
+     },
+     "refusals": [
+      {
+       "what": "no such fd",
+       "fd": 4096,
+       "want": "EBADF",
+       "got": "EBADF",
+       "errno": 8
+      },
+      {
+       "what": "a negative fd",
+       "fd": -1,
+       "want": "EBADF",
+       "got": "EBADF",
+       "errno": 8
+      },
+      {
+       "what": "not a data object",
+       "fd": 3,
+       "want": "EINVAL",
+       "got": "EINVAL",
+       "errno": 28
+      },
+      {
+       "what": "never offered a bitmap",
+       "fd": 3,
+       "want": "ENOTSUP",
+       "got": "ENOTSUP",
+       "errno": 58
+      },
+      {
+       "what": "offered and never written",
+       "fd": 3,
+       "want": "ENOENT",
+       "got": "ENOENT",
+       "errno": 44
+      },
+      {
+       "what": "a payload that is not a bitmap",
+       "fd": 3,
+       "want": "EBADMSG",
+       "got": "0",
+       "errno": 0
+      }
+     ],
+     "wholeBatch": {
+      "at": {
+       "x": 240,
+       "y": 16,
+       "w": 32,
+       "h": 32
+      },
+      "ink": 3628759807,
+      "paper": 185405951,
+      "want": "EBADMSG",
+      "got": "0",
+      "errno": 0
+     },
+     "batches": 2,
+     "blitOps": 2,
+     "controls": {
+      "noRefusals": false,
+      "wholePayload": true,
+      "once": true
+     },
+     "quitBy": "--once"
+    },
+    "pattern": {
+     "clear": 185405951,
+     "blit": {
+      "at": {
+       "x": 16,
+       "y": 16
+      },
+      "w": 8,
+      "h": 8,
+      "samples": [
+       {
+        "dx": 0,
+        "dy": 0,
+        "rgba": 1251727615
+       },
+       {
+        "dx": 7,
+        "dy": 0,
+        "rgba": 3631893247
+       },
+       {
+        "dx": 0,
+        "dy": 7,
+        "rgba": 2681514239
+       },
+       {
+        "dx": 7,
+        "dy": 7,
+        "rgba": 3637594879
+       },
+       {
+        "dx": 3,
+        "dy": 3,
+        "rgba": 1251727615
+       },
+       {
+        "dx": 4,
+        "dy": 3,
+        "rgba": 3631893247
+       },
+       {
+        "dx": 3,
+        "dy": 4,
+        "rgba": 2681514239
+       },
+       {
+        "dx": 4,
+        "dy": 4,
+        "rgba": 3637594879
+       }
+      ],
+      "outside": {
+       "dx": 8,
+       "dy": 8,
+       "rgba": 185405951
+      }
+     },
+     "over": {
+      "at": {
+       "x": 16,
+       "y": 48
+      },
+      "w": 4,
+      "h": 4,
+      "ground": 4076140799,
+      "src": 1251727488
+     }
+    },
+    "ops": 3,
+    "blits": [
+     {
+      "fd": 3,
+      "raw": 3,
+      "x": 16,
+      "y": 16
+     },
+     {
+      "fd": 4,
+      "raw": 4,
+      "x": 16,
+      "y": 48
+     }
+    ],
+    "payloads": [
+     {
+      "fd": 3,
+      "bytes": 264,
+      "w": 8,
+      "h": 8
+     },
+     {
+      "fd": 4,
+      "bytes": 72,
+      "w": 4,
+      "h": 4
+     }
+    ],
+    "surfaceBefore": {
+     "w": 320,
+     "h": 200,
+     "ops": 6,
+     "batches": 3,
+     "unknown": 0,
+     "text": 0,
+     "clips": 0,
+     "clipResets": 0,
+     "blits": 3,
+     "blitsUnbacked": 0,
+     "extent": {
+      "cssW": 308,
+      "cssH": 164,
+      "clientW": 308,
+      "clientH": 164
+     }
+    },
+    "surfaceAfter": {
+     "w": 320,
+     "h": 200,
+     "ops": 6,
+     "batches": 3,
+     "unknown": 0,
+     "text": 0,
+     "clips": 0,
+     "clipResets": 0,
+     "blits": 3,
+     "blitsUnbacked": 0,
+     "extent": {
+      "cssW": 308,
+      "cssH": 164,
+      "clientW": 308,
+      "clientH": 164
+     }
+    },
+    "samples": [
+     {
+      "dx": 0,
+      "dy": 0,
+      "rgba": 1251727615,
+      "at": {
+       "x": 16,
+       "y": 16
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "dx": 7,
+      "dy": 0,
+      "rgba": 3631893247,
+      "at": {
+       "x": 23,
+       "y": 16
+      },
+      "read": "rgba(216,122,74,255)",
+      "want": "rgba(216,122,74,255)",
+      "wouldBeCss": "rgba(216,122,74,1)"
+     },
+     {
+      "dx": 0,
+      "dy": 7,
+      "rgba": 2681514239,
+      "at": {
+       "x": 16,
+       "y": 23
+      },
+      "read": "rgba(159,212,168,255)",
+      "want": "rgba(159,212,168,255)",
+      "wouldBeCss": "rgba(159,212,168,1)"
+     },
+     {
+      "dx": 7,
+      "dy": 7,
+      "rgba": 3637594879,
+      "at": {
+       "x": 23,
+       "y": 23
+      },
+      "read": "rgba(216,209,74,255)",
+      "want": "rgba(216,209,74,255)",
+      "wouldBeCss": "rgba(216,209,74,1)"
+     },
+     {
+      "dx": 3,
+      "dy": 3,
+      "rgba": 1251727615,
+      "at": {
+       "x": 19,
+       "y": 19
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "dx": 4,
+      "dy": 3,
+      "rgba": 3631893247,
+      "at": {
+       "x": 20,
+       "y": 19
+      },
+      "read": "rgba(216,122,74,255)",
+      "want": "rgba(216,122,74,255)",
+      "wouldBeCss": "rgba(216,122,74,1)"
+     },
+     {
+      "dx": 3,
+      "dy": 4,
+      "rgba": 2681514239,
+      "at": {
+       "x": 19,
+       "y": 20
+      },
+      "read": "rgba(159,212,168,255)",
+      "want": "rgba(159,212,168,255)",
+      "wouldBeCss": "rgba(159,212,168,1)"
+     },
+     {
+      "dx": 4,
+      "dy": 4,
+      "rgba": 3637594879,
+      "at": {
+       "x": 20,
+       "y": 20
+      },
+      "read": "rgba(216,209,74,255)",
+      "want": "rgba(216,209,74,255)",
+      "wouldBeCss": "rgba(216,209,74,1)"
+     }
+    ],
+    "outside": {
+     "dx": 8,
+     "dy": 8,
+     "rgba": 185405951,
+     "at": {
+      "x": 24,
+      "y": 24
+     },
+     "read": "rgba(11,13,17,255)",
+     "want": "rgba(11,13,17,255)",
+     "wouldBeCss": "rgba(11,13,17,1)"
+    },
+    "over": {
+     "at": {
+      "x": 16,
+      "y": 48
+     },
+     "read": "rgba(158,200,232,255)",
+     "expect": {
+      "r": 158,
+      "g": 199,
+      "b": 232
+     },
+     "src": "rgba(74,155,216,128)",
+     "ground": "rgba(242,244,248,255)"
+    },
+    "aim": {
+     "hits": true,
+     "at": {
+      "x": 15,
+      "y": 167
+     },
+     "what": "the blitter's surface",
+     "viewport": {
+      "w": 756,
+      "h": 469
+     },
+     "why": "",
+     "css": {
+      "x": 1,
+      "y": 1
+     },
+     "scale": 1.0389610389610389
+    },
+    "controls": {
+     "noPayloads": false
+    },
+    "theKnownBitmapDrewEveryColourItAskedFor": true,
+    "theReadIsAByteAlphaAndNotACssFraction": true,
+    "theExtentIsThePayloadsOwn": true,
+    "theTranslucentPayloadComposited": true,
+    "theRendererCountedTwoBackedBlits": false,
+    "thePayloadsRodeTheBatch": true,
+    "theOpCarriedTheDestinationAndASignedFd": true,
+    "theTwoRunsDrewTheSamePicture": true,
+    "ok": false
+   }
+  },
+  "refuse": {
+   "ok": false,
+   "evidence": {
+    "why": "",
+    "rows": [
+     {
+      "at": 0,
+      "what": "no such fd",
+      "fd": 4096,
+      "want": "EBADF",
+      "got": "EBADF",
+      "errno": 8
+     },
+     {
+      "at": 1,
+      "what": "a negative fd",
+      "fd": -1,
+      "want": "EBADF",
+      "got": "EBADF",
+      "errno": 8
+     },
+     {
+      "at": 2,
+      "what": "not a data object",
+      "fd": 3,
+      "want": "EINVAL",
+      "got": "EINVAL",
+      "errno": 28
+     },
+     {
+      "at": 3,
+      "what": "never offered a bitmap",
+      "fd": 3,
+      "want": "ENOTSUP",
+      "got": "ENOTSUP",
+      "errno": 58
+     },
+     {
+      "at": 4,
+      "what": "offered and never written",
+      "fd": 3,
+      "want": "ENOENT",
+      "got": "ENOENT",
+      "errno": 44
+     },
+     {
+      "at": 5,
+      "what": "a payload that is not a bitmap",
+      "fd": 3,
+      "want": "EBADMSG",
+      "got": "0",
+      "errno": 0
+     }
+    ],
+    "wholeBatch": {
+     "at": {
+      "x": 240,
+      "y": 16,
+      "w": 32,
+      "h": 32
+     },
+     "ink": 3628759807,
+     "paper": 185405951,
+     "want": "EBADMSG",
+     "got": "0",
+     "errno": 0
+    },
+    "refusedPixels": [
+     {
+      "at": {
+       "x": 240,
+       "y": 16
+      },
+      "read": "rgba(216,74,122,255)",
+      "want": "rgba(11,13,17,255)",
+      "wouldBeCss": "rgba(11,13,17,1)",
+      "wouldBeInk": "rgba(216,74,122,255)"
+     },
+     {
+      "at": {
+       "x": 271,
+       "y": 16
+      },
+      "read": "rgba(216,74,122,255)",
+      "want": "rgba(11,13,17,255)",
+      "wouldBeCss": "rgba(11,13,17,1)",
+      "wouldBeInk": "rgba(216,74,122,255)"
+     },
+     {
+      "at": {
+       "x": 240,
+       "y": 47
+      },
+      "read": "rgba(216,74,122,255)",
+      "want": "rgba(11,13,17,255)",
+      "wouldBeCss": "rgba(11,13,17,1)",
+      "wouldBeInk": "rgba(216,74,122,255)"
+     },
+     {
+      "at": {
+       "x": 271,
+       "y": 47
+      },
+      "read": "rgba(216,74,122,255)",
+      "want": "rgba(11,13,17,255)",
+      "wouldBeCss": "rgba(11,13,17,1)",
+      "wouldBeInk": "rgba(216,74,122,255)"
+     },
+     {
+      "at": {
+       "x": 256,
+       "y": 32
+      },
+      "read": "rgba(216,74,122,255)",
+      "want": "rgba(11,13,17,255)",
+      "wouldBeCss": "rgba(11,13,17,1)",
+      "wouldBeInk": "rgba(216,74,122,255)"
+     }
+    ],
+    "batchesSeen": 3,
+    "batchesSent": 2,
+    "controls": {
+     "noRefusals": false,
+     "wholePayload": true,
+     "blitUnvalidated": false
+    },
+    "noSuchFdIsEBADF": true,
+    "aNegativeFdIsEBADF": true,
+    "anFdOnAFileIsEINVAL": true,
+    "anObjectThatNeverOfferedABitmapIsENOTSUP": true,
+    "offeredAndNeverWrittenIsENOENT": true,
+    "aTornPayloadIsEBADMSG": false,
+    "theSixAttemptsAnsweredFiveDistinctErrnos": true,
+    "theGoodFillInABadBatchWasNeverDrawn": false,
+    "theRefusedBatchesNeverReachedThePage": false,
+    "ok": false
+   }
+  },
+  "shell": {
+   "ok": true,
+   "evidence": {
+    "why": "",
+    "dpr": 1,
+    "dir": "/usr/share",
+    "client": {
+     "cssW": 428,
+     "cssH": 150,
+     "surfaceW": 428,
+     "h": 150
+    },
+    "scale": 1,
+    "groundTruth": {
+     "w": 16,
+     "h": 16,
+     "bytes": 1032
+    },
+    "flatPoints": 12,
+    "crumbs": [
+     {
+      "label": "/",
+      "wantX": 4,
+      "drawnX": 8,
+      "elided": false
+     },
+     {
+      "label": "usr",
+      "wantX": 24,
+      "drawnX": 28,
+      "elided": false
+     },
+     {
+      "label": "share",
+      "wantX": 58,
+      "drawnX": 62,
+      "elided": false
+     }
+    ],
+    "opened": {
+     "texts": [
+      "1-3 of 3",
+      "/",
+      "usr",
+      "share",
+      "Search",
+      "Large icons \u00b7 sorted by Name",
+      "logo.png",
+      "png \u00b7 1 KB",
+      "logo.rgba",
+      "bitmap \u00b7 2 KB",
+      "readme.txt",
+      "text \u00b7 1 KB"
+     ],
+     "blits": 2
+    },
+    "payloads": [
+     {
+      "fd": 3,
+      "bytes": 1032,
+      "w": 16,
+      "h": 16
+     },
+     {
+      "fd": 4,
+      "bytes": 1032,
+      "w": 16,
+      "h": 16
+     }
+    ],
+    "thumbsDrawn": [
+     {
+      "fd": 3,
+      "at": {
+       "x": 58,
+       "y": 96
+      },
+      "bytes": 1032,
+      "w": 16,
+      "h": 16
+     },
+     {
+      "fd": 4,
+      "at": {
+       "x": 184,
+       "y": 96
+      },
+      "bytes": 1032,
+      "w": 16,
+      "h": 16
+     }
+    ],
+    "thumbPixels": [
+     {
+      "fd": 3,
+      "dx": 0,
+      "dy": 0,
+      "at": {
+       "x": 58,
+       "y": 96
+      },
+      "read": "rgba(216,209,74,255)",
+      "want": "rgba(216,209,74,255)",
+      "wouldBeCss": "rgba(216,209,74,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 8,
+      "dy": 0,
+      "at": {
+       "x": 66,
+       "y": 96
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 15,
+      "dy": 0,
+      "at": {
+       "x": 73,
+       "y": 96
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 0,
+      "dy": 8,
+      "at": {
+       "x": 58,
+       "y": 104
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 8,
+      "dy": 8,
+      "at": {
+       "x": 66,
+       "y": 104
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 15,
+      "dy": 8,
+      "at": {
+       "x": 73,
+       "y": 104
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 0,
+      "dy": 15,
+      "at": {
+       "x": 58,
+       "y": 111
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 8,
+      "dy": 15,
+      "at": {
+       "x": 66,
+       "y": 111
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 3,
+      "dx": 15,
+      "dy": 15,
+      "at": {
+       "x": 73,
+       "y": 111
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 0,
+      "dy": 0,
+      "at": {
+       "x": 184,
+       "y": 96
+      },
+      "read": "rgba(216,209,74,255)",
+      "want": "rgba(216,209,74,255)",
+      "wouldBeCss": "rgba(216,209,74,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 8,
+      "dy": 0,
+      "at": {
+       "x": 192,
+       "y": 96
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 15,
+      "dy": 0,
+      "at": {
+       "x": 199,
+       "y": 96
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 0,
+      "dy": 8,
+      "at": {
+       "x": 184,
+       "y": 104
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 8,
+      "dy": 8,
+      "at": {
+       "x": 192,
+       "y": 104
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 15,
+      "dy": 8,
+      "at": {
+       "x": 199,
+       "y": 104
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 0,
+      "dy": 15,
+      "at": {
+       "x": 184,
+       "y": 111
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 8,
+      "dy": 15,
+      "at": {
+       "x": 192,
+       "y": 111
+      },
+      "read": "rgba(74,155,216,255)",
+      "want": "rgba(74,155,216,255)",
+      "wouldBeCss": "rgba(74,155,216,1)"
+     },
+     {
+      "fd": 4,
+      "dx": 15,
+      "dy": 15,
+      "at": {
+       "x": 199,
+       "y": 111
+      },
+      "read": "rgba(242,244,248,255)",
+      "want": "rgba(242,244,248,255)",
+      "wouldBeCss": "rgba(242,244,248,1)"
+     }
+    ],
+    "payloadVsFile": [
+     {
+      "fd": 3,
+      "dx": 3,
+      "dy": 0,
+      "sx": 3,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 4,
+      "dy": 0,
+      "sx": 4,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 5,
+      "dy": 0,
+      "sx": 5,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 6,
+      "dy": 0,
+      "sx": 6,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 7,
+      "dy": 0,
+      "sx": 7,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 8,
+      "dy": 0,
+      "sx": 8,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 9,
+      "dy": 0,
+      "sx": 9,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 3,
+      "dx": 10,
+      "dy": 0,
+      "sx": 10,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 3,
+      "dy": 0,
+      "sx": 3,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 4,
+      "dy": 0,
+      "sx": 4,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 5,
+      "dy": 0,
+      "sx": 5,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 6,
+      "dy": 0,
+      "sx": 6,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 7,
+      "dy": 0,
+      "sx": 7,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 8,
+      "dy": 0,
+      "sx": 8,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 9,
+      "dy": 0,
+      "sx": 9,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     },
+     {
+      "fd": 4,
+      "dx": 10,
+      "dy": 0,
+      "sx": 10,
+      "sy": 0,
+      "got": 1251727615,
+      "want": 1251727615
+     }
+    ],
+    "selected": {
+     "cell": {
+      "x": 6,
+      "y": 56,
+      "w": 120,
+      "h": 128
+     },
+     "aim": {
+      "hits": true,
+      "at": {
+       "x": 241,
+       "y": 335
+      },
+      "what": "the first cell",
+      "viewport": {
+       "w": 756,
+       "h": 469
+      },
+      "why": "",
+      "css": {
+       "x": 66,
+       "y": 120
+      },
+      "scale": 1
+     },
+     "before": [
+      "1-3 of 3",
+      "/",
+      "usr",
+      "share",
+      "Search",
+      "Large icons \u00b7 sorted by Name",
+      "logo.png",
+      "png \u00b7 1 KB",
+      "logo.rgba",
+      "bitmap \u00b7 2 KB",
+      "readme.txt",
+      "text \u00b7 1 KB"
+     ],
+     "after": [
+      "1-3 of 3",
+      "1 selected \u00b7 1 file, 1 KB",
+      "/",
+      "usr",
+      "share",
+      "Search",
+      "Large icons \u00b7 sorted by Name",
+      "logo.png",
+      "png \u00b7 1 KB",
+      "logo.rgba",
+      "bitmap \u00b7 2 KB",
+      "readme.txt",
+      "text \u00b7 1 KB"
+     ],
+     "itemAtPoint": 0
+    },
+    "searched": {
+     "field": {
+      "from": 270,
+      "to": 401,
+      "mid": 336
+     },
+     "aim": {
+      "hits": true,
+      "at": {
+       "x": 511,
+       "y": 254
+      },
+      "what": "the search field",
+      "viewport": {
+       "w": 756,
+       "h": 469
+      },
+      "why": "",
+      "css": {
+       "x": 336,
+       "y": 39
+      },
+      "scale": 1
+     },
+     "query": "log",
+     "texts": [
+      "1-2 of 2",
+      "\"log\" \u2014 2 of 3 here",
+      "/",
+      "usr",
+      "share",
+      "log",
+      "Large icons \u00b7 sorted by Name",
+      "logo.png",
+      "png \u00b7 1 KB",
+      "logo.rgba",
+      "bitmap \u00b7 2 KB"
+     ],
+     "blits": 2
+    },
+    "switched": {
+     "aim": {
+      "hits": true,
+      "at": {
+       "x": 389,
+       "y": 285
+      },
+      "what": "the list",
+      "viewport": {
+       "w": 756,
+       "h": 469
+      },
+      "why": "",
+      "css": {
+       "x": 214,
+       "y": 70
+      },
+      "scale": 1
+     },
+     "from": "large",
+     "texts": [
+      "1-2 of 2",
+      "\"log\" \u2014 2 of 3 here",
+      "/",
+      "usr",
+      "share",
+      "log",
+      "Medium icons \u00b7 sorted by Name",
+      "logo.png",
+      "png \u00b7 1 KB",
+      "logo.rgba",
+      "bitmap \u00b7 2 KB"
+     ]
+    },
+    "navigated": {
+     "segment": {
+      "label": "/",
+      "path": "/",
+      "x": 4,
+      "w": 16,
+      "elided": false
+     },
+     "aim": {
+      "hits": true,
+      "at": {
+       "x": 187,
+       "y": 254
+      },
+      "what": "the `/` segment",
+      "viewport": {
+       "w": 756,
+       "h": 469
+      },
+      "why": "",
+      "css": {
+       "x": 12,
+       "y": 39
+      },
+      "scale": 1
+     },
+     "texts": [
+      "1-4 of 6",
+      "/",
+      "Search",
+      "Medium icons \u00b7 sorted by Name",
+      "Users",
+      "DIR",
+      "bench",
+      "DIR",
+      "dev",
+      "DIR",
+      "proc",
+      "DIR"
+     ]
+    },
+    "account": {
+     "view": "medium",
+     "viewLabel": "Medium icons",
+     "viewFlow": "grid",
+     "viewAxis": "y",
+     "viewSwitches": 1,
+     "viewFrom": "argv",
+     "lanes": 4,
+     "crumbNav": 1,
+     "crumbs": [
+      {
+       "label": "/",
+       "path": "/",
+       "x": 4,
+       "w": 16
+      }
+     ],
+     "query": "",
+     "matched": 6,
+     "listed": 6,
+     "searches": 3,
+     "shownRows": 4,
+     "thumbs": {
+      "wanted": 0,
+      "ready": 0,
+      "decoded": 4,
+      "fellBack": 0,
+      "released": 4,
+      "bytes": 0,
+      "peakBytes": 2064,
+      "clamped": 0,
+      "drewPictures": 0,
+      "drewIcons": 4,
+      "made": [
+       {
+        "path": "/usr/share/logo.png",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 96,
+        "scale": 1
+       },
+       {
+        "path": "/usr/share/logo.rgba",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 96,
+        "scale": 1
+       },
+       {
+        "path": "/usr/share/logo.png",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 48,
+        "scale": 1
+       },
+       {
+        "path": "/usr/share/logo.rgba",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 48,
+        "scale": 1
+       }
+      ],
+      "rows": [],
+      "why": ""
+     }
+    },
+    "controls": {
+     "noThumbs": false,
+     "noPayloads": false
+    },
+    "theWindowOpenedInTheModeArgvNamed": true,
+    "theAccountDescribesOneRowOfTheViewTable": true,
+    "theModesOwnStripWasDrawn": true,
+    "aRealCtrlWheelSteppedTheMode": true,
+    "everySegmentWasDrawnWhereTheHitTestLooks": true,
+    "aRealClickOnASegmentNavigated": true,
+    "aRealClickSelectedTheCellTheGeometryNames": true,
+    "theStripReportedWhatTheSearchLookedAt": true,
+    "realKeysFilteredTheListTheReaderCanSee": true,
+    "searchSaid": {
+     "query": "log",
+     "matched": 2,
+     "of": 3
+    },
+    "everyRowDrewAPictureOrItsTypeIcon": true,
+    "theProcessDecodedThePictures": true,
+    "everyPayloadWasReleasedOnExit": true,
+    "everyPayloadIsTheExtentThumbFitNames": true,
+    "theDrawnPixelsAreThePayloadsOwn": true,
+    "thePayloadIsTheFilesOwnPixels": true,
+    "ok": true
+   }
+  }
+ }
+}

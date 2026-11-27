@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>M23 experiment — is there an honest PNG decode site?</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+.ok{color:#8f8}.bad{color:#f88}</style></head>
+<body>
+<pre id="log">starting…</pre>
+<script>
+  globalThis.BLIT = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    results: {}, errors: [], faults: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M23's owed measurement: IS THERE AN HONEST SITE FOR A PNG DECODE?
+ *
+ * `docs/PLAN-SHELL.md` §M23 "If the assumption is wrong" rests on two claims. The first is true —
+ * `src/bin/imgview.mjs` reads the signature and the IHDR and says so in capitals. The second is
+ * "a locked-down realm has no `createImageBitmap` (src/libos/lockdown.mjs)", and this page checks
+ * it AGAINST `TARGETS` ITSELF rather than restating the list: `TARGETS` is the one definition of
+ * what a realm loses (CLAUDE.md), so a name absent from it is a name a process keeps.
+ *
+ * A PRESENT BINDING IS NOT A USABLE ONE, which is the question the row did not ask.
+ * `createImageBitmap` is async, and constraint 219 is the precedent: M8 measured that a transferred
+ * `OffscreenCanvas` reaches a process only in the one state where it AWAITS a macrotask. So the
+ * decode is run in a REAL process on a REAL kernel, in all three states a process can be in, by
+ * `bench/m23-blit/program.mjs`.
+ *
+ * A process double would have been cheaper and would have answered a different question: a double
+ * has not had `src/libos/lockdown.mjs` run on its realm and is not served under the process
+ * realm's `default-src 'none'` policy (`scripts/serve.py`), and either of those could be what
+ * refuses a decode.
+ */
+import { bootKernel, shutdown as shutdownKernel, ask } from '/www/pagekernel.mjs'
+import { TARGETS } from '/src/libos/lockdown.mjs'
+
+const PROGRAM = '/bench/m23-blit/program.mjs'
+
+const out = document.getElementById('log')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/** The command-line control, carried to the program as argv: the subject promise becomes one that
+ *  cannot settle. A control re-runnable without a source edit (CLAUDE.md). */
+const CONTROL_NEVER = params.get('control') === 'never'
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.BLIT.state = 'aborted'
+  globalThis.BLIT.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures: without a SAB there is ' +
+    'no kernel and no process to park in Atomics.wait, so the question cannot be asked.'
+  out.className = 'bad'
+  say(globalThis.BLIT.why)
+} else {
+  main().catch((e) => {
+    globalThis.BLIT.state = 'error'
+    globalThis.BLIT.why = String((e && e.stack) || e)
+    say(globalThis.BLIT.why)
+  })
+}
+
+async function main () {
+  say('M23 decode-site probe' + (CONTROL_NEVER ? '   [CONTROL: subject never settles]' : ''))
+
+  /* THE PLAN'S CLAIM, CHECKED AGAINST THE SINGLE SOURCE OF TRUTH. Not a string search over the
+   * file: the data is exported for exactly this, and a grep would also match the prose. */
+  const names = TARGETS.map((t) => t.on + '.' + t.name)
+  const stripped = names.some((n) => n === 'global.createImageBitmap')
+  say('')
+  say('lockdown TARGETS: ' + names.length + ' bindings')
+  say('  createImageBitmap is in TARGETS   ' + (stripped ? 'YES' : 'NO') +
+    '   <- the plan says a realm has none')
+
+  const k = await bootKernel({ bench: 1 }, globalThis.BLIT, say)
+  let row = null
+  try {
+    const mounts = (await ask(k, 'm3-state')).m3 || {}
+    globalThis.BLIT.usr = mounts.usr || {}
+    const argv = ['m23-decode'].concat(CONTROL_NEVER ? ['--control-never'] : [])
+    k.post({ t: 'spawn', count: 1, programUrl: PROGRAM,
+      cfg: { argv, uid: 0, gid: 0 }, readyTimeoutMs: 20000 })
+    const spawned = await k.expect('spawned', 20000)
+    if (spawned.refused) throw new Error('spawn refused: ' + spawned.why)
+    const pid = spawned.pids[0]
+    await k.expect('ready', 20000)
+    k.post({ t: 'go', go: { mode: 'park', pid } })
+    const results = await k.expect('results', 60000)
+    row = (results.results || []).find((r) => r.pid === pid)
+    if (!row) {
+      throw new Error('no result row for pid ' + pid + '; got ' +
+        JSON.stringify((results.results || []).map((r) => r.pid)))
+    }
+  } finally {
+    await shutdownKernel(k, globalThis.BLIT)
+  }
+
+  globalThis.BLIT.results = { strippedByLockdown: stripped, controlNever: CONTROL_NEVER, row }
+  globalThis.BLIT.state = 'done'
+
+  /* `realmHas`, not `realm`: `src/libos/process.mjs` owns the key `realm` on every result row and
+   * overwrites a program's own. The LOCKDOWN report is what arrives under that name, and printing
+   * it beside this is worth the two lines — it is the evidence that the strip really ran. */
+  const realm = row.realmHas || {}
+  const cold = row.cold || {}
+  const park = row.park || {}
+  const spin = row.spin || {}
+  const awaited = row.awaited || {}
+  const controls = row.controls || {}
+  const pixels = row.pixels || {}
+  say('')
+  say('lockdown DID run in this process: ' +
+    ((row.realm && row.realm.stripped) || []).length + ' bindings stripped, ' +
+    ((row.realm && row.realm.remaining) || []).length + ' remaining')
+  say('')
+  say('what a REAL process realm still has, after that strip:')
+  for (const name of Object.keys(realm)) say('  ' + name.padEnd(20) + realm[name])
+  say('')
+  say('did the decode promise settle where the process could see it?')
+  say('  cold, nothing blocking  settled after ' + cold.turns + ' macrotask turn(s), ' +
+    cold.latencyMs + ' ms')
+  say('  parked in a syscall     ' + (park.settledDuringPark ? 'YES' : 'no') +
+    '    (nanosleep asked ' + park.requestedMs + ' ms, took ' + park.elapsedMs +
+    ' ms, returned ' + park.nanosleep + ')')
+  say('    ...and once unparked  after ' + park.turnsAfterTheParkEnded + ' turn(s), ' +
+    park.observedAfterTheParkEndedMs + ' ms later; total latency ' + park.totalLatencyMs + ' ms')
+  say('  spinning                ' + (spin.settledDuringSpin ? 'YES' : 'no') +
+    '    (busy for ' + spin.elapsedMs + ' ms)')
+  say('    ...and once it stopped after ' + spin.turnsAfterTheSpinEnded + ' turn(s), ' +
+    spin.observedAfterTheSpinEndedMs + ' ms later')
+  say('  awaited                 ' + awaited.verdict +
+    '    (latency ' + awaited.latencyMs + ' ms, resolved to ' + (awaited.kind || '—') + ')')
+  if (awaited.error) say('  the await said          ' + awaited.error)
+  say('')
+  say('CONTROLS, through the same watchdog:')
+  say('  a promise that settles reads        ' + controls.aPromiseThatSettlesReads)
+  say('  a promise that never settles reads  ' + controls.aPromiseThatNeverSettlesReads)
+  say('  so the probe can tell them apart    ' + (controls.canTellThemApart ? 'YES' : 'NO'))
+  say('')
+  say('and the PIXELS, which is what DL_BLIT would need:')
+  say('  ' + JSON.stringify(pixels))
+  say('')
+  say('and what it would COST to get them to the kernel (derived from the ABI, not written):')
+  say('  ' + JSON.stringify(row.payloadCeiling))
+  for (const note of row.notes || []) say('  note: ' + note)
+  out.className = controls.canTellThemApart ? 'ok' : 'bad'
+}
+</script>
+</body>
+</html>

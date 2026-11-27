@@ -921,6 +921,46 @@ class Control:
     #: refresh that COUNTS and does not re-list is indistinguishable from a working one except by
     #: content. `docs/PLAN-SHELL.md` §M21's third control.
     STALE_LISTING = "stale-listing"
+    #: M22's first: the shell REMEMBERS its tray rows instead of deriving them from `host.frames`
+    #: every `sync`, so an icon outlives the process that published it — the classic tray defect.
+    #: The shipped shell has no withdrawal step to skip (`trayRows()` is derived), so the world is
+    #: built in `www/m22.html` at the one place it could live, which that page records.
+    #: `docs/PLAN-SHELL.md` §M22's first control.
+    TRAY_OUTLIVES = "tray-outlives"
+    #: M22's second: `.taskbar-band` keeps `overflow: hidden`, which is what it had while its own
+    #: comment claimed it scrolled. The world is NARROWER than it looks and that is measured: a
+    #: programmatic `scrollLeft` still works under `hidden` in both engines, so the chevrons and
+    #: `revealSlot` go on working and the clause that dies is the DRIVEN WHEEL.
+    #: `docs/PLAN-SHELL.md` §M22's second control.
+    BAND_CLIPS = "band-clips"
+    #: M22's third: `src/bin/editor.mjs`'s save writes `[saved]` to the WINDOW fd and touches the
+    #: filesystem not at all — the defect this milestone retires, restored through that program's
+    #: own declared `--save-to-window-fd` flag. The BYTES clauses must fail and EVERY DRAWING clause
+    #: must hold, which is exactly how the defect shipped. `docs/PLAN-SHELL.md` §M22's third.
+    SAVE_TO_WINDOW_FD = "save-to-window-fd"
+    #: M23's first: `www/m23.html` wraps `Surface.prototype.replay` to drop the payload map, so
+    #: every `DL_BLIT` arrives with no pixels behind it. The RENDERER's world — the shape of every
+    #: way the payload side-channel can fail — so the pixel clauses die and every errno clause
+    #: holds, because the refusals are the kernel's. `docs/PLAN-SHELL.md` §M23.
+    NO_PAYLOADS = "no-payloads"
+    #: M23's second: `m23blit --no-refusals` makes none of the six bad calls, which is what says the
+    #: errno clauses are coupled to those calls and not to a constant. The PICTURE must still draw.
+    NO_REFUSALS = "no-refusals"
+    #: M23's third: `m23blit --whole-payload` writes a payload that IS a whole bitmap where the
+    #: EBADMSG attempt wants a torn one, so the kernel has nothing to refuse and the batch it rode
+    #: is drawn. The DEFECT seen from the program's side, as against `blit-unvalidated`, which is
+    #: the same defect seen from the kernel's.
+    WHOLE_PAYLOAD = "whole-payload"
+    #: M23's fourth: `files --no-thumbs` decodes nothing. R26's FALLBACK is what must hold —
+    #: `everyRowDrewAPictureOrItsTypeIcon` stays green, because a row with no picture keeps the icon
+    #: it would have had and a blank cell is a different number.
+    NO_THUMBS = "no-thumbs"
+    #: M23's fifth, and the one `docs/PLAN-SHELL.md` §M23 names: the kernel FORWARDS a payload
+    #: `decodeBitmap` refuses instead of answering -EBADMSG. `setBlitValidated` is exported from
+    #: `src/kernel/calls.mjs` and nothing calls it, so the world is built out of the SERVED BYTES of
+    #: that file (`repo_fixture`) rather than through a boot cfg key that does not exist. Scoped to
+    #: the bytes: EBADF, EINVAL, ENOTSUP and ENOENT are unmoved and a well-formed blit still draws.
+    BLIT_UNVALIDATED = "blit-unvalidated"
     ONCE = "once"
 
 
@@ -1000,6 +1040,14 @@ CONTROL_RUNS = {
     Control.RESTORE_OVERWRITES: ("restore-overwrites",),
     Control.MOVE_FORCED_COPY: ("move-forced-copy",),
     Control.STALE_LISTING: ("stale-listing",),
+    Control.TRAY_OUTLIVES: ("tray-outlives",),
+    Control.BAND_CLIPS: ("band-clips",),
+    Control.SAVE_TO_WINDOW_FD: ("save-to-window-fd",),
+    Control.NO_PAYLOADS: ("no-payloads",),
+    Control.NO_REFUSALS: ("no-refusals",),
+    Control.WHOLE_PAYLOAD: ("whole-payload",),
+    Control.NO_THUMBS: ("no-thumbs",),
+    Control.BLIT_UNVALIDATED: ("blit-unvalidated",),
 }
 
 
@@ -7259,6 +7307,742 @@ _M21_PASTE_CLOBBERS_FAILS = (
 )
 
 
+# ======================================================================================
+# m22. The shell's remainder: the band, the pins, the tray, the save and the chord.
+#
+# FIVE PROOFS ACROSS TWO LOADS OF ONE DOCUMENT, which is R24's own shape rather than a convenience:
+# a pin that survives a reload cannot be asserted in the load that made it. `www/m22.html?proofs=1`
+# makes the pin with a real click and `location.replace`s to `&phase=2`; only load 2 reaches
+# `state === 'done'`. `drive_gestures` drives both, which is why every gesture id is prefixed
+# `p1-`/`p2-`: that function skips a `want` whose id equals the last one performed and the serial
+# restarts at 1 in a new document, so two loads asking for `click-orb#1` would have the second
+# silently dropped.
+#
+# THE CHORD IS Alt+` / Alt+Shift+` AND THE CHOICE WAS MEASURED, NOT PREFERRED.
+# `bench/m22-switch/probe.py` scored 25 candidates in Chrome over CDP and Firefox over BiDi on five
+# clauses; 14 are free and preventable in BOTH engines, and the pair taken is the only qualifying
+# one whose reverse is not Ctrl-based. The MENU LABELS IT — a menu advertising an accelerator the
+# system cannot receive is the live-looking-button defect — and Alt+Tab, which is in `BLOCKED`,
+# must appear in no rendered label at all.
+#
+# THE THREE WORLDS ARE QUERY PARAMETERS ON THE SAME DOCUMENT, so each is re-runnable from the
+# command line with no source edit: `band_clips=1` and `tray_outlives=1` are page-side, and
+# `save_to_window_fd=1` travels on ONE editor's argv (`src/bin/editor.mjs`'s own declared flag),
+# which is what scopes it to the bytes clauses and leaves the EROFS refusal standing in a second
+# process that never saw the flag.
+# ======================================================================================
+
+#: How long the driver waits for www/m22.html to reach a terminal state.
+#:
+#: WHAT IS IN IT: TWO kernel boots (one per load), two shells, a pin gesture through a real start
+#: menu, three `editor` processes, a `winopen -n 2`, a desktop-width search for the band's overflow
+#: window, a kill of the desktop process and of its heirs, and every filesystem reading taken
+#: through its own `wc`/`grep`/`stat` process. MEASURED by `scripts/check.py --only m22` at 15.80 s
+#: headless at dpr 2 on Chrome 158, and at 15.80-20.70 s in each of the three control worlds. The
+#: margin is ~20x and deliberately so: the one thing a smaller number buys is a BROKEN run on a
+#: slower machine.
+M22_TIMEOUT = 420.0
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the pin.
+#:
+#: THE RELOAD IS A CLAUSE AND NOT INFRASTRUCTURE. `window.__m22mark` cannot survive a navigation and
+#: the epoch pins load 1's stash to THIS run, so a page that never navigated — or one reading a
+#: previous run's stash — is red here rather than publishing a pin clause over the still-live first
+#: shell.
+_M22_PINS = (
+    ("the page really navigated between the two loads", "thePageReallyReloaded", ("reloaded",)),
+    ("and the subject was not pinned to begin with", "theSubjectWasNotPinnedToBeginWith",
+     ("subject", "load1")),
+    ("the pin was made by a real click on the row that asked for it", "theGestureLandedOnTheRow",
+     ("load1",)),
+    ("and the band took it before any reload", "theBandTookThePinImmediately", ("load1",)),
+    # THE BYTES, OUT OF `wc` AND `grep` PROCESSES: the shell showing a button is not the file
+    # holding a name, and R24 is about the second.
+    ("and the pin file holds the list, read by wc and grep", "thePinFileHoldsTheList",
+     ("load1", "path")),
+    ("and it is a regular file", "thePinFileIsAFile", ("load1", "path")),
+    ("the same bytes are there after the reload", "theFileSurvivedTheReload", ("load2",)),
+    # TWO CLAUSES AND NOT ONE: a desktop that read the file and dropped the name satisfies the
+    # first alone, which is `pinnable`'s own failure mode.
+    ("and the button came back", "theButtonCameBack", ("load2",)),
+    ("and its slot had no window of its own", "thePinnedSlotHadNoWindow", ("load2",)),
+    ("and a real click on it launched the program", "thePinnedButtonLaunchedTheProgram",
+     ("load2",)),
+    ("and the running program merged into that button", "theRunningProgramMergedIntoThePin",
+     ("load2",)),
+)
+
+#: Proof 2: THE SAVE. The defect retired is `src/bin/editor.mjs`'s "save and close" writing
+#: `[saved]` to the WINDOW fd: a reader was told their edit was saved and it was not.
+#:
+#: SO THE BYTE CLAUSES AND THE DRAWING CLAUSES ARE SEPARATE, which is what makes
+#: `--save-to-window-fd` a control and not a blanket failure: the dialog, the title, the cascade,
+#: the screen and the program's own reported COUNT are identical in that world and only the file is
+#: empty. Every byte figure here comes out of a `wc` or `grep` process that was not alive when the
+#: write happened.
+_M22_SAVE = (
+    ("the operand opened the file and the title took its path", "theOperandOpenedTheFile",
+     ("docPath", "opening", "account")),
+    ("and real typing reached the document", "theRealKeyboardReachedTheDocument", ("account",)),
+    # THE TWO CTRL CHORDS ARE SYNTHESISED AND THE PAGE SAYS WHICH IS WHICH: `scripts/cdp.py`'s
+    # `KEYS` has no virtual key code for a Ctrl letter, the same gap M20 records for F2 and M21 for
+    # F5. Claiming all of it was real is the alternative.
+    ("and the synthesised keys are counted apart from the real ones",
+     "theSyntheticKeysAreCountedApart", ("keys",)),
+    ("ctrl-S put the document in the file, read by wc and grep", "theSaveWroteTheBytes",
+     ("afterCtrlS", "want")),
+    ("and the program's own readback agrees with the page's", "theProgramReportedWhatIsInTheFile",
+     ("account", "want")),
+    ("and the editor said so on screen", "theScreenReportedTheSave", ("afterCtrlS",)),
+    ("ctrl-shift-S opened the Save As dialog", "theSaveAsDialogOpened", ("saveAs", "account")),
+    ("and Save As wrote the other path, byte for byte", "theSaveAsWroteTheOtherPath",
+     ("afterSaveAs", "asPath", "want")),
+    ("and the close dialog named the new destination", "theCloseDialogNamedTheDestination",
+     ("asked", "account")),
+    # THE RETIRED DEFECT'S OWN GESTURE, with no synthesised key in the route: a real click on the X
+    # and a real `y`.
+    ("and the y that closed it saved the longer document", "theCloseSavedBeforeItClosed",
+     ("afterClose", "account", "want")),
+    ("and nothing went to the window fd instead", "nothingWasWrittenToTheWindowFdInstead",
+     ("account",)),
+    # THE REFUSAL'S ERRNO SEPARATELY FROM THE ABSENCE OF BYTES. A single "it did not save" passes
+    # for a save that failed for the wrong reason — M3's `truncate` answered ENOENT where it owed
+    # EROFS.
+    ("a save onto a read-only mount says EROFS", "theReadOnlySaveSaysEROFS", ("ro",)),
+    ("and it wrote nothing and went out the clean door", "theReadOnlySaveWroteNothing", ("ro",)),
+    ("and that editor said EROFS on screen", "theReadOnlyEditorSaidSoOnScreen", ("ro",)),
+)
+
+#: Proof 3: THE SWITCH. The chord switches, and the menu labels the accelerator the dispatcher
+#: really binds.
+#:
+#: THE TWO READINGS THAT TELL A DISPATCHER FROM A WINDOW HANDLER. `prevented` is NECESSARY AND NOT
+#: SUFFICIENT — the terminal and the surface handlers both cancel any key that produces bytes, and
+#: `bytesForKey` answers one byte for Alt+` because Alt is not Ctrl — so the clauses that
+#: discriminate are the taken chord NOT reaching the program and the wrong physical key reaching it
+#: INSTEAD. Without that pair, a dispatcher matching on neither field and switching on every
+#: Alt-held keydown satisfies everything above.
+#:
+#: AND THE BINDING IS ON `code`. Firefox delivers Shift+Backquote as `key: '~'` and Chrome as
+#: `key: '\`'` (`bench/m22-switch/probe.py`, both engines), so a `key`-matching dispatcher passes
+#: every other clause here and silently misses Alt+Shift+` in the second engine — the shape of all
+#: five Chrome-only bills CLAUDE.md records.
+_M22_SWITCH = (
+    ("there is more than one window to switch between",
+     "thereIsMoreThanOneWindowToSwitchBetween", ("windows", "stackBefore")),
+    ("the menu labels the forward chord, read off the DOM", "theMenuLabelsTheForwardChord",
+     ("menuRows", "menuAccels")),
+    ("and the reverse chord beside it", "theMenuLabelsTheReverseChord",
+     ("menuRows", "menuAccels")),
+    ("and every band button carries its own slot accelerator",
+     "theButtonsCarryTheirSlotAccelerator", ("slotAccels", "table")),
+    ("and no blocked chord is labelled anywhere", "noBlockedChordIsLabelledAnywhere",
+     ("menuAccels", "slotAccels", "table")),
+    ("the forward chord switched, in the direction the kernel's stack owed",
+     "theForwardChordSwitched", ("sends", "stackBefore")),
+    ("and the reverse chord went the other way", "theReverseChordWentTheOtherWay",
+     ("sends", "stackBefore")),
+    ("and the dispatcher cancelled every chord", "theChordsWerePrevented", ("sends",)),
+    ("and a taken chord never reached the program", "theTakenChordsNeverReachedTheProgram",
+     ("sends",)),
+    ("the binding is on code and not on key, which Firefox's own key is the reading of",
+     "theChordIsBoundToTheCodeAndNotTheKey", ("sends",)),
+    ("and the wrong physical key switched nothing", "theWrongPhysicalKeyDoesNothing", ("sends",)),
+    ("and reached the program instead", "theWrongPhysicalKeyReachedTheProgramInstead",
+     ("sends",)),
+    ("and a superset of the modifiers fired nothing", "aSupersetOfTheModifiersDoesNotFire",
+     ("sends",)),
+    ("Alt+1 selected the first band button", "theSlotChordSelectedTheFirstButton",
+     ("sends", "chords")),
+    ("and it is the chord the table publishes for slot 1", "theSlotChordIsTheOneTheTablePublishes",
+     ("table", "chords")),
+    ("and every chord was synthetic, which the page measures rather than claims",
+     "theChordsWereSyntheticAndSaidSo", ("keys",)),
+)
+
+#: Proof 4: THE BAND. Every button is reachable past the 42 CSS px shrink floor.
+#:
+#: DRIVEN AND NOT PHOTOGRAPHED. A clipped button is in the DOM, has a non-zero rect and cannot be
+#: clicked, so every reading is a driven gesture or a hit test (constraint 40).
+#:
+#: THE WHEEL'S AXIS IS A CLAUSE OF ITS OWN. A `deltaY` over a horizontal-only scroller moves it
+#: 0 px in both engines, measured, so `aVerticalWheelMovesItNothing` is the positive control that
+#: stops `aDrivenHorizontalWheelScrollsIt` being an assertion over whichever axis happened to work.
+_M22_BAND = (
+    # THE FIXTURE IS SEARCHED RATHER THAN ASSERTED: the window in which the band overflows AND
+    # still holds one whole button is about ten pixels wide and moves with the tray's width.
+    ("the band overflows and still holds a button", "theBandOverflowsAndStillHoldsAButton",
+     ("search", "narrow")),
+    ("and the shrink floor is the one the skin publishes", "theFloorIsTheOneTheSkinPublishes",
+     ("minBtnW", "narrow")),
+    ("and the band really is a scroller", "theBandIsAScroller", ("narrow",)),
+    ("and the last button starts out of view", "theLastButtonStartsOutOfView",
+     ("slots", "last", "narrow")),
+    ("both chevrons are shown while it overflows, and the one with nowhere to go is disabled",
+     "theChevronsAppearWithTheOverflow", ("narrow",)),
+    ("a real chevron click scrolls it on", "aRealChevronClickScrollsItOn", ("afterNext",)),
+    ("and another scrolls it back", "aRealChevronClickScrollsItBack",
+     ("afterPrev", "afterNext")),
+    ("and both went through the shell's own scroll", "theChevronsWentThroughTheShell",
+     ("scrolls",)),
+    ("a vertical wheel moves it nothing", "aVerticalWheelMovesItNothing", ("afterDeltaY",)),
+    ("and a driven horizontal wheel scrolls it", "aDrivenHorizontalWheelScrollsIt",
+     ("afterDeltaX",)),
+    ("the last button is reachable at its own centre", "theLastButtonIsReachable",
+     ("revealed", "last")),
+    ("and a real click on it is taken by the shell", "aRealClickOnItIsTakenByTheShell",
+     ("clicked",)),
+    ("and the desktop went back to its full width", "theDesktopWasRestored", ("restored",)),
+)
+
+#: Proof 5: THE TRAY. The icon is withdrawn when its process DIES, asserted by KILLING it.
+#:
+#: THE WITHDRAWAL IS TWO READINGS AND BOTH ARE REGISTERED: the publisher's death, and the death of
+#: the last holder of the window DESCRIPTION. They were one red clause and one green one while
+#: teardown trusted the last close — see `WinMgr.reapPid` in `src/kernel/wins.mjs` for what closed
+#: the gap, and `tray-outlives` for the world in which both go red again.
+_M22_TRAY = (
+    # A STATUS ICON AND NOT A PIN, which is the one way this row can be published wrong: `isTrayRow`
+    # and `isPinnedRow` are exclusive over all 256 flag words and the bit between them is
+    # `WITEM_MENU`, so a status icon carrying it is drawn in the BAND. A different picture rather
+    # than an error.
+    ("the tray drew exactly one status icon", "theTrayDrewExactlyOneStatusIcon",
+     ("trayRows", "icons")),
+    ("and the row is the desktop process's own", "theRowIsTheDesktopProcesses",
+     ("before", "desk")),
+    ("and a real click on it ran the verb", "aRealClickOnTheIconStartedTheProgram",
+     ("clicked", "opened")),
+    ("the kill withdrew the icon", "theIconWentWhenItsOwnProcessDied",
+     ("after", "saidOfOwner", "wentMs")),
+    ("and the kernel destroyed its windows too", "theKernelDestroyedItsWindowsToo",
+     ("saidOfOwner",)),
+    ("and it went when the last holder of the description died",
+     "theIconWentWhenTheLastHolderDied", ("after", "icons", "heirs")),
+    ("and the desktop's window went with its process", "theDesktopWindowWentWithTheProcess",
+     ("frames", "desk")),
+    # THE KILLS WERE AIMED. A clause reading only the empty tray passes for a page that ended
+    # everything.
+    ("and the windows the page opened are still there",
+     "theProcessesThePageStartedAreStillRunning", ("strangers", "frames")),
+)
+
+#: proof name -> its clause table, in the order the page runs them. Read by the body and by the
+#: label inventory, so a clause added to one reaches the other.
+_M22_PROOFS = (("pins", _M22_PINS), ("save", _M22_SAVE), ("switch", _M22_SWITCH),
+               ("band", _M22_BAND), ("tray", _M22_TRAY))
+
+M22_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+) + tuple(label for _, table in _M22_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m22.html",
+)
+
+#: THE PAGE'S WHOLE-RUN VERDICT, which EVERY M22 world turns red and no control is NAMED for.
+#:
+#: `globalThis.M22.verdict` is `ok` only when all five proofs are, so a control that breaks one
+#: clause breaks this too — in its world and in every other control's. Declared as failing rather
+#: than held for the reason audit rule 14 and `score` need: `held` requires a label to HOLD, so a
+#: verdict left in `held` would report every control as having broken something it never touched.
+#:
+#: IT IS NOT AN EXEMPTION. In the plain phase the verdict is a registered expectation that must
+#: PASS, and `--prove-failure` inverts it like any other.
+_M22_VERDICT = ("the page's own verdict is ok",)
+
+
+def _m22_fails(subject: Tuple[str, ...]) -> Tuple[str, ...]:
+    """A control's own subject, PLUS the page's whole-run verdict.
+
+    WHICH CLAUSES A CONTROL IS NAMED FOR IS THE `subject` ARGUMENT AT EACH CALL SITE, and each
+    control's `why` states it. This function adds `_M22_VERDICT` and nothing else, because the
+    verdict is the one label no control can leave green and every control would otherwise have to
+    restate.
+    """
+    return tuple(subject) + _M22_VERDICT
+
+
+def _m22_held(subject: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Every M22 label a control does not turn red.
+
+    DERIVED FROM THE INVENTORY, as `held_rest` is and for its reason: a hand-written `held` is a
+    subset nobody has to extend, so a clause added to the page would be scored by no control.
+    """
+    return held_rest(M22_LABELS, _m22_fails(subject))
+
+
+M22_DOCUMENT = "/www/m22.html?proofs=1"
+
+M22_READY = ("(() => { const M = globalThis.M22 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M22 = """(() => {
+  const M = globalThis.M22 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    reload: M.reload || {},
+    paths: M.paths || {},
+    chords: M.chords || {},
+    notDriven: (M.notDriven || []).map(String),
+    pins: one(P.pins),
+    save: one(P.save),
+    switch: one(P.switch),
+    band: one(P.band),
+    tray: one(P.tray),
+  }
+})()"""
+
+M22_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list,
+    "reload": dict, "paths": dict, "chords": dict, "notDriven": list,
+    "pins": (dict, type(None)),
+    "save": (dict, type(None)),
+    "switch": (dict, type(None)),
+    "band": (dict, type(None)),
+    "tray": (dict, type(None)),
+}
+
+#: How many gestures www/m22.html asks for ACROSS BOTH LOADS, asserted as a constant rather than a
+#: floor for M20's and M21's reason: a `>=` would be green for a drive that died halfway, which is
+#: the failure a control world is otherwise indistinguishable from.
+#:
+#: THREE IN LOAD 1 — the orb, the typed filter, the pin row — and the rest in load 2: the pinned
+#: button, six in the save (the text, the Save As name, Enter, the text after it, the X, the `y`),
+#: the read-only editor's X, two for the switch proof's menu (the orb, Escape), five in the band
+#: (two chevrons, two wheels, the last button) and the tray icon's click. None of M22's three worlds
+#: stops the drive early, so one constant serves all four phases.
+M22_GESTURES = 19
+
+#: How many of those happen in LOAD 1: the orb, the typed filter, the pin row. Declared because
+#: `M22.gestureLog` is per DOCUMENT — a navigation starts a new one — so the page's own count is
+#: the total less these three, and the subtraction is written once rather than as a second constant.
+M22_LOAD1_GESTURES = 3
+
+#: What A SHELL THAT REMEMBERS ITS TRAY ROWS must break: BOTH readings of the withdrawal.
+#:
+#: TWO CLAUSES, AND NEITHER IS THE KERNEL'S. The cache is over the SHELL's rows, so the kernel's
+#: `win-destroy` still arrives and `and the kernel destroyed its windows too` HOLDS — which is what
+#: keeps this control about the withdrawal rather than about the kill. What it takes is the two
+#: clauses that read the shell's own report: the icon does not go when the publisher dies, and it
+#: does not go when the last holder of the description dies either, because a remembered row is
+#: never derived again. That is the classic tray defect written at the one place it can live.
+_TRAY_OUTLIVES_FAILS = (
+    "the kill withdrew the icon",
+    "and it went when the last holder of the description died",
+)
+
+#: What RESTORING `overflow: hidden` must break: the DRIVEN WHEEL, and the computed value that says
+#: the control is in force.
+#:
+#: NOT REACHABILITY, AND THAT IS MEASURED RATHER THAN ASSUMED. `overflow: hidden` still permits a
+#: PROGRAMMATIC `scrollLeft` in both engines, so the chevrons go on working, `revealSlot` goes on
+#: revealing and `the last button is reachable` HOLDS. A control scoped to reachability would turn
+#: nothing — which must be rescoped rather than reported (CLAUDE.md). `the band really is a
+#: scroller` is the control's own applied-ness reading: it asserts the COMPUTED `overflow-x` and not
+#: the flag, so the two agreeing is what makes this a world at all.
+_BAND_CLIPS_FAILS = (
+    "and the band really is a scroller",
+    "and a driven horizontal wheel scrolls it",
+)
+
+#: What `editor --save-to-window-fd` must break: the FOUR byte clauses, and every drawing clause
+#: must hold.
+#:
+#: THAT ASYMMETRY IS THE CONTROL'S WHOLE POINT, because it is exactly how the defect shipped. Under
+#: it `commitSave` writes `[saved]` to the WINDOW fd and returns the document's length, so the
+#: program still reports three saves of the right size, the title still follows the Save As, the
+#: close dialog still names the destination, the cascade still runs and the screen still carries
+#: `[saved N byte(s) to P]` — and the file is empty. Only a reading taken by a separate `wc`/`grep`
+#: process, plus the defect's own counter, can tell the two apart.
+#:
+#: AND THE EROFS CLAUSES HOLD, because the flag is PER-PROCESS ARGV: `www/m22.html` arms it on the
+#: editor that carries the bytes clauses and spawns the `/usr` one without it. A boot-wide switch
+#: would have turned the refusal too and separated nothing.
+_SAVE_TO_WINDOW_FD_FAILS = (
+    "ctrl-S put the document in the file, read by wc and grep",
+    "and Save As wrote the other path, byte for byte",
+    "and the y that closed it saved the longer document",
+    "and nothing went to the window fd instead",
+)
+
+# ======================================================================================
+# m23. The blit, its five errnos, and the file manager's views.
+#
+# Every clause is one boolean www/m23.html publishes, paired here with the label this check
+# records and the evidence keys a failure prints. M18's through M22's table discipline, for their
+# reason: a label spelled in a control's declaration and a boolean spelled in the page are the two
+# sides of one fact, and only a table stops them drifting.
+#
+# FOUR OF THE FIVE WORLDS ARE QUERY PARAMETERS ON THE SAME DOCUMENT and the fifth is served bytes.
+# `no_refusals`, `whole_payload` and `no_thumbs` travel on a PROGRAM'S argv — `m23blit`'s and
+# `files`'s own declared flags — `no_payloads` is the page's wrapper around the renderer it built,
+# and `blit-unvalidated` is a `repo_fixture` over `src/kernel/calls.mjs` because the kernel has no
+# cfg key to reach `setBlitValidated` with. Each is re-runnable from the command line with no
+# source edit.
+# ======================================================================================
+
+#: How long the driver waits for www/m23.html to reach a terminal state.
+#:
+#: WHAT IS IN IT: one kernel boot, a desktop process, THREE runs of `m23blit` (the `--once` run
+#: that describes the picture, the run whose pixels are read, and the `resultOf` of each), one
+#: `files` process driven through five real gestures, a 16x16 PNG and a 16x16 `.rgba` decoded
+#: INSIDE that process, and one `fetch` of the ground-truth file over HTTP. MEASURED by
+#: `scripts/check.py --only m23` at 10.54 s headless at dpr 2 on Chrome 158 — where every thumbnail
+#: payload is resampled rather than 1:1 — and at 10.37-10.54 s in each of the five control worlds.
+#: The margin is ~40x and deliberately so: the one thing a smaller number buys is a BROKEN run on a
+#: slower machine.
+M23_TIMEOUT = 420.0
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the blit draws.
+#:
+#: THE PIXELS ARE READ BACK OUT OF THE CANVAS AND THE DESTINATION IS THE OP'S. A blit that drew and
+#: one that did not are the same picture on a surface nobody sampled, and a page that restated
+#: "where the payload is and what colour it should be" would assert the wrong pixel the first time
+#: `thumbFit` changed — so both the destination and the clear colour come off ops the page tapped.
+_M23_BLIT = (
+    ("a known bitmap drew every colour it was asked for",
+     "theKnownBitmapDrewEveryColourItAskedFor", ("samples",)),
+    # CONSTRAINT 224 AS A CLAUSE OF ITS OWN. `pixelColor` and `cssColor` differ only in the alpha
+    # field, so an assertion that held for both could not tell them apart.
+    ("and the read is a byte alpha and not a CSS fraction",
+     "theReadIsAByteAlphaAndNotACssFraction", ("samples",)),
+    ("and the extent is the payload's own, so nothing was scaled",
+     "theExtentIsThePayloadsOwn", ("outside",)),
+    # THE ONE READING THAT TELLS A RENDERER THAT COMPOSITES FROM ONE THAT OVERWRITES, which is why
+    # a blit goes through `drawImage` and never `putImageData`.
+    ("and the translucent payload composited over its ground",
+     "theTranslucentPayloadComposited", ("over",)),
+    ("and the renderer counted two backed blits", "theRendererCountedTwoBackedBlits",
+     ("surfaceAfter",)),
+    # THE TRANSPORT, SEPARATELY FROM THE PICTURE: an empty payload map and no map are the same
+    # screen, and `blitsUnbacked` plus this clause are the only readings that tell them apart.
+    ("and both payloads rode the batch", "thePayloadsRodeTheBatch", ("payloads",)),
+    ("and the op carried the destination and a signed fd",
+     "theOpCarriedTheDestinationAndASignedFd", ("blits", "pattern")),
+    ("and the clear colour came off an op the page saw", "theClearColourCameOffTheOpToo",
+     ("clear", "pattern")),
+    # AN ACCOUNT ARRIVES ON A PROCESS'S DEATH AND A WINDOW DIES WITH ITS PROCESS (constraint 14,
+    # `WinMgr.reapPid`), so one run cannot hand the page both the points to read and the pixels at
+    # them. This clause is what says the `--once` run described the run that was sampled.
+    ("and the two runs drew the same picture", "theTwoRunsDrewTheSamePicture",
+     ("account", "pattern")),
+)
+
+#: Proof 2: THE REFUSAL PATH. Six attempts, five distinct errnos, each its own expectation.
+#:
+#: ONE EXPECTATION PER REFUSAL, because a single "it refused" passes for a refusal for the wrong
+#: reason — M3's `truncate` answered ENOENT where it owed EROFS and only the per-call assertion
+#: caught it (CLAUDE.md). The two EBADF rows are two ways to name no fd, which is why six attempts
+#: owe five errnos and not six.
+_M23_REFUSE = (
+    ("no such fd is EBADF", "noSuchFdIsEBADF", ("rows",)),
+    ("and a negative fd is EBADF", "aNegativeFdIsEBADF", ("rows",)),
+    ("an fd on a file is EINVAL", "anFdOnAFileIsEINVAL", ("rows",)),
+    ("an object that never offered a bitmap is ENOTSUP",
+     "anObjectThatNeverOfferedABitmapIsENOTSUP", ("rows",)),
+    ("offered and never written is ENOENT", "offeredAndNeverWrittenIsENOENT", ("rows",)),
+    ("a payload whose bytes contradict its own header is EBADMSG", "aTornPayloadIsEBADMSG",
+     ("rows", "wholeBatch")),
+    ("and the six attempts answered five distinct errnos",
+     "theSixAttemptsAnsweredFiveDistinctErrnos", ("rows",)),
+    # THE BATCH IS REFUSED WHOLE, read as FIVE POINTS of the fill's own rectangle: a fill that
+    # landed and was covered by nothing is a rectangle, not a pixel.
+    ("and the good fill in a bad batch was never drawn", "theGoodFillInABadBatchWasNeverDrawn",
+     ("refusedPixels", "wholeBatch")),
+    ("and the refused batches never reached the page", "theRefusedBatchesNeverReachedThePage",
+     ("batchesSeen", "batchesSent")),
+)
+
+#: Proof 3: THE FILE MANAGER. R26 through R31, read back out of the display list the page replayed.
+#:
+#: THE THUMBNAIL CLAUSES ARE THE POINT OF THE BLIT, and they are the ones a ratio enters through:
+#: a payload is produced at `cell * dpr` DEVICE px, so a clause right at dpr 1 and wrong by the
+#: ratio everywhere else is the shape of defect that cost M11, M12 and M16 a milestone each
+#: (constraint 264). The extent is recomputed from the program's own exported `thumbFit`.
+_M23_SHELL = (
+    # `viewFrom` AND THE OPENING FRAME'S LABEL, because an account is a reading AT EXIT and this
+    # run steps the mode half way through. The first clause this page shipped read `account.view`
+    # and was red against a run that had done everything right.
+    ("the window opened in the mode argv named", "theWindowOpenedInTheModeArgvNamed",
+     ("account", "opened")),
+    ("and the account describes one row of the view table",
+     "theAccountDescribesOneRowOfTheViewTable", ("account", "client")),
+    ("and the mode's own strip was drawn", "theModesOwnStripWasDrawn", ("opened",)),
+    ("and a real ctrl-wheel stepped the mode", "aRealCtrlWheelSteppedTheMode",
+     ("account", "switched")),
+    # THE STRIP'S TWO HALVES ARE DECLARED INVERSES, so this is the clause that says a reader
+    # pressing a word reaches that word.
+    ("every segment was drawn where the hit test looks",
+     "everySegmentWasDrawnWhereTheHitTestLooks", ("crumbs",)),
+    ("and a real click on one navigated", "aRealClickOnASegmentNavigated",
+     ("account", "navigated")),
+    ("a real click selected the cell the geometry names",
+     "aRealClickSelectedTheCellTheGeometryNames", ("selected",)),
+    # THE SEARCH IS READ OUT OF THE DISPLAY LIST AND NOT OUT OF THE ACCOUNT: the query is cleared
+    # by the navigation that follows it, so the strip's own sentence is the only reading taken at
+    # the moment a reader could have read it.
+    ("the strip reported what the search looked at", "theStripReportedWhatTheSearchLookedAt",
+     ("searchSaid", "searched")),
+    ("and real keys filtered the list the reader can see",
+     "realKeysFilteredTheListTheReaderCanSee", ("account", "searched")),
+    # R26's FALLBACK AS ARITHMETIC: `drewPictures + drewIcons === shownRows`, so a blank cell is a
+    # different number and not a missing one. It HOLDS under `no-thumbs`, which is the whole
+    # difference between a fallback and a blank cell.
+    ("every row drew a picture or its type icon", "everyRowDrewAPictureOrItsTypeIcon",
+     ("account",)),
+    ("and the process decoded the pictures", "theProcessDecodedThePictures", ("account",)),
+    ("and every payload was released on exit", "everyPayloadWasReleasedOnExit", ("account",)),
+    ("and every payload is the extent thumbFit names", "everyPayloadIsTheExtentThumbFitNames",
+     ("account", "groundTruth")),
+    ("and the drawn pixels are the payload's own", "theDrawnPixelsAreThePayloadsOwn",
+     ("thumbPixels",)),
+    # TWO PICTURES AND ONE FILE: a PNG through the platform's decoder and an `.rgba` through
+    # `decodeBitmap`, both asserted against the bytes `/src/share/logo.rgba` holds — which the
+    # provider mount serves, so the page is not comparing two copies of an image.
+    ("and the payload is the file's own pixels", "thePayloadIsTheFilesOwnPixels",
+     ("payloadVsFile",)),
+)
+
+#: proof name -> its clause table, in the order the page runs them. Read by the body and by the
+#: label inventory, so a clause added to one reaches the other.
+_M23_PROOFS = (("blit", _M23_BLIT), ("refuse", _M23_REFUSE), ("shell", _M23_SHELL))
+
+M23_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+    "the ground truth is the file the mount serves",
+) + tuple(label for _, table in _M23_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m23.html",
+)
+
+#: THE PAGE'S WHOLE-RUN VERDICT, which EVERY M23 world turns red and no control is NAMED for.
+#:
+#: M22's `_M22_VERDICT`, for its reason: `globalThis.M23.verdict` is `ok` only when all three
+#: proofs are, so a control that breaks one clause breaks this too — in its world and in every
+#: other control's. Declared as failing rather than held because `held` requires a label to HOLD,
+#: and a verdict left there would report every control as having broken something it never touched.
+#:
+#: IT IS NOT AN EXEMPTION. In the plain phase it is a registered expectation that must PASS, and
+#: `--prove-failure` inverts it like any other.
+_M23_VERDICT = ("the page's own verdict is ok",)
+
+
+def _m23_fails(subject: Tuple[str, ...]) -> Tuple[str, ...]:
+    """A control's own subject, PLUS the page's whole-run verdict.
+
+    WHICH CLAUSES A CONTROL IS NAMED FOR IS THE `subject` ARGUMENT AT EACH CALL SITE, and each
+    control's `why` states it. This adds `_M23_VERDICT` and nothing else.
+    """
+    return tuple(subject) + _M23_VERDICT
+
+
+def _m23_held(subject: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Every M23 label a control does not turn red, DERIVED from the inventory.
+
+    `held_rest`'s reason: a hand-written `held` is a subset nobody has to extend, so a clause added
+    to the page would be scored by no control.
+    """
+    return held_rest(M23_LABELS, _m23_fails(subject))
+
+
+M23_DOCUMENT = "/www/m23.html?proofs=1"
+
+M23_READY = ("(() => { const M = globalThis.M23 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M23 = """(() => {
+  const M = globalThis.M23 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    groundTruth: M.groundTruth || {},
+    notDriven: (M.notDriven || []).map(String),
+    blit: one(P.blit),
+    refuse: one(P.refuse),
+    shell: one(P.shell),
+  }
+})()"""
+
+M23_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list,
+    "groundTruth": dict, "notDriven": list,
+    "blit": (dict, type(None)),
+    "refuse": (dict, type(None)),
+    "shell": (dict, type(None)),
+}
+
+#: How many gestures www/m23.html asks for, asserted as a CONSTANT rather than a floor for M20's,
+#: M21's and M22's reason: a `>=` would be green for a drive that died halfway, which is the
+#: failure a control world is otherwise indistinguishable from.
+#:
+#: FIVE, all in the file-manager proof and all REAL input: the click into the first cell, the click
+#: into the search field, the typed query, the Ctrl+wheel that steps the mode, and the click on a
+#: breadcrumb segment. None of M23's five worlds stops the drive early — `no_refusals` and
+#: `whole_payload` move `m23blit`'s calls, which ask for nothing — so one constant serves all six
+#: phases.
+M23_GESTURES = 5
+
+#: What `/src/share/logo.rgba` is, as the page's own `decodeBitmap` reads it off the wire. The
+#: ground truth every thumbnail pixel clause rests on, so a 404 or a short file must be a RED
+#: CLAUSE rather than a silently skipped comparison: `proofShell` goes on without it and
+#: `payloadVsFile` is then empty, which `thePayloadIsTheFilesOwnPixels` would report as a length
+#: failure with no reason attached.
+M23_LOGO = {"w": 16, "h": 16, "bytes": 1032}
+
+#: What DROPPING THE BLIT PAYLOAD MAP must break: every clause that reads a PIXEL a payload put
+#: there, and the renderer's own backed-blit count.
+#:
+#: AND EVERY ERRNO CLAUSE MUST HOLD, which is the asymmetry that makes this world worth running:
+#: the refusals are the KERNEL's and this world is the RENDERER's, so a page that confused the two
+#: would be reported here rather than passing. `theExtentIsThePayloadsOwn` holds too — one pixel
+#: past a payload that drew nothing is still the clear colour — and so does
+#: `thePayloadsRodeTheBatch`, because the map reaches the page and the wrapper drops it one layer
+#: below. Those two holding is what says this control is the renderer's and not the transport's.
+_NO_PAYLOADS_FAILS = (
+    "a known bitmap drew every colour it was asked for",
+    "and the read is a byte alpha and not a CSS fraction",
+    "and the translucent payload composited over its ground",
+    "and the renderer counted two backed blits",
+    "and the drawn pixels are the payload's own",
+)
+
+#: What MAKING NONE OF THE SIX BAD CALLS must break: the six errnos, their distinctness, and the
+#: whole-batch clause that rides the sixth attempt's fd.
+#:
+#: THIS IS THE CONTROL THAT SAYS THE ERRNO CLAUSES ARE COUPLED TO THOSE CALLS. An assertion over a
+#: constant still inverts and still fires (CLAUDE.md), so `--prove-failure` cannot answer "is this
+#: reading the kernel's refusals?" — only a world where the calls are not made can.
+#: `theRefusedBatchesNeverReachedThePage` HOLDS: with no refusal attempted, the page still sees
+#: exactly the two batches the program sent, which is the same number for the opposite reason and
+#: is why that clause is not this control's.
+_NO_REFUSALS_FAILS = (
+    "no such fd is EBADF",
+    "and a negative fd is EBADF",
+    "an fd on a file is EINVAL",
+    "an object that never offered a bitmap is ENOTSUP",
+    "offered and never written is ENOENT",
+    "a payload whose bytes contradict its own header is EBADMSG",
+    "and the six attempts answered five distinct errnos",
+    "and the good fill in a bad batch was never drawn",
+)
+
+#: What WRITING A WHOLE BITMAP WHERE THE TORN ONE GOES must break: the EBADMSG clause and the two
+#: readings of the batch it rode, plus the renderer's blit count, which rises because a third blit
+#: now draws.
+#:
+#: `theSixAttemptsAnsweredFiveDistinctErrnos` HOLDS AND THAT IS MEASURED RATHER THAN ASSUMED. The
+#: sixth attempt answers `0` instead of `EBADMSG`, so the six rows still carry five distinct
+#: answers — the clause counts distinctness and not which five. A control scoped to it would turn
+#: nothing.
+_WHOLE_PAYLOAD_FAILS = (
+    "and the renderer counted two backed blits",
+    "a payload whose bytes contradict its own header is EBADMSG",
+    "and the good fill in a bad batch was never drawn",
+    "and the refused batches never reached the page",
+)
+
+#: What `files --no-thumbs` must break: every clause about a decode, a payload or a drawn picture.
+#:
+#: AND R26's FALLBACK MUST HOLD. `every row drew a picture or its type icon` is the one clause this
+#: world leaves green, and it is the whole difference between a fallback and a blank cell: a row
+#: with no picture keeps the icon it would have had, so `drewPictures + drewIcons === shownRows`
+#: either way. A control that turned it too would be a control about `files` drawing nothing.
+_NO_THUMBS_FAILS = (
+    "and the process decoded the pictures",
+    "and every payload was released on exit",
+    "and every payload is the extent thumbFit names",
+    "and the drawn pixels are the payload's own",
+    "and the payload is the file's own pixels",
+)
+
+#: `src/kernel/calls.mjs`'s own module-level switch, verbatim, and the same line with validation
+#: off. The fixture asserts this needle occurs exactly once before it writes anything.
+_BLIT_VALIDATED = "let blitValidated = true;"
+_BLIT_UNVALIDATED = "let blitValidated = false;"
+
+
+def _m23_blit_unvalidated(source: pathlib.Path) -> pathlib.Path:
+    """`win_draw` FORWARDS a payload `decodeBitmap` refuses instead of answering -EBADMSG.
+
+    THE SERVED BYTES AND NOT A BOOT CFG KEY, because there is no key: `setBlitValidated` is
+    exported from `src/kernel/calls.mjs` and nothing calls it — `src/kernel/kernel.mjs` reads no
+    `cfg.blitUnvalidated`, where every other bench-gated hook lives. Patching the module's own
+    initial value is the same world the exported setter would build, reached through the one lever
+    a check owns over a file it does not.
+    """
+    return _patch_tree(source, "src/kernel/calls.mjs", _BLIT_VALIDATED, _BLIT_UNVALIDATED)
+
+
+#: What THE KERNEL SKIPPING `decodeBitmap` must break, and only this.
+#:
+#: SCOPED TO THE BYTES, which is `setBlitValidated`'s own docstring and what makes this a control
+#: about validation alone: the fd is still resolved and the format still fetched, so EBADF, EINVAL,
+#: ENOTSUP and ENOENT are UNMOVED, and the well-formed blit still draws every colour it asked for —
+#: `a known bitmap drew every colour it was asked for` HOLDS. That asymmetry is the whole reading.
+#:
+#: FOUR CLAUSES, MEASURED. The EBADMSG attempt is answered 0, so its clause dies; the fill that
+#: rode that batch is now DRAWN, so the whole-batch clause dies; the page sees three batches where
+#: two were sent as refusals, so the never-reached clause dies; and the renderer meets a payload
+#: its own `decodeBitmap` refuses and counts it UNBACKED, so the backed-blit count dies. The
+#: renderer's second refusal is the second line of the same argument and must not be the first,
+#: which is exactly what that last clause reads.
+_BLIT_UNVALIDATED_FAILS = (
+    "and the renderer counted two backed blits",
+    "a payload whose bytes contradict its own header is EBADMSG",
+    "and the good fill in a bad batch was never drawn",
+    "and the refused batches never reached the page",
+)
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -7392,6 +8176,27 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "comes out of `wc` and `grep` in separate processes. UNMEASURABLE rather than "
                 "FAIL, because a FAIL would claim a row was deleted, found in the Bin and "
                 "restored with the wrong bytes.",
+        ), "m22": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and no `desktop` process publishes a row — so "
+                "there is no pinned button, no tray icon and no band to overflow. There is also no "
+                "FILESYSTEM and therefore no SESSION TREE (D40), so the pin file and every path "
+                "the saves write do not exist. THE SHELL IS THE SHARPEST CASE HERE, as it is for "
+                "m20 and m21: the Superbar, its chevrons and the start menu are plain DOM, so a "
+                "page with no kernel at all could draw a band with a pinned button in it and a "
+                "menu labelled `Alt+\\``, and satisfy every clause that only read a label "
+                "(constraint 40). UNMEASURABLE rather than FAIL, because a FAIL would claim a pin "
+                "survived a reload and launched the wrong program.",
+        ), "m23": Expect(
+            UNMEASURABLE,
+            why="the same mechanism, and this check's subject is the first casualty: without "
+                "COOP/COEP there is no SAB, so no kernel boots, nothing holds a data object, no "
+                "window has a surface and no process exists to decode a picture in. A blit is a "
+                "fd into kernel-owned bytes (constraints 240, 241) and there are neither. The "
+                "`files` process whose decodes every thumbnail clause reads never starts, and "
+                "neither do the three `m23blit` runs. UNMEASURABLE rather than FAIL, because a "
+                "FAIL would claim a payload was drawn and found to be the wrong pixels.",
         ), "m19a": Expect(
             UNMEASURABLE,
             why="the same mechanism, and for this check it takes the whole subject away: without "
@@ -9501,6 +10306,267 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "absence of the row that went, and keeps a selection over a file that is gone",
             failed=_STALE_LISTING_FAILS,
             held=held_rest(M21_LABELS, _STALE_LISTING_FAILS),
+        )},
+    ),
+    "tray-outlives": NegativeControl(
+        name="tray-outlives",
+        why="tray_outlives=1: the shell REMEMBERS its tray rows instead of deriving them from "
+            "`host.frames` on every `sync`, so an icon outlives the process that published it. "
+            "`docs/PLAN-SHELL.md` §M22's first control, and the row calls it the classic tray "
+            "defect.\n"
+            "IT IS BUILT IN `www/m22.html` AND NOT IN `src/wm/taskbar.mjs`, which that page "
+            "records as a finding rather than leaving as a surprise: the shipped shell has NO "
+            "withdrawal step to skip — `trayRows()` is DERIVED from the host's frames every sync — "
+            "so there is nothing there for a flag to remove. A control that turns nothing verifies "
+            "nothing (CLAUDE.md), so the world is written at the one place it can live: the page "
+            "wraps the shell's own `trayRows` in a cache. A `setShellControls({trayOutlives})` key "
+            "would be the better home and is a change in a file this check does not own.\n"
+            "WHAT MUST BREAK: BOTH READINGS OF THE WITHDRAWAL, and nothing else. `the kill "
+            "withdrew the icon` is the plan's own sentence — the publisher dies and the icon goes "
+            "with it — and `and it went when the last holder of the description died` is the "
+            "second reading, which held even before `WinMgr.reapPid`. Under the cache neither goes "
+            "at all, because a remembered row is never derived again.\n"
+            "WHAT MUST HOLD: the published row and its flags, the click that runs its verb, the "
+            "desktop WINDOW going with its process, and `and the kernel destroyed its windows "
+            "too`. The cache is over the SHELL's rows, so the host's frame table and the kernel's "
+            "`win-destroy` are untouched — which is what keeps this control about the withdrawal "
+            "rather than about the kill, and what tells it apart from a world where teardown "
+            "stopped destroying windows.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("tray_outlives", "1"),),
+        expects={"m22": Expect(
+            Outcome.FAIL,
+            why="a shell that remembers its tray rows draws an icon for a process that is gone, "
+                "which is a status icon reporting a program that cannot be running",
+            failed=_m22_fails(_TRAY_OUTLIVES_FAILS),
+            held=_m22_held(_TRAY_OUTLIVES_FAILS),
+        )},
+    ),
+    "band-clips": NegativeControl(
+        name="band-clips",
+        why="band_clips=1: `.taskbar-band` keeps `overflow: hidden` — what it had while its own "
+            "comment claimed it scrolled — through `src/wm/taskbar.mjs`'s declared "
+            "`setShellControls({bandClips})`. `docs/PLAN-SHELL.md` §M22's second control.\n"
+            "THE WORLD IS NARROWER THAN THE ROW'S WORDING AND THAT IS MEASURED. `overflow: hidden` "
+            "still permits a PROGRAMMATIC `scrollLeft` — both engines — so the chevrons go on "
+            "scrolling the band, `revealSlot` goes on revealing the last button and the "
+            "REACHABILITY clauses HOLD. The row says the reachability clause must fail; a control "
+            "scoped to it would turn nothing, and a control that turns nothing must be rescoped "
+            "rather than reported (CLAUDE.md). So what is declared below is what the world really "
+            "takes.\n"
+            "WHAT MUST BREAK: the DRIVEN WHEEL, and the computed value that says the control is in "
+            "force. TWO clauses. `and a driven horizontal wheel scrolls it` is the subject: a "
+            "`hidden` scroller refuses a wheel outright, which is the gesture a hand actually makes "
+            "at a taskbar. `and the band really is a scroller` asserts the COMPUTED `overflow-x` "
+            "rather than the flag, so it is this control's applied-ness reading — a world the page "
+            "asked for and the stylesheet did not deliver is a green run over an unmodified "
+            "shell.\n"
+            "WHAT MUST HOLD: everything else in the band proof, including `a vertical wheel moves "
+            "it nothing` — which is 0 px in BOTH worlds and is the positive control that stops the "
+            "horizontal clause being an assertion over whichever axis happened to work. A wheel "
+            "over this band MUST carry deltaX: a deltaY moves it 0 px in both engines, measured.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("band_clips", "1"),),
+        expects={"m22": Expect(
+            Outcome.FAIL,
+            why="a band that clips refuses a wheel, so the buttons past the 42 CSS px shrink floor "
+                "are reachable by the shell's own chevrons and by no gesture a reader makes over "
+                "the band itself",
+            failed=_m22_fails(_BAND_CLIPS_FAILS),
+            held=_m22_held(_BAND_CLIPS_FAILS),
+        )},
+    ),
+    "save-to-window-fd": NegativeControl(
+        name="save-to-window-fd",
+        why="save_to_window_fd=1: `editor`'s save writes `[saved]` to the WINDOW fd and touches "
+            "the filesystem not at all, through `src/bin/editor.mjs`'s own declared "
+            "`--save-to-window-fd` flag. `docs/PLAN-SHELL.md` §M22's third control, and the "
+            "behaviour it restores is the defect the milestone retires: a reader was told their "
+            "edit was saved and it was not.\n"
+            "THE ROW REQUIRES AN ASYMMETRY AND THE MEASUREMENT BORE IT OUT. `commitSave` returns "
+            "the document's LENGTH under this flag, so the program still reports three saves of "
+            "the right size, `savePath` still follows the Save As, the title still changes, the "
+            "close dialog still names the destination, the cascade still runs and the screen still "
+            "carries `[saved N byte(s) to P]` — with one extra `[saved]` line above it, which is "
+            "why no clause here pins that screen verbatim. EVERY DRAWING CLAUSE HOLDS and the file "
+            "is empty, which is exactly how the defect shipped.\n"
+            "WHAT MUST BREAK: the FOUR byte clauses, each read by a `wc` or `grep` process that "
+            "was not alive when the write happened, plus the defect's own counter. ctrl-S leaves "
+            "the file at its opened length; Save As creates NO file at the second path, so `wc` "
+            "answers a non-zero exit there; the `y` that closed the editor — the retired defect's "
+            "own gesture, with no synthesised key in its route — leaves that path still absent; "
+            "and `windowFdSaves` reads 3 with `toWindowFd` true, which is the one number that is "
+            "not a reading of the bytes.\n"
+            "AND THE EROFS CLAUSES HOLD, because the flag is PER-PROCESS ARGV. `www/m22.html` arms "
+            "it on the editor that carries the byte clauses and spawns the `/usr` one without it, "
+            "so the refusal is measured in a process that never saw the control. A boot-wide "
+            "switch would have turned the refusal too — the same program cannot both refuse a write "
+            "and skip it — and separated nothing.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("save_to_window_fd", "1"),),
+        expects={"m22": Expect(
+            Outcome.FAIL,
+            why="a save that writes to the window fd reports three saves of the right size and "
+                "leaves the file at its opened length, so every reading a reader can see is right "
+                "and the bytes are not there",
+            failed=_m22_fails(_SAVE_TO_WINDOW_FD_FAILS),
+            held=_m22_held(_SAVE_TO_WINDOW_FD_FAILS),
+        )},
+    ),
+    "no-payloads": NegativeControl(
+        name="no-payloads",
+        why="no_payloads=1: `Surface.prototype.replay` is wrapped so the blit payload map never "
+            "reaches it, which is the shape of EVERY way the payload side-channel can fail — a "
+            "kernel that posted none, a transport that dropped it, a host that did not forward "
+            "it. Every `DL_BLIT` then counts as `blitsUnbacked` and draws nothing.\n"
+            "IT IS BUILT IN `www/m23.html` AND NOT IN `src/wm/surface.mjs`, which that page "
+            "records as a finding rather than leaving as a surprise: a `setSurfaceControls` key "
+            "would be the better home and is a change in a file that slice did not own. The page "
+            "is the supervisor and this is the renderer the page built, so the wrapper is at the "
+            "one place it can live.\n"
+            "WHAT MUST BREAK: the four clauses that read a PIXEL a payload put there, plus the "
+            "renderer's own backed-blit count. `blitsUnbacked` is the one signal that tells 'the "
+            "payload channel dropped it' from 'the program drew nothing', which are the same "
+            "picture.\n"
+            "WHAT MUST HOLD, AND THIS IS THE ASYMMETRY WORTH RUNNING IT FOR: every one of the six "
+            "errno clauses. The refusals are the KERNEL's and this world is the RENDERER's, so a "
+            "check that confused the two is reported here rather than passing. "
+            "`and the extent is the payload's own` holds too — one pixel past a payload that drew "
+            "nothing is still the clear colour — and so does `and both payloads rode the batch`, "
+            "because the map DOES reach the page and the wrapper drops it one layer below. Those "
+            "two holding is what says this control is the renderer's and not the transport's.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_payloads", "1"),),
+        expects={"m23": Expect(
+            Outcome.FAIL,
+            why="a blit with no payload behind it draws nothing and raises no error anywhere, so "
+                "a window is blank on its next repaint and every errno is still right",
+            failed=_m23_fails(_NO_PAYLOADS_FAILS),
+            held=_m23_held(_NO_PAYLOADS_FAILS),
+        )},
+    ),
+    "no-refusals": NegativeControl(
+        name="no-refusals",
+        why="no_refusals=1: `m23blit` makes NONE of the six bad calls, through "
+            "`bench/m23-page/program.mjs`'s own declared `--no-refusals` flag.\n"
+            "THIS IS THE CONTROL THAT SAYS THE ERRNO CLAUSES ARE COUPLED TO THOSE CALLS. An "
+            "assertion over a constant still inverts and still fires (CLAUDE.md), so "
+            "`--prove-failure` cannot answer 'is this reading the kernel's refusals?'. Only a "
+            "world where the calls are not made can, and the clauses go red because the rows they "
+            "look for are absent rather than wrong.\n"
+            "WHAT MUST BREAK: the six errnos, their distinctness, and the whole-batch clause that "
+            "rides the sixth attempt's fd — eight clauses.\n"
+            "WHAT MUST HOLD: the PICTURE, every clause of it, because the program still makes its "
+            "two good blits. And `and the refused batches never reached the page`, which is this "
+            "control's one measured surprise: with no refusal attempted the page still sees "
+            "exactly the two batches the program sent — the same number for the opposite reason — "
+            "so a control scoped to it would turn nothing and it is deliberately not named here.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_refusals", "1"),),
+        expects={"m23": Expect(
+            Outcome.FAIL,
+            why="a program that asks for no refusal leaves every errno clause with no row to "
+                "read, which is what tells those clauses apart from an assertion over a constant",
+            failed=_m23_fails(_NO_REFUSALS_FAILS),
+            held=_m23_held(_NO_REFUSALS_FAILS),
+        )},
+    ),
+    "whole-payload": NegativeControl(
+        name="whole-payload",
+        why="whole_payload=1: the EBADMSG attempt's data object is written a payload that IS a "
+            "whole bitmap, through `bench/m23-page/program.mjs`'s declared `--whole-payload` "
+            "flag, so the kernel has nothing to refuse and the batch it rode is drawn.\n"
+            "THE DEFECT FROM THE PROGRAM'S SIDE, where `blit-unvalidated` is the same defect from "
+            "the KERNEL's. The two worlds turn the same four clauses by two different mechanisms, "
+            "and both are worth running: this one says the clause is coupled to the BYTES the "
+            "program wrote, that one says it is coupled to the kernel's `decodeBitmap`.\n"
+            "WHAT MUST BREAK: the EBADMSG clause, the two readings of the batch it rode — the "
+            "fill is now drawn and the page now sees three batches where two were sent — and the "
+            "renderer's backed-blit count, which rises to three because a third blit draws.\n"
+            "WHAT MUST HOLD, AND IT IS MEASURED RATHER THAN ASSUMED: `and the six attempts "
+            "answered five distinct errnos`. The sixth attempt answers `0` instead of `EBADMSG`, "
+            "so the six rows still carry five distinct answers — the clause counts distinctness "
+            "and not which five. A control scoped to it would turn nothing, which must be "
+            "rescoped rather than reported (CLAUDE.md).",
+        serve_kwargs={},
+        fixture=None,
+        query=(("whole_payload", "1"),),
+        expects={"m23": Expect(
+            Outcome.FAIL,
+            why="a payload the kernel can decode is a payload the kernel must draw, so the "
+                "EBADMSG clause and both readings of the batch it rode are the program's bytes "
+                "and not a constant",
+            failed=_m23_fails(_WHOLE_PAYLOAD_FAILS),
+            held=_m23_held(_WHOLE_PAYLOAD_FAILS),
+        )},
+    ),
+    "no-thumbs": NegativeControl(
+        name="no-thumbs",
+        why="no_thumbs=1: `files` decodes nothing, through `src/bin/files.mjs`'s own declared "
+            "`--no-thumbs` flag. `wanted` still counts the candidates and `decoded` goes to 0, "
+            "which is what tells this world from a view mode that draws no pictures.\n"
+            "WHAT MUST BREAK: every clause about a decode, a payload or a drawn picture — five.\n"
+            "WHAT MUST HOLD: R26's FALLBACK, and that one clause is the whole difference between "
+            "a fallback and a blank cell. `every row drew a picture or its type icon` is "
+            "`drewPictures + drewIcons === shownRows`, so a row with no picture keeps the icon it "
+            "would have had and the arithmetic is the same either way. A control that turned it "
+            "too would be a control about `files` drawing nothing at all, which is a different "
+            "world. The views, the address strip, the details pane and search are untouched: this "
+            "is a file manager with no previews, which is what every reader had before R26.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("no_thumbs", "1"),),
+        expects={"m23": Expect(
+            Outcome.FAIL,
+            why="a file manager that decodes nothing still marks every row, so the clause that "
+                "reads the fallback holds and the five that read a payload do not",
+            failed=_m23_fails(_NO_THUMBS_FAILS),
+            held=_m23_held(_NO_THUMBS_FAILS),
+        )},
+    ),
+    "blit-unvalidated": NegativeControl(
+        name="blit-unvalidated",
+        why="`let blitValidated = false` in the SERVED copy of src/kernel/calls.mjs, so `win_draw` "
+            "FORWARDS a `DOBJ_BITMAP` payload `decodeBitmap` refuses instead of answering "
+            "-EBADMSG. `docs/PLAN-SHELL.md` §M23's own control, in its own words.\n"
+            "A SERVED-BYTES FIXTURE (`repo_fixture`) AND NOT A QUERY PARAMETER, because there is "
+            "no parameter to take: `setBlitValidated` is exported from src/kernel/calls.mjs and "
+            "NOTHING CALLS IT — src/kernel/kernel.mjs reads no `cfg.blitUnvalidated`, where every "
+            "other bench-gated hook lives, and `www/m23.html` records that as a finding and "
+            "refuses to report a green run over an unmodified world. Patching the module's own "
+            "initial value is the world the exported setter would build, reached through the one "
+            "lever a check owns over a file it does not. `?blit_unvalidated=1` rides with it so "
+            "the page's own record names the world, and the page's measurement of whether the "
+            "world arrived is this control's applied-ness reading: if the fixture did not take, "
+            "the EBADMSG clause stays green and this run is scored as turning less than it "
+            "declared.\n"
+            "WHAT MUST BREAK: FOUR clauses. The EBADMSG attempt is answered 0; the good fill that "
+            "rode that batch is now DRAWN; the page sees three batches where two were sent as "
+            "refusals; and the renderer meets a payload its own `decodeBitmap` refuses and counts "
+            "it UNBACKED, so the backed-blit count moves. That last one is the second line of the "
+            "same argument arriving where it must not be the first.\n"
+            "WHAT MUST HOLD: the DRAWN PIXELS, and that asymmetry is `setBlitValidated`'s own "
+            "docstring. The control is scoped to the BYTES: the fd is still resolved and the "
+            "format still fetched, so EBADF, EINVAL, ENOTSUP and ENOENT are unmoved and `a known "
+            "bitmap drew every colour it was asked for` is green. A kernel that stopped resolving "
+            "fds would turn all six errnos, which is a different world and is `no-refusals`'s "
+            "opposite number.",
+        serve_kwargs={},
+        fixture=None,
+        repo_fixture=_m23_blit_unvalidated,
+        query=(("blit_unvalidated", "1"),),
+        expects={"m23": Expect(
+            Outcome.FAIL,
+            why="a kernel that forwards a payload whose bytes contradict its own header has moved "
+                "an image-format decision to the renderer, where a blank window and a drawn one "
+                "are the same picture",
+            failed=_m23_fails(_BLIT_UNVALIDATED_FAILS),
+            held=_m23_held(_BLIT_UNVALIDATED_FAILS),
         )},
     ),
 }
@@ -17645,6 +18711,452 @@ def check_m21(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m21.html", env.served_matches_disk(env.document),
                     "the m21.html served does not match www/m21.html on disk")
+
+
+# ======================================================================================
+# m22. The band, the pins, the tray, the save and the chord.
+# ======================================================================================
+
+
+def _m22_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE PER CLAUSE AND NOT ONE PER PROOF, because all three controls name SINGLE clauses INSIDE a
+    proof: `band-clips` must turn two of the band's thirteen and leave the eleven that a
+    programmatic scroll keeps alive, and `save-to-window-fd` must turn four of the save's fourteen
+    while every drawing clause holds. A check recording "the save proof passed" could not tell a
+    program that wrote bytes from one that reported writing them, which is the defect this
+    milestone retires.
+
+    EVERY PROOF IS DRIVEN IN EVERY WORLD, so no control has to name a 'not driven' subset — none of
+    M22's three flags stops a gesture being performed. `notDriven` rides every failure anyway: a
+    null proof would make this record a page of red clauses, and the page's own list of what it
+    never ran is the cheapest way to see why.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause, "notDriven": got["notDriven"],
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m22",
+    milestone="m22",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.TRAY_OUTLIVES, Control.BAND_CLIPS,
+              Control.SAVE_TO_WINDOW_FD),
+    labels=M22_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M22_DOCUMENT,
+    ready_expr=M22_READY,
+    ready_what="globalThis.M22 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m22.html?proofs=1)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M22 && globalThis.M22.state",
+    refusal_want="aborted",
+    note="THE SHELL'S REMAINDER — five driven proofs over TWO LOADS of one document, which is "
+         "R24's own shape and not a convenience: a pin that survives a reload cannot be asserted "
+         "in the load that made it. Load 1 makes the pin with a real click on a real start-menu "
+         "row and `location.replace`s to `&phase=2`; only load 2 reaches `done`. Every gesture id "
+         "is prefixed `p1-`/`p2-` because `drive_gestures` skips a `want` whose id equals the last "
+         "one performed and the serial restarts at 1 in a new document, so two loads asking for "
+         "`click-orb#1` would have the second silently dropped (docs/PLAN-SHELL.md §M22).\n"
+         "THE CHORD WAS MEASURED AND NOT PREFERRED. `bench/m22-switch/probe.py` scored 25 "
+         "candidates on five clauses — received / mods / code / preventable / host-quiet — in "
+         "Chrome over `scripts/cdp.py` and Firefox over `scripts/bidi.py`, each chord run a SECOND "
+         "time with the listener cancelling nothing as a per-chord positive control, and the whole "
+         "table gated behind a bare `5` keydown that must arrive. 14 chords are free and "
+         "preventable in BOTH engines; `src/wm/chords.mjs` takes Alt+` forward, Alt+Shift+` "
+         "backward and Alt+1..9 direct. THE MENU PUBLISHES THE REAL ACCELERATOR, read off the DOM "
+         "rather than off the table, and Alt+Tab — which is in `BLOCKED` — must appear in no "
+         "rendered label: a menu showing an accelerator the system cannot receive is the "
+         "live-looking-button defect.\n"
+         "THE BINDING IS ON `code` AND A CLAUSE SAYS SO. Firefox delivers Shift+Backquote as "
+         "`key: '~'` and Chrome as a backquote; both agree on `code: 'Backquote'`, so a dispatcher "
+         "matching `event.key` passes every other clause here and silently misses Alt+Shift+` in "
+         "the second engine — the shape of all five Chrome-only bills CLAUDE.md records. The page "
+         "dispatches that chord WITH Firefox's own `key` and it must still switch.\n"
+         "AND `prevented` IS NECESSARY AND NOT SUFFICIENT, stated where it is asserted: the "
+         "terminal and the surface handlers both cancel any key that produces bytes and "
+         "`bytesForKey` answers one byte for Alt+` (Alt is not Ctrl), so a cancelled chord alone "
+         "does not prove a dispatcher ran. The clauses that discriminate are the taken chord NOT "
+         "reaching the program and the WRONG PHYSICAL KEY reaching it instead.\n"
+         "THE CHORDS AND THE TWO Ctrl CHORDS ARE SYNTHESISED AND THE PAGE MEASURES THAT RATHER "
+         "THAN CLAIMING OTHERWISE. `scripts/cdp.py`'s `KEYS` carries no row for `Backquote`, a "
+         "digit or a Ctrl letter — the same gap M20 records for F2 and M21 for F5 — so the page "
+         "asserts `synthetic` rose by exactly six and `trusted` did not move. What a synthesised "
+         "key cannot prove here is the ARRIVAL, which is `bench/m22-switch/probe.py`'s clause in "
+         "both engines, and not the binding. Everything the gap does not force is real: the orb, "
+         "the menu row, the typed text, Enter, the X, the `y`, both chevrons, both wheels and "
+         "every click on a band button or a tray icon.\n"
+         "THE WITHDRAWAL CLAUSE WAS RED AND WAS NOT WEAKENED TO PASS — THE KERNEL WAS FIXED. "
+         "`docs/PLAN-SHELL.md` §M22's proof sentence is that a tray icon is withdrawn when its "
+         "process dies, and killing the publisher drew `reaped` out of the kernel and NO "
+         "`win-destroy`: `spawnChild` copies EVERY fd into a child — window fds included — so the "
+         "description's `refs` never reached 0 and `F_WIN.close`, then the only caller of "
+         "`WinMgr.destroyTree`, never ran. The desktop spawns every program a reader starts, so ANY "
+         "running program held its window, its rows and its tray icon. `WinMgr.reapPid` "
+         "(`src/kernel/wins.mjs`), called from `teardown` in `src/kernel/kernel.mjs`, destroys the "
+         "windows a dying process CREATED regardless of refs — constraint 14's \"destroy windows\" "
+         "as a step of its own rather than a consequence of the fd walk. BOTH READINGS STAY "
+         "REGISTERED: the publisher's death and the death of the last holder of the description, "
+         "because only the pair would notice a revert to a refcount.\n"
+         "negative controls: --negative tray-outlives makes the shell REMEMBER its tray rows "
+         "instead of deriving them from `host.frames`, and turns TWO — both readings of the "
+         "withdrawal, since a remembered row is never derived again. `and the kernel destroyed its "
+         "windows too` HOLDS under it, which is what tells this world apart from one where "
+         "teardown stopped destroying windows. --negative band-clips "
+         "restores `overflow: hidden` and turns TWO: the DRIVEN WHEEL and the computed `overflow-x` "
+         "that says the control is in force. The row asks for the reachability clause; measured, "
+         "`hidden` still permits a programmatic `scrollLeft` in both engines, so the chevrons and "
+         "`revealSlot` go on working and that clause HOLDS — the control is rescoped to what the "
+         "world really takes rather than reported as turning more than it does. --negative "
+         "save-to-window-fd restores the editor's defect and turns FOUR byte clauses while EVERY "
+         "DRAWING CLAUSE HOLDS, which is the asymmetry the plan row asks for and which the "
+         "measurement bore out: `commitSave` returns the document's length, so three saves of the "
+         "right size are reported, the title follows, the dialog names the destination and the "
+         "screen says `[saved N byte(s) to P]` with one extra `[saved]` line above it — and the "
+         "file is empty. The flag is PER-PROCESS ARGV, so the EROFS refusal is measured in a "
+         "second editor that never saw it. --negative no-isolation must come out BROKEN: no SAB, "
+         "no kernel, no desktop process, so nothing publishes a pin, a tray row or a band.\n"
+         "MEASURED SUBSETS, one run each at dpr 2 on Chrome 158, counted as the check's own red "
+         "rows against 0 red in the plain phase: 3 red / 70 intact for tray-outlives, 3 / 70 for "
+         "band-clips and 5 / 68 for save-to-window-fd — so the three worlds turn 2, 2 and 4 "
+         "clauses of their own, plus `the page's own verdict is ok`, which EVERY world turns and "
+         "which no control is named for (`_M22_VERDICT`).",
+)
+def check_m22(env: Env) -> None:
+    performed = drive_gestures(env, "M22", timeout=M22_TIMEOUT)
+    got = env.read(READ_M22, M22_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m22.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m22.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed, the `desktop` process that "
+            "publishes the pinned rows and the tray row never starts, and the session's writable "
+            "copy of the read-only base — which the pin file and every save on this page live in — "
+            "is never seeded.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m22.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+    # LOAD 2 IS THE ONLY LOAD THAT REACHES `done`, so a terminal state is also the evidence that
+    # the navigation happened at all. The pin proof's own first clause reads the three-part reload
+    # record; this is the phase it was taken in.
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE FIXTURE IS BUILT AND READ BY REAL PROGRAMS — `rm -f` on the pin file, `mkdir -p`, `echo`
+    # through a shell redirection, three `editor` processes, `winopen -n 2`, and one
+    # `wc`/`grep`/`stat` process per reading. A process that faulted during its own init reads
+    # downstream as "the window never opened", and a swallowed failure is a defect (CLAUDE.md,
+    # harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because every aim on this page is a VIEWPORT point computed from a CSS-px rect and
+    # the band proof's whole subject is a CSS-px shrink floor. A figure labelled with a ratio it was
+    # not taken at is what cost M11, M12 and M16 a milestone each (constraints 264, 297).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, TO THE EXACT COUNT, ACROSS BOTH LOADS. A CONSTANT AND NOT A FLOOR,
+    # which is M20's and M21's reason: a `>=` would be green for a drive that died halfway, and none
+    # of M22's three worlds stops a gesture happening.
+    #
+    # `got["gestures"]` IS LOAD 2's LOG ALONE, because a new document starts a new one — so the
+    # page's own count is the performed total less load 1's three, and the arithmetic is written
+    # here rather than being a second constant.
+    env.expect_that("the page was really driven",
+                    performed == M22_GESTURES
+                    and got["gestures"] == M22_GESTURES - M22_LOAD1_GESTURES,
+                    {"performed": performed, "want": M22_GESTURES,
+                     "pageLoggedInLoad2": got["gestures"],
+                     "load1": M22_LOAD1_GESTURES, "phase": got["phase"],
+                     "reload": got["reload"], "notDriven": got["notDriven"]})
+    # AND THE WORLD IS THE ONE ASKED FOR, from BOTH sides. `saveToWindowFd` travels on ONE
+    # process's argv and nothing page-side holds it, so it is checked against the DOCUMENT;
+    # `bandClips` and `trayOutlives` are page-side, and `controlsInForce` is the host's and the
+    # shell's own report of the MODULE state they are running under. A switch another page in this
+    # realm left holding is a world nobody asked for, which is why it is read BACK.
+    #
+    # THE TWO NON-EMPTY TESTS ARE WHAT STOP THAT HALF BEING VACUOUS: a page that published no
+    # record at all reads back as `{}`, and "no key is truthy" holds over an empty table. Both
+    # sub-records are REQUIRED to be there — `setHostControls` and `setShellControls` each return a
+    # full record of booleans — so a `controlsInForce` with one side missing is a page that only
+    # half answered.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    host_live = live.get("host") or {}
+    shell_live = live.get("shell") or {}
+    asked_band = "band_clips=1" in env.document
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(cfg.get("proofs")) and int(cfg.get("phase") or 0) == 2
+        and bool(shell_live) and bool(host_live)
+        and bool(shell_live.get("bandClips")) == asked_band
+        and not [key for key, value in shell_live.items()
+                 if value and key != "bandClips"]
+        and not [key for key, value in host_live.items() if value]
+        and bool(cfg.get("bandClips")) == asked_band
+        and bool(cfg.get("saveToWindowFd")) == ("save_to_window_fd=1" in env.document)
+        and bool(cfg.get("trayOutlives")) == ("tray_outlives=1" in env.document),
+        {"asked": cfg, "inForce": live, "document": env.document,
+         "paths": got["paths"], "chords": got["chords"]})
+
+    for proof, table in _M22_PROOFS:
+        _m22_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's through M21's precedent: a diagnosis naming the
+    # one fact that explains several red clauses at once, with its address, is cheaper than a reader
+    # rediscovering it from five evidence blocks. This page pushes two of them — the withdrawal
+    # finding behind the tray clauses, and the missing chord dispatcher if nothing took the chord.
+    #
+    # THE EXACT STRING AND NOT A SUBSTRING TEST. `bad: tray` and `bad: save` name which proof went,
+    # and a test that accepted any `bad:` would report the wrong world green. EVERY control turns
+    # this one, which is why `_M22_VERDICT` adds it to each control's `failed` set.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notDriven": got["notDriven"],
+                     "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. A band that scrolls and one that clips are the same picture,
+    # an inert tray icon and a working one are the same picture, and a save that wrote bytes and one
+    # that wrote `[saved]` to a window differ by nothing on screen — every clause above reads a byte
+    # count out of a separate process, a counter, a computed style or a hit test (constraint 40).
+    env.shoot("m22-shell")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m22.html", env.served_matches_disk(env.document),
+                    "the m22.html served does not match www/m22.html on disk")
+
+
+# ======================================================================================
+# m23. The blit, its five errnos, and the file manager's views.
+# ======================================================================================
+
+
+def _m23_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE PER CLAUSE AND NOT ONE PER PROOF, because every one of M23's five controls names SINGLE
+    clauses INSIDE a proof: `no-payloads` must turn four of the blit proof's nine and leave the six
+    errno clauses of a different proof alone, and `no-thumbs` must turn five of the shell proof's
+    fifteen while R26's fallback clause stays green. A check recording 'the blit proof passed'
+    could not tell a renderer that composited from one that overwrote, which is one of the two
+    readings this milestone exists for.
+
+    EVERY PROOF IS DRIVEN IN EVERY WORLD, so no control has to name a 'not driven' subset — none of
+    M23's five flags stops a gesture being performed. `notDriven` rides every failure anyway: a
+    null proof would make this record a page of red clauses, and the page's own list of what it
+    never ran is the cheapest way to see why.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause, "notDriven": got["notDriven"],
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m23",
+    milestone="m23",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.NO_PAYLOADS, Control.NO_REFUSALS,
+              Control.WHOLE_PAYLOAD, Control.NO_THUMBS, Control.BLIT_UNVALIDATED),
+    labels=M23_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M23_DOCUMENT,
+    ready_expr=M23_READY,
+    ready_what="globalThis.M23 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m23.html?proofs=1)",
+    ready_timeout=M23_TIMEOUT,
+    refusal_expr="globalThis.M23 && globalThis.M23.state",
+    refusal_want="aborted",
+    note="A PROCESS PUTS AN IMAGE IN ITS OWN WINDOW — `DL_BLIT` takes a data-object fd, so the "
+         "bytes are already kernel-owned and refcounted (constraints 240, 241) and the kernel "
+         "learns no image format: it validates with `decodeBitmap`, which is constraint 293's "
+         "rule for a text run applied unchanged. Three driven proofs: the blit draws, every way it "
+         "can be refused answers its own errno, and the file manager's views, address strip, "
+         "details pane, search and THUMBNAILS are read back out of the display list the page "
+         "replayed.\n"
+         "THE DECODE HAPPENS IN THE PROCESS, AND THAT IS A MEASUREMENT AND NOT A PREFERENCE. "
+         "`docs/PLAN-SHELL.md` §M23 assumed a locked-down realm has no `createImageBitmap`; "
+         "`bench/m23-blit/` imported `TARGETS` from src/libos/lockdown.mjs rather than grepping "
+         "for it and found the binding present, then went past 'present' to 'usable': a decode "
+         "settles inside a real process under M6's live CSP in 0.30 ms (Chrome, "
+         "bench/m23-blit/results-headless.json) / 0.12 ms (Firefox, results-firefox.json), "
+         "byte-exact against this repo's own /usr/share/logo.rgba — maxDelta 0 over 256 of 256 "
+         "opaque pixels in both engines — BUT ONLY IN AN AWAITED TURN: not while parked in a "
+         "syscall (406.81 ms elapsed, nothing settled) and not while spinning (400 ms), and a "
+         "COLD decode needed 7 macrotask turns in Chrome and 5 in Firefox. Constraint 219's shape "
+         "holds for a promise, which is why "
+         "`src/bin/files.mjs` does its decodes BETWEEN syscalls and why a synchronous thumbnail "
+         "loop over a directory cannot exist.\n"
+         "THE PIXELS ARE READ BACK, NOT PHOTOGRAPHED. A blit that drew and one that did not are "
+         "the same picture on a surface nobody sampled, and `blitsUnbacked` is the one counter "
+         "that tells 'the payload channel dropped it' from 'the program drew nothing'. The "
+         "destination comes off the `DL_BLIT` op the page TAPPED and the clear colour off the "
+         "`DL_CLEAR` in the first batch, so neither a colour nor a coordinate is restated by the "
+         "page; `M23.blitReadback` is the one function a second engine asserts with, because a "
+         "driver with its own copy of 'where the payload is and what colour it should be' asserts "
+         "the wrong pixel the first time `thumbFit` changes.\n"
+         "ONE EXPECTATION PER REFUSAL. Six attempts, FIVE distinct errnos — EBADF for no fd and "
+         "for a negative one, EINVAL for an fd on something that is not an F_DATA, ENOTSUP for an "
+         "object that never offered DOBJ_BITMAP, ENOENT for one that offered and never wrote it, "
+         "EBADMSG for bytes that contradict their own header. A single 'it refused' passes for a "
+         "program that blitted a FILE descriptor (CLAUDE.md), and the sixth errno is the only one "
+         "the kernel can reach by decoding. A batch with one bad blit is refused WHOLE, asserted "
+         "as five points of the good fill's own rectangle: a fill that landed and was covered by "
+         "nothing is a rectangle, not a pixel.\n"
+         "THE RATIO IS WHERE A THUMBNAIL DEFECT HIDES. A payload is produced at `cell * dpr` "
+         "DEVICE px, so at dpr 1 a 16x16 logo is 1:1 and at dpr 2 it is resampled — the suite runs "
+         "at VIEWPORT_SCALE, and the clause recomputes the extent from the program's own exported "
+         "`thumbFit` rather than from a constant. A clause right at dpr 1 and wrong by the ratio "
+         "everywhere else is the shape of defect that cost M11, M12 and M16 a milestone each "
+         "(constraints 264, 297).\n"
+         "WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped: the `q` that collects "
+         "each account is a SYNTHESISED key, because `scripts/cdp.py`'s KEYS table carries no "
+         "printable letters and the gesture protocol's `type` kind is for a field. What a "
+         "synthesised key could not prove is a key's ARRIVAL, which is M18's subject and not this "
+         "one. Every POINTER gesture and the typed query are real input.\n"
+         "negative controls: --negative no-payloads wraps `Surface.prototype.replay` to drop the "
+         "payload map and turns FIVE — the four clauses that read a pixel a payload put there, and "
+         "the renderer's backed-blit count — while EVERY ERRNO CLAUSE HOLDS, because the refusals "
+         "are the kernel's and that world is the renderer's. --negative no-refusals makes none of "
+         "the six bad calls and turns EIGHT, which is the only run that can say the errno clauses "
+         "are coupled to those calls rather than to a constant; `and the refused batches never "
+         "reached the page` HOLDS under it, the same number for the opposite reason, so it is "
+         "deliberately not in that subset. --negative whole-payload writes a WHOLE bitmap where "
+         "the torn one goes and --negative blit-unvalidated patches `let blitValidated = false` "
+         "into the SERVED src/kernel/calls.mjs: the same four clauses by two different mechanisms, "
+         "the program's bytes and the kernel's `decodeBitmap`, and both hold `and the six attempts "
+         "answered five distinct errnos` because the sixth row answers `0` and five distinct "
+         "answers is still five. --negative no-thumbs decodes nothing and turns FIVE while R26's "
+         "fallback clause stays green, which is the whole difference between a fallback and a "
+         "blank cell. --negative no-isolation must come out BROKEN: no SAB, no kernel, no process "
+         "to decode in and no surface to blit onto.\n"
+         "MEASURED SUBSETS, one run each at dpr 2 on Chrome 158, counted as the check's own red "
+         "rows against 0 red in the plain phase: 6 red / 39 intact for no-payloads, 9 / 36 for "
+         "no-refusals, 5 / 40 for whole-payload, 5 / 40 for blit-unvalidated and 6 / 39 for "
+         "no-thumbs — so the five worlds turn 5, 8, 4, 4 and 5 clauses of their own, plus `the "
+         "page's own verdict is ok`, which EVERY world turns and which no control is named for "
+         "(`_M23_VERDICT`).",
+)
+def check_m23(env: Env) -> None:
+    performed = drive_gestures(env, "M23", timeout=M23_TIMEOUT)
+    got = env.read(READ_M23, M23_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m23.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m23.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, nothing holds a data object, there is no surface "
+            "to blit onto and the `files` process whose decodes every thumbnail clause reads never "
+            "starts.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m23.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # A PROCESS THAT FAULTED DURING ITS OWN INIT READS DOWNSTREAM AS 'THE WINDOW NEVER OPENED', and
+    # this page runs five of them: the desktop, three `m23blit` runs and one `files`. A swallowed
+    # failure is a defect (CLAUDE.md, harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because a thumbnail payload is produced at `cell * dpr` DEVICE px and every aim on
+    # this page is a viewport point computed from a CSS-px rect. A figure labelled with a ratio it
+    # was not taken at is what cost M11, M12 and M16 a milestone each (constraints 264, 297).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, TO THE EXACT COUNT. A CONSTANT AND NOT A FLOOR, which is M20's
+    # through M22's reason: a `>=` would be green for a drive that died halfway, and none of M23's
+    # five worlds stops a gesture happening. Both counts, because `performed` is the driver's and
+    # `gestureLog` is the page's, and a receipt the page never saw is a gesture nobody performed.
+    env.expect_that("the page was really driven",
+                    performed == M23_GESTURES and got["gestures"] == M23_GESTURES,
+                    {"performed": performed, "want": M23_GESTURES,
+                     "pageLogged": got["gestures"], "phase": got["phase"],
+                     "notDriven": got["notDriven"]})
+    # AND THE WORLD IS THE ONE ASKED FOR, from BOTH sides. Four of the five flags are the page's
+    # own query parameters, so they are checked against the DOCUMENT; `controlsInForce` is the
+    # host's and the shell's report of the MODULE state they are running under, and a switch
+    # another page in this realm left holding is a world nobody asked for.
+    #
+    # THE TWO NON-EMPTY TESTS ARE WHAT STOP THAT HALF BEING VACUOUS: a page that published no
+    # record reads back as `{}`, and "no key is truthy" holds over an empty table.
+    #
+    # `blit_unvalidated` IS CHECKED THE SAME WAY AND MEANS SOMETHING ELSE: the page passes it to
+    # the kernel as a cfg key no hook reads, so it records the ASK and not the world. What says the
+    # world arrived is the EBADMSG clause going red, which is why it is in that control's `failed`
+    # set and why this clause cannot stand in for it.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    host_live = live.get("host") or {}
+    shell_live = live.get("shell") or {}
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(cfg.get("proofs")) and bool(shell_live) and bool(host_live)
+        and not [key for key, value in shell_live.items() if value]
+        and not [key for key, value in host_live.items() if value]
+        and bool(cfg.get("noPayloads")) == ("no_payloads=1" in env.document)
+        and bool(cfg.get("noRefusals")) == ("no_refusals=1" in env.document)
+        and bool(cfg.get("wholePayload")) == ("whole_payload=1" in env.document)
+        and bool(cfg.get("noThumbs")) == ("no_thumbs=1" in env.document)
+        and bool(cfg.get("blitUnvalidated")) == ("blit_unvalidated=1" in env.document),
+        {"asked": cfg, "inForce": live, "document": env.document})
+    # THE GROUND TRUTH IS A FILE AND NOT A CONSTANT, and this clause is what stops its absence
+    # being a silently skipped comparison. `/src/share/logo.rgba` is the same bytes the `/usr/share`
+    # provider mount serves (src/kernel/providerfs.mjs), fetched over HTTP and decoded with the
+    # ABI's own `decodeBitmap` — so the thumbnail clauses compare a payload against a FILE rather
+    # than two copies of an image. 1032 B is BITMAP_HEADER + 16*16*4, derived and not chosen: a
+    # DOBJ_BITMAP payload is its header plus one 32-bit pixel each.
+    gt = got["groundTruth"] or {}
+    env.expect_that("the ground truth is the file the mount serves",
+                    not gt.get("why")
+                    and (gt.get("w"), gt.get("h"), gt.get("bytes"))
+                    == (M23_LOGO["w"], M23_LOGO["h"], M23_LOGO["bytes"]),
+                    {"groundTruth": gt, "want": M23_LOGO})
+
+    for proof, table in _M23_PROOFS:
+        _m23_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's through M22's precedent: a diagnosis naming the
+    # one fact that explains several red clauses at once, with its address, is cheaper than a
+    # reader rediscovering it from three evidence blocks. This page pushes one that matters — the
+    # `blit_unvalidated` world refusing to report itself built when the EBADMSG attempt was still
+    # refused.
+    #
+    # THE EXACT STRING AND NOT A SUBSTRING TEST. `bad: refuse` and `bad: shell` name which proof
+    # went, and a test that accepted any `bad:` would report the wrong world green. EVERY control
+    # turns this one, which is why `_M23_VERDICT` adds it to each control's `failed` set.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notDriven": got["notDriven"],
+                     "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. A blit that drew and one whose payload was dropped are the
+    # same picture at this size, a refused batch and a batch nobody sent are the same screen, and a
+    # thumbnail resampled wrongly is a picture that still looks like the logo — every clause above
+    # reads a pixel back through `Surface.pixel`, a counter, a text run out of the display list or
+    # a byte count from the program's own account (constraint 40).
+    env.shoot("m23-blit")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m23.html", env.served_matches_disk(env.document),
+                    "the m23.html served does not match www/m23.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

@@ -51,7 +51,10 @@ import {
 /** The modifiers held, as `mods` bits. ONE mapping for every event type that carries them — a key,
  *  a pointer and a wheel had three copies of these three lines, and `mods` is one namespace
  *  (src/abi.mjs). An absent event is no modifiers, which is `#keys`'s synthetic-caller case. */
-function modifierBits(event) {
+/* EXPORTED because `src/wm/chords.mjs`'s `takeChord` takes the mods from its CALLER, and its own
+ * comment says why: this is the one definition of how a `KeyboardEvent` becomes `WMOD_*` bits, and
+ * a second reading of `altKey` in the chord table would be the copy that drifts. */
+export function modifierBits(event) {
   let mods = 0;
   if (!event) return mods;
   if (event.shiftKey) mods |= WMOD_SHIFT;
@@ -776,7 +779,11 @@ export class WinHost {
     if (!entry.surface) { this.stats.unknown += 1; return; }
     const bytes = m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0);
     this.stats.batches += 1;
-    this.stats.ops += entry.surface.replay(bytes);
+    /* M23. THE BLIT PAYLOADS RIDE THE SAME MESSAGE, `Map<fd, Uint8Array>` or absent. Forwarded and
+     * never inspected, which is this file's whole rule: the kernel resolved the fds and validated
+     * the headers (`src/kernel/calls.mjs`), `src/wm/surface.mjs` is the one renderer, and the page
+     * decides nothing. A message carrying no map replays as every batch before M23 did. */
+    this.stats.ops += entry.surface.replay(bytes, m.blits instanceof Map ? m.blits : null);
   }
 
   /**

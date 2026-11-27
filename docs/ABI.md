@@ -279,7 +279,8 @@ INVAL NAMETOOLONG
 `win_set(fd, what, …)` → 0 · BADF INVAL **EHOSTGONE**
 `win_surface(fd, w, h)` → 0 · BADF INVAL **ENOMEM** **EHOSTGONE** — `w` × `h` DEVICE pixels, and
 the kernel allocates it
-`win_draw(fd, nops, byteregion = nops × 32 B)` → 0 · BADF INVAL **EHOSTGONE**
+`win_draw(fd, nops, byteregion = nops × 32 B)` → 0 · BADF INVAL **EHOSTGONE** — and, for a
+`DL_BLIT` in the list, **ENOTSUP** **ENOENT** **EBADMSG**; see §A `DL_BLIT` is validated five ways
 `win_raise(fd)` → 0 · BADF INVAL **EPERM** (a modal blocks it) **EHOSTGONE**
 `win_poll` DOES NOT EXIST, and that is the design: the fd `win_create` returns is read with
 `read(2)` and waited on with `poll(2)`
@@ -388,6 +389,7 @@ arguments and a reserved word. `DL_MAX_OPS` — how many fit in one call — is 
 | `DL_STROKE_RECT` | `a0..a3` = x, y, w, h; `a4` = rgba; `a5` = line width |
 | `DL_LINE` | `a0..a3` = x0, y0, x1, y1; `a4` = rgba; `a5` = line width |
 | `DL_TEXT` + `DL_TEXT_DATA` | M15. The header is `a0`, `a1` = x, y (TOP-left), `a2` = px size, `a3` = the byte length, `a4` = rgba, with `DLT_BOLD` / `DLT_MONO` / `DLT_RIGHT` / `DLT_CENTER` in flags; then `ceil(len / 24)` `DL_TEXT_DATA` records carrying the UTF-8 in `a0..a5` as little-endian words. A record is 32 bytes and a string is not, so the run is a header plus continuations — and a header whose data is missing is refused WHOLE by the kernel, because half a filename reads as a filename (constraint 293) |
+| `DL_BLIT` | M23. `a0`, `a1` = the destination's TOP-left in SURFACE px, **signed** — a scrolled list draws a row at a negative y; `a2` = a **data-object fd** whose `DOBJ_BITMAP` payload holds the pixels; `a3..a5` unused and written zero. **There is NO destination w/h**: the extent is the payload's own `BMP_W`/`BMP_H`, so a caller wanting a 32×32 thumbnail decodes at 32×32, and at `cell × dpr` for a dpr-2 surface using the ratio `WEV_CLIENT` handed it (constraint 319). `encodeBlit(fd, x, y)` and `blitFdOf(op)` are declared inverses and the only two places `a2` is spelled — the kernel's validator and `src/wm/surface.mjs` are the readers. Pixels MUST NOT travel inline: six i32 arguments is six pixels, worse than one `DL_FILL_RECT` each (constraint 317) |
 | `DL_CLIP` | M17. `a0..a3` = x, y, w, h in SURFACE px, like every other display-list coordinate. It INTERSECTS, as a canvas clip does, so two viewports in one batch need a `DLC_RESET` between them; `flags & DLC_RESET` drops the clip instead and `a0..a3` are then ignored. **It is the first op that outlives itself**, so `replay` resets the clip at the top of every batch — a clip left set by batch N would make batch N+1 draw nothing, which a reader sees as a window gone blank with no error anywhere |
 
 **Every colour is `0xRRGGBBAA`**, and `src/abi.mjs` renders it for both consumers: `cssColor` for a
@@ -405,6 +407,24 @@ name a viewport that overhangs, and a row drawn at a negative offset MAY be clip
 negative y, so containment is not required and the far edge is exclusive. A reset is not
 rect-validated at all, since it takes no rectangle. A window with no surface answers EINVAL for the
 older reason: there is nothing to draw on, and the clip rect is never inspected.
+
+**A `DL_BLIT` IS VALIDATED FIVE WAYS AND EACH ANSWERS ITS OWN ERRNO**, whole batch, before anything
+is drawn — the rule a malformed text run already gets (constraint 293), because a single "it
+refused" passes for a refusal for the wrong reason:
+
+| errno | when |
+|---|---|
+| **EBADF** | no such fd, and a negative fd |
+| **EINVAL** | an fd on something that is not an `F_DATA` |
+| **ENOTSUP** | the object never offered `DOBJ_BITMAP` |
+| **ENOENT** | offered and never written |
+| **EBADMSG** | present, and `decodeBitmap` refuses the bytes against their own header |
+
+**`EBADMSG` is 9**, WASI preview1's number and not Linux's (constraint 306). Each fd is resolved
+once per batch, so one sprite drawn N times costs one fetch, and the bytes handed to the page are a
+VIEW of the kernel-owned payload rather than a copy. The kernel validates with `decodeBitmap` and
+never with an image decoder: a format parser over untrusted bytes in the only privileged realm in
+the system is the direction M6 exists to reverse (`docs/DECISIONS.md` D42).
 
 **`WEV_POINTER` is how a surface is reached**: `a` and `b` are x and y in SURFACE pixels, `c` is the
 button mask, and `mods` carries `WPTR_DOWN` / `WPTR_UP` / `WPTR_MOVE` beside the keyboard
@@ -471,7 +491,7 @@ group exists to remove.
 | `DOBJ_TEXT` | UTF-8 |
 | `DOBJ_PATHS` | Windows' CF_HDROP as this filesystem spells it: ABSOLUTE paths, NUL-separated, no trailing NUL |
 | `DOBJ_PNG` | opaque PNG bytes. Nothing here decodes PNG — it is the proof that bytes of a format the system does not understand cross two processes untouched |
-| `DOBJ_BITMAP` | `[u32 w][u32 h]` then RGBA8 rows, top row first. The one image format a display list can draw, one `DL_FILL_RECT` per pixel |
+| `DOBJ_BITMAP` | `[u32 w][u32 h]` then RGBA8 rows, top row first. The one image format a display list can draw — **by `DL_BLIT`, which names the object by fd**, since M23. Before that op existed the only route was one `DL_FILL_RECT` per pixel, which is 256 records for a 16×16 icon |
 
 **THE OFFER IS A BITMASK, DECLARED AT CREATE AND NEVER WIDENED**, and it travels in a register and
 in an event record's `c` field — because a drop target must decide whether it can accept DURING the
@@ -766,6 +786,53 @@ the VFS's own hop limit.
 `utimesNow(path)` → 0 or -errno, and `realpath(path)` → the canonical path **as a string**, or a
 negative number, which is `readlink`'s shape. All three reach a program through the frozen `env.fs`
 table in `src/libos/process.mjs`; a program must not import `syscall.mjs` itself.
+
+### The eighth item flag, as M22 built it — and the row that adds NO CALL
+
+**M22 ADDS NO SYSCALL, NO ERRNO AND NO RECORD.** `NSYS` is still **63** and §Two counts still closes
+at `63 + 16 - 4 = 75`. That is the honest summary of the shape: a pinned taskbar button and a tray
+status icon are not a new capability, they are two more kinds of **published row**, and the call that
+carries them — `win_items` — has existed since M14. `WinMgr.activateItem` passes `where` through
+unvalidated, so `activateItem(win, index, WITEM_TRAY)` already worked and the kernel needed no edit.
+
+**`WITEM_TRAY: 0x80` IS THE EIGHTH ITEM FLAG AND `WITEM_FLAGS_ALL` IS `0xff`**, up from `0x7f`. M20
+took the seventh (`WITEM_CONTEXT: 0x40`), so this is the second move of that mask and the last one
+the low byte can take. `selfTest` asserts the mask is the OR of the declared flags **and** that the
+flag list is 8 rows, so a ninth flag that forgot either fails under node.
+
+**THE BIT IS A PLACE AND NOT A KIND, which is why it is read through two functions and never
+directly.** `WITEM_TRAY` says *not in the start menu*; what the row IS depends on `WITEM_MENU`
+beside it:
+
+| flags | what the row is | where it is drawn |
+|---|---|---|
+| `WITEM_TRAY` alone | a **status icon**. Not a launcher: it stands for a process that is running | the notification area |
+| `WITEM_TRAY \| WITEM_MENU` | a **pinned button**. A launcher, which is what a pin is | the Superbar's band |
+| `WITEM_MENU` alone | a start-menu row, M14's meaning, unchanged | the start menu |
+
+`isTrayRow(flags)` and `isPinnedRow(flags)` in `src/abi.mjs` are the only readers, and **they are
+exclusive over all 256 flag words, asserted at module load** — a loop, not a fixture, because a
+composed bit whose two readings overlap puts one row in two places and the overlap would be found by
+whichever case nobody wrote. Both also reject `WITEM_SEPARATOR`: a separator has no place.
+
+**THE CONSEQUENCE FOR A PUBLISHER IS A ONE-BIT MISTAKE WITH A VISIBLE SYMPTOM.** A tray status icon
+that carries `WITEM_MENU` is drawn in the band as a pin, so the test is not decoration. And a pinned
+row's **label MUST be the program's name exactly** as the basename of `argv[0]`: that string is the
+Superbar's group key, and it is the only thing that merges a pinned button with the window the
+program later opens. Pinned rows MUST be published on the **desktop** window (`WROLE_DESKTOP`) —
+the shell reads them from the one window that outlives every program; tray rows may be on **any**
+window and are withdrawn by that window being destroyed, which is `win_items`' own lifetime and not
+a new one.
+
+**NO NEW EVENT, AND THE ACTIVATION ARRIVES THROUGH `WEV_ITEM` WITH `where` CARRYING THE BIT.**
+`itemAt(ev)` is unchanged: `{ index, where }`, dismissal `index < 0`. A tray icon's activation reads
+`where & WITEM_TRAY`, and a **pin launch** arrives as `WITEM_MENU` because the gesture is a
+start-menu row — so a publisher counting tray activations must count the event's `where` and not the
+row's flags.
+
+**A14's CHORD TABLE IS NOT IN THIS DOCUMENT AND MUST NOT BE.** `src/wm/chords.mjs` binds
+`KeyboardEvent.code` — a browser string, and both of its readers are page-side. This file holds what
+the kernel and a process must agree on. Constraints 312 and 313 and `DECISIONS.md` D41 carry it.
 
 ---
 

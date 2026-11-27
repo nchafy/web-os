@@ -1,0 +1,781 @@
+{
+  "ok": true,
+  "why": "all 8 clause(s) green in Firefox",
+  "clauses": {
+    "the window opened with a surface and a batch": true,
+    "the breadcrumb has a segment per path component": true,
+    "and every segment's box fits the strip's room": true,
+    "a trusted press on a segment navigated to the path it named": true,
+    "a trusted press on the view button repainted the window": true,
+    "a trusted Ctrl+F and typed keys narrowed the listing": true,
+    "and the program counted the narrowing": true,
+    "a payload was made at THIS engine's ratio": true
+  },
+  "evidence": {
+    "url": "http://127.0.0.1:49427/bench/m23-files/page.html?dir=/Users/Default/share&argv=--view%20medium",
+    "proveFailure": false,
+    "start": {
+      "ready": true,
+      "phase": "live",
+      "dpr": 1,
+      "title": "files \u2014 /Users/Default/share",
+      "clientW": 748,
+      "scale": 1,
+      "store": {
+        "w": 748,
+        "h": 484
+      },
+      "surface": {
+        "w": 748,
+        "h": 484,
+        "ops": 40,
+        "batches": 1,
+        "unknown": 0,
+        "text": 13,
+        "clips": 1,
+        "clipResets": 0,
+        "blits": 2,
+        "blitsUnbacked": 0,
+        "extent": {
+          "cssW": 748,
+          "cssH": 484,
+          "clientW": 748,
+          "clientH": 484
+        }
+      },
+      "stripRoom": 586,
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 52,
+          "y": 147,
+          "right": 20
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 87,
+          "y": 147,
+          "right": 69
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 143,
+          "y": 147,
+          "right": 132
+        },
+        {
+          "label": "share",
+          "path": "/Users/Default/share",
+          "x": 199,
+          "y": 147,
+          "right": 181
+        }
+      ],
+      "emptyAt": {
+        "x": 229,
+        "y": 147
+      },
+      "viewAt": {
+        "x": 775,
+        "y": 147
+      },
+      "centre": {
+        "x": 414,
+        "y": 350
+      },
+      "runs": [
+        "3 items",
+        "/",
+        "Users",
+        "Default",
+        "share",
+        "Search",
+        "Medium icons \u00b7 sorted by Name",
+        "logo.png",
+        "png \u00b7 1 KB",
+        "logo.rgba",
+        "bitmap \u00b7 2 KB",
+        "readme.txt",
+        "text \u00b7 1 KB"
+      ]
+    },
+    "pressed": {
+      "at": {
+        "x": 143,
+        "y": 147
+      },
+      "wanted": "/Users/Default",
+      "what": "Default"
+    },
+    "afterPress": {
+      "ready": true,
+      "phase": "live",
+      "dpr": 1,
+      "title": "files \u2014 /Users/Default",
+      "clientW": 748,
+      "scale": 1,
+      "store": {
+        "w": 748,
+        "h": 484
+      },
+      "surface": {
+        "w": 748,
+        "h": 484,
+        "ops": 81,
+        "batches": 2,
+        "unknown": 0,
+        "text": 27,
+        "clips": 2,
+        "clipResets": 0,
+        "blits": 2,
+        "blitsUnbacked": 0,
+        "extent": {
+          "cssW": 748,
+          "cssH": 484,
+          "clientW": 748,
+          "clientH": 484
+        }
+      },
+      "stripRoom": 586,
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 52,
+          "y": 147,
+          "right": 20
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 87,
+          "y": 147,
+          "right": 69
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 143,
+          "y": 147,
+          "right": 132
+        }
+      ],
+      "emptyAt": {
+        "x": 180,
+        "y": 147
+      },
+      "viewAt": {
+        "x": 775,
+        "y": 147
+      },
+      "centre": {
+        "x": 414,
+        "y": 350
+      },
+      "runs": [
+        "4 items",
+        "/",
+        "Users",
+        "Default",
+        "Search",
+        "Medium icons \u00b7 sorted by Name",
+        "bin",
+        "DIR",
+        "include",
+        "DIR",
+        "lib",
+        "DIR",
+        "share",
+        "DIR"
+      ]
+    },
+    "titleDir": "/Users/Default",
+    "afterViewButton": {
+      "ready": true,
+      "phase": "live",
+      "dpr": 1,
+      "title": "files \u2014 /Users/Default",
+      "clientW": 748,
+      "scale": 1,
+      "store": {
+        "w": 748,
+        "h": 484
+      },
+      "surface": {
+        "w": 748,
+        "h": 484,
+        "ops": 118,
+        "batches": 3,
+        "unknown": 0,
+        "text": 37,
+        "clips": 3,
+        "clipResets": 0,
+        "blits": 2,
+        "blitsUnbacked": 0,
+        "extent": {
+          "cssW": 748,
+          "cssH": 484,
+          "clientW": 748,
+          "clientH": 484
+        }
+      },
+      "stripRoom": 586,
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 52,
+          "y": 147,
+          "right": 20
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 87,
+          "y": 147,
+          "right": 69
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 143,
+          "y": 147,
+          "right": 132
+        }
+      ],
+      "emptyAt": {
+        "x": 180,
+        "y": 147
+      },
+      "viewAt": {
+        "x": 775,
+        "y": 147
+      },
+      "centre": {
+        "x": 414,
+        "y": 350
+      },
+      "runs": [
+        "4 items",
+        "/",
+        "Users",
+        "Default",
+        "Search",
+        "Small icons \u00b7 sorted by Name",
+        "bin",
+        "include",
+        "lib",
+        "share"
+      ]
+    },
+    "afterSearch": {
+      "ready": true,
+      "phase": "live",
+      "dpr": 1,
+      "title": "files \u2014 /Users/Default",
+      "clientW": 748,
+      "scale": 1,
+      "store": {
+        "w": 748,
+        "h": 484
+      },
+      "surface": {
+        "w": 748,
+        "h": 484,
+        "ops": 220,
+        "batches": 6,
+        "unknown": 0,
+        "text": 64,
+        "clips": 6,
+        "clipResets": 0,
+        "blits": 2,
+        "blitsUnbacked": 0,
+        "extent": {
+          "cssW": 748,
+          "cssH": 484,
+          "clientW": 748,
+          "clientH": 484
+        }
+      },
+      "stripRoom": 586,
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 52,
+          "y": 147,
+          "right": 20
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 87,
+          "y": 147,
+          "right": 69
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 143,
+          "y": 147,
+          "right": 132
+        }
+      ],
+      "emptyAt": {
+        "x": 180,
+        "y": 147
+      },
+      "viewAt": {
+        "x": 775,
+        "y": 147
+      },
+      "centre": {
+        "x": 414,
+        "y": 350
+      },
+      "runs": [
+        "0 items",
+        "\"o\" \u2014 0 of 4 here",
+        "/",
+        "Users",
+        "Default",
+        "o",
+        "Small icons \u00b7 sorted by Name"
+      ]
+    },
+    "searchSaid": "\"o\" \u2014 0 of 4 here",
+    "row": {
+      "exit": 0,
+      "program": "files",
+      "dir": "/Users/Default",
+      "win": 1,
+      "fd": 0,
+      "rows": [
+        {
+          "name": "bin",
+          "format": "DIR",
+          "dir": true,
+          "size": 33,
+          "mtimeMs": 1795775694585,
+          "statted": true,
+          "origin": "",
+          "cells": {
+            "name": "bin",
+            "date": "2026-11-27 05:34",
+            "type": "DIR",
+            "size": ""
+          }
+        },
+        {
+          "name": "include",
+          "format": "DIR",
+          "dir": true,
+          "size": 1,
+          "mtimeMs": 1795775694594,
+          "statted": true,
+          "origin": "",
+          "cells": {
+            "name": "include",
+            "date": "2026-11-27 05:34",
+            "type": "DIR",
+            "size": ""
+          }
+        },
+        {
+          "name": "lib",
+          "format": "DIR",
+          "dir": true,
+          "size": 2,
+          "mtimeMs": 1795775694615,
+          "statted": true,
+          "origin": "",
+          "cells": {
+            "name": "lib",
+            "date": "2026-11-27 05:34",
+            "type": "DIR",
+            "size": ""
+          }
+        },
+        {
+          "name": "share",
+          "format": "DIR",
+          "dir": true,
+          "size": 3,
+          "mtimeMs": 1795775694656,
+          "statted": true,
+          "origin": "",
+          "cells": {
+            "name": "share",
+            "date": "2026-11-27 05:34",
+            "type": "DIR",
+            "size": ""
+          }
+        }
+      ],
+      "drags": 0,
+      "refusedDrags": 0,
+      "dirFrom": "argv",
+      "dirWhy": "",
+      "pointers": 9,
+      "presses": 0,
+      "drops": [],
+      "effects": [],
+      "why": "q",
+      "clients": 2,
+      "resurfaces": 1,
+      "refusedSurfaces": 0,
+      "surfaceWhy": "",
+      "surface": {
+        "w": 748,
+        "h": 484
+      },
+      "client": {
+        "w": 748,
+        "h": 484
+      },
+      "dpr": 1,
+      "wheels": 0,
+      "coalescedWheels": 0,
+      "pageWheels": 0,
+      "scroll": 0,
+      "scrollMax": 0,
+      "dyTotal": 0,
+      "clamped": {
+        "top": 0,
+        "bottom": 0
+      },
+      "maxRows": 60,
+      "shownRows": 4,
+      "firstRow": 0,
+      "focus": -1,
+      "keysyms": 0,
+      "dblclicks": 0,
+      "activations": 0,
+      "relists": 1,
+      "backs": 0,
+      "spawned": [],
+      "refused": 0,
+      "refusals": [],
+      "refusalWhy": "",
+      "history": 1,
+      "sort": {
+        "key": "name",
+        "dir": 1,
+        "chosen": false
+      },
+      "sorts": 0,
+      "selected": [],
+      "anchor": -1,
+      "selects": 0,
+      "bands": 1,
+      "bandSelected": 0,
+      "hovers": 3,
+      "leaves": 0,
+      "lit": -1,
+      "stats": 7,
+      "dirStats": 4,
+      "cappedRows": 0,
+      "menus": 0,
+      "refusedMenus": 0,
+      "dismissals": 0,
+      "chosen": [],
+      "menuRows": [],
+      "menuTarget": -1,
+      "menuInSurfaceAt": null,
+      "created": [],
+      "renamed": [],
+      "deleted": [],
+      "pasted": [],
+      "clipboard": null,
+      "copies": 0,
+      "cuts": 0,
+      "pastes": 0,
+      "renaming": null,
+      "renames": 0,
+      "bin": {
+        "dir": "/Users/Default/$Recycle.Bin",
+        "binned": [],
+        "restored": [],
+        "permanent": 0,
+        "stranded": 0,
+        "strandedRecords": 0,
+        "listing": false
+      },
+      "view": "small",
+      "viewLabel": "Small icons",
+      "viewFlow": "grid",
+      "viewAxis": "y",
+      "viewSwitches": 1,
+      "viewFrom": "argv",
+      "lanes": 4,
+      "viewsRemembered": 1,
+      "crumbs": [
+        {
+          "label": "/",
+          "path": "/",
+          "x": 4,
+          "w": 16
+        },
+        {
+          "label": "Users",
+          "path": "/Users",
+          "x": 24,
+          "w": 45
+        },
+        {
+          "label": "Default",
+          "path": "/Users/Default",
+          "x": 73,
+          "w": 59
+        }
+      ],
+      "crumbNav": 1,
+      "pathEdits": 0,
+      "pathWas": "",
+      "strip": "trail",
+      "stripDraft": "",
+      "query": "",
+      "matched": 4,
+      "listed": 4,
+      "searches": 1,
+      "deepSearches": 0,
+      "searchCost": {
+        "dirsRead": 0,
+        "entriesSeen": 0,
+        "statted": 0,
+        "ms": 0,
+        "chunks": 0,
+        "why": ""
+      },
+      "statMs": 1.039999999999992,
+      "refreshes": 0,
+      "refreshKept": 0,
+      "dragEnters": 0,
+      "dragLeaves": 0,
+      "dropsIn": 0,
+      "dragOffers": [],
+      "dropped": [],
+      "dropWhere": [],
+      "effectsOffered": [],
+      "movedOut": [],
+      "thumbs": {
+        "wanted": 0,
+        "ready": 0,
+        "decoded": 2,
+        "fellBack": 0,
+        "capped": 0,
+        "clamped": 0,
+        "evicted": 0,
+        "released": 2,
+        "bytes": 0,
+        "peakBytes": 2064,
+        "maxSide": 511,
+        "cap": 28,
+        "decodeMs": 32.56,
+        "rows": [],
+        "why": "Small icons draws type icons",
+        "made": [
+          {
+            "path": "/Users/Default/share/logo.png",
+            "w": 16,
+            "h": 16,
+            "bytes": 1032,
+            "cell": 48,
+            "scale": 1
+          },
+          {
+            "path": "/Users/Default/share/logo.rgba",
+            "w": 16,
+            "h": 16,
+            "bytes": 1032,
+            "cell": 48,
+            "scale": 1
+          }
+        ],
+        "madeCapped": 0,
+        "drewPictures": 0,
+        "drewIcons": 4
+      },
+      "controls": {
+        "frozenSurface": false,
+        "cssPxSurface": false,
+        "unclampedScroll": false,
+        "stableSortOff": false,
+        "foldersLast": false,
+        "noDirStat": false,
+        "bandFromRow": false,
+        "menuInSurface": false,
+        "pasteClobbers": false,
+        "restoreOverwrites": false,
+        "moveForcedCopy": false,
+        "staleListing": false,
+        "noThumbs": false,
+        "thumbNoFallback": false
+      },
+      "noDrainMs": 0,
+      "heldMs": 0,
+      "destroyed": [
+        1
+      ],
+      "ms": 4371.68,
+      "clock": {
+        "n": 200000,
+        "quantumMs": 0.01999999999999602,
+        "zeroFraction": 0.996925,
+        "meanMs": 6.150000000000022e-05,
+        "maxMs": 0.020000000000003126,
+        "distinct": [
+          [
+            0,
+            199385
+          ],
+          [
+            0.01999999999999602,
+            264
+          ],
+          [
+            0.019999999999999574,
+            1
+          ],
+          [
+            0.020000000000003126,
+            350
+          ]
+        ]
+      },
+      "realm": {
+        "skipped": false,
+        "stripped": [
+          "global.fetch",
+          "global.XMLHttpRequest",
+          "global.importScripts",
+          "global.indexedDB",
+          "global.caches",
+          "global.WebSocket",
+          "global.Worker",
+          "navigator.storage",
+          "URL.createObjectURL",
+          "URL.revokeObjectURL"
+        ],
+        "absent": [
+          "global.SharedWorker"
+        ],
+        "remaining": [],
+        "where": {
+          "global.fetch": [
+            "WorkerGlobalScope"
+          ],
+          "global.XMLHttpRequest": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.importScripts": [
+            "WorkerGlobalScope"
+          ],
+          "global.indexedDB": [
+            "WorkerGlobalScope"
+          ],
+          "global.caches": [
+            "WorkerGlobalScope"
+          ],
+          "global.WebSocket": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "global.Worker": [
+            "DedicatedWorkerGlobalScope"
+          ],
+          "navigator.storage": [
+            "WorkerNavigator"
+          ],
+          "URL.createObjectURL": [
+            "Function"
+          ],
+          "URL.revokeObjectURL": [
+            "Function"
+          ]
+        }
+      },
+      "abiFingerprint": 3049692993,
+      "isolated": true,
+      "exiting": false,
+      "envKeys": [
+        "syscall",
+        "write",
+        "r1of",
+        "rawWriteLength",
+        "probeNotEqual",
+        "samples",
+        "resetSamples",
+        "observeHeartbeat",
+        "barrierArrive",
+        "barrierDepart",
+        "barrierCounters",
+        "publishProgress",
+        "fs",
+        "proc",
+        "tty",
+        "win",
+        "data",
+        "std",
+        "shlex",
+        "pid",
+        "index",
+        "argv",
+        "envp"
+      ],
+      "envKinds": [
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "function",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "plain",
+        "number",
+        "number",
+        "plain",
+        "plain"
+      ],
+      "pid": 1,
+      "calls": 111,
+      "replies": 111,
+      "errors": 0,
+      "sinkBytes": 3233,
+      "sinkSum": 3061185167,
+      "sinkWrites": 23
+    },
+    "payloads": [
+      {
+        "path": "/Users/Default/share/logo.png",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 48,
+        "scale": 1
+      },
+      {
+        "path": "/Users/Default/share/logo.rgba",
+        "w": 16,
+        "h": 16,
+        "bytes": 1032,
+        "cell": 48,
+        "scale": 1
+      }
+    ],
+    "wantedSide": 16
+  }
+}

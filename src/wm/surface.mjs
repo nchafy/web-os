@@ -13,9 +13,9 @@
 // revoked, which M12's blur governor needs.
 
 import {
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_BLIT,
   DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLC_RESET,
-  decodeDrawOps, cssColor, textOfOps,
+  decodeDrawOps, cssColor, textOfOps, blitFdOf, decodeBitmap,
 } from "../abi.mjs";
 
 /* THE TWO FAMILIES A DISPLAY LIST CAN ASK FOR, and the only typography in this file. A process
@@ -65,6 +65,13 @@ export class Surface {
    *  at all times once a batch has run — see `#resetClip`. */
   #clipScope = false;
 
+  /** M23's scratch surface a blit's pixels are staged on, and its context. Lazy, so a page that
+   *  never blits never allocates one, and GROWN AND NEVER SHRUNK, because a list of thumbnails
+   *  blits the same size on every repaint. */
+  #blitEl = null;
+
+  #blitG = null;
+
   /** `spec.into` is the window's client area. The canvas is sized in DEVICE pixels — the size the
    *  process asked for — and scaled to fill the client area by CSS, so a process that asks for a
    *  surface smaller than its frame gets a scaled one rather than a corner of one. */
@@ -84,6 +91,15 @@ export class Surface {
        telling them apart is the whole of M17's header clause. */
     this.clips = 0;
     this.clipResets = 0;
+    /* M23. A BLIT DRAWN, and one ASKED FOR WITH NO PIXELS BEHIND IT. Two counters and not one for
+       the reason `clips` and `clipResets` are two: the states differ and a reader has to tell them
+       apart. An unbacked blit is the shape of every way the payload side-channel can fail —
+       `k.wins.draw` dropped the map, the message lost it in transit, or the bytes are corrupt under
+       the `blit-unvalidated` control — and all of those look exactly like "the program drew
+       nothing" in a screenshot. NOT folded into `unknown`, which means an op this renderer does not
+       know: a blit it does know and cannot honour is a different fact. */
+    this.blits = 0;
+    this.blitsUnbacked = 0;
     const canvas = document.createElement("canvas");
     canvas.className = "surface";
     canvas.width = this.w;
@@ -124,8 +140,13 @@ export class Surface {
    * Replay one batch. `bytes` is the kernel's copy of the caller's region, so the length is
    * already a whole number of ops — `decodeDrawOps` refuses anything else rather than dropping a
    * tail, which is the same rule the window event record uses.
+   *
+   * `blits` is the batch's image payloads, `Map<fd, Uint8Array>`, resolved kernel-side because an
+   * fd is meaningless here: this file holds no file table and must not acquire one. A `DL_BLIT`
+   * whose fd is absent from the map is COUNTED and not drawn — see `blitsUnbacked`. Omitted means
+   * an empty map, which is every batch a program sent before M23.
    */
-  replay(bytes) {
+  replay(bytes, blits = null) {
     /* THE WHOLE LENGTH, SO THE REFUSAL ABOVE IS REACHABLE. This rounded down to a whole number of
      * ops, which made `decodeDrawOps`'s "not a whole number of ops" throw unreachable from the
      * only caller that matters — and the docstring three lines up promised the opposite. A torn
@@ -225,6 +246,26 @@ export class Surface {
             this.g.clip();
           }
           break;
+        case DL_BLIT: {
+          /* THE ONE PLACE A BITMAP BECOMES PIXELS. The op names a data-object fd and the kernel
+           * resolved it into `blits`; this file decodes the header with the SAME `decodeBitmap` the
+           * kernel validated with, so the two are not forming separate opinions about the layout
+           * (constraint 293's rule, as it already applies to a text run).
+           *
+           * A MISSING OR CORRUPT PAYLOAD DRAWS NOTHING AND IS COUNTED. The kernel refuses corrupt
+           * bytes before they get here; reaching this branch means either the payload channel
+           * dropped the map or the `blit-unvalidated` control is in force, and both are states a
+           * reader must be able to name rather than see as a blank window. */
+          const payload = blits ? blits.get(blitFdOf(op)) : null;
+          const bmp = payload ? decodeBitmap(payload) : null;
+          if (!bmp) {
+            this.blitsUnbacked += 1;
+            break;
+          }
+          this.g.drawImage(this.#stage(bmp), 0, 0, bmp.w, bmp.h, op.a0, op.a1, bmp.w, bmp.h);
+          this.blits += 1;
+          break;
+        }
         case DL_TEXT_DATA:
           /* REACHED ONLY WHEN A DATA RECORD HAD NO HEADER, because a well-formed run is skipped
            * past above. That is a malformed batch, and it is counted rather than drawn. */
@@ -251,6 +292,39 @@ export class Surface {
     if (this.#clipScope) this.g.restore();
     this.g.save();
     this.#clipScope = true;
+  }
+
+  /**
+   * A decoded bitmap, as something `drawImage` will take, with its pixels at 0,0.
+   *
+   * `putImageData` STRAIGHT ONTO THE SURFACE WOULD BE WRONG, AND SILENTLY SO — which is the whole
+   * reason this staging step exists. It is defined to ignore the clipping region, the transform,
+   * the global alpha and the composite operation
+   * (<https://html.spec.whatwg.org/multipage/canvas.html#dom-context-2d-putimagedata>), so a
+   * thumbnail in a scrolled list would paint straight over the header `DL_CLIP` exists to protect:
+   * M17's defect, back through a second door and with no error anywhere. `drawImage` honours all
+   * four.
+   *
+   * SYNCHRONOUS, and that is not an accident either. `createImageBitmap` is async, and a renderer
+   * that awaited one could not finish the batch it is in the middle of — constraint 219's shape,
+   * and `bench/m23-blit/` is the measurement that the decode belongs in a process's own awaited
+   * turn rather than anywhere on this path.
+   */
+  #stage(bmp) {
+    if (!this.#blitEl || this.#blitEl.width < bmp.w || this.#blitEl.height < bmp.h) {
+      this.#blitEl = new OffscreenCanvas(
+        Math.max(bmp.w, this.#blitEl ? this.#blitEl.width : 0),
+        Math.max(bmp.h, this.#blitEl ? this.#blitEl.height : 0),
+      );
+      this.#blitG = this.#blitEl.getContext("2d");
+    }
+    const img = this.#blitG.createImageData(bmp.w, bmp.h);
+    img.data.set(bmp.pixels);
+    this.#blitG.putImageData(img, 0, 0);
+    /* THE SOURCE RECTANGLE IS THE CALLER'S TO NAME, and `replay` names it: the scratch may be
+       LARGER than this bitmap, and a `drawImage` with no source rect would draw the whole scratch
+       — including whatever a previous, bigger blit left in it. */
+    return this.#blitEl;
   }
 
   /** One pixel, as `rgba(r,g,b,a)` with a 0–255 alpha — WHAT A READER WOULD SEE, read back out of
@@ -327,6 +401,7 @@ export class Surface {
     return {
       w: this.w, h: this.h, ops: this.ops, batches: this.batches, unknown: this.unknown,
       text: this.text, clips: this.clips, clipResets: this.clipResets,
+      blits: this.blits, blitsUnbacked: this.blitsUnbacked,
       extent: this.extent(),
     };
   }

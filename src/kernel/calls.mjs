@@ -17,8 +17,8 @@ import {
   TERMIOS_BYTES, WINSIZE_BYTES, POLLFD_BYTES, PFD_FD, PFD_EVENTS, PFD_REVENTS,
   POLLIN, POLLOUT, POLLERR, POLLHUP, POLLNVAL, TIOCGPGRP, TIOCSPGRP, ST_RETURN,
   WIN_SET_TITLE, WIN_SET_BOX, WIN_SET_MODAL, WIN_SET_STATE, WIN_SET_ROLE, WIN_SET_CURSOR,
-  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DLC_RESET,
-  decodeDrawOps, textOfOps,
+  WEV_BYTES, DLOP_BYTES, DL_MAX_OPS, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DLC_RESET, DL_BLIT,
+  decodeDrawOps, textOfOps, blitFdOf, decodeBitmap, DOBJ_BITMAP, EBADMSG,
   WMODAL_MAX, WMODE_MAX, decodeWinItems,
   encodeTermios, decodeTermios, encodeWinsize,
   encodeFilestat, encodeStatfs, direntSize, DE_INO, DE_TYPE, DE_NLEN, STATFS_BYTES,
@@ -1155,12 +1155,32 @@ HANDLERS.win_surface = (p, k) => {
 };
 
 /**
+ * M23's NEGATIVE CONTROL, boot-gated on bench=1: forward a `DOBJ_BITMAP` payload `decodeBitmap`
+ * refuses, instead of answering -EBADMSG.
+ *
+ * SCOPED TO THE BYTES AND NOT TO THE FD. The fd is still resolved and the format still fetched, so
+ * EBADF, EINVAL and ENOTSUP are unmoved and a WELL-FORMED blit still draws its pixels — which is
+ * what makes this a control about validation alone (`CLAUDE.md`: a control moves a NAMED subset).
+ * `src/wm/surface.mjs` then counts the corrupt payload as an unbacked blit, because the renderer's
+ * own `decodeBitmap` is the second line of the same argument and must not be the first.
+ */
+let blitValidated = true;
+
+export function setBlitValidated(on) {
+  blitValidated = !!on;
+}
+
+/**
  * win_draw(fd, nops) -> 0, with the ops in the byte region. ONE SYSCALL PER BATCH: a call per
  * operation would make a 2,000-op frame 2,000 round trips, and M0 measured a round trip at ~100 µs.
  *
  * The ops are NOT interpreted here. The kernel counts them, charges them to the window and
  * forwards the bytes; `src/wm/surface.mjs` is the one renderer, so the colour encoding and the op
  * vocabulary have exactly one reading. A kernel that drew would be a kernel that owned a canvas.
+ *
+ * THREE OPS ARE THE EXCEPTION AND ALL THREE ARE VALIDATION, NOT RENDERING: a text run must be
+ * whole, a clip must leave something to draw on, and a blit's fd must name a whole bitmap. Each is
+ * a batch the page could not refuse without drawing something wrong first.
  */
 HANDLERS.win_draw = (p, k) => {
   const d = winOf(p, p.ctl[A0]);
@@ -1198,8 +1218,58 @@ HANDLERS.win_draw = (p, k) => {
    * It is the only interpretation the kernel does of a display list, and it is validation rather
    * than rendering: `src/wm/surface.mjs` is still the one renderer. */
   const decoded = decodeDrawOps(region, region.length);
+  /* THE BLIT PAYLOADS THIS BATCH NAMES, fd -> a COPY of the data object's `DOBJ_BITMAP` bytes.
+   *
+   * BUILT DURING VALIDATION AND NOT AFTER IT, because resolving the fd IS the validation: there is
+   * no cheaper way to learn that fd 7 holds a whole bitmap than to decode the bitmap fd 7 holds.
+   * Null until the first blit, so a batch with no image allocates nothing — which is every batch
+   * every program sent before M23.
+   *
+   * NOT A COPY, WHICH IS THE OPPOSITE OF `WinMgr.draw`'S RULE FOR THE REGION, and the difference is
+   * where the bytes live. The region is the CALLER'S SAB, which the caller may overwrite the
+   * instant its call is answered. A payload is kernel heap, and `DataMgr.set` allocates a fresh
+   * array and REPLACES the map entry rather than writing into the held one — so a rewrite after
+   * this call cannot reach a view taken before it, and a `slice` here would copy up to
+   * `DOBJ_MAX_BYTES` per blit per repaint for nothing. If `set` ever came to write in place, this
+   * is the line that breaks. */
+  let blits = null;
   for (let i = 0; i < decoded.length; i += 1) {
     const op = decoded[i].op;
+    /* A BLIT'S FD IS RESOLVED HERE, BEFORE ANYTHING IS DRAWN, and each way it can be wrong answers
+     * its OWN errno — `objOf` for the fd (EBADF for none, EINVAL for an fd on something that is
+     * not a data object), `DataMgr.fetch` for the format (ENOTSUP for an object that never offered
+     * a bitmap, ENOENT for one that offered and never wrote it), and `decodeBitmap` for the bytes
+     * (EBADMSG). A single "it refused" would pass for a program that blitted a FILE descriptor
+     * (`CLAUDE.md`: assert each refusal's errno separately).
+     *
+     * `fetch` AND NOT A SECOND READER of the payload map: it is the one definition of "these bytes,
+     * by format", it already owns those two errnos, and it charges the read to the object's own
+     * `gets` — which is honest, because this is a read.
+     *
+     * THE KERNEL LEARNS NOTHING ABOUT IMAGE FORMATS HERE. `decodeBitmap` checks a header against a
+     * length and nothing else; a PNG decoder in the only privileged realm in the system is the
+     * direction M6 exists to reverse, and `bench/m23-blit/` is the measurement that a process can
+     * do it instead. */
+    if (op === DL_BLIT) {
+      const fd = blitFdOf(decoded[i]);
+      /* ONCE PER FD PER BATCH, and that is not only a saving. A payload cannot change mid-batch —
+       * nothing in this loop yields — so a second resolution of the same fd could only ever reach
+       * the same answer, while `DataMgr.fetch` charges each one to the object's `gets`. A sprite
+       * drawn 2,000 times in one frame would otherwise read as 2,000 reads of its payload, and a
+       * count that says that is a count nobody can use. */
+      if (blits && blits.has(fd)) continue;
+      const desc = objOf(p, fd);
+      if (typeof desc === "number") return desc;
+      const got = k.data.fetch(desc.obj, DOBJ_BITMAP);
+      if (typeof got === "number") return got;
+      /* `got.bytes` IS THE WHOLE PAYLOAD and not a window into it: `fetch`'s offset defaults to 0,
+       * and `decodeBitmap` asserts the length EXACTLY, so a partial fetch would be refused rather
+       * than blitted short. */
+      if (blitValidated && !decodeBitmap(got.bytes)) return -EBADMSG;
+      if (!blits) blits = new Map();
+      blits.set(fd, got.bytes);
+      continue;
+    }
     if (op === DL_TEXT) {
       const got = textOfOps(decoded, i);
       if (!got) return -EINVAL;
@@ -1230,7 +1300,7 @@ HANDLERS.win_draw = (p, k) => {
       }
     }
   }
-  return k.wins.draw(d.win, region);
+  return k.wins.draw(d.win, region, blits);
 };
 
 /**

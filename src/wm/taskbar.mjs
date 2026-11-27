@@ -35,12 +35,23 @@
 
 import {
   WST_NORMAL, WST_MIN, WST_MAX, WITEM_DESKTOP, WITEM_JUMP, WITEM_MENU, WITEM_SEPARATOR,
-  WITEM_DISABLED, WITEM_CONTEXT, WROLE_DESKTOP, WICON_PROGRAM,
+  WITEM_DISABLED, WITEM_CONTEXT, WITEM_TRAY, WROLE_DESKTOP, WICON_PROGRAM,
+  isTrayRow, isPinnedRow,
 } from "../abi.mjs";
 // `progName` AND `iconForProgram` ARE THE ICON MODULE'S, because a window's CAPTION needs the
 // same answer this bar does — see `iconForProgram`'s own note.
 import { iconMarkup, iconForProgram, progName } from "./icons.mjs";
-import { TASKBAR_H, THUMB_W, THUMB_H } from "./aero.mjs";
+// The ONE definition of how a KeyboardEvent becomes WMOD_* bits; `takeChord` takes it as an
+// argument rather than reading `altKey` a second time.
+import { modifierBits } from "./winhost.mjs";
+import { TASKBAR_H, THUMB_W, THUMB_H, TASK_BTN_MIN_W } from "./aero.mjs";
+// M22: A14's chord table. THE MENU'S LABEL AND THE DISPATCHER'S BINDING ARE ONE ROW — see
+// `src/wm/chords.mjs`, whose whole reason is that a label written twice advertises an accelerator
+// nothing listens for.
+import {
+  SWITCH_NEXT, SWITCH_PREV, SELECT_SLOTS, slotChord, takeChord,
+  CHORD_SWITCH, CHORD_SELECT,
+} from "./chords.mjs";
 
 /** How long the pointer must rest on a button before its thumbnails appear. Windows 7 waits about
  *  this long; shorter and the previews flash past as the pointer crosses the bar. */
@@ -72,10 +83,18 @@ const HOVER_CLOSE_MS = 400;
  * Module-level and page-side, which is `setGeometryControls`'s shape and for its reason: nothing
  * in `src/wm/` is reachable from a process, and the page is the supervisor.
  */
-let shellControls = { noGroup: false };
+let shellControls = { noGroup: false, bandClips: false };
 
 export function setShellControls(opts = {}) {
-  shellControls = { noGroup: opts.noGroup === true };
+  shellControls = {
+    noGroup: opts.noGroup === true,
+    /* M22's `band-clips`: the band keeps `overflow: hidden`, which is what it had while its own
+     * comment claimed it scrolled. MEASURED, because the control's world is narrower than it looks:
+     * `overflow: hidden` still permits a PROGRAMMATIC `scrollLeft` — 237 px of 237 in Chrome 157 —
+     * so the chevrons go on working and the clause that dies is the DRIVEN WHEEL. See
+     * `#syncChevrons` for the figures and for which wheel axis moves a band at all. */
+    bandClips: opts.bandClips === true,
+  };
   return { ...shellControls };
 }
 
@@ -133,7 +152,21 @@ export class Taskbar {
       // that was told are two facts, and the defect is exactly the case where only the first is
       // true. Measured: 3 opens here against 2 reports there.
       contextOpens: 0, contextClicks: 0, contextDismissals: 0,
+      // M22: the chord actions, the pinned launches, a click on a tray icon, and a chevron press.
+      // `switches` and `selects` rise whether the gesture came from a chord or from the menu row
+      // that LABELS it, because they are one route — which is the point of the chord table.
+      switches: 0, selects: 0, pinLaunches: 0, trayClicks: 0, bandScrolls: 0,
+      /* CHORDS THIS SHELL TOOK, SPLIT BY `isTrusted`, and the split is a harness-honesty
+       * requirement rather than a statistic. `WinHost.keyCounts()` sums what reached a WINDOW's
+       * widget, and a chord no longer does — the dispatcher consumes it, which is the point. So a
+       * check that wanted to know its synthetic chord did not pass for a real one had nowhere left
+       * to read: the counter has to live where the consumer lives. */
+      trustedChords: 0, syntheticChords: 0,
     };
+    /** M22: what the band is showing, left to right, as `{kind, group, pin, btn}` — the index a
+     *  chord's slot number selects. REBUILT BY `sync`, and 1-based at the ABI boundary: `Alt+1` is
+     *  `slots[0]`. */
+    this.slots = [];
     this.#build();
     /* THE STRIP IS RESERVED BEFORE THE FIRST SYNC, so the work area is right from the first frame:
      * a maximized window laid out before this call is a window covering the taskbar. `reserve`
@@ -179,9 +212,68 @@ export class Taskbar {
     this.band.className = "taskbar-band";
     this.band.dataset.band = "1";
 
+    /**
+     * THE BAND IS A SCROLLER WITH TWO CHEVRONS BESIDE IT, and that is the answer to the comment
+     * this file carried for two milestones: it said the band "SCROLLS RATHER THAN SHRINKS past its
+     * width" while the CSS was `overflow: hidden`, which cannot both be true. Past the
+     * `TASK_BTN_MIN_W` shrink floor the buttons stop narrowing, so the band overflows, and clipping
+     * an overflow is how a running program becomes unreachable with nothing reported.
+     *
+     * WHY BOTH A SCROLLER AND BUTTONS, measured rather than chosen (Chrome 157, this machine):
+     * a `mouseWheel` carrying `deltaX: 120` over an `overflow-x: auto` band moves `scrollLeft` to
+     * 120, and the SAME event carrying `deltaY: 120` moves it to 0 — a vertical wheel is not mapped
+     * onto a horizontal-only scroller. So a reader holding a plain vertical-wheel mouse has no
+     * native route, and Windows 7's own answer is the one taken here: a chevron pane per direction,
+     * shown only while the band overflows.
+     *
+     * DO NOT "FIX" THE VERTICAL WHEEL by scrolling the band from a `wheel` listener. That would be
+     * a programmatic scroll, which `overflow: hidden` does NOT stop — so it would also take away
+     * `band-clips`'s only world and leave the reachability clause passing over a clipped band.
+     */
+    const bandWrap = document.createElement("div");
+    bandWrap.className = "taskbar-bandwrap";
+    bandWrap.dataset.bandwrap = "1";
+    this.chevrons = [-1, 1].map((dir) => {
+      const chev = document.createElement("button");
+      chev.type = "button";
+      chev.className = `band-chev ${dir < 0 ? "is-prev" : "is-next"}`;
+      chev.dataset.bandChev = dir < 0 ? "prev" : "next";
+      chev.setAttribute("aria-label", dir < 0 ? "Earlier buttons" : "Later buttons");
+      chev.textContent = dir < 0 ? "‹" : "›";
+      chev.hidden = true;
+      chev.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.scrollBand(dir);
+      });
+      return chev;
+    });
+    bandWrap.append(this.chevrons[0], this.band, this.chevrons[1]);
+    // THE DISABLED STATE FOLLOWS THE SCROLL ITSELF and not only a click, because a trackpad moves
+    // the band without going through `scrollBand`.
+    this.band.addEventListener("scroll", () => this.#syncChevrons());
+    /* AND A VIEWPORT RESIZE IS AN OVERFLOW-CHANGING EVENT, which it was not until a probe caught
+     * it: `sync()` runs on a window-table change, so narrowing the browser made the band overflow
+     * with NO chevron shown until the next window opened or the reader scrolled by some other
+     * means. Measured at a 234 px viewport — the band read `over: 6` with both chevrons still
+     * hidden, and they appeared only once a driven wheel fired the listener above. A reader
+     * resizing their window is exactly the case the whole clause is about.
+     *
+     * KEPT so `dispose` can take it off: a second shell on one page would otherwise leave this one
+     * syncing a detached band, which is the defect `dispose`'s own note records. */
+    this.onViewportResize = () => this.#syncChevrons();
+    const view = this.into.ownerDocument.defaultView;
+    if (view) view.addEventListener("resize", this.onViewportResize);
+
     const tray = document.createElement("div");
     tray.className = "tray";
     tray.dataset.tray = "1";
+    /** M22: the notification area. Rows a PROCESS published with `WITEM_TRAY` and nothing else —
+     *  so an icon is withdrawn by its process dying, which is what `sync` rebuilding from
+     *  `host.frames` means (constraint 14: teardown takes a dead process's windows, and its items
+     *  go with them). */
+    this.trayIcons = document.createElement("div");
+    this.trayIcons.className = "tray-icons";
+    this.trayIcons.dataset.trayIcons = "0";
     this.clockEl = document.createElement("div");
     this.clockEl.className = "clock";
     this.clockEl.dataset.clock = "1";
@@ -198,9 +290,9 @@ export class Taskbar {
     this.showBtn.addEventListener("focus", () => this.peek(true));
     this.showBtn.addEventListener("blur", () => this.peek(false));
     this.showBtn.addEventListener("click", () => this.showDesktop());
-    tray.append(this.clockEl, this.showBtn);
+    tray.append(this.trayIcons, this.clockEl, this.showBtn);
 
-    bar.append(this.startBtn, this.band, tray);
+    bar.append(this.startBtn, bandWrap, tray);
     this.el = bar;
     this.into.append(bar);
 
@@ -232,6 +324,31 @@ export class Taskbar {
         this.closePopup();
       }
     });
+    /* A14's CHORDS, ON THE CAPTURE PHASE, AND THE PHASE IS THE WHOLE POINT.
+     *
+     * A switcher belongs to the SHELL, not to whichever window has the keyboard. The listener above
+     * bubbles, and `src/wm/terminal.mjs` listens on its own `pre` — which is deeper in the tree, so
+     * it runs FIRST and turns the keystroke into bytes for the focused program. Measured before this
+     * existed: `--only m22`'s switch proof read `prevented: True` with `switches: 0`, `where:
+     * 'terminal'` and `screenGrew: 1` — the chord was cancelled and the terminal had already eaten
+     * it. Capture runs ancestor-first, so the shell sees the chord before any window can.
+     *
+     * `stopPropagation` GOES WITH IT. `takeChord` calls `preventDefault`, which stops the BROWSER
+     * and not the page: without stopping propagation the terminal's own listener still fires and
+     * Alt+` arrives in the reader's shell as a backtick.
+     *
+     * A CHORD THE TABLE DOES NOT HOLD IS NOT TOUCHED. `takeChord` returns null and this returns,
+     * so every other key reaches the window that has focus exactly as before. */
+    this.into.addEventListener("keydown", (e) => {
+      const chord = takeChord(e, modifierBits(e));
+      if (!chord) return;
+      e.stopPropagation();
+      // COUNTED BEFORE IT ACTS, so a chord that throws downstream is still counted as arriving.
+      if (e.isTrusted) this.stats.trustedChords += 1;
+      else this.stats.syntheticChords += 1;
+      if (chord.action === CHORD_SWITCH) this.switchWindow(chord.arg);
+      else if (chord.action === CHORD_SELECT) this.selectSlot(chord.arg);
+    }, true);
   }
 
   /* ---- the clock ----------------------------------------------------------------------------- */
@@ -303,80 +420,355 @@ export class Taskbar {
     return null;
   }
 
+  /**
+   * M22. THE PINNED ROWS, from the DESKTOP window's published items.
+   *
+   * WHERE THE PIN LIST LIVES, and why it is not here. A pinned button must survive a RELOAD, and
+   * nothing page-side does: the page is rebuilt from zero every load, and a pin list in
+   * `localStorage` would be a second store with its own lifetime beside a filesystem that already
+   * has one. So the list is a FILE in the writable session tree (D40/M19a) and
+   * `src/bin/desktop.mjs` is what reads it — which also keeps the division this shell rests on:
+   * page-side chrome whose CONTENTS are a process's (D39). The shell renders rows it was published
+   * and decides nothing about what they are, so it cannot pin anything either; a pin gesture is a
+   * `WITEM_CONTEXT` row the desktop process acts on.
+   *
+   * A PINNED ROW'S LABEL IS THE PROGRAM'S NAME, as `progName` reports it, because that is this
+   * bar's group key — it is how a pinned button and the window that program later opens become ONE
+   * button rather than two.
+   */
+  pinnedRows() {
+    const desk = this.desktopEntry();
+    if (!desk) return [];
+    return (desk.items || [])
+      .map((row, index) => ({ ...row, index, win: desk.id }))
+      .filter((row) => isPinnedRow(row.flags));
+  }
+
+  /**
+   * M22. THE TRAY'S ROWS: every window's items that are `WITEM_TRAY` status icons, from EVERY
+   * process and not just the desktop's.
+   *
+   * THAT IS THE WITHDRAWAL. An icon exists because a live window publishes it, so killing the
+   * process destroys the window (constraint 14), the window leaves `host.frames`, and the next
+   * `sync` has nothing to draw — no withdraw call, and nothing for a dying process to forget to
+   * send. The classic tray defect is an icon that outlives its process, and this shape has no way
+   * to produce one.
+   */
+  trayRows() {
+    const out = [];
+    for (const [id, entry] of this.host.frames) {
+      (entry.items || []).forEach((row, index) => {
+        if (isTrayRow(row.flags)) out.push({ ...row, index, win: id, pid: entry.pid });
+      });
+    }
+    return out;
+  }
+
   /** Rebuild the band. Called on every window-table change, which is what `WinHost.watch` is. */
   sync() {
     this.stats.syncs += 1;
     const top = this.topmost();
     this.band.textContent = "";
-    for (const group of this.groups()) {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "task-btn";
-      btn.dataset.taskBtn = group.key;
-      btn.dataset.wins = group.wins.map((w) => w.id).join(",");
-      const icon = iconForProgram(group.prog);
-      const live = group.wins.filter((w) => w.entry.state !== WST_MIN);
-      const active = group.wins.some((w) => w.id === top);
-      const allMin = live.length === 0;
-      btn.classList.toggle("is-active", active);
-      btn.classList.toggle("is-minimized", allMin);
-      btn.classList.toggle("is-group", group.wins.length > 1);
-      btn.dataset.state = allMin ? "min" : (active ? "active" : "idle");
-      // THE ICON IS MARKUP AND THE LABEL IS TEXT. The label comes from a program's own title, so it
-      // is set as `textContent` and never as HTML — one assignment is the whole of what keeps a
-      // window title from being a script.
-      btn.innerHTML = iconMarkup(icon, 20);
-      const label = document.createElement("span");
-      label.className = "task-label";
-      label.textContent = group.wins.length === 1
-        ? (group.wins[0].entry.win.titleText || group.key)
-        : group.key;
-      btn.append(label);
-      if (group.wins.length > 1) {
-        const count = document.createElement("span");
-        count.className = "task-count";
-        count.textContent = String(group.wins.length);
-        btn.append(count);
+    this.slots = [];
+    /* PINNED FIRST AND IN THE PUBLISHED ORDER, which is what makes a slot number worth binding a
+     * chord to: a position that moved every time a window opened would make `Alt+3` a different
+     * program each minute. A pinned program that is RUNNING is its own button and not a second one
+     * beside it — Windows 7's own merge, and the reason a pinned row's label is the group key. */
+    const groups = this.groups();
+    const byKey = new Map(groups.map((g) => [g.key, g]));
+    const merged = new Set();
+    const plan = [];
+    for (const pin of this.pinnedRows()) {
+      const group = byKey.get(pin.label);
+      if (group) {
+        merged.add(group.key);
+        plan.push({ kind: "group", group, pin });
+      } else {
+        plan.push({ kind: "pin", pin });
       }
-      /* THE BUTTON TRAVELS WITH THE CLICK, rather than being found again by a selector built from
-       * the group's key. The key is `progName(prog)`, which is the basename of ARGV[0] — chosen by
-       * whatever process called `spawn` — so interpolating it into a `querySelector` let a program
-       * with a quote in its argv throw a SyntaxError inside this handler. A critic found it. */
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.clickGroup(group, btn);
-      });
-      /* THE JUMP LIST OPENS ON THE RIGHT BUTTON'S PRESS, which is Windows 7's own timing and is
-       * also the only signal that reliably exists: a `contextmenu` event is produced by the
-       * BROWSER's own input pipeline, and `Input.dispatchMouseEvent` with `button: "right"` does
-       * not generate one — measured, as a jump-list proof that found `jumpOpens: 0` after a real
-       * right-press landed on the button. `pointerdown` with `button === 2` is the event that
-       * actually arrives, from a hand and from a driver alike. */
-      btn.addEventListener("pointerdown", (e) => {
-        if (e.button !== 2) return;
-        e.preventDefault();
-        e.stopPropagation();
-        this.openJumpList(group, btn);
-      });
-      // And the browser's own menu is refused, or a right-click would show Chrome's.
-      btn.addEventListener("contextmenu", (e) => e.preventDefault());
-      /* AND IT HAS A KEYBOARD SPELLING, because every gesture in this shell does: Shift+F10 and
-       * the Menu key are the platform's own bindings for "the context menu of what has focus", and
-       * a taskbar button is a real `<button>` that can take focus. */
-      btn.addEventListener("keydown", (e) => {
-        const wants = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
-        if (!wants) return;
-        e.preventDefault();
-        this.openJumpList(group, btn);
-      });
-      btn.addEventListener("pointerenter", () => this.#hoverIn(group, btn));
-      btn.addEventListener("pointerleave", () => this.#hoverOut());
-      this.band.append(btn);
     }
+    for (const group of groups) {
+      if (!merged.has(group.key)) plan.push({ kind: "group", group });
+    }
+    for (const slot of plan) {
+      const no = this.slots.length + 1;
+      const btn = slot.kind === "group"
+        ? this.#groupButton(slot.group, top)
+        : this.#pinButton(slot.pin);
+      /* THE ACCELERATOR IS ON THE BUTTON ITSELF, as `aria-keyshortcuts` and as the tooltip, and it
+       * is `slotChord`'s label and never a string built here. Past `SELECT_SLOTS` there is no
+       * chord, so there is no label — a button advertising `Alt+10` would be the live-looking
+       * button defect in its purest form. */
+      const chord = slotChord(no);
+      btn.dataset.slot = String(no);
+      if (chord) {
+        btn.setAttribute("aria-keyshortcuts", chord.label);
+        btn.title = `${btn.dataset.taskBtn || slot.pin.label} (${chord.label})`;
+      }
+      this.band.append(btn);
+      this.slots.push({ ...slot, btn });
+    }
+    this.#syncTray();
+    this.#syncChevrons();
     // A POPUP OUTLIVES A REBUILD ONLY IF ITS WINDOW DOES. A jump list for a window that has just
     // closed is a menu of commands nothing can carry out.
     if (this.open && this.open.win && !this.host.get(this.open.win)) this.closePopup();
     return this.band.children.length;
+  }
+
+  /** A pinned program with no window: an icon, a label, and one route to start it — the
+   *  `WITEM_MENU` activation that the start menu already uses, so the shell gains no second way to
+   *  run a program. */
+  #pinButton(pin) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "task-btn is-pinned";
+    btn.dataset.pinBtn = pin.label;
+    btn.dataset.pinIndex = String(pin.index);
+    btn.dataset.state = "pinned";
+    btn.innerHTML = iconMarkup(pin.icon, 20);
+    const label = document.createElement("span");
+    label.className = "task-label";
+    label.textContent = pin.label;
+    btn.append(label);
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.launchPin(pin);
+    });
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    return btn;
+  }
+
+  /** Start the program a pinned button stands for, through the process that published the row. */
+  launchPin(pin) {
+    this.stats.pinLaunches += 1;
+    this.stats.launches += 1;
+    this.closePopup();
+    this.host.activateItem(pin.win, pin.index, WITEM_MENU);
+    return pin.label;
+  }
+
+  /** The tray's status icons, rebuilt from `trayRows()`. */
+  #syncTray() {
+    const rows = this.trayRows();
+    this.trayIcons.textContent = "";
+    for (const row of rows) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tray-icon";
+      btn.dataset.trayIcon = String(row.win);
+      btn.dataset.trayIndex = String(row.index);
+      // THE LABEL IS A PROGRAM'S, so it reaches the DOM as an attribute value and as nothing else:
+      // an icon has no room for text, and `aria-label`/`title` are what a reader and a screen
+      // reader get instead.
+      btn.setAttribute("aria-label", row.label);
+      btn.title = row.label;
+      btn.disabled = (row.flags & WITEM_DISABLED) !== 0;
+      btn.innerHTML = iconMarkup(row.icon, 16);
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.stats.trayClicks += 1;
+        this.host.activateItem(row.win, row.index, WITEM_TRAY);
+      });
+      btn.addEventListener("contextmenu", (e) => e.preventDefault());
+      this.trayIcons.append(btn);
+    }
+    this.trayIcons.dataset.trayIcons = String(rows.length);
+    return rows.length;
+  }
+
+  /* ---- M22: reaching a button past the shrink floor ------------------------------------------ */
+
+  /** How far the band's content exceeds its box, in CSS px. 0 when everything fits. */
+  bandOverflow() {
+    return Math.max(0, this.band.scrollWidth - this.band.clientWidth);
+  }
+
+  /**
+   * Show or hide the chevrons, and disable the one that has nowhere to go.
+   *
+   * THE `is-clipped` CLASS IS THE CONTROL and it is applied here rather than in `#build`, because
+   * `setShellControls` may be called after the bar exists — a control that needs the page rebuilt
+   * is a control nobody re-runs.
+   */
+  #syncChevrons() {
+    this.band.classList.toggle("is-clipped", shellControls.bandClips === true);
+    const over = this.bandOverflow();
+    const at = this.band.scrollLeft;
+    const states = [];
+    for (const chev of this.chevrons) {
+      const back = chev.dataset.bandChev === "prev";
+      chev.hidden = over <= 1;
+      chev.disabled = over <= 1 || (back ? at <= 0 : at >= over - 1);
+      states.push({ dir: chev.dataset.bandChev, shown: !chev.hidden, enabled: !chev.disabled });
+    }
+    return { over, at, chevrons: states };
+  }
+
+  /**
+   * Scroll the band by a page, less one button's floor width so a partly-visible button is not
+   * stepped over — the defect a whole-page scroll has at exactly the position a reader stops at.
+   */
+  scrollBand(dir) {
+    const step = Math.max(TASK_BTN_MIN_W, this.band.clientWidth - TASK_BTN_MIN_W);
+    const want = this.band.scrollLeft + (dir < 0 ? -step : step);
+    this.band.scrollLeft = Math.max(0, Math.min(want, this.bandOverflow()));
+    this.stats.bandScrolls += 1;
+    this.#syncChevrons();
+    return this.band.scrollLeft;
+  }
+
+  /**
+   * Bring a slot's button WHOLLY inside the band's box and report where it landed, in client CSS
+   * px.
+   *
+   * WHAT A CHECK READS. `inView` is the button's own rect against the band's, so it answers "could
+   * a hand click this" rather than "does the DOM contain it" — a clipped button is in the DOM, has
+   * a non-zero size, and is unreachable, which is the whole of the defect this milestone removes.
+   */
+  revealSlot(n) {
+    const slot = this.slots[n - 1];
+    if (!slot) return null;
+    const btn = slot.btn;
+    const band = this.band.getBoundingClientRect();
+    const before = btn.getBoundingClientRect();
+    if (before.left < band.left) {
+      this.band.scrollLeft -= band.left - before.left;
+    } else if (before.right > band.right) {
+      this.band.scrollLeft += before.right - band.right;
+    }
+    this.#syncChevrons();
+    const after = btn.getBoundingClientRect();
+    return {
+      slot: n,
+      scrollLeft: this.band.scrollLeft,
+      box: rectOf(btn),
+      inView: after.left >= band.left - 0.5 && after.right <= band.right + 0.5,
+      /* AND WHAT THE HIT TEST FINDS AT ITS CENTRE, which is `M15_PANEL`'s own reading applied to a
+       * button: a button inside the band's box but under the tray or a popup is still a button a
+       * hand cannot click. */
+      reachable: (() => {
+        const cx = Math.round(after.left + after.width / 2);
+        const cy = Math.round(after.top + after.height / 2);
+        const el = this.into.ownerDocument.elementFromPoint(cx, cy);
+        return Boolean(el && el.closest && el.closest(".task-btn") === btn);
+      })(),
+    };
+  }
+
+  /* ---- M22: the chord actions ---------------------------------------------------------------- */
+
+  /**
+   * SWITCH WINDOWS, forward or backward: A14's substitute for Alt+Tab.
+   *
+   * THE ORDER IS THE KERNEL'S. `host.order` is what `win-stack` last sent, so "the next one" means
+   * the next one down the real stack and not the next one this file happened to render. A MINIMIZED
+   * WINDOW IS IN THE CYCLE and is restored on the way — Alt+Tab reaches a minimized window, and a
+   * switcher that skipped them would leave a reader unable to get back to anything they put away.
+   *
+   * THE DESKTOP IS NOT IN THE CYCLE, for `groups()`'s reason: it is the surface the windows sit on.
+   */
+  switchWindow(dir = 1) {
+    const ids = this.host.order.filter((id) => {
+      const entry = this.host.get(id);
+      return Boolean(entry) && entry.role !== WROLE_DESKTOP;
+    });
+    if (ids.length === 0) return 0;
+    const top = this.topmost();
+    const from = ids.indexOf(top) >= 0 ? ids.indexOf(top) : ids.length - 1;
+    // FORWARD GOES DOWN THE STACK, because the window in front is the one you are leaving.
+    const step = dir >= 0 ? -1 : 1;
+    const want = ids[((from + step) % ids.length + ids.length) % ids.length];
+    this.stats.switches += 1;
+    if (want === top) return top;
+    const entry = this.host.get(want);
+    if (entry && entry.state === WST_MIN) this.host.askState(want, WST_NORMAL);
+    this.host.post({ t: "win-raise", win: want });
+    this.stats.raises += 1;
+    return want;
+  }
+
+  /**
+   * SELECT A SUPERBAR BUTTON BY ITS SLOT, 1-based: A14's direct-select set, `Alt+1`..`Alt+9`.
+   *
+   * A pinned slot with no window LAUNCHES and a live one goes through `clickGroup`, so the chord
+   * and the click are one behaviour — including the three-way click rule, which is what makes
+   * `Alt+1` twice minimize and restore the way the button does.
+   */
+  selectSlot(n) {
+    const slot = this.slots[n - 1];
+    if (!slot) return null;
+    this.stats.selects += 1;
+    this.revealSlot(n);
+    if (slot.kind === "pin") return this.launchPin(slot.pin);
+    return this.clickGroup(slot.group, slot.btn);
+  }
+
+  /** A group's Superbar button. */
+  #groupButton(group, top) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "task-btn";
+    btn.dataset.taskBtn = group.key;
+    btn.dataset.wins = group.wins.map((w) => w.id).join(",");
+    const icon = iconForProgram(group.prog);
+    const live = group.wins.filter((w) => w.entry.state !== WST_MIN);
+    const active = group.wins.some((w) => w.id === top);
+    const allMin = live.length === 0;
+    btn.classList.toggle("is-active", active);
+    btn.classList.toggle("is-minimized", allMin);
+    btn.classList.toggle("is-group", group.wins.length > 1);
+    btn.dataset.state = allMin ? "min" : (active ? "active" : "idle");
+    // THE ICON IS MARKUP AND THE LABEL IS TEXT. The label comes from a program's own title, so it
+    // is set as `textContent` and never as HTML — one assignment is the whole of what keeps a
+    // window title from being a script.
+    btn.innerHTML = iconMarkup(icon, 20);
+    const label = document.createElement("span");
+    label.className = "task-label";
+    label.textContent = group.wins.length === 1
+      ? (group.wins[0].entry.win.titleText || group.key)
+      : group.key;
+    btn.append(label);
+    if (group.wins.length > 1) {
+      const count = document.createElement("span");
+      count.className = "task-count";
+      count.textContent = String(group.wins.length);
+      btn.append(count);
+    }
+    /* THE BUTTON TRAVELS WITH THE CLICK, rather than being found again by a selector built from
+     * the group's key. The key is `progName(prog)`, which is the basename of ARGV[0] — chosen by
+     * whatever process called `spawn` — so interpolating it into a `querySelector` let a program
+     * with a quote in its argv throw a SyntaxError inside this handler. A critic found it. */
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.clickGroup(group, btn);
+    });
+    /* THE JUMP LIST OPENS ON THE RIGHT BUTTON'S PRESS, which is Windows 7's own timing and is
+     * also the only signal that reliably exists: a `contextmenu` event is produced by the
+     * BROWSER's own input pipeline, and `Input.dispatchMouseEvent` with `button: "right"` does
+     * not generate one — measured, as a jump-list proof that found `jumpOpens: 0` after a real
+     * right-press landed on the button. `pointerdown` with `button === 2` is the event that
+     * actually arrives, from a hand and from a driver alike. */
+    btn.addEventListener("pointerdown", (e) => {
+      if (e.button !== 2) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.openJumpList(group, btn);
+    });
+    // And the browser's own menu is refused, or a right-click would show Chrome's.
+    btn.addEventListener("contextmenu", (e) => e.preventDefault());
+    /* AND IT HAS A KEYBOARD SPELLING, because every gesture in this shell does: Shift+F10 and
+     * the Menu key are the platform's own bindings for "the context menu of what has focus", and
+     * a taskbar button is a real `<button>` that can take focus. */
+    btn.addEventListener("keydown", (e) => {
+      const wants = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey);
+      if (!wants) return;
+      e.preventDefault();
+      this.openJumpList(group, btn);
+    });
+    btn.addEventListener("pointerenter", () => this.#hoverIn(group, btn));
+    btn.addEventListener("pointerleave", () => this.#hoverOut());
+    return btn;
   }
 
   /**
@@ -482,7 +874,7 @@ export class Taskbar {
 
   /** One row of a popup: an icon, a label, and what to do. Returns the button so a caller can mark
    *  it. */
-  #row(parent, { icon, label, disabled = false, onClick = null, data = {} }) {
+  #row(parent, { icon, label, disabled = false, onClick = null, data = {}, accel = "" }) {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "shell-row";
@@ -492,6 +884,18 @@ export class Taskbar {
     // TEXT, NOT HTML: every label here came from a program.
     text.textContent = label;
     row.append(text);
+    /* M22. THE ACCELERATOR, DRAWN WHERE WINDOWS 7 DRAWS IT — right-aligned, after the label. It is
+     * a `src/wm/chords.mjs` row's own `label` at every call site and never a string written here,
+     * because the owner's rule is that the menu publishes the REAL accelerator: a menu showing a
+     * chord the dispatcher does not listen for is the live-looking-button defect. `aria-keyshortcuts`
+     * as well as the text, so the binding is announced and not only drawn. */
+    if (accel) {
+      const key = document.createElement("span");
+      key.className = "shell-accel";
+      key.textContent = accel;
+      row.append(key);
+      row.setAttribute("aria-keyshortcuts", accel);
+    }
     for (const [key, value] of Object.entries(data)) row.dataset[key] = String(value);
     if (disabled) row.disabled = true;
     if (onClick && !disabled) {
@@ -502,6 +906,35 @@ export class Taskbar {
     }
     parent.append(row);
     return row;
+  }
+
+  /**
+   * M22. A14's TWO SWITCH ROWS, LABELLED AND LIVE. ONE DEFINITION, drawn in two places — the start
+   * menu's foot, which is the shell's own menu and is always one click away, and the window list,
+   * whose whole subject is "which of these windows".
+   *
+   * THE ROW DOES WHAT THE CHORD DOES. `switchWindow` is reached from both, so a reader who cannot
+   * remember the accelerator still has the gesture and the accelerator they are shown is the one
+   * `takeChord` listens for.
+   *
+   * Alt+Tab IS NOT HERE AND NO EDIT TO THIS FILE COULD PUT IT HERE. `src/wm/chords.mjs` keeps it in
+   * `BLOCKED` — Chrome's host acts on it unless the page cancels, measured — and that module's
+   * `selfTest` fails at load if any bound row wears a blocked chord's label.
+   */
+  #switchRows(parent) {
+    for (const [chord, label] of [[SWITCH_NEXT, "Next window"], [SWITCH_PREV, "Previous window"]]) {
+      this.#row(parent, {
+        icon: null,
+        label,
+        accel: chord.label,
+        data: { switchDir: chord.arg },
+        onClick: () => {
+          this.switchWindow(chord.arg);
+          this.closePopup();
+        },
+      });
+    }
+    return 2;
   }
 
   #separator(parent) {
@@ -608,6 +1041,16 @@ export class Taskbar {
       strip.append(cell);
     }
     this.popup.append(strip);
+    /* M22. A14's CHORDS, LABELLED AND LIVE, in the one panel whose whole subject is "which of
+     * these windows". Two rows and not a hint: the row DOES what the chord does — `switchWindow` is
+     * one implementation reached from both — so a reader who cannot remember the accelerator still
+     * has the gesture, and the accelerator they are shown is the one `takeChord` listens for.
+     *
+     * Alt+Tab IS NOT HERE AND CANNOT BE. `src/wm/chords.mjs` keeps it in `BLOCKED` — the host acts
+     * on it in Chrome unless the page cancels — and `selfTest` fails at module load if any row
+     * wears its label, so there is no edit to this file that could put it on screen. */
+    this.#separator(this.popup);
+    this.#switchRows(this.popup);
     this.open = { kind: "thumbs", win: group.wins[0].id, group: group.key };
     // NO SELECTOR BUILT FROM A PROGRAM'S OWN STRING: see the click handler in `sync`.
     this.#placeAbove(anchor || this.#buttonFor(group) || this.el);
@@ -920,6 +1363,7 @@ export class Taskbar {
     search.addEventListener("input", () => render(search.value));
     const foot = document.createElement("div");
     foot.className = "start-foot";
+    this.#switchRows(foot);
     this.#row(foot, {
       icon: null,
       label: "Log off",
@@ -1020,7 +1464,11 @@ export class Taskbar {
       height: TASKBAR_H,
       reserved: this.host.reserved,
       workArea: this.host.workArea(),
-      buttons: this.band.children.length,
+      /* STILL THE SUPERBAR'S OWN BUTTONS, counted by the attribute and no longer by the band's
+       * child count: a pinned program with no window is a band child and is not a window group, so
+       * `check_landing`'s reading of this number would have changed meaning the day a pin was
+       * published. `pins` is the other count. */
+      buttons: this.band.querySelectorAll("[data-task-btn]").length,
       groups,
       topmost: this.topmost(),
       // THE CALLBACK IS NOT PART OF THE REPORT. `onDismiss` is a function, which `JSON.stringify`
@@ -1042,6 +1490,54 @@ export class Taskbar {
         win: Number(cell.dataset.thumbWin),
         kind: cell.querySelector("canvas")?.dataset.thumb || "",
       })),
+      /* ---- M22 ------------------------------------------------------------------------------
+       *
+       * THE BAND AS A SCROLLER, so "is every button reachable" is a number and not a picture.
+       * `over` is how far the content exceeds the box; `fits` is the whole claim. A button is in
+       * `slots` whether it fits or not — the DOM always has them all, which is exactly why the
+       * clipped band passed for two milestones.
+       */
+      band: {
+        clientW: this.band.clientWidth,
+        scrollW: this.band.scrollWidth,
+        scrollLeft: this.band.scrollLeft,
+        over: this.bandOverflow(),
+        fits: this.bandOverflow() <= 1,
+        minBtnW: TASK_BTN_MIN_W,
+        // THE COMPUTED VALUE AND NOT THE CONTROL FLAG, because the flag says what was asked and
+        // this says what the stylesheet did. `band-clips` is only a world if the two agree.
+        overflowX: this.into.ownerDocument.defaultView
+          ? this.into.ownerDocument.defaultView.getComputedStyle(this.band).overflowX
+          : "",
+        chevrons: this.chevrons.map((c) => ({
+          dir: c.dataset.bandChev, shown: !c.hidden, enabled: !c.disabled,
+        })),
+      },
+      slots: this.slots.map((slot, i) => {
+        const chord = slotChord(i + 1);
+        const box = slot.btn.getBoundingClientRect();
+        const band = this.band.getBoundingClientRect();
+        return {
+          slot: i + 1,
+          kind: slot.kind,
+          key: slot.kind === "group" ? slot.group.key : slot.pin.label,
+          accel: chord ? chord.label : "",
+          inView: box.left >= band.left - 0.5 && box.right <= band.right + 0.5,
+        };
+      }),
+      pins: this.band.querySelectorAll("[data-pin-btn]").length,
+      pinned: this.pinnedRows().map((row) => ({ label: row.label, index: row.index })),
+      tray: this.trayRows().map((row) => ({
+        label: row.label, icon: row.icon, win: row.win, index: row.index, pid: row.pid,
+      })),
+      // THE LABELS THE MENUS PUBLISHED, read off the DOM and not off the chord table, because the
+      // requirement is that the MENU shows the real accelerator — asserting the table against
+      // itself would pass over a menu that printed nothing.
+      accels: [...this.popup.querySelectorAll(".shell-accel")].map((el) => el.textContent),
+      slotAccels: [...this.band.querySelectorAll("[aria-keyshortcuts]")]
+        .map((el) => el.getAttribute("aria-keyshortcuts")),
+      chords: { next: SWITCH_NEXT.label, prev: SWITCH_PREV.label, slots: SELECT_SLOTS },
+      trustedChords: this.stats.trustedChords, syntheticChords: this.stats.syntheticChords,
       peeking: this.peeking,
       clock: this.clockEl.textContent,
       clockEpoch: Number(this.clockEl.dataset.epoch || 0),
@@ -1057,6 +1553,8 @@ export class Taskbar {
      * `sync()` into a detached band on every window-table change, and the WORK AREA stayed 40 px
      * shorter than the desktop with no taskbar occupying it — so every maximized window was laid
      * out against a strip reserved for nothing. */
+    const view = this.into.ownerDocument.defaultView;
+    if (view && this.onViewportResize) view.removeEventListener("resize", this.onViewportResize);
     this.host.unwatch(this.watcher);
     this.host.useShell(null);
     this.host.reserve(0);

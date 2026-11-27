@@ -1,0 +1,2288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M22 — the band, the pins, the tray, the save and the chord</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M21's pages do it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop — and every window and every taskbar button on it — out from under every rect
+   the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:120px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+/* TALL ENOUGH FOR THE EDITOR AND ITS TWO DIALOGS AT ONCE: the Save As dialog opens at y 250 with
+   h 210 (`src/bin/editor.mjs` SA_Y/SA_H), and a window clamped out of the work area is a window
+   whose caption button no gesture can reach. The WIDTH is set from script by the band proof and
+   restored after it, which is this page's only route to a band narrower than its content. */
+#desktop { position:relative; height:560px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M22 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M22 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M22's page: THE SHELL'S REMAINDER — a band that reaches every button, a pin that survives a
+ * reload, a tray icon withdrawn by a KILL, a save that writes bytes, and the chord the measurement
+ * selected.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283).
+ *
+ *   PROOF 1  pins: A PINNED BUTTON SURVIVES A RELOAD AND LAUNCHES. The pin is made by a REAL click
+ *            on a REAL start-menu row in load 1, the page then NAVIGATES, and load 2 asserts the
+ *            button is back — read off the band's DOM, off the shell's report, and off the FILE's
+ *            own bytes through `wc` and `grep` in separate processes. The subject is `editor`,
+ *            which is NOT in `src/bin/desktop.mjs`'s `DEFAULT_PINS`: a pin list that never
+ *            persisted publishes the defaults, so this clause fails against exactly that world
+ *   PROOF 2  save: `editor`'s SAVE WRITES BYTES TO THE FILE, read back through a fresh `open` — the
+ *            program's own (`commitSave` re-reads before it reports) and the page's, out of `wc`
+ *            and `grep` processes that hold no fd of the editor's. Three saves on two paths, the
+ *            last one driven by REAL INPUT ALONE: the X, then `y` in the close dialog, which is the
+ *            exact gesture whose `[saved]` went to the WINDOW fd. A SECOND editor on `/usr` is the
+ *            refusal, EROFS asserted by name
+ *   PROOF 3  switch: THE CHORD SWITCHES, AND THE MENU LABELS THE REAL ACCELERATOR. Alt+` forward,
+ *            Alt+Shift+` backward, Alt+1..9 direct — `src/wm/chords.mjs` is the one table, and the
+ *            labels are read off the DOM the shell rendered rather than off that table. Alt+Tab
+ *            appears NOWHERE, which is a clause: it is in `BLOCKED`
+ *   PROOF 4  band: THE BAND REACHES EVERY BUTTON PAST THE 42 CSS px SHRINK FLOOR, driven and not
+ *            photographed — a wheel on each axis, both chevrons clicked, and the last button
+ *            hit-tested at its own centre after `revealSlot`
+ *   PROOF 5  tray: A TRAY ICON IS WITHDRAWN WHEN ITS PROCESS DIES, asserted by KILLING the process.
+ *            `end-process` is SIGKILL through the kernel's own reap, so nothing asks the desktop to
+ *            withdraw anything and nothing could have been politely handed back
+ *
+ * ## THE RELOAD, AND WHY THIS PAGE LOADS TWICE
+ *
+ * R24's claim is that a pin SURVIVES A RELOAD, and nothing page-side does. So the proofs path runs
+ * in two loads of this document: load 1 makes the pin and `location.replace`s to `&phase=2`, load 2
+ * asserts it is still there and runs every other proof. Load 1's readings travel in
+ * `sessionStorage` — the one store that survives a navigation in the same tab and nothing else —
+ * stamped with an EPOCH that load 2's URL carries, so a stash left by a previous run cannot be read
+ * as this run's evidence.
+ *
+ * `window.__m22mark` IS THE INFRASTRUCTURE CLAUSE. It is set in load 1 and cannot survive a
+ * navigation, so finding it in load 2 means the page never navigated and the pin clause would be a
+ * reading of the still-live first shell. `bench/m19a-seed-firefox/firefox-session.py` states the
+ * same clause for the same reason.
+ *
+ * EVERY GESTURE NAME IS PREFIXED WITH ITS LOAD, and that is not decoration: `scripts/check.py`'s
+ * `drive_gestures` skips a `want` whose id equals the last one it performed, and the serial restarts
+ * at 1 in a new document — so two loads asking for `click-orb#1` would have the second one silently
+ * dropped and the page would time out waiting for a gesture nobody was ever asked for.
+ *
+ * ## WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped
+ *
+ *   1. THE CHORD AND ctrl-S ARE SYNTHESISED, AND THE PAGE SAYS SO AND MEASURES IT.
+ *      `scripts/cdp.py`'s `KEYS` table holds Tab, Enter, Escape, Space, the four arrows and
+ *      Backspace, and carries no `code` — so `Backquote`, the digits and a Ctrl+letter are
+ *      undrivable through the gesture protocol, exactly as M20 records for F2 and M21 for F5.
+ *      `bench/m22-switch/probe.py` is where the chords are dispatched as REAL keys, in BOTH
+ *      engines, with their `code`, their modifiers and `isTrusted` read back; what a synthesised
+ *      key cannot prove here is the ARRIVAL, not the binding. So the page dispatches
+ *      `KeyboardEvent`s carrying the chord's own `code`, asserts `host.keyCounts().synthetic` rose
+ *      and `trusted` did not, and drives every pointer gesture and every printable key for real.
+ *      `"Backquote": (192, "")` in that table is the one line that would close it — and it works
+ *      only BECAUSE the binding is on `code`: `Page.press` sends `key` and `code` as the same
+ *      string, so the chord would arrive as `key: "Backquote"`, which no `key`-matching dispatcher
+ *      would take. It is a file this slice does not own.
+ *   2. THE WITHDRAWAL IS TWO READINGS AND THIS PAGE KEEPS BOTH, because the first one was RED and
+ *      the second one explained why. Killing the publisher drew `reaped` out of the kernel and NO
+ *      `win-destroy`: a window died on the last close of its DESCRIPTION, and `spawnChild`
+ *      (`src/kernel/kernel.mjs`) inherits every fd into a child — window fds included — so a
+ *      process with one living child was reaped with `refs` above zero and
+ *      `src/kernel/files.mjs`'s `F_WIN.close`, the only thing that called `WinMgr.destroyTree`,
+ *      never ran. The desktop spawns every program a reader starts, so ANY running program held
+ *      its window, its rows and its tray icon. `WinMgr.reapPid` (`src/kernel/wins.mjs`), called
+ *      from `teardown`, is what closed it: the windows a dying process CREATED go regardless of
+ *      refs, which is constraint 14's "destroy windows" as a step of its own rather than a
+ *      consequence of the fd walk. Both clauses are kept, because the second one is the only
+ *      reading that would notice the fix being reverted to a refcount.
+ *   3. `tray-outlives` HAS NO WORLD IN `src/wm/taskbar.mjs`, and the shipped shape is the reason:
+ *      `trayRows()` DERIVES the tray from `host.frames` every `sync`, so there is no withdrawal
+ *      step to skip. A control that turns nothing verifies nothing (CLAUDE.md), so this page builds
+ *      the world where the shell REMEMBERS its rows instead of deriving them — `?tray_outlives=1`
+ *      wraps the shell's own `trayRows` in a cache, which is the classic tray defect written at the
+ *      one place it can live. A `setShellControls({trayOutlives})` key would be the better home and
+ *      is a change in a file this slice does not own.
+ */
+import { setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import { setShellControls } from '/src/wm/taskbar.mjs'
+import {
+  WITEM_MENU, WITEM_TRAY, WMOD_ALT, WMOD_CTRL, WMOD_SHIFT, WMOD_META,
+  isTrayRow, isPinnedRow,
+} from '/src/abi.mjs'
+/* A14's ONE TABLE. The page reads the chord it must dispatch and the label the menu must show out
+ * of the same rows the dispatcher binds and the shell draws — a page that spelled "Alt+`" itself
+ * would be a third copy, and the one that drifted would be the one nobody runs. */
+import {
+  CHORDS, BLOCKED, SWITCH_NEXT, SWITCH_PREV, SELECT_SLOTS, CHORD_SWITCH, CHORD_SELECT,
+  slotChord, labelFor,
+} from '/src/wm/chords.mjs'
+/* THE SHRINK FLOOR AND THE CHEVRON'S WIDTH, imported: the band proof's whole subject is the
+ * overflow PAST that floor, and a page that wrote 42 would be asserting against a number the
+ * stylesheet no longer uses. */
+import { TASK_BTN_MIN_W, BAND_CHEV_W, TASKBAR_H } from '/src/wm/aero.mjs'
+/* THE SESSION TREE'S ROOT, IMPORTED AND NEVER WRITTEN — `www/shell.mjs`'s own precedent. The pin
+ * file and every fixture below live under it, and `/Users/Default` spelled here would be the second
+ * copy that puts a save somewhere the desktop process is not looking. */
+import { HOME_DIR } from '/src/libos/std.mjs'
+import {
+  spawnProgram, resultOf, ask as askKernel, until, gestureAsker,
+} from '/www/pagekernel.mjs'
+import {
+  bootShell, stageDesktop, place, requireIsolation, PROGRAMS, DESKTOP_HELP,
+} from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+/** AND IT SCROLLS TO THE NEWEST LINE. The log is a FIXED-HEIGHT box for M13's reason, so the lines
+ *  a reader most needs are the ones that have just scrolled out of it — and in a second engine this
+ *  log is the only channel there is (CLAUDE.md), where a screenshot cannot scroll. */
+const say = (s) => {
+  out.textContent += s + '\n'
+  out.scrollTop = out.scrollHeight
+}
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /** WHICH LOAD THIS IS. 1 makes the pin and navigates; 2 asserts it survived and runs the rest. */
+  phase: params.get('phase') === '2' ? 2 : 1,
+  /** Load 1's stamp as load 2's URL carries it back. Empty in load 1, which MINTS it. */
+  epoch: params.get('epoch') || '',
+  /* THE THREE WORLDS, EACH RE-RUNNABLE FROM THE COMMAND LINE WITHOUT A SOURCE EDIT. */
+  bandClips: params.get('band_clips') === '1',
+  saveToWindowFd: params.get('save_to_window_fd') === '1',
+  trayOutlives: params.get('tray_outlives') === '1',
+}
+globalThis.M22.config = CFG
+
+/** THIS RUN'S STAMP. Load 1 mints it and puts it in the URL it navigates to; load 2 compares the URL
+ *  against the stash. A stash from a previous run therefore cannot be read as this run's evidence —
+ *  which matters because `sessionStorage` outlives a navigation on purpose and `scripts/check.py`
+ *  re-navigates the same document per check. */
+const EPOCH = CFG.phase === 1 ? `${Date.now()}-${Math.round(performance.now())}` : CFG.epoch
+
+/* THE PAGE-SIDE CONTROLS, SET IN FULL AND ON BOTH PATHS. They are MODULE state, so a page that sets
+ * none still has to say none: otherwise the others are left holding whatever the last page in this
+ * realm asked for. `bandClips` is M22's, and `noGroup` is named as false rather than omitted
+ * because `setShellControls` rebuilds the whole record from the object it is handed. */
+setSurfaceControls({})
+setHostControls({})
+setShellControls({ noGroup: false, bandClips: CFG.bandClips })
+
+const EDITOR = '/src/bin/editor.mjs'
+const SH = '/src/bin/sh.mjs'
+const WC = '/src/bin/wc.mjs'
+const GREP = '/src/bin/grep.mjs'
+const STAT = '/src/bin/stat.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const RM = '/src/bin/rm.mjs'
+
+/* ---- the fixture's names ---------------------------------------------------------------------- */
+
+/** The tree this page's saves write into, in the session's own WRITABLE copy (D40/M19a). Not
+ *  `/tmp`: `std.sessionDir` is where `editor` with no operand puts a document, and a proof about a
+ *  reader's save must be about the directory a reader's save lands in. */
+const ROOT = `${HOME_DIR}/m22`
+
+/** THE PIN FILE, spelled from `HOME_DIR` and the leaf `src/bin/desktop.mjs` owns. The LEAF is the
+ *  one thing this page restates, and it restates it as a constant with that fact attached:
+ *  `PINS_LEAF` is module-private in the program, so there is no binding to import. A drift arrives
+ *  as `thePinFileHoldsTheList` going red with the button still on the bar, which is the loud end of
+ *  the two failure modes. */
+const PINS_LEAF = '.taskbar-pins'
+const PINS_PATH = `${HOME_DIR}/${PINS_LEAF}`
+
+/**
+ * THE PROGRAM THE GESTURE PINS, and the choice is the whole of clause 1's discriminating power.
+ *
+ * `editor` is pinnable — it is in `/usr/bin`, in `OPENS_OWN_WINDOW` and not in `HIDDEN_FROM_MENU` —
+ * and it is NOT in `DEFAULT_PINS`, which is `["files", "term"]`. A pin list that was never written
+ * reads back ENOENT and publishes those two, so `editor` on the band after the reload cannot be
+ * satisfied by a desktop that merely loaded. `bench/m22-pins/firefox-pins.py` picks the same
+ * subject for the same reason.
+ */
+const PIN_ME = 'editor'
+
+/** What the defaults are, as the only thing this page asserts about them: the subject must not be
+ *  one of them. Read off the shell BEFORE the gesture rather than written out, so the clause is
+ *  about the list the program actually published. */
+const pinsBefore = []
+
+/** The document the save proof writes. Its bytes are the proof, so they are a string whose length
+ *  no other string here shares. */
+const DOC_NAME = 'notes.txt'
+const DOC_TEXT = 'M22-THE-FILE-AS-IT-WAS-OPENED'
+/** What a REAL keyboard adds to it. Typed through `scripts/cdp.py`'s own per-character key events,
+ *  so these bytes are the ones that have to reach the file. */
+const TYPED = 'M22-TYPED-BY-A-REAL-KEYBOARD'
+/**
+ * AND WHAT IS TYPED AFTER THE SAVE AS, which is a FIXTURE AND NOT A FLOURISH.
+ *
+ * `src/bin/editor.mjs` breaks out of its loop on a close request when `!dirty` — "a clean buffer
+ * closes at once; a dirty one asks" — and a Save As clears `dirty`. So without these bytes the X
+ * would close the window with no dialog at all and the `y` clause would be waiting for a window
+ * that is never created.
+ *
+ * It also makes the final file DIFFERENT IN LENGTH from what Save As wrote, so "the close saved"
+ * is a byte count and not a path that was written twice with the same contents — the shape M21
+ * records at `CTRL2_TEXT`: an assertion over a constant inverts and fires and verifies nothing.
+ */
+const AFTER_AS = 'M22-TYPED-AFTER-THE-SAVE-AS'
+/** What Save As adds to the STEM. `notes.txt` becomes `notes-as.txt`, which is `src/bin/editor.mjs`
+ *  splitting the name with `std.extOf` and appending to the stem alone. */
+const AS_SUFFIX = '-as'
+
+/** THE READ-ONLY PATH THE REFUSAL IS ABOUT. `/usr` is `MNT_RO` with `mutErrno: "EROFS"` and
+ *  `src/share/readme.txt` is a real file with real bytes, so the editor opens it, loads it and then
+ *  cannot write it — which is the one reachable save refusal this system has. */
+const RO_DOC = '/usr/share/readme.txt'
+
+/** `echo` adds the newline unless `-n`, so a file is one byte longer than the string it was given
+ *  (`src/bin/echo.mjs`). */
+const echoBytes = (text) => text.length + 1
+
+/* ---- what the proofs are, before any of them has run ------------------------------------------ */
+
+globalThis.M22.proofs = { pins: null, save: null, switch: null, band: null, tray: null }
+
+const ask = gestureAsker(globalThis.M22)
+
+/** The host and the shell, once there are any. Published for a driver in another engine. */
+let HOST = null
+let SHELL = null
+let KERNEL = null
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/**
+ * WHAT THE KERNEL SAID ABOUT A DEATH, kept as a list.
+ *
+ * THE TRAY PROOF IS A CLAIM ABOUT A KILL, and a kill is three messages: `reaped` for the process,
+ * `win-destroy` for its windows, and `error` or `panic` for a kill that could not happen. Without
+ * them, a tray icon that did not go looks identical to a message the kernel never received — which
+ * is the first thing this page measured wrong, and `error: no such pid` is what it turned out to be
+ * saying. `bootShell({tap})` registers this before the host's own listener.
+ */
+const KMSG = []
+const KMSG_KINDS = new Set(['reaped', 'win-destroy', 'error', 'panic', 'note'])
+function kernelTap (m) {
+  if (!m || !KMSG_KINDS.has(m.t)) return
+  KMSG.push({ t: m.t, pid: m.pid, ids: m.ids, why: m.why, kind: m.kind, at: Math.round(
+    performance.now()) })
+}
+
+/* ---- reading the filesystem through ordinary programs ----------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 20000)) }
+}
+
+/**
+ * ONE FILE'S BYTE AND LINE COUNT, out of a SEPARATE `wc` PROCESS.
+ *
+ * THE PAGE CANNOT READ A FILE — it holds no fd and makes no syscall — so "the bytes are in the
+ * file" has to be read through a program, and the reading must not be the saving program's own. The
+ * editor already re-reads through a fresh `open` before it reports (`commitSave`); this is the
+ * SECOND, independent reading, by a process that was not alive when the write happened.
+ */
+async function bytesOf (k, path) {
+  const row = await runProgram(k, WC, ['wc', '-c', '-l', path])
+  const total = row.total || {}
+  return { path, exit: row.exit, bytes: total.bytes | 0, lines: total.lines | 0 }
+}
+
+/** How many lines of `path` contain `needle`, as a FIXED STRING (constraint 138), with the status
+ *  beside the count: `grep` answers 1 for a file it read and did not match, which is what makes
+ *  "these are NOT the bytes" a measurement rather than an absence. */
+async function linesWith (k, path, needle) {
+  const row = await runProgram(k, GREP, ['grep', '-c', needle, path])
+  return { path, needle, exit: row.exit, matched: row.matched | 0 }
+}
+
+/** One `lstat` row, or a row that says the path is not there. */
+async function statOf (k, path) {
+  const row = await runProgram(k, STAT, ['stat', path])
+  const got = (row.rows || [])[0] || null
+  return { path, exit: row.exit, type: got ? got.type : '' }
+}
+
+/** Write one line into a file through a REAL SHELL REDIRECTION. No path here carries a glob
+ *  character, so `expandOne` does no matching and the target is the word (`src/bin/sh.mjs`). */
+async function writeLine (k, path, text) {
+  const row = await runProgram(k, SH, ['sh', '-c', `echo ${text} > ${path}`])
+  return { path, text, exit: row.exit }
+}
+
+/* ---- aiming real input ------------------------------------------------------------------------ */
+
+/** THE VIEWPORT BOUND, as ONE test every aim applies. `Input.dispatchMouseEvent` takes a VIEWPORT
+ *  coordinate, so a point past `innerWidth` is delivered to nothing — no error, no event, and a
+ *  page that waited for an effect simply reports a red clause. A harness MUST fail when it cannot
+ *  reach what it was pointed at. */
+function onScreen (at, what, where = '') {
+  if (!at) throw new Error(`${what}: there is no measurable rect to aim at`)
+  if (at.x < 0 || at.y < 0 || at.x >= window.innerWidth || at.y >= window.innerHeight) {
+    throw new Error(`${what} is at client ${at.x},${at.y}, outside a `
+      + `${window.innerWidth}x${window.innerHeight} viewport — a dispatched mouse event carries a `
+      + `VIEWPORT coordinate, so nothing would receive it.${where ? ` ${where}` : ''}`)
+  }
+  return at
+}
+
+/**
+ * THE CENTRE OF ONE ELEMENT, IN VIEWPORT COORDINATES, AND THE HIT TEST THAT SAYS A HAND COULD
+ * REACH IT.
+ *
+ * `elementFromPoint` IS THE CLAUSE AND NOT A COURTESY. Every gesture on this page lands on shell
+ * chrome — an orb, a menu row, a chevron, a taskbar button, a caption button — and all of it is
+ * inside a 40 px strip under a stack of windows. A button in the DOM with a non-zero rect and
+ * something else on top of it is exactly the defect the band proof removes, so the aim REPORTS what
+ * the point really finds rather than assuming it is the element it was computed from.
+ */
+function aimEl (el, what) {
+  if (!el) throw new Error(`there is no element to aim ${what} at`)
+  const r = el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`${what} has no measurable rect (${JSON.stringify(r.toJSON())})`)
+  }
+  const at = onScreen({
+    x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2),
+  }, what)
+  const found = document.elementFromPoint(at.x, at.y)
+  return {
+    at,
+    box: { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width),
+      h: Math.round(r.height) },
+    /* CONTAINMENT AND NOT IDENTITY: a `.task-btn` holds an icon `<svg>` and a label `<span>`, and
+     * the hit test finds whichever one is under the centre. */
+    hits: Boolean(found && (found === el || el.contains(found))),
+    found: found ? String(found.className || found.tagName) : 'nothing',
+  }
+}
+
+/** ONE ROW OF THE SHELL'S POPUP, BY ITS LABEL — and the index the shell will report with it.
+ *  A LABEL THAT IS NOT THERE EXACTLY ONCE IS A THROW, with the whole popup printed: a driver that
+ *  clicked whichever row came first would run a verb nobody chose. */
+function aimPopupRow (shell, label, what) {
+  const rows = [...shell.popup.querySelectorAll('.shell-row')]
+  const labels = rows.map((el) => (el.querySelector('.shell-label') || {}).textContent || '')
+  const hits = rows.filter((unused, i) => labels[i] === label)
+  if (hits.length !== 1) {
+    throw new Error(`the popup has ${hits.length} row(s) labelled ${JSON.stringify(label)} among `
+      + `[${labels.join(' | ')}] — ${what}`)
+  }
+  const el = hits[0]
+  const aim = aimEl(el, `the popup row ${JSON.stringify(label)}`)
+  return {
+    label,
+    index: Number(el.dataset.menuIndex !== undefined ? el.dataset.menuIndex : -1),
+    accel: (el.querySelector('.shell-accel') || {}).textContent || '',
+    disabled: el.disabled === true,
+    ...aim,
+  }
+}
+
+/* ---- driving ---------------------------------------------------------------------------------- */
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR WHAT IT WAS FOR.
+ *
+ * `wait` IS THE GESTURE'S OWN CONSEQUENCE AND NOT A TIMEOUT NOBODY TUNED, which is M19's rule: a
+ * predicate the page can read, or `'settle'` where nothing observable is owed. The NAME carries the
+ * load, for the `drive_gestures` id-guard reason stated in this page's header.
+ */
+async function gesture (spec, { wait = 'settle', ms = 8000 } = {}) {
+  const named = { ...spec, name: `p${CFG.phase}-${spec.name || spec.kind}` }
+  await ask(named)
+  if (wait === 'settle') { await pause(350); return -1 }
+  return Math.round(await until(wait, ms))
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** The shell's own numbers, as one row — the ones every proof below reads. */
+function shellCounts (shell) {
+  const r = shell.report()
+  return {
+    syncs: r.syncs | 0, buttons: r.buttons | 0, pins: r.pins | 0,
+    switches: r.switches | 0, selects: r.selects | 0, raises: r.raises | 0,
+    trustedChords: r.trustedChords | 0, syntheticChords: r.syntheticChords | 0,
+    buttonClicks: r.buttonClicks | 0, minimizes: r.minimizes | 0, restores: r.restores | 0,
+    pinLaunches: r.pinLaunches | 0, trayClicks: r.trayClicks | 0, bandScrolls: r.bandScrolls | 0,
+    launches: r.launches | 0, menuOpens: r.menuOpens | 0,
+    topmost: r.topmost | 0,
+    popupKind: r.popupKind,
+    popupRows: [...r.popupRows],
+    accels: [...r.accels],
+    slotAccels: [...r.slotAccels],
+    chords: { ...r.chords },
+    band: { ...r.band, chevrons: (r.band.chevrons || []).map((c) => ({ ...c })) },
+    slots: (r.slots || []).map((s) => ({ ...s })),
+    pinned: (r.pinned || []).map((p) => ({ ...p })),
+    tray: (r.tray || []).map((t) => ({ ...t })),
+  }
+}
+
+/** EVERY FRAME THE HOST HOLDS, the desktop included — which is the point here rather than an
+ *  oversight: the tray proof asserts that the desktop's own window went with its process, so the
+ *  one row a window list would normally drop is the row that clause reads. */
+function framesOf (host) {
+  return [...host.frames.values()]
+    .map((e) => ({ id: e.id, pid: e.pid, prog: e.prog, role: e.role, title: e.win.titleText }))
+    .sort((a, b) => a.id - b.id)
+}
+
+/** Wait for a frame whose title contains `title`, and hand back the ENTRY. `skip` is the set of ids
+ *  that were already there — this page opens several `editor` windows, so a new one is told from an
+ *  old one by exclusion and never by title alone. */
+async function framed (host, title, skip = null, ms = 20000) {
+  const find = () => {
+    for (const entry of host.frames.values()) {
+      if (skip && skip.has(entry.id)) continue
+      if (entry.win.titleText.includes(title)) return entry
+    }
+    return null
+  }
+  const got = await until(() => Boolean(find()), ms)
+  return got < 0 ? null : find()
+}
+
+/** A TEXT window's transcript, which is every byte its program has written to the window fd. The
+ *  only reading the page has of what a windowed program said, and what every wait below is on. */
+const screenOf = (entry) => (entry && entry.term ? entry.term.transcript : '')
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer gesture is delivered by DOM
+ *  hit-testing. The kernel owns the order (constraint 226), so this asks rather than restyling. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/* ---- the synthesised keys, and the counting that says they were ------------------------------- */
+
+/**
+ * ONE KEYBOARD EVENT CARRYING A CHORD'S `code`, dispatched at the element that has the keyboard.
+ *
+ * `code` COMES FROM THE CHORD ROW AND THE MODIFIER BOOLEANS ARE DERIVED FROM ITS `mods`, so the
+ * page cannot dispatch a gesture the table does not describe. `keyAs` overrides the `key` ALONE,
+ * which is what makes the engine-disagreement clause possible: Firefox delivers Shift+Backquote as
+ * `key: "~"` and Chrome as `key: "\`"`, and a dispatcher bound on `key` passes in one engine and
+ * silently misses the chord in the other.
+ *
+ * `cancelable: true`, because `defaultPrevented` read back off the event is how this page asserts
+ * that `takeChord` called `preventDefault` — a chord the page does not cancel is a chord the host
+ * may also act on, which is what F6 measured as `host: "stopped"` in Chrome.
+ */
+function chordEvent (chord, { keyAs = null } = {}) {
+  return new KeyboardEvent('keydown', {
+    key: keyAs === null ? '`' : keyAs,
+    code: chord.code,
+    altKey: (chord.mods & WMOD_ALT) !== 0,
+    ctrlKey: (chord.mods & WMOD_CTRL) !== 0,
+    shiftKey: (chord.mods & WMOD_SHIFT) !== 0,
+    metaKey: (chord.mods & WMOD_META) !== 0,
+    bubbles: true,
+    cancelable: true,
+  })
+}
+
+/**
+ * DISPATCH ONE CHORD AT THE ELEMENT HOLDING THE KEYBOARD, and report everything the page can see
+ * of what happened to it.
+ *
+ * `into` IS A WINDOW'S OWN WIDGET AND NOT `document`, because the dispatcher is reached on the way
+ * INTO a window (`src/wm/winhost.mjs`): the event has to arrive where a reader's key would. It
+ * bubbles, so a listener on the desktop or on the document sees it too.
+ *
+ * `prevented` IS NECESSARY AND NOT SUFFICIENT, and the comment is the measurement: a window's own
+ * keydown handler ALSO calls `preventDefault` for any key that produces bytes
+ * (`src/wm/terminal.mjs` `#key`, `src/wm/winhost.mjs`'s surface handler), and `bytesForKey` answers
+ * one byte for Alt+` — Alt is not Ctrl and the backquote is one character. So a cancelled chord does
+ * not by itself say the dispatcher took it. What DOES say so is `screen`: a chord the dispatcher
+ * takes never becomes a `WEV_KEY`, so the program with the keyboard echoes nothing. The two
+ * readings together are the clause, and the unbound dispatches below are the other half — the same
+ * `key` on a different `code` must land in the program as a byte.
+ */
+function sendChord (into, chord, opts = {}) {
+  const event = chordEvent(chord, opts)
+  into.el.focus()
+  into.el.dispatchEvent(event)
+  return {
+    id: chord.id, code: chord.code, mods: chord.mods, label: chord.label,
+    keyAs: event.key,
+    where: String(into.el.className || into.el.tagName),
+    /* READ BACK OFF THE EVENT, after dispatch: synchronous dispatch means every listener has run by
+     * the time this line is reached. */
+    prevented: event.defaultPrevented === true,
+  }
+}
+
+/** A chord this table does NOT hold, built from a code and a modifier word rather than from a row.
+ *  The superset clause's instrument: Alt+Ctrl+` must match nothing. */
+const unboundChord = (code, mods) => Object.freeze({
+  id: `unbound-${code}-${mods}`, code, mods, label: labelFor(code, mods), action: '', arg: 0,
+})
+
+/** One synthesised key into a widget, by `key` and modifiers. `src/wm/terminal.mjs`'s
+ *  `bytesForKey` uppercases the letter before the C0 subtraction, so `ctrl+s` is byte 19 and
+ *  ctrl-shift-S is the SAME byte with `WMOD_SHIFT` in the record — which is the only thing that
+ *  tells Save from Save As apart. */
+function synthKey (el, key, { ctrl = false, shift = false } = {}) {
+  el.focus()
+  el.dispatchEvent(new KeyboardEvent('keydown', {
+    key, ctrlKey: ctrl, shiftKey: shift, bubbles: true, cancelable: true,
+  }))
+}
+
+/* ---- load 1: the pin gesture ------------------------------------------------------------------ */
+
+/** Where load 1 leaves its readings, and the one key it uses. `sessionStorage` and not
+ *  `localStorage`: the stash belongs to this TAB and this run, and a store that outlived the tab
+ *  would hand a later run an older run's evidence. */
+const STASH_KEY = 'm22-load-1'
+
+/**
+ * MAKE THE PIN WITH REAL INPUT, READ THE FILE BACK, AND NAVIGATE.
+ *
+ * THREE REAL GESTURES AND NOTHING SYNTHETIC: a click on the orb, the program's name TYPED into the
+ * start menu's own search box, and a click on the row that appears. The search is not a shortcut
+ * around a scroll — it is the shell's own filter, and it is what makes the aim independent of how
+ * many rows `/usr/bin` happens to have today (42 of them).
+ */
+async function drivePin (k, host, shell) {
+  const before = shellCounts(shell)
+  pinsBefore.push(...before.pinned.map((p) => p.label))
+
+  const orb = desktop.querySelector('[data-start]')
+  const orbAim = aimEl(orb, 'the start orb')
+  await gesture({ kind: 'click', name: 'click-the-orb', at: orbAim.at },
+    { wait: () => shell.report().popupKind === 'start', ms: 6000 })
+  const opened = shellCounts(shell)
+
+  /* THE NAME, TYPED. The search box has the keyboard the moment the menu opens (`openStart` focuses
+   * it), so these keys go where a reader's would. The needle is the ROW's own label, so the filter
+   * leaves exactly one `.shell-row` and `aimPopupRow` throws if it does not. */
+  const needle = `Pin ${PIN_ME}`
+  await gesture({ kind: 'type', name: 'type-the-pin-rows-name', text: needle },
+    { wait: () => {
+      const list = shell.popup.querySelector('.start-list')
+      return Boolean(list) && list.dataset.rows === '1'
+    }, ms: 6000 })
+  /** HOW MANY ROWS THE START MENU'S PROGRAM LIST IS SHOWING, which is NOT `report().popupRows`:
+   *  that is every `.shell-row` in the popup, and the menu's FOOT holds three of its own — the two
+   *  switch rows and Log off. `openStart`'s `render` publishes the filtered count on the list
+   *  itself, so this is the shell's own statement about its filter. */
+  const listRows = () => Number(
+    (shell.popup.querySelector('.start-list') || { dataset: {} }).dataset.rows)
+  const filtered = { ...shellCounts(shell), listRows: listRows() }
+  const row = aimPopupRow(shell, needle, 'the pin gesture')
+
+  await gesture({ kind: 'click', name: 'click-the-pin-row', at: row.at },
+    { wait: () => (shell.report().pinned || []).some((p) => p.label === PIN_ME), ms: 10000 })
+  const after = shellCounts(shell)
+
+  /* THE FILE, READ BY PROGRAMS THAT HOLD NO FD OF THE DESKTOP'S. This is what "persisted" means
+   * before any navigation has happened: the gesture wrote bytes and `fsync`ed them (constraint 23,
+   * `writePins`), and a reload is about whether they come back. */
+  const file = {
+    stat: await statOf(k, PINS_PATH),
+    counts: await bytesOf(k, PINS_PATH),
+    subject: await linesWith(k, PINS_PATH, PIN_ME),
+  }
+
+  return {
+    epoch: EPOCH,
+    pinsBefore: [...pinsBefore],
+    subject: PIN_ME,
+    path: PINS_PATH,
+    orb: { box: orbAim.box, hits: orbAim.hits, found: orbAim.found },
+    row: { label: row.label, index: row.index, box: row.box, hits: row.hits, found: row.found },
+    before, opened, filtered, after,
+    file,
+    keys: { ...host.keyCounts() },
+    gestures: [...globalThis.M22.gestureLog],
+  }
+}
+
+/* ---- load 2, proof 1: the pin came back ------------------------------------------------------- */
+
+/**
+ * THE PINNED BUTTON, AFTER THE NAVIGATION — and then a REAL CLICK ON IT, which must start the
+ * program.
+ *
+ * THE LAUNCH IS THE OTHER HALF OF R24 AND IS NOT A BONUS. A pinned button that cannot start
+ * anything is the live-looking button defect with a reload in front of it, and the route it takes
+ * is the one the start menu already uses: `activateItem(win, index, WITEM_MENU)` into the process
+ * that published the row (`Taskbar.launchPin`). So the shell gains no second way to run a program,
+ * and this clause is what says the index that came back out of the FILE still names the right row.
+ */
+async function drivePinBack (k, host, shell) {
+  const back = shellCounts(shell)
+  const btn = desktop.querySelector(`[data-pin-btn="${PIN_ME}"]`)
+  const file = {
+    stat: await statOf(k, PINS_PATH),
+    counts: await bytesOf(k, PINS_PATH),
+    subject: await linesWith(k, PINS_PATH, PIN_ME),
+  }
+  if (!btn) {
+    return { back, file, launched: null, btn: null,
+      why: `no [data-pin-btn="${PIN_ME}"] on the band` }
+  }
+  const aim = aimEl(btn, `the pinned ${PIN_ME} button`)
+  const known = new Set(host.frames.keys())
+  await gesture({ kind: 'click', name: 'click-the-pinned-button', at: aim.at },
+    { wait: () => [...host.frames.values()].some((e) => !known.has(e.id) && e.prog.includes(PIN_ME)),
+      ms: 20000 })
+  const entry = await framed(host, `${PIN_ME} — `, known)
+  const launched = shellCounts(shell)
+  return {
+    back, file, btn: { box: aim.box, hits: aim.hits, found: aim.found },
+    launched,
+    window: entry ? { id: entry.id, pid: entry.pid, prog: entry.prog, title: entry.win.titleText }
+      : null,
+    /* THE SLOT THE PIN OCCUPIES, AFTER THE LAUNCH. Windows 7 MERGES a running pinned program into
+     * its own button rather than putting a second one beside it, and `Taskbar.sync` does it by the
+     * group key being the pin's label — so the slot's `kind` turning from `pin` to `group` with the
+     * SAME key is the merge, read as data. */
+    slot: (launched.slots.find((s) => s.key === PIN_ME) || null),
+    why: '',
+  }
+}
+
+/* ---- load 2, proof 2: the save ---------------------------------------------------------------- */
+
+/**
+ * THE SAVE, DRIVEN THREE TIMES ON TWO PATHS — and the last one by real input alone.
+ *
+ * ctrl-S AND ctrl-shift-S ARE SYNTHESISED AND THE PAGE SAYS SO (header note 1): `scripts/cdp.py`
+ * has no virtual key code for a Ctrl chord, which is the same gap M20 records for F2. What is NOT
+ * synthesised is anything the gap does not force: the text is typed with real per-character key
+ * events, the Save As name is typed, Enter is a real `rawKeyDown`, the X is a real click and the
+ * `y` that answers the close dialog is a real key. THAT LAST ONE IS THE RETIRED DEFECT'S OWN
+ * GESTURE — "save and close" wrote `[saved]` to the window fd and nothing to the file — so the
+ * headline clause rests on a route with no synthesised key in it at all.
+ */
+async function driveSave (k, host) {
+  const known = new Set(host.frames.keys())
+  const docPath = `${ROOT}/${DOC_NAME}`
+  const asPath = `${ROOT}/notes${AS_SUFFIX}.txt`
+  /* THE CONTROL IS PER-PROCESS ARGV, armed on THIS editor and not on the `/usr` one below: that is
+   * what scopes `--save-to-window-fd` to the bytes clause and leaves the EROFS clause standing. */
+  const argv = ['editor', ...(CFG.saveToWindowFd ? ['--save-to-window-fd'] : []), docPath]
+  const spawned = await spawnProgram(k, EDITOR, argv)
+  const entry = await framed(host, `editor — ${docPath}`, known)
+  if (!entry) throw new Error(`the editor window on ${docPath} never opened`)
+  await raise(k, entry)
+  place(entry, { x: 140, y: 30, w: 520, h: 230 })
+  await pause(250)
+  const opening = { title: entry.win.titleText, screen: screenOf(entry) }
+
+  /* THE TEXT, TYPED FOR REAL. The widget takes the keyboard when it is focused, and `type_keys`
+   * sends one `keyDown` carrying `text` per character — which is what makes `isTrusted` true and
+   * what a `insertText` would never deliver. */
+  entry.term.focus()
+  await gesture({ kind: 'type', name: 'type-into-the-editor', text: TYPED },
+    { wait: () => screenOf(entry).includes(TYPED), ms: 8000 })
+  const typed = { screen: screenOf(entry), keys: { ...host.keyCounts() } }
+
+  /* ctrl-S. The wait is the editor's OWN REPORT of the save, which it writes to its window fd
+   * either way: `[saved N byte(s) to P]` or `P: ERRNO — NOT saved`. Waiting for a byte count alone
+   * would hang on exactly the world the refusal clause is about. */
+  const SAVED_MARK = '[saved'
+  const NOT_SAVED = 'NOT saved'
+  const beforeCtrlS = screenOf(entry).length
+  synthKey(entry.term.el, 's', { ctrl: true })
+  const ctrlSMs = Math.round(await until(() => {
+    const screen = screenOf(entry).slice(beforeCtrlS)
+    return screen.includes(SAVED_MARK) || screen.includes(NOT_SAVED)
+  }, 15000))
+  const afterCtrlS = {
+    ms: ctrlSMs,
+    screen: screenOf(entry).slice(beforeCtrlS),
+    file: await bytesOf(k, docPath),
+    had: await linesWith(k, docPath, DOC_TEXT),
+    gained: await linesWith(k, docPath, TYPED),
+    keys: { ...host.keyCounts() },
+  }
+
+  /* ctrl-shift-S: the SAVE AS dialog. Byte 19 again, told apart from the save by `WMOD_SHIFT` on
+   * the record — so this gesture is also the proof that the modifier survives the trip from a
+   * `KeyboardEvent` through `modifierBits` into a `WEV_KEY`. */
+  const seen = new Set(host.frames.keys())
+  synthKey(entry.term.el, 's', { ctrl: true, shift: true })
+  const dialog = await framed(host, 'editor — Save As', seen, 15000)
+  if (!dialog) throw new Error('ctrl-shift-S opened no `editor — Save As` window')
+  await pause(200)
+  dialog.term.focus()
+  await gesture({ kind: 'type', name: 'type-the-save-as-name', text: AS_SUFFIX },
+    { wait: () => screenOf(dialog).includes(`notes${AS_SUFFIX}`), ms: 8000 })
+  const saveAs = { win: dialog.id, title: dialog.win.titleText, screen: screenOf(dialog) }
+  /**
+   * ENTER IS A REAL KEY: `scripts/cdp.py`'s `KEYS` has it, and it arrives as byte 10 through
+   * `bytesForKey`.
+   *
+   * THE WAIT IS THE TITLE AND NOT THE DIALOG, and the difference is a RACE THIS PAGE MEASURED. Only
+   * a save that landed closes the dialog (`commitSaveAs` keeps the field up when the name was
+   * refused) — but that function destroys the dialog and only THEN calls `win_set_title`, which is a
+   * syscall whose effect reaches this page as a later message. Waiting on the dialog alone read the
+   * old title about one run in three, and `theSaveAsWroteTheOtherPath` went red with the save
+   * perfectly fine. The title is the LAST thing the gesture produces, so it is the thing to wait for.
+   */
+  await gesture({ kind: 'key', name: 'press-enter-in-save-as', key: 'Enter' },
+    { wait: () => !host.get(dialog.id) && entry.win.titleText === `editor — ${asPath}`,
+      ms: 15000 })
+  const afterSaveAs = {
+    title: entry.win.titleText,
+    screen: screenOf(entry),
+    file: await bytesOf(k, asPath),
+    had: await linesWith(k, asPath, DOC_TEXT),
+    gained: await linesWith(k, asPath, TYPED),
+    dialogGone: !host.get(dialog.id),
+  }
+
+  /* AND THE DOCUMENT IS MADE DIRTY AGAIN, BY REAL KEYS, because a Save As clears `dirty` and
+   * `src/bin/editor.mjs` closes a clean buffer at once: without these bytes the X below would
+   * destroy the window and the close dialog would never exist (see `AFTER_AS`). */
+  await raise(k, entry)
+  entry.term.focus()
+  await gesture({ kind: 'type', name: 'type-after-the-save-as', text: AFTER_AS },
+    { wait: () => screenOf(entry).includes(AFTER_AS), ms: 8000 })
+  const dirtied = { screen: screenOf(entry) }
+
+  /* THE X, FOR REAL — and the dialog it raises is the one `y` answers. `Win.closeBtn` is the
+   * element; the frame posts `WEV_CLOSE` and nothing else (constraint 44), so the window is still
+   * there afterwards and the dialog is the program's answer. */
+  const closeAim = aimEl(entry.win.closeBtn, "the editor's Close button")
+  const hadFrames = new Set(host.frames.keys())
+  await gesture({ kind: 'click', name: 'click-the-editors-X', at: closeAim.at },
+    { wait: () => [...host.frames.values()].some((e) => !hadFrames.has(e.id)
+      && e.win.titleText === 'Save changes?'), ms: 15000 })
+  const askWin = await framed(host, 'Save changes?', hadFrames, 5000)
+  if (!askWin) throw new Error('the X raised no `Save changes?` dialog')
+  const asked = {
+    win: askWin.id, screen: screenOf(askWin),
+    /* THE DESTINATION IS IN THE QUESTION, which is `askText`'s own contract: a dialog that said
+     * "save and close" without saying where is an instruction a reader cannot check. */
+    names: screenOf(askWin).includes(asPath),
+  }
+  askWin.term.focus()
+  await gesture({ kind: 'type', name: 'answer-y-in-the-close-dialog', text: 'y' },
+    { wait: () => !host.get(entry.id) && !host.get(askWin.id), ms: 20000 })
+  const account = await resultOf(k, spawned.pid, 20000)
+  const afterClose = {
+    file: await bytesOf(k, asPath),
+    gained: await linesWith(k, asPath, TYPED),
+    editorGone: !host.get(entry.id),
+    dialogGone: !host.get(askWin.id),
+  }
+
+  return {
+    argv, pid: spawned.pid, docPath, asPath,
+    opening, typed, afterCtrlS, saveAs, afterSaveAs, dirtied, asked, afterClose,
+    account: accountOfEditor(account),
+    keys: { ...host.keyCounts() },
+  }
+}
+
+/** THE REFUSAL, IN A SECOND PROCESS WITH NO CONTROL ARMED. `/usr` is `MNT_RO` with
+ *  `mutErrno: "EROFS"`, so the open succeeds, the document loads and the save cannot land — and the
+ *  errno is asserted BY NAME, separately, because a single "it refused" passes for a refusal for
+ *  the wrong reason (M3's `truncate` answered ENOENT where it owed EROFS). */
+async function driveRefusedSave (k, host) {
+  const known = new Set(host.frames.keys())
+  const spawned = await spawnProgram(k, EDITOR, ['editor', RO_DOC])
+  const entry = await framed(host, `editor — ${RO_DOC}`, known)
+  if (!entry) throw new Error(`the editor window on ${RO_DOC} never opened`)
+  await raise(k, entry)
+  place(entry, { x: 140, y: 300, w: 520, h: 200 })
+  await pause(250)
+  const before = screenOf(entry).length
+  synthKey(entry.term.el, 's', { ctrl: true })
+  const ms = Math.round(await until(
+    () => screenOf(entry).slice(before).includes('NOT saved'), 15000))
+  const refused = { ms, screen: screenOf(entry).slice(before) }
+  /* AND CLOSED WITH THE X ALONE, WHICH RAISES NO DIALOG — because nothing was typed here, so the
+   * buffer is CLEAN and `src/bin/editor.mjs` closes a clean one at once. That is a reading rather
+   * than a convenience: a refused save must not leave a document the program thinks is unsaved
+   * work, and `why` says which of the two doors it went out of. */
+  await raise(k, entry)
+  await gesture({ kind: 'click', name: 'click-the-ro-editors-X', at:
+    aimEl(entry.win.closeBtn, "the read-only editor's Close button").at },
+  { wait: () => !host.get(entry.id), ms: 20000 })
+  const account = await resultOf(k, spawned.pid, 20000)
+  return { path: RO_DOC, pid: spawned.pid, refused, account: accountOfEditor(account) }
+}
+
+/** THE M22 FIELDS OF AN `editor` ACCOUNT, with a shape for a program that never reached them. A
+ *  refusal path returns an account too, and defaulting rather than letting a clause dereference
+ *  `undefined` is what makes such a run report FAILED CLAUSES over a stated exit code instead of a
+ *  thrown page — the difference between a proof that failed and a harness that broke. */
+function accountOfEditor (row = {}) {
+  return {
+    exit: row.exit,
+    why: String(row.why || ''),
+    savePath: String(row.savePath || ''),
+    saved: (row.saved || []).map((s) => ({ path: String(s.path), bytes: s.bytes | 0 })),
+    /* THE ERRNO ROWS ARE COPIED AND NOT NORMALISED: a defaulted `errno: ""` would make "it refused
+     * with an errno" pass for a refusal that had none. */
+    saveErrors: (row.saveErrors || []).map((e) => ({ ...e })),
+    saveFailures: row.saveFailures | 0,
+    docBytes: row.docBytes | 0,
+    toWindowFd: row.toWindowFd === true,
+    windowFdSaves: row.windowFdSaves | 0,
+    saveAsOpened: row.saveAsOpened | 0,
+    saveAsCancels: row.saveAsCancels | 0,
+    menus: row.menus | 0,
+    refusedMenus: row.refusedMenus | 0,
+    typePicks: row.typePicks | 0,
+    nameFaults: row.nameFaults | 0,
+    keys: row.keys | 0,
+    closes: row.closes | 0,
+    refusals: row.refusals | 0,
+    typed: String(row.typed || ''),
+    opened: String(row.opened || ''),
+    openError: String(row.openError || ''),
+  }
+}
+
+/* ---- load 2, proof 3: the chord --------------------------------------------------------------- */
+
+/**
+ * THE SWITCHER, AND THE MENU THAT LABELS IT.
+ *
+ * SIX DISPATCHES, EACH ANSWERING ONE QUESTION the measurement left to the dispatcher:
+ *
+ *   forward      Alt+`        the top window changes to the next one DOWN the stack
+ *   back         Alt+Shift+`  and it comes back, which is what makes either direction mean anything
+ *   firefox      Alt+Shift+`  with `key: "~"` — FIREFOX'S OWN SPELLING, dispatched in Chrome. A
+ *                             dispatcher bound on `key` misses this one and nothing says so
+ *   wrong-code   Alt+`        with `code: "KeyQ"` and `key: "\`"` — the mirror: a dispatcher bound
+ *                             on `key` would TAKE this one, and the real key is the other. It must
+ *                             go THROUGH, which the program's own screen is the reading of
+ *   superset     Alt+Ctrl+`   matches nothing, because `chordAt` is exact — and it goes through too
+ *   slot         Alt+1        selects the first Superbar button, which is the direct-select set
+ *
+ * THE CHORDS GO INTO A PROGRAM THAT ECHOES, and that is the instrument rather than the fixture.
+ * `editor` writes every printable it receives to its own window, so "the dispatcher TOOK the chord"
+ * is readable as a screen that did not grow — and the two unbound dispatches are the positive
+ * control for that reading, because the same `key` on a different `code` must arrive as a byte.
+ */
+async function driveSwitch (k, host, shell) {
+  const stackOf = async () => {
+    const st = await winState(k)
+    return [...((st.wins || {}).stack || [])]
+  }
+  const open = shellCounts(shell)
+
+  /* THE START MENU'S FOOT, WHERE THE TWO ROWS ARE. The accelerators are read off the DOM the shell
+   * rendered — `report().accels` is `.shell-accel` text — because the requirement is that the MENU
+   * shows the real accelerator, and asserting the chord table against itself would pass over a menu
+   * that printed nothing at all. */
+  const orbAim = aimEl(desktop.querySelector('[data-start]'), 'the start orb')
+  await gesture({ kind: 'click', name: 'click-the-orb-for-the-switch-rows', at: orbAim.at },
+    { wait: () => shell.report().popupKind === 'start', ms: 6000 })
+  const menu = shellCounts(shell)
+  const rows = {
+    next: aimPopupRow(shell, 'Next window', 'the switch rows'),
+    prev: aimPopupRow(shell, 'Previous window', 'the switch rows'),
+  }
+  /* AND IT IS CLOSED WITH A REAL Escape, which the shell binds on the desktop element. A menu left
+   * open would sit over the taskbar for every gesture after this one — and it holds the keyboard,
+   * which the chords below need. */
+  await gesture({ kind: 'key', name: 'close-the-start-menu', key: 'Escape' },
+    { wait: () => shell.popup.hidden === true, ms: 6000 })
+
+  /* THE PROGRAM THE CHORDS ARE AIMED INTO: the editor the PINNED BUTTON started, still open. A
+   * THROW and not a fallback if it is not there — a chord dispatched at nothing is a green clause
+   * about a gesture that reached no handler. */
+  /** The desktop's window id, which the cycle EXCLUDES: it is the surface the windows sit on and
+   *  `switchWindow` skips `WROLE_DESKTOP` for `groups()`'s reason. Read off the shell so the page
+   *  does not decide which window is the desktop. */
+  const deskWin = (shell.desktopEntry() || { id: 0 }).id
+
+  const into = await framed(host, 'editor — ', null, 2000)
+  if (!into || !into.term) {
+    throw new Error('the switch proof needs a text window that ECHOES to read "the chord was taken" '
+      + `off; the frames are ${JSON.stringify(framesOf(host))}`)
+  }
+  await raise(k, into)
+  into.term.focus()
+  await pause(200)
+
+  /* THE KEY COUNTS BEFORE ANY CHORD, so the clause about them is a DIFFERENCE and not a total: the
+   * six dispatches below must raise `synthetic` by six and `trusted` by none, which is the page
+   * measuring that it synthesised them rather than claiming it did not (header note 1). */
+  const before = {
+    stack: await stackOf(), counts: shellCounts(shell), keys: { ...host.keyCounts() },
+    screen: screenOf(into).length,
+  }
+  /**
+   * WHICH WINDOW A DIRECTION OWES, GIVEN THE ORDER THAT WAS IN FORCE.
+   *
+   * ONE MODULO OVER THE KERNEL'S OWN STACK, and it is here because the DIRECTION is what this proof
+   * is about: "it switched" is satisfied by a switcher that picks at random. It is not a second copy
+   * of `switchWindow` — that function also restores a minimized window, posts the raise and counts
+   * — it is the one sentence of that function's docstring, as arithmetic: forward goes one step DOWN
+   * the stack, because the window in front is the one you are leaving.
+   *
+   * AND IT IS COMPUTED PER PRESS, because a RAISE RE-ORDERS THE STACK. Forward then reverse does
+   * NOT return a reader to where they started, and that is a property of raising rather than a
+   * defect in either direction — Windows 7 holds a transient order only while Alt is down, and this
+   * ABI has no held-chord state. The first version of this clause asserted the return and measured
+   * `4 -> 3 -> 2`, which is the order moving under it.
+   */
+  const owed = (stack, top, dir) => {
+    const ids = stack.filter((id) => id !== deskWin)
+    if (!ids.length) return 0
+    const at = ids.indexOf(top) >= 0 ? ids.indexOf(top) : ids.length - 1
+    const step = dir >= 0 ? -1 : 1
+    return ids[((at + step) % ids.length + ids.length) % ids.length]
+  }
+
+  const sends = []
+  const topAfter = async (row, dir) => {
+    /* WHAT THE PRESS WAS OWED, computed from the state BEFORE it: the stack and the top as the last
+     * reading left them. */
+    const prev = sends.length ? sends[sends.length - 1] : before
+    row.owed = dir === null ? 0
+      : owed(prev.stack, (prev.topmost === undefined ? prev.counts.topmost : prev.topmost) | 0, dir)
+    await pause(500)
+    row.stack = await stackOf()
+    row.topmost = shell.report().topmost | 0
+    row.switches = shell.report().switches | 0
+    row.selects = shell.report().selects | 0
+    /* HOW MUCH THE ECHOING PROGRAM'S SCREEN GREW SINCE THE LAST DISPATCH. 0 means the chord never
+     * became a `WEV_KEY`, which is what "the dispatcher took it" means from outside the kernel. */
+    const now = screenOf(into)
+    row.screenGrew = now.length - (sends.length ? sends[sends.length - 1].screenAt : before.screen)
+    row.screenAt = now.length
+    sends.push(row)
+    return row
+  }
+
+  const forward = await topAfter(sendChord(into.term, SWITCH_NEXT), SWITCH_NEXT.arg)
+  /* THE REVERSE CHORD IS DISPATCHED AT THE SAME WIDGET, which is not a detail: the forward chord
+   * raised another window, so a page that re-read the focus would be typing into whatever came up.
+   * A reader holding Alt does not re-aim between notches either. */
+  const backward = await topAfter(sendChord(into.term, SWITCH_PREV), SWITCH_PREV.arg)
+  /* FIREFOX'S SPELLING OF THE SAME PHYSICAL KEY. Measured in `bench/m22-switch/probe.py`: BiDi lets
+   * the ENGINE apply the layout, so a shifted backtick arrives as `key: "~"` there and as `key:
+   * "\`"` over CDP, while `code` is `Backquote` in both. */
+  const firefox = await topAfter(sendChord(into.term, SWITCH_PREV, { keyAs: '~' }),
+    SWITCH_PREV.arg)
+  /* THE MIRROR: the `key` a Chrome dispatcher would have matched, on the WRONG PHYSICAL KEY. */
+  const wrongCode = await topAfter(sendChord(into.term, unboundChord('KeyQ', WMOD_ALT)), null)
+  /* AND A SUPERSET, which must match nothing: Alt+Shift+` is its own row, so an Alt+` that fired on
+   * any superset would make the reverse chord unreachable. */
+  const superset = await topAfter(
+    sendChord(into.term, unboundChord('Backquote', WMOD_ALT | WMOD_CTRL)), null)
+  /* THE SLOT. `Alt+1` is `slots[0]`, which is the first button on the band — a pinned program with
+   * no window LAUNCHES and a live one goes through the same three-way click rule the button has. */
+  const slot = await topAfter(sendChord(into.term, slotChord(1)), null)
+
+  return {
+    open, menu, rows, before, sends,
+    forward, backward, firefox, wrongCode, superset, slot,
+    into: { id: into.id, title: into.win.titleText, prog: into.prog },
+    after: shellCounts(shell),
+    keys: { ...host.keyCounts() },
+    /* WHAT THE TABLE SAYS, beside what the DOM showed. Two readings of one fact is the only way to
+     * see them disagree. */
+    table: {
+      next: SWITCH_NEXT.label, prev: SWITCH_PREV.label, slots: SELECT_SLOTS,
+      rows: CHORDS.length,
+      blocked: BLOCKED.map((b) => ({ id: b.id, label: b.label, why: b.why })),
+      slotLabels: Array.from({ length: SELECT_SLOTS }, (unused, i) => slotChord(i + 1).label),
+    },
+  }
+}
+
+/* ---- load 2, proof 4: the band ---------------------------------------------------------------- */
+
+/**
+ * THE VIEWPORT SEARCH, APPLIED TO THE DESKTOP ELEMENT RATHER THAN TO THE VIEWPORT.
+ *
+ * `bench/m22-band/probe.py` narrows the EMULATED VIEWPORT until the band overflows, and records why
+ * the width cannot be a constant: the band needs two properties at once — narrower than its content
+ * and wider than one button — and the window between them is about ten pixels wide and moves with
+ * the tray, whose width moves with how wide the locale's clock renders.
+ *
+ * A PAGE CANNOT RESIZE ITS OWN VIEWPORT, and it does not have to: the taskbar is `left: 0; right: 0`
+ * inside the desktop element (`src/wm/aero.mjs`), so the desktop's width IS the bar's width. So the
+ * search runs here, in the product, with no emulation — which also means the clause is re-runnable
+ * in a second engine, where `Emulation.setDeviceMetricsOverride` does not exist.
+ *
+ * `sync()` AFTER EVERY STEP, because `#syncChevrons` runs on a window-table change and on a VIEWPORT
+ * resize, and this is neither. A band left un-synced reports `over: N` with both chevrons hidden,
+ * which is the exact state the probe measured and reported as a defect.
+ */
+const BAND_WIDE_W = 560
+const BAND_MIN_W = 150
+const BAND_STEP_W = 6
+
+function narrowUntilOverflow (shell) {
+  const tried = []
+  for (let w = BAND_WIDE_W; w >= BAND_MIN_W; w -= BAND_STEP_W) {
+    desktop.style.width = `${w}px`
+    shell.sync()
+    const band = shell.report().band
+    tried.push({ w, clientW: Math.round(band.clientW), scrollW: Math.round(band.scrollW),
+      over: Math.round(band.over) })
+    /* BOTH PROPERTIES, OR THE CLAUSE BELOW IS UNSATISFIABLE RATHER THAN FALSE: a band narrower than
+     * one button has no scroll position at which the last button is wholly inside it. */
+    if (band.over > 1 && band.clientW >= TASK_BTN_MIN_W) {
+      return { width: w, tried, found: true }
+    }
+  }
+  return { width: 0, tried, found: false }
+}
+
+/**
+ * DRIVE THE BAND: a wheel on each axis, both chevrons, and the last button hit-tested.
+ *
+ * THE AXIS IS A CLAUSE AND NOT A DETAIL. A `mouseWheel` carrying `deltaY` moves a horizontal-only
+ * scroller 0 px in both engines and `deltaX` moves it (`bench/m22-band/probe.py`, constraint 297's
+ * shape), so a check that dispatched the wrong axis would assert a constant against a scroller that
+ * never moved. The vertical one is driven FIRST and asserted to move nothing, which makes it this
+ * clause's own negative control.
+ */
+async function driveBand (k, host, shell) {
+  const wide = shellCounts(shell)
+  const search = narrowUntilOverflow(shell)
+  if (!search.found) {
+    /* A HARNESS MUST FAIL WHEN IT CANNOT REACH WHAT IT WAS POINTED AT. There is no band to drive, so
+     * the page says what it tried rather than reporting a clause about a state it never produced. */
+    desktop.style.width = ''
+    shell.sync()
+    throw new Error('no desktop width between '
+      + `${BAND_MIN_W} and ${BAND_WIDE_W} CSS px left the band overflowing AND wider than one `
+      + `${TASK_BTN_MIN_W} px button. The band is ${wide.buttons} button(s) and ${wide.pins} pin(s) `
+      + `wide: ${JSON.stringify(search.tried.slice(-6))}`)
+  }
+  const narrow = shellCounts(shell)
+  const last = narrow.slots.length
+  const bandEl = desktop.querySelector('[data-band]')
+  const bandAim = aimEl(bandEl, 'the taskbar band')
+
+  /**
+   * THE CHEVRONS GO FIRST, AND THE ORDER IS A MEASUREMENT RATHER THAN A PREFERENCE.
+   *
+   * Each chevron is DISABLED where it has nowhere to go, so each has to be pressed from a position
+   * where it is live: `next` from 0 and `prev` from somewhere past it. The first version of this
+   * proof wheeled first and then pressed `prev`, which under `band-clips` meant pressing a chevron
+   * that was correctly disabled at `scrollLeft: 0` — so a control scoped to the WHEEL turned two
+   * chevron clauses as well, and the scope the slice contract asks for was unreachable.
+   *
+   * NO BRANCH ON THE POSITION, which would be a page deciding what to expect from the state the
+   * control produced. Pressing `next` and then `prev` is live in BOTH worlds, because
+   * `overflow: hidden` still permits a programmatic `scrollLeft` — measured, both engines.
+   */
+  const nextEl = desktop.querySelector('[data-band-chev="next"]')
+  const prevEl = desktop.querySelector('[data-band-chev="prev"]')
+  const nextAim = aimEl(nextEl, 'the next chevron')
+  const atNext = shell.report().band.scrollLeft
+  await gesture({ kind: 'click', name: 'click-the-next-chevron', at: nextAim.at },
+    { wait: () => shell.report().band.scrollLeft > atNext + 0.5, ms: 6000 })
+  const afterNext = shellCounts(shell).band
+  const prevAim = aimEl(prevEl, 'the prev chevron')
+  const atPrev = shell.report().band.scrollLeft
+  await gesture({ kind: 'click', name: 'click-the-prev-chevron', at: prevAim.at },
+    { wait: () => shell.report().band.scrollLeft < atPrev - 0.5, ms: 6000 })
+  const afterPrev = shellCounts(shell).band
+
+  /* THEN THE WHEEL'S VERTICAL AXIS, WHICH MUST MOVE NOTHING. `gapMs` is not needed — one notch is
+   * one event and nothing here is counting a stream, so M17's reason for pacing does not apply. */
+  await gesture({ kind: 'wheel', name: 'wheel-the-band-vertically', at: bandAim.at,
+    deltaX: 0, deltaY: 120 }, { wait: 'settle' })
+  const afterDeltaY = shellCounts(shell).band
+
+  /* AND THE HORIZONTAL ONE, WHICH IS THE ONE CLAUSE `band-clips` KILLS: `overflow: hidden` refuses a
+   * wheel and still permits a programmatic `scrollLeft`, so every other clause here HOLDS under that
+   * control. It is driven from `scrollLeft: 0`, which the `prev` press above left it at. */
+  await gesture({ kind: 'wheel', name: 'wheel-the-band-horizontally', at: bandAim.at,
+    deltaX: 120, deltaY: 0 }, { wait: 'settle' })
+  const afterDeltaX = shellCounts(shell).band
+
+  /* AND THE LAST BUTTON, REVEALED AND HIT-TESTED AT ITS OWN CENTRE. `revealSlot` is the shell's own
+   * — the same call `selectSlot` makes for a chord — and `reachable` is `elementFromPoint` finding
+   * that button and not the tray or a popup over it, which is what "a hand could click this" means. */
+  const revealed = shell.revealSlot(last)
+  await pause(200)
+  const afterReveal = shellCounts(shell)
+  const lastBtnAim = revealed && afterReveal.slots[last - 1]
+    ? aimEl(shell.slots[last - 1].btn, `band slot ${last}`)
+    : null
+  /* AND A REAL CLICK ON IT, because "reachable" is a hit test and "it does something" is a gesture.
+   * The slot may be a PIN or a GROUP, so the effect asserted is the shell's own counter rather than
+   * a window: `selectSlot`'s two branches are `launchPin` and `clickGroup`, and both of them are
+   * what a click on that button already does. */
+  let clicked = null
+  if (lastBtnAim) {
+    const hadClicks = shell.report().buttonClicks + shell.report().pinLaunches
+    await gesture({ kind: 'click', name: 'click-the-last-band-button', at: lastBtnAim.at },
+      { wait: () => (shell.report().buttonClicks + shell.report().pinLaunches) > hadClicks,
+        ms: 8000 })
+    clicked = shellCounts(shell)
+  }
+
+  /* THE DESKTOP GOES BACK TO ITS FULL WIDTH, and the shell is re-synced: the tray proof below aims
+   * at an icon in that bar, and a 230 px desktop is not the one the rest of this page measured. */
+  desktop.style.width = ''
+  shell.sync()
+  await pause(250)
+  const restored = shellCounts(shell)
+
+  return {
+    wide, search, narrow, last,
+    minBtnW: TASK_BTN_MIN_W, chevW: BAND_CHEV_W, barH: TASKBAR_H,
+    band: bandAim.box,
+    afterDeltaY, afterDeltaX, afterPrev, afterNext,
+    revealed, afterReveal, clicked, restored,
+  }
+}
+
+/* ---- load 2, proof 5: the tray ---------------------------------------------------------------- */
+
+/**
+ * THE TRAY ICON, CLICKED — AND THEN ITS PROCESS KILLED.
+ *
+ * `end-process` IS `reap(p, STAT_KILLED, SIGKILL)` in the kernel (`src/kernel/kernel.mjs`), which is
+ * the same teardown a crash gets: fds closed, windows destroyed, nothing asked of the process. So
+ * the withdrawal cannot be the desktop politely handing its row back — there is no such call, and
+ * the one graceful door `src/bin/desktop.mjs` has (`env.win.items(fd, [])` at the end of `run`) is
+ * not reached by a kill.
+ *
+ * THE CLICK COMES FIRST, because an icon that does nothing is not a tray icon. It is the third
+ * rendering of one published list (a start-menu row, a desktop icon, a tray icon), and the verb it
+ * runs is `spawn /usr/bin/taskmgr` — so the proof that the click worked is a WINDOW, and the proof
+ * that the kill was aimed at the desktop and not at everything is that the window is still there
+ * afterwards.
+ */
+/**
+ * HOW LONG A WITHDRAWAL IS GIVEN. Measured on the live desktop: a kill with no inherited
+ * description outstanding withdraws the icon in under 250 ms, so five seconds is not a tuned
+ * number — it is the difference between a message that is late and one that is never coming.
+ */
+const TRAY_WAIT_MS = 5000
+
+async function driveTray (k, host, shell, heirs = []) {
+  const desk = shell.desktopEntry()
+  if (!desk) throw new Error('there is no desktop window, so there is no tray row to withdraw')
+  const before = shellCounts(shell)
+  /* THE ROW'S FLAGS, READ THROUGH THE ABI'S OWN TWO PREDICATES. `isTrayRow` and `isPinnedRow` are
+   * exclusive over all 256 flag words (`src/abi.mjs` asserts it at module load), and the bit that
+   * separates them is `WITEM_MENU` — so a status icon that carried it would be drawn in the band as
+   * a pin instead, which is the one way this row can be published wrong. */
+  const rows = (desk.items || []).map((row, index) => ({
+    index, label: row.label, flags: row.flags,
+    tray: isTrayRow(row.flags), pinned: isPinnedRow(row.flags),
+    hasMenu: (row.flags & WITEM_MENU) !== 0, hasTray: (row.flags & WITEM_TRAY) !== 0,
+  }))
+  const trayRows = rows.filter((r) => r.tray)
+  const iconEls = [...desktop.querySelectorAll('[data-tray-icon]')]
+
+  let clicked = null
+  let opened = null
+  if (iconEls.length === 1) {
+    const aim = aimEl(iconEls[0], 'the tray icon')
+    const known = new Set(host.frames.keys())
+    await gesture({ kind: 'click', name: 'click-the-tray-icon', at: aim.at },
+      { wait: () => [...host.frames.values()].some((e) => !known.has(e.id)), ms: 20000 })
+    /* THE WINDOW `src/bin/taskmgr.mjs` OPENS IS TITLED "Task Manager", which is also the tray row's
+     * own label — the row names the program it starts, which is what makes the icon legible. */
+    opened = await framed(host, 'Task Manager', known, 5000)
+    clicked = { aim: { box: aim.box, hits: aim.hits, found: aim.found }, counts: shellCounts(shell) }
+  }
+
+  /**
+   * THE KILL, IN TWO STEPS, AND THE SECOND ONE IS WHERE A DEFECT THIS PAGE FOUND USED TO LIVE.
+   *
+   * STEP 1 is the plan's sentence: kill the process that published the row. By PID, through the
+   * page's own supervisor route — the same one the start menu's `Log off` row uses — so nothing is
+   * sent to the desktop's window and nothing is asked of the process.
+   *
+   * IT WAS NOT ENOUGH, AND `said` IS WHERE THAT WAS MEASURED: the kernel answered `reaped` and NO
+   * `win-destroy`. `src/kernel/kernel.mjs`'s `spawnChild` inherits EVERY fd of the caller into the
+   * child, window fds included, so the description's `refs` is 2 — and the fd walk in `teardown`
+   * only decrements, so `src/kernel/files.mjs`'s `F_WIN.close` never ran and `WinMgr.destroyTree`
+   * was never reached. The desktop spawns every program a reader starts, so ANY program running at
+   * the time held its window: the frame stayed, the rows stayed, and the tray icon outlived its
+   * process. `WinMgr.reapPid`, called from `teardown`, is the fix — constraint 14's "at
+   * `terminate()`: close fds, DESTROY WINDOWS, drop the taskbar button" as two steps and not one.
+   *
+   * STEP 2 IS KEPT, and it is now the discriminating reading rather than a way around the defect:
+   * the heirs hold descriptions on a window that is already gone, so killing them must leave the
+   * tray empty and the icon absent. A kernel that went back to trusting the last close would turn
+   * step 1 red and leave step 2 green, which is exactly the pair that located this in one run.
+   */
+  const pid = desk.pid
+  const deskWin = desk.id
+  const went = () => !host.get(deskWin) && shell.report().tray.length === 0
+  const saidBefore = KMSG.length
+  host.post({ t: 'end-process', pid })
+  const wentMs = Math.round(await until(went, TRAY_WAIT_MS))
+  await pause(200)
+  const afterOwner = shellCounts(shell)
+  const saidOfOwner = KMSG.slice(saidBefore)
+
+  /* THE HEIRS: the pids the DESKTOP PROCESS spawned, which is where the inherited descriptions
+   * are. Named by the proofs that caused them rather than guessed at, and filtered to the ones
+   * still alive — a pid that has already exited holds nothing. */
+  const saidBefore2 = KMSG.length
+  /* THE PROGRAM THIS PROOF'S OWN CLICK STARTED IS AN HEIR TOO, and it has to be in the list: the
+   * tray icon's verb is `spawn` IN THE DESKTOP PROCESS, so the window the click opened holds the
+   * desktop's fd exactly as the pinned button's did. */
+  const asked = [...heirs, opened ? opened.pid : 0].filter((p) => p > 0)
+  const live = asked.filter((p) => [...host.frames.values()].some((e) => e.pid === p))
+  for (const heir of live) host.post({ t: 'end-process', pid: heir })
+  const wentAfterHeirsMs = live.length
+    ? Math.round(await until(went, TRAY_WAIT_MS))
+    : null
+  await pause(200)
+  const after = shellCounts(shell)
+  const said = KMSG.slice(saidBefore)
+
+  return {
+    desk: { win: deskWin, pid, items: rows.length },
+    rows, trayRows,
+    icons: { before: iconEls.length,
+      after: desktop.querySelectorAll('[data-tray-icon]').length,
+      dataset: (desktop.querySelector('[data-tray-icons]') || { dataset: {} })
+        .dataset.trayIcons || '' },
+    clicked,
+    opened: opened ? { id: opened.id, pid: opened.pid, title: opened.win.titleText } : null,
+    heirs: { asked, live, said: KMSG.slice(saidBefore2) },
+    before, afterOwner, after, wentMs, wentAfterHeirsMs, said, saidOfOwner,
+    /* THE WINDOWS THE PAGE ITSELF SPAWNED, which inherited nothing: they are what says the kill was
+     * AIMED rather than a page that ended everything. */
+    strangers: framesOf(host).filter((f) => f.prog.includes('winopen')),
+    frames: framesOf(host),
+  }
+}
+
+/* =============================================================================================
+   PROOF 1: THE PIN — a pinned button survives a reload, and launches.
+
+   `docs/PLAN-SHELL.md` §M22: "A pinned button survives a reload and launches."
+
+   THE CLAUSE COULD FAIL AGAINST A PIN LIST THAT WAS NEVER PERSISTED, and that is the whole reason
+   the subject is `editor`: `src/bin/desktop.mjs`'s `DEFAULT_PINS` is `["files", "term"]` and is used
+   when the file is ENOENT, so a world in which the write never landed publishes those two and
+   `editor` is absent from the band, from the shell's report and from the file's bytes at once.
+   ============================================================================================= */
+function proofPins (load1, load2) {
+  const pins = {
+    load1: {
+      pinsBefore: load1.pinsBefore,
+      pinned: load1.after.pinned,
+      pins: load1.after.pins,
+      file: load1.file,
+      orb: load1.orb,
+      row: load1.row,
+      menuRows: load1.opened.popupRows.length,
+      filteredRows: load1.filtered.listRows,
+      filteredPopup: load1.filtered.popupRows,
+    },
+    load2: {
+      pinned: load2.back.pinned,
+      pins: load2.back.pins,
+      slots: load2.back.slots,
+      file: load2.file,
+      btn: load2.btn,
+      launched: load2.window,
+      slot: load2.slot,
+      why: load2.why,
+    },
+    subject: PIN_ME,
+    path: PINS_PATH,
+    reloaded: globalThis.M22.reload,
+  }
+
+  /* THE RELOAD HAPPENED, AND IT IS INFRASTRUCTURE AS A CLAUSE. `window.__m22mark` is set in load 1
+   * and cannot survive a navigation, so its absence here is what makes every clause below a reading
+   * of a page built from zero rather than of the still-live first shell. The epoch pins the stash to
+   * THIS run. */
+  pins.thePageReallyReloaded = globalThis.M22.reload.navigated === true
+    && globalThis.M22.reload.markSurvived === false
+    && globalThis.M22.reload.epochMatched === true
+
+  /* THE SUBJECT WAS NOT PINNED BEFORE THE GESTURE, which is what stops every clause below passing
+   * over a desktop that simply published its defaults. */
+  pins.theSubjectWasNotPinnedToBeginWith = !load1.pinsBefore.includes(PIN_ME)
+    && load1.pinsBefore.length > 0
+
+  /* THE GESTURE WAS A REAL ROW IN A REAL MENU: the orb and the row were both hit-tested at the point
+   * the click went to, and the shell filtered to exactly the row that was clicked. */
+  pins.theGestureLandedOnTheRow = load1.orb.hits === true && load1.row.hits === true
+    && load1.row.index >= 0 && load1.row.label === `Pin ${PIN_ME}`
+    /* THE PROGRAM LIST FILTERED TO ONE ROW, which is the shell's own count on `.start-list` and
+     * NOT `popupRows`: that is every row in the popup, and the menu's foot carries three of its
+     * own. `aimPopupRow` is the other half — it THROWS unless exactly one row wears the label — so
+     * between them the click cannot have gone to a row nobody chose. */
+    && load1.filtered.listRows === 1
+  /* AND THE PIN APPEARED AT ONCE, before any reload: the desktop re-publishes after it writes, so a
+   * button that only arrived on the next load would be a write with no acknowledgement. */
+  pins.theBandTookThePinImmediately = load1.after.pinned.some((p) => p.label === PIN_ME)
+    && load1.after.pins === load1.before.pins + 1
+
+  /* THE FILE HOLDS THE LIST, AS BYTES, out of `wc` and `grep` processes that hold no fd of the
+   * desktop's. The length is DERIVED from the names the shell published rather than written out: the
+   * format is one name per line with a trailing newline (`writePins`), so the arithmetic is the
+   * names and nothing else. */
+  const wantBytes = [...load1.pinsBefore, PIN_ME].reduce((n, name) => n + name.length + 1, 0)
+  pins.thePinFileHoldsTheList = load1.file.counts.exit === 0
+    && load1.file.counts.bytes === wantBytes
+    && load1.file.counts.lines === load1.pinsBefore.length + 1
+    && load1.file.subject.matched === 1 && load1.file.subject.exit === 0
+  /* AND IT IS A REGULAR FILE AND NOT A DIRECTORY SOMETHING ELSE MADE. */
+  pins.thePinFileIsAFile = load1.file.stat.exit === 0
+    && load1.file.stat.type === 'regular file'
+
+  /* AFTER THE RELOAD: THE SAME BYTES, AND THE SAME BUTTON. Both, because the file surviving and the
+   * band showing it are two facts — a desktop that read the file and dropped the name would satisfy
+   * the first alone, which is `pinnable`'s own failure mode. */
+  pins.theFileSurvivedTheReload = load2.file.counts.exit === 0
+    && load2.file.counts.bytes === load1.file.counts.bytes
+    && load2.file.counts.lines === load1.file.counts.lines
+    && load2.file.subject.matched === 1
+  pins.theButtonCameBack = load2.back.pinned.some((p) => p.label === PIN_ME)
+    && load2.btn !== null && load2.btn.hits === true
+  /* AND IT IS A BUTTON AND NOT A WINDOW GROUP: before the launch the subject has no window at all,
+   * so its slot's `kind` is `pin`. */
+  const slotBefore = load2.back.slots.find((s) => s.key === PIN_ME) || null
+  pins.thePinnedSlotHadNoWindow = Boolean(slotBefore) && slotBefore.kind === 'pin'
+
+  /* AND IT LAUNCHES. The window is the effect, and the ROUTE is the shell's own counter: a pin
+   * launch is a `WITEM_MENU` activation on the publishing process, so `pinLaunches` rising with
+   * `launches` is what says the click went through `launchPin` and not through some second way for
+   * the page to start a program. */
+  pins.thePinnedButtonLaunchedTheProgram = load2.window !== null
+    && load2.window.prog.includes(PIN_ME)
+    && load2.launched.pinLaunches === load2.back.pinLaunches + 1
+    && load2.launched.launches === load2.back.launches + 1
+  /* AND THE RUNNING PROGRAM MERGED INTO ITS OWN PINNED BUTTON rather than appearing beside it,
+   * which is Windows 7's own rule and the reason a pinned row's label is the group key. */
+  pins.theRunningProgramMergedIntoThePin = Boolean(load2.slot)
+    && load2.slot.kind === 'group' && load2.slot.key === PIN_ME
+    && load2.launched.pins === load2.back.pins - 1
+
+  pins.ok = pins.thePageReallyReloaded && pins.theSubjectWasNotPinnedToBeginWith
+    && pins.theGestureLandedOnTheRow && pins.theBandTookThePinImmediately
+    && pins.thePinFileHoldsTheList && pins.thePinFileIsAFile
+    && pins.theFileSurvivedTheReload && pins.theButtonCameBack
+    && pins.thePinnedSlotHadNoWindow && pins.thePinnedButtonLaunchedTheProgram
+    && pins.theRunningProgramMergedIntoThePin
+  globalThis.M22.proofs.pins = { ok: pins.ok, evidence: pins }
+  say((pins.ok ? 'ok  ' : 'BAD ') + 'pins: [' + load1.pinsBefore.join(' ') + '] + ' + PIN_ME
+    + ' -> ' + load1.file.counts.bytes + ' byte(s) in ' + PINS_PATH + '; after the reload ['
+    + load2.back.pinned.map((p) => p.label).join(' ') + '] and the click opened '
+    + ((load2.window && load2.window.title) || 'NOTHING'))
+}
+
+/* =============================================================================================
+   PROOF 2: THE SAVE — bytes in the file, read back through a fresh `open`.
+
+   `docs/PLAN-SHELL.md` §M22: "`editor`'s save writes bytes to the file, read back through a fresh
+   `open`." And the defect it retires is named at `src/bin/editor.mjs:25`: the save wrote `[saved]`
+   to the WINDOW fd, so a reader was told their edit was saved and it was not.
+
+   SO EVERY BYTE FIGURE HERE COMES OUT OF A SEPARATE PROCESS. `commitSave` re-reads through its own
+   fresh `open` before it reports — that is the program's clause — and `wc` and `grep` out of
+   processes that were not alive when the write happened are the page's. `--save-to-window-fd` leaves
+   the editor's own screen, the dialog, the cascade and the reported COUNT identical and moves only
+   these readings, which is exactly how the defect shipped.
+   ============================================================================================= */
+function proofSave (run, ro) {
+  const save = {
+    argv: run.argv,
+    docPath: run.docPath,
+    asPath: run.asPath,
+    opening: { title: run.opening.title },
+    afterCtrlS: run.afterCtrlS,
+    saveAs: { win: run.saveAs.win, title: run.saveAs.title },
+    afterSaveAs: run.afterSaveAs,
+    asked: run.asked,
+    afterClose: run.afterClose,
+    account: run.account,
+    ro: { path: ro.path, account: ro.account, screen: ro.refused.screen },
+    keys: run.keys,
+    /* WHAT THE DOCUMENT MUST BE AT EACH SAVE, as arithmetic over the strings this page wrote and
+     * typed. `echo` adds the newline, so the opened file is `DOC_TEXT\n` and the document is that
+     * plus what the keyboard put there, neither of which ends in a newline of its own.
+     *
+     * TWO FIGURES AND NOT ONE, and the difference is the clause: ctrl-S and Save As write the
+     * shorter document and the close dialog's `y` writes the longer one, so a `y` that wrote
+     * nothing leaves the file at `afterTyped` and is visible as a count rather than as a path that
+     * happens to exist. */
+    want: {
+      afterTyped: echoBytes(DOC_TEXT) + TYPED.length,
+      final: echoBytes(DOC_TEXT) + TYPED.length + AFTER_AS.length,
+    },
+  }
+
+  /* THE FIXTURE CLAUSES. The operand opened, the title took the path, and the typed bytes reached
+   * the program — a save clause over a document the keyboard never reached is a clause about an
+   * empty file. */
+  save.theOperandOpenedTheFile = run.account.opened === run.docPath
+    && run.account.openError === ''
+    && run.opening.title === `editor — ${run.docPath}`
+  save.theRealKeyboardReachedTheDocument = run.account.typed.includes(TYPED)
+    && run.typed.screen.includes(TYPED)
+  /* AND THE KEYS THE PAGE SYNTHESISED ARE COUNTED APART FROM THE ONES IT DID NOT. `WinHost` counts
+   * `isTrusted` separately for exactly this reason: the text and the `y` are real and the two Ctrl
+   * chords are not, and the page says which is which rather than claiming all of it was real. */
+  save.theSyntheticKeysAreCountedApart = run.keys.trusted > run.typed.keys.trusted
+    && run.keys.synthetic >= 2
+
+  /* THE BYTES. ctrl-S put the document in the file: the byte count is the arithmetic above, the
+   * opened text is still in it, and the typed text is in it too — three readings, because a count
+   * alone passes for a file of the right length holding something else. */
+  save.theSaveWroteTheBytes = run.afterCtrlS.file.exit === 0
+    && run.afterCtrlS.file.bytes === save.want.afterTyped
+    && run.afterCtrlS.had.matched === 1
+    && run.afterCtrlS.gained.matched === 1
+  /* AND THE PROGRAM'S OWN READBACK AGREES WITH THE PAGE'S. `commitSave` re-opens and compares BYTES
+   * before it reports a count, so a row in `saved` is the program's claim and this is the
+   * independent one — the two agreeing is what makes either worth reading. */
+  save.theProgramReportedWhatIsInTheFile = run.account.saved.length === 3
+    && run.account.saved[0].path === run.docPath
+    && run.account.saved[0].bytes === save.want.afterTyped
+    && run.account.docBytes === save.want.final
+  /* AND IT SAID SO ON SCREEN, which is the half a reader sees. */
+  save.theScreenReportedTheSave = run.afterCtrlS.screen
+    .includes(`[saved ${save.want.afterTyped} byte(s)`)
+    && run.afterCtrlS.screen.includes(run.docPath)
+
+  /* SAVE AS: A SECOND PATH, THE SAME BYTES, AND THE TITLE FOLLOWED. The dialog is ctrl-shift-S's —
+   * byte 19 with `WMOD_SHIFT`, which is the only thing that tells it from a save — so this clause is
+   * also the proof that the modifier survived the trip into a `WEV_KEY`. */
+  save.theSaveAsDialogOpened = run.account.saveAsOpened === 1
+    && run.saveAs.title === 'editor — Save As'
+    && run.account.nameFaults === 0
+  save.theSaveAsWroteTheOtherPath = run.afterSaveAs.file.exit === 0
+    && run.afterSaveAs.file.bytes === save.want.afterTyped
+    && run.afterSaveAs.gained.matched === 1
+    && run.afterSaveAs.dialogGone === true
+    && run.afterSaveAs.title === `editor — ${run.asPath}`
+  /* AND THE DESTINATION MOVED WITH IT: the close dialog names the NEW path, which is `askText`'s own
+   * contract — `y` writes there, so the question has to say so. */
+  save.theCloseDialogNamedTheDestination = run.asked.names === true
+    && run.account.savePath === run.asPath
+
+  /* AND THE `y` THAT CLOSED IT SAVED, WITH NO SYNTHESISED KEY IN THE ROUTE AT ALL: a real click on
+   * the X and a real `y`. This is the gesture whose `[saved]` went to the window fd. */
+  save.theCloseSavedBeforeItClosed = run.account.saved.length === 3
+    && run.account.saved[2].path === run.asPath
+    && run.account.saved[2].bytes === save.want.final
+    && run.account.why === 'saved and closed'
+    && run.afterClose.editorGone === true && run.afterClose.dialogGone === true
+    /* THE LONGER FIGURE, which is what makes this a reading: Save As left `afterTyped` bytes at
+     * this path and only the `y` can have made it `final`. */
+    && run.afterClose.file.bytes === save.want.final
+    && run.afterClose.file.bytes > run.afterSaveAs.file.bytes
+    && run.afterClose.gained.matched === 1
+  /* AND NOTHING WENT TO THE WINDOW FD. `windowFdSaves` is the defect's own counter and it is the
+   * one number that is not a reading of the bytes: 0 here and 3 under the control. */
+  save.nothingWasWrittenToTheWindowFdInstead = run.account.windowFdSaves === 0
+    && run.account.toWindowFd === false
+    && run.account.saveFailures === 0 && run.account.saveErrors.length === 0
+
+  /* THE REFUSAL, IN A SECOND PROCESS: EROFS BY NAME, and no save at all. The errno is asserted
+   * separately from the absence of bytes, because "it did not save" passes for a save that failed
+   * for the wrong reason. */
+  const err = (ro.account.saveErrors || [])[0] || null
+  save.theReadOnlySaveSaysEROFS = Boolean(err) && err.errno === 'EROFS'
+    && err.path === ro.path
+  save.theReadOnlySaveWroteNothing = ro.account.saved.length === 0
+    && ro.account.saveFailures === 1
+    && ro.account.windowFdSaves === 0
+    /* AND IT WENT OUT THE CLEAN DOOR. A refused save must not leave the program believing it is
+     * holding unsaved work: nothing was typed, so the buffer is clean and the X closes it without
+     * asking — `why` is which door, and `closed with nothing to save` is the right one. */
+    && ro.account.why === 'closed with nothing to save'
+  save.theReadOnlyEditorSaidSoOnScreen = ro.refused.screen.includes('EROFS')
+    && ro.refused.screen.includes('NOT saved')
+
+  save.ok = save.theOperandOpenedTheFile && save.theRealKeyboardReachedTheDocument
+    && save.theSyntheticKeysAreCountedApart
+    && save.theSaveWroteTheBytes && save.theProgramReportedWhatIsInTheFile
+    && save.theScreenReportedTheSave
+    && save.theSaveAsDialogOpened && save.theSaveAsWroteTheOtherPath
+    && save.theCloseDialogNamedTheDestination && save.theCloseSavedBeforeItClosed
+    && save.nothingWasWrittenToTheWindowFdInstead
+    && save.theReadOnlySaveSaysEROFS && save.theReadOnlySaveWroteNothing
+    && save.theReadOnlyEditorSaidSoOnScreen
+  globalThis.M22.proofs.save = { ok: save.ok, evidence: save }
+  say((save.ok ? 'ok  ' : 'BAD ') + 'save: ' + run.account.saved.length + ' save(s), '
+    + run.afterCtrlS.file.bytes + ' of ' + save.want.afterTyped + ' byte(s) in ' + run.docPath
+    + ' and ' + run.afterClose.file.bytes + ' of ' + save.want.final + ' in ' + run.asPath
+    + '; window-fd saves ' + run.account.windowFdSaves + '; ' + ro.path + ' answered '
+    + ((err && err.errno) || 'NOTHING'))
+}
+
+/* =============================================================================================
+   PROOF 3: THE SWITCH — the chord switches, and the menu labels the real accelerator.
+
+   `docs/PLAN-SHELL.md` §M22 leaves the choice among the measured-free chords to a human, and the
+   repository owner's rule is: take whichever candidate the probe shows free in BOTH engines, and
+   LABEL the real accelerator in the menu. `bench/m22-switch/probe.py` scored 25 candidates on five
+   clauses in Chrome over CDP and Firefox over BiDi; 14 qualified and `src/wm/chords.mjs` takes
+   Alt+` / Alt+Shift+` with Alt+1..9 as the direct-select set.
+
+   A MENU SHOWING AN ACCELERATOR THE SYSTEM CANNOT RECEIVE IS THE LIVE-LOOKING-BUTTON DEFECT, so the
+   label is a requirement. Alt+Tab is in `BLOCKED` — Chrome's host acts on it unless the page cancels
+   — and its absence from every rendered label is a clause here and not a remark.
+   ============================================================================================= */
+function proofSwitch (run) {
+  const sw = {
+    menuAccels: run.menu.accels,
+    menuRows: { next: run.rows.next, prev: run.rows.prev },
+    slotAccels: run.after.slotAccels,
+    chords: run.after.chords,
+    table: run.table,
+    stackBefore: run.before.stack,
+    sends: run.sends,
+    keys: run.keys,
+    windows: run.before.stack.length,
+  }
+
+  /* THE FIXTURE: there are at least two windows to switch between. One window makes every direction
+   * clause vacuously true, because `switchWindow` answers the same id both ways. */
+  sw.thereIsMoreThanOneWindowToSwitchBetween = run.before.stack.length >= 2
+
+  /* THE MENU PUBLISHES THE REAL ACCELERATOR, READ OFF THE DOM. `.shell-accel` is what the shell
+   * drew; the chord table is the other reading, and the two agreeing is the requirement. Asserting
+   * the table against itself would pass over a menu that printed nothing. */
+  sw.theMenuLabelsTheForwardChord = run.rows.next.accel === SWITCH_NEXT.label
+    && SWITCH_NEXT.label === 'Alt+`'
+  sw.theMenuLabelsTheReverseChord = run.rows.prev.accel === SWITCH_PREV.label
+    && SWITCH_PREV.label === 'Alt+Shift+`'
+  /* AND EVERY SUPERBAR BUTTON CARRIES ITS OWN SLOT ACCELERATOR, as `aria-keyshortcuts` — the
+   * attribute a screen reader reads and the tooltip a hand hovers. Past `SELECT_SLOTS` there is no
+   * chord and so there is no label, which is why this compares against the TABLE's first N labels
+   * and not against a count. */
+  sw.theButtonsCarryTheirSlotAccelerator = run.after.slotAccels.length > 0
+    && run.after.slotAccels.every((label, i) => label === run.table.slotLabels[i])
+
+  /* AND Alt+Tab IS LABELLED NOWHERE. Every string the shell rendered, against every label the
+   * measurement disqualified — so a menu that advertised a chord the host is only lending the page
+   * fails here rather than shipping. */
+  const rendered = [...run.menu.accels, ...run.after.slotAccels, ...run.menu.popupRows]
+  sw.noBlockedChordIsLabelledAnywhere = rendered.length > 0
+    && !run.table.blocked.some((b) => rendered.some((s) => String(s).includes(b.label)))
+
+  /* THE CHORD SWITCHES, AND IT SWITCHES IN THE DIRECTION IT SAYS. The top window becomes the one
+   * the order in force owed — one step DOWN for forward and one step UP for the reverse — which is
+   * read off the KERNEL's stack, because only it decides the order (constraint 226). "It switched"
+   * on its own is satisfied by a switcher that picks at random, and the two chords differ by
+   * nothing but their direction.
+   *
+   * NOT "AND BACK", AND THE FIRST VERSION OF THIS CLAUSE SAID SO AND MEASURED `4 -> 3 -> 2`: a
+   * raise re-orders the stack, so the reverse chord steps up the NEW order rather than returning a
+   * reader to where they were. Windows 7 holds a transient order while Alt is down and this ABI has
+   * no held-chord state, so that is a property of raising and not a defect in a direction. */
+  sw.theForwardChordSwitched = run.forward.topmost !== (run.before.counts.topmost | 0)
+    && run.forward.topmost === run.forward.owed
+    && run.forward.owed > 0
+    && run.forward.switches === run.before.counts.switches + 1
+  sw.theReverseChordWentTheOtherWay = run.backward.topmost === run.backward.owed
+    && run.backward.owed > 0
+    && run.backward.topmost !== run.forward.topmost
+    && run.backward.switches === run.forward.switches + 1
+
+  /* AND THE DISPATCHER CANCELLED THEM. Every qualifying chord reads `host: "never"`, so nothing
+   * leaks today — but F6 measured `host: "stopped"` in Chrome, which is the demonstration of what a
+   * missed `preventDefault` costs on a chord the host binds: the reader's focus leaves the page and
+   * nothing is thrown anywhere.
+   *
+   * NECESSARY AND NOT SUFFICIENT, stated where it is asserted: a window's own keydown handler also
+   * cancels any key that produces bytes, and Alt+` produces one. The clause below is the one that
+   * discriminates. */
+  sw.theChordsWerePrevented = run.forward.prevented === true && run.backward.prevented === true
+    && run.firefox.prevented === true && run.slot.prevented === true
+
+  /* A TAKEN CHORD DOES NOT REACH THE PROGRAM. `takeChord` runs BEFORE the key is routed into a
+   * window, so the editor that holds the keyboard echoes NOTHING for a chord — and it echoes a
+   * backquote for a key that is not one, which is the two unbound dispatches below. That pair is
+   * what tells a dispatcher from a window handler that happened to cancel the same event. */
+  sw.theTakenChordsNeverReachedTheProgram = run.forward.screenGrew === 0
+    && run.backward.screenGrew === 0 && run.firefox.screenGrew === 0
+    && run.slot.screenGrew === 0
+
+  /* THE BINDING IS ON `code` AND NOT ON `key`, AND THIS IS THE CLAUSE THAT SAYS SO. Firefox delivers
+   * Shift+Backquote as `key: "~"`; the same chord is dispatched here with that `key` and it must
+   * still switch. A dispatcher matching `event.key === "\`"` passes every other clause on this page
+   * and silently misses Alt+Shift+` in the other engine — the shape of all five Chrome-only bills
+   * CLAUDE.md records. */
+  sw.theChordIsBoundToTheCodeAndNotTheKey = run.firefox.keyAs === '~'
+    && run.firefox.switches === run.backward.switches + 1
+    && run.firefox.topmost === run.firefox.owed
+    && run.firefox.topmost !== run.backward.topmost
+  /* AND THE MIRROR: the `key` a Chrome-bound dispatcher would have matched, on a DIFFERENT physical
+   * key, must do nothing — and must go THROUGH to the program, which is the positive control for
+   * the screen reading above. Without this pair the clauses above pass for a dispatcher that
+   * matches on neither field and switches on every Alt-held keydown. */
+  sw.theWrongPhysicalKeyDoesNothing = run.wrongCode.switches === run.firefox.switches
+    && run.wrongCode.topmost === run.firefox.topmost
+  sw.theWrongPhysicalKeyReachedTheProgramInstead = run.wrongCode.screenGrew > 0
+
+  /* AND A SUPERSET MATCHES NOTHING. Alt+Shift+` is its own row, so an Alt+` that fired on any
+   * superset would make the reverse chord unreachable — arithmetic, not an engine. It goes through
+   * to the program too, for the same reason. */
+  sw.aSupersetOfTheModifiersDoesNotFire = run.superset.switches === run.wrongCode.switches
+    && run.superset.topmost === run.wrongCode.topmost
+    && run.superset.screenGrew > 0
+
+  /* AND THE DIRECT-SELECT SET SELECTS. `Alt+1` is `slots[0]`: a pinned slot with no window launches
+   * and a live one goes through the same three-way click rule the button has, so the counter that
+   * moves is `selects` and the route is the one a click already takes — which is why the second
+   * conjunct is a SUM over the four things that rule can do rather than a guess at which one slot 1
+   * was in. A `selects` that rose with nothing behind it would be a chord that reached the shell and
+   * did nothing. */
+  const did = (c) => (c.minimizes | 0) + (c.restores | 0) + (c.raises | 0) + (c.pinLaunches | 0)
+  sw.theSlotChordSelectedTheFirstButton = run.slot.selects === run.before.counts.selects + 1
+    && did(run.after) > did(run.before.counts)
+    && run.after.slots.length > 0
+  /* AND IT IS THE CHORD THE TABLE PUBLISHES FOR SLOT 1, not a digit this page chose. */
+  sw.theSlotChordIsTheOneTheTablePublishes = slotChord(1).label === 'Alt+1'
+    && run.table.slots === SELECT_SLOTS && run.table.rows === 2 + SELECT_SLOTS
+
+  /* AND EVERY ONE OF THESE KEYS WAS SYNTHETIC, said rather than claimed otherwise (header note 1).
+   * SIX DISPATCHES, SIX SYNTHETIC KEYS AND NO TRUSTED ONE: `scripts/cdp.py` carries no virtual key
+   * code for `Backquote` or a digit, so the arrival is `bench/m22-switch/probe.py`'s clause in both
+   * engines and the binding is this one. A difference and not a total, because every pointer
+   * gesture on this page is real and the counters are cumulative. */
+  /* READ OFF THE SHELL AND NOT OFF `host.keyCounts()`, because those two cannot both be true.
+   * `keyCounts()` sums what reached a WINDOW's widget, and `theTakenChordsNeverReachedTheProgram`
+   * above asserts a bound chord reaches no window at all — so a clause wanting the same six keys in
+   * `keyCounts` was asking the dispatcher to both consume them and not consume them. Measured: with
+   * the dispatcher wired, `keyCounts().synthetic` moves by 0 on a chord and the five switch clauses
+   * go green. The counter now lives where the consumer lives, and the question it answers is
+   * unchanged — a synthetic key must not pass for a reader's own. */
+  /* FOUR TO THE SHELL AND TWO TO THE PROGRAM, which is a sharper reading than the six this clause
+   * first asked for. Six chords are dispatched, but only FOUR are bound — `wrongCode` and
+   * `superset` exist precisely to assert that the wrong physical key and a modifier superset do
+   * NOTHING, and the dispatcher counts only what it takes. So the split IS the claim: the shell
+   * took the four bound ones and never the other two, and the two unbound ones reached a window's
+   * widget, which `theWrongPhysicalKeyReachedTheProgramInstead` reads from the other end.
+   *
+   * It was `keyCounts().synthetic + 6` against `host.keyCounts()`, and that could not hold once a
+   * dispatcher existed: `keyCounts` sums what reached a WINDOW, and a taken chord reaches none. The
+   * question is unchanged — a synthetic key must not pass for a reader's own — and both halves of
+   * it are now asserted at the layer that saw the key. */
+  sw.theChordsWereSyntheticAndSaidSo =
+    run.after.syntheticChords === run.before.counts.syntheticChords + 4
+    && run.after.trustedChords === run.before.counts.trustedChords
+    && run.keys.synthetic === run.before.keys.synthetic + 2
+    && run.keys.trusted === run.before.keys.trusted
+
+  sw.ok = sw.thereIsMoreThanOneWindowToSwitchBetween
+    && sw.theMenuLabelsTheForwardChord && sw.theMenuLabelsTheReverseChord
+    && sw.theButtonsCarryTheirSlotAccelerator && sw.noBlockedChordIsLabelledAnywhere
+    && sw.theForwardChordSwitched && sw.theReverseChordWentTheOtherWay
+    && sw.theChordsWerePrevented
+    && sw.theTakenChordsNeverReachedTheProgram
+    && sw.theChordIsBoundToTheCodeAndNotTheKey && sw.theWrongPhysicalKeyDoesNothing
+    && sw.theWrongPhysicalKeyReachedTheProgramInstead
+    && sw.aSupersetOfTheModifiersDoesNotFire
+    && sw.theSlotChordSelectedTheFirstButton && sw.theSlotChordIsTheOneTheTablePublishes
+    && sw.theChordsWereSyntheticAndSaidSo
+  globalThis.M22.proofs.switch = { ok: sw.ok, evidence: sw }
+  /* AND IF NOTHING TOOK THE CHORD, THE PAGE SAYS WHICH WIRE IS MISSING rather than leaving five red
+   * clauses for a reader to diagnose. `screenGrew > 0` on a BOUND chord is the decisive reading: the
+   * event reached the window's own key handler and became a `WEV_KEY`, so no dispatcher ran ahead of
+   * it. Measured with the wire in place: all of these clauses go green and this note is absent. */
+  if (!sw.ok && run.forward.screenGrew > 0 && run.forward.switches === run.before.counts.switches) {
+    globalThis.M22.notes.push('NOTHING IS LISTENING FOR THE CHORDS: Alt+` reached the focused '
+      + `program as a byte (its screen grew by ${run.forward.screenGrew}) and the shell's `
+      + '`switches` did not move, so no dispatcher ran ahead of the window route. The contract is '
+      + 'one call in src/wm/winhost.mjs, which this slice does not own: `takeChord(event, '
+      + 'modifierBits(event))` on keydown BEFORE the key is routed, then `shell.switchWindow(arg)` '
+      + 'for CHORD_SWITCH and `shell.selectSlot(arg)` for CHORD_SELECT. Measured with that call '
+      + 'wired at the top of `WinHost.#keys`: every clause in this proof goes green.')
+  }
+  say((sw.ok ? 'ok  ' : 'BAD ') + 'switch: the menu shows [' + run.menu.accels.join(' ')
+    + '], the band shows [' + run.after.slotAccels.join(' ') + ']; top '
+    + run.before.counts.topmost + ' -> ' + run.forward.topmost + ' -> ' + run.backward.topmost
+    + ' (and ' + run.firefox.topmost + ' with Firefox\'s own key: ' + run.firefox.keyAs + '); '
+    + run.after.switches + ' switch(es), ' + run.after.selects + ' select(s)')
+}
+
+/* =============================================================================================
+   PROOF 4: THE BAND — every button is reachable past the 42 CSS px shrink floor.
+
+   `docs/PLAN-SHELL.md` §M22: "The taskbar band reaches every button past the 42 CSS px shrink
+   floor (`src/wm/aero.mjs:577-583`, whose comment says it scrolls while its CSS clips it)."
+
+   DRIVE IT, DO NOT PHOTOGRAPH IT. A clipped button is in the DOM, has a non-zero rect and cannot be
+   clicked, so every reading here is either a driven gesture or a hit test: a wheel on each axis,
+   both chevrons clicked for real, and the last button's own centre handed to `elementFromPoint`.
+   ============================================================================================= */
+function proofBand (run) {
+  const band = {
+    search: run.search,
+    width: run.search.width,
+    minBtnW: run.minBtnW,
+    wide: run.wide.band,
+    narrow: run.narrow.band,
+    afterDeltaY: run.afterDeltaY,
+    afterDeltaX: run.afterDeltaX,
+    afterPrev: run.afterPrev,
+    afterNext: run.afterNext,
+    revealed: run.revealed,
+    slots: run.afterReveal.slots,
+    last: run.last,
+    restored: run.restored.band,
+    bandBox: run.band,
+    scrolls: { before: run.narrow.bandScrolls, after: run.restored.bandScrolls },
+    clicked: run.clicked ? { buttonClicks: run.clicked.buttonClicks,
+      pinLaunches: run.clicked.pinLaunches, selects: run.clicked.selects } : null,
+  }
+
+  /* THE FIXTURE, AND IT IS SEARCHED RATHER THAN ASSERTED: the band must overflow AND still hold one
+   * whole button, and the window between those two is about ten pixels wide and moves with the
+   * tray's width. The search reports what it found. */
+  band.theBandOverflowsAndStillHoldsAButton = run.search.found === true
+    && run.narrow.band.over > 1
+    && run.narrow.band.clientW >= run.minBtnW
+    && run.narrow.band.fits === false
+  /* AND THE SHRINK FLOOR IS THE STYLESHEET'S OWN NUMBER, which is what makes this the overflow past
+   * the floor rather than a band someone narrowed. */
+  band.theFloorIsTheOneTheSkinPublishes = run.narrow.band.minBtnW === TASK_BTN_MIN_W
+  /* AND THE BAND REALLY IS A SCROLLER. The COMPUTED value and not the control flag: `band-clips` is
+   * only a world if the two agree. */
+  band.theBandIsAScroller = run.narrow.band.overflowX === 'auto'
+  /* AND THE LAST BUTTON IS OUT OF VIEW TO BEGIN WITH, which is the defect this proof is about: the
+   * DOM has every button whether it fits or not. */
+  const lastBefore = run.narrow.slots[run.last - 1] || null
+  band.theLastButtonStartsOutOfView = Boolean(lastBefore) && lastBefore.inView === false
+    && run.narrow.slots.length === run.last && run.last >= 2
+
+  /* THE CHEVRONS ARE SHOWN WHILE IT OVERFLOWS, and the one with nowhere to go is DISABLED — Windows
+   * 7's own rule for an inapplicable command, and this project's for a caption button. At
+   * `scrollLeft: 0` that is `prev`. */
+  const chev = (row, dir) => (row.chevrons || []).find((c) => c.dir === dir) || {}
+  band.theChevronsAppearWithTheOverflow = chev(run.narrow.band, 'prev').shown === true
+    && chev(run.narrow.band, 'next').shown === true
+    && chev(run.narrow.band, 'prev').enabled === false
+    && chev(run.narrow.band, 'next').enabled === true
+
+  /* BOTH CHEVRONS WORK, CLICKED FOR REAL: forward from 0 and back to it, through the shell's own
+   * `scrollBand` — which the counter says, because a page that had set `scrollLeft` itself would
+   * have moved the band without going through the control a reader presses. THEY HOLD UNDER
+   * `band-clips`, because `overflow: hidden` does not stop a programmatic scroll. */
+  band.aRealChevronClickScrollsItOn = run.afterNext.scrollLeft > 0
+  band.aRealChevronClickScrollsItBack = run.afterPrev.scrollLeft < run.afterNext.scrollLeft
+  band.theChevronsWentThroughTheShell = run.restored.bandScrolls >= run.narrow.bandScrolls + 2
+
+  /* A DRIVEN WHEEL REACHES PAST THE FLOOR — AND ONLY ON THE HORIZONTAL AXIS. The vertical one is
+   * this clause's own negative control: measured, a `deltaY` over a horizontal-only scroller moves
+   * it 0 px, so a check that dispatched the wrong axis would be asserting a constant against a
+   * scroller that never moved. THESE TWO ARE THE CLAUSES `band-clips` TAKES, with
+   * `theBandIsAScroller` — which is the control's own applied-ness reading — and nothing else here
+   * moves under it. */
+  band.aVerticalWheelMovesItNothing = run.afterDeltaY.scrollLeft === 0
+  band.aDrivenHorizontalWheelScrollsIt = run.afterDeltaX.scrollLeft > 0
+
+  /* AND THE LAST BUTTON IS REACHABLE: wholly inside the band's box, and `elementFromPoint` at its
+   * own centre finds THAT button. Both, because a button inside the box but under the tray or a
+   * popup is still a button a hand cannot click. */
+  band.theLastButtonIsReachable = Boolean(run.revealed)
+    && run.revealed.slot === run.last
+    && run.revealed.inView === true && run.revealed.reachable === true
+  /* AND A REAL CLICK ON IT DID SOMETHING. `revealSlot` is a hit test; this is the gesture. */
+  band.aRealClickOnItIsTakenByTheShell = Boolean(run.clicked)
+    && (run.clicked.buttonClicks + run.clicked.pinLaunches)
+      > (run.afterReveal.buttonClicks + run.afterReveal.pinLaunches)
+
+  /* AND THE DESKTOP WENT BACK TO ITS FULL WIDTH, so the proof after this one is aiming at the bar
+   * every other reading on this page was taken against. */
+  band.theDesktopWasRestored = run.restored.band.over <= 1 && run.restored.band.fits === true
+
+  band.ok = band.theBandOverflowsAndStillHoldsAButton && band.theFloorIsTheOneTheSkinPublishes
+    && band.theBandIsAScroller && band.theLastButtonStartsOutOfView
+    && band.theChevronsAppearWithTheOverflow
+    && band.aVerticalWheelMovesItNothing && band.aDrivenHorizontalWheelScrollsIt
+    && band.aRealChevronClickScrollsItBack && band.aRealChevronClickScrollsItOn
+    && band.theChevronsWentThroughTheShell
+    && band.theLastButtonIsReachable && band.aRealClickOnItIsTakenByTheShell
+    && band.theDesktopWasRestored
+  globalThis.M22.proofs.band = { ok: band.ok, evidence: band }
+  say((band.ok ? 'ok  ' : 'BAD ') + 'band: ' + run.search.width + ' px desktop leaves a '
+    + Math.round(run.narrow.band.clientW) + ' px band over ' + Math.round(run.narrow.band.scrollW)
+    + ' px of buttons (' + Math.round(run.narrow.band.over) + ' px past it); wheel deltaY -> '
+    + run.afterDeltaY.scrollLeft + ', deltaX -> ' + run.afterDeltaX.scrollLeft
+    + ', chevrons -> ' + run.afterPrev.scrollLeft + '/' + run.afterNext.scrollLeft
+    + '; slot ' + run.last + ' reachable=' + Boolean(run.revealed && run.revealed.reachable))
+}
+
+/* =============================================================================================
+   PROOF 5: THE TRAY — the icon is withdrawn when its process DIES.
+
+   `docs/PLAN-SHELL.md` §M22: "A tray icon is withdrawn when its process dies — asserted by killing
+   the process, not by asking it to withdraw."
+
+   SO THE GESTURE IS A KILL. `end-process` is `reap(p, STAT_KILLED, SIGKILL)`: fds closed, windows
+   destroyed, nothing asked of the process (constraint 14 — teardown is not reap). The classic tray
+   defect is an icon that outlives its process, and the SHELL has no way to produce one because
+   `trayRows()` derives the tray from `host.frames` on every `sync` — the KERNEL had one, and
+   header note 2 is where that is recorded. `?tray_outlives=1` is the world where the shell
+   REMEMBERS instead, which is this page's own control (header note 3).
+   ============================================================================================= */
+function proofTray (run) {
+  const tray = {
+    desk: run.desk,
+    rows: run.rows.filter((r) => r.hasTray),
+    trayRows: run.trayRows,
+    icons: run.icons,
+    before: run.before.tray,
+    after: run.after.tray,
+    clicked: run.clicked,
+    opened: run.opened,
+    heirs: run.heirs,
+    strangers: run.strangers,
+    wentMs: run.wentMs,
+    wentAfterHeirsMs: run.wentAfterHeirsMs,
+    said: run.said,
+    saidOfOwner: run.saidOfOwner,
+    frames: run.frames,
+    controls: { trayOutlives: CFG.trayOutlives },
+  }
+
+  /* THE ICON WAS THERE, AND IT WAS A STATUS ICON AND NOT A PIN. `isTrayRow` and `isPinnedRow` are
+   * exclusive over the whole flag word and the bit between them is `WITEM_MENU`, so a status icon
+   * carrying it would have been drawn in the band — which is the one way this row can be published
+   * wrong, and it is a different picture rather than an error. */
+  tray.theTrayDrewExactlyOneStatusIcon = run.before.tray.length === 1
+    && run.icons.before === 1
+    && run.trayRows.length === 1
+    && run.trayRows[0].hasMenu === false && run.trayRows[0].pinned === false
+  tray.theRowIsTheDesktopProcesses = run.before.tray.length === 1
+    && run.before.tray[0].win === run.desk.win
+    && run.before.tray[0].pid === run.desk.pid
+    && run.before.tray[0].label === 'Task Manager'
+
+  /* AND A REAL CLICK ON IT RAN THE VERB. An icon that does nothing is not a tray icon, and the
+   * route is the third rendering of one published list: `activateItem(win, index, WITEM_TRAY)` into
+   * the process that published the row, which spawns. The effect is a WINDOW. */
+  tray.aRealClickOnTheIconStartedTheProgram = Boolean(run.clicked)
+    && run.clicked.aim.hits === true
+    && run.clicked.counts.trayClicks === 1
+    && run.opened !== null
+
+  /* THE KILL WITHDREW IT — THE PLAN'S SENTENCE. No withdraw call exists to be skipped: the row
+   * lives on the desktop's window, so `terminate()` destroys the window (constraint 14) and the
+   * next `sync` has nothing to draw. `wentMs` is the OBSERVED transition and not a state read after
+   * a pause: a clause reading only `afterOwner.tray.length === 0` would also pass for a tray that
+   * was empty the whole time, which is the vacuous reading this pair exists to refuse. */
+  tray.theIconWentWhenItsOwnProcessDied = run.afterOwner.tray.length === 0
+    && run.wentMs >= 0
+  /* AND THE KERNEL SAID BOTH HALVES OF A DEATH. `reaped` alone is a process that died with its
+   * windows still up, which is the reading that located the cause. */
+  tray.theKernelDestroyedItsWindowsToo = run.saidOfOwner.some((m) => m.t === 'reaped')
+    && run.saidOfOwner.some((m) => m.t === 'win-destroy')
+
+  /* AND IT DID GO WHEN THE LAST HOLDER OF THE DESCRIPTION DIED, which is the measurement of the
+   * cause rather than a way around it: the heirs are the processes the desktop SPAWNED, and the
+   * window outlives its owner exactly as long as one of them holds the fd it inherited. Three
+   * readings — the shell's report, the DOM, and the count the element publishes. */
+  tray.theIconWentWhenTheLastHolderDied = run.after.tray.length === 0
+    && run.icons.after === 0
+    && run.icons.dataset === '0'
+    && (run.wentAfterHeirsMs === null || run.wentAfterHeirsMs >= 0)
+  /* AND THE WINDOW WENT WITH IT, which is what says the withdrawal was teardown and not a program
+   * tidying up: the desktop window is gone from the page's own table. */
+  tray.theDesktopWindowWentWithTheProcess = !run.frames.some((f) => f.id === run.desk.win)
+
+  /* AND THE KILLS WERE AIMED. The windows the PAGE spawned — `winopen`'s two — inherited nothing
+   * from the desktop and are still there, so this is a withdrawal and not a page that ended
+   * everything, which a clause reading only the empty tray would have passed for. */
+  tray.theProcessesThePageStartedAreStillRunning = run.strangers.length === 2
+    && run.strangers.every((f) => run.frames.some((g) => g.id === f.id))
+
+  tray.ok = tray.theTrayDrewExactlyOneStatusIcon && tray.theRowIsTheDesktopProcesses
+    && tray.aRealClickOnTheIconStartedTheProgram
+    && tray.theIconWentWhenItsOwnProcessDied && tray.theKernelDestroyedItsWindowsToo
+    && tray.theIconWentWhenTheLastHolderDied && tray.theDesktopWindowWentWithTheProcess
+    && tray.theProcessesThePageStartedAreStillRunning
+  globalThis.M22.proofs.tray = { ok: tray.ok, evidence: tray }
+  /* THE NOTE NAMES WHICH SIDE FAILED, because the two worlds that produce an icon outliving its
+   * process have different addresses and the same picture. `win-destroy` is the discriminator: with
+   * it, the kernel tore the window down and what is still drawing a row is the SHELL; without it,
+   * teardown did not destroy a window the dying process created. A note that asserted one cause
+   * would be wrong in the other world — this page shipped exactly that note and `--negative
+   * tray-outlives` printed it claiming "no win-destroy" beside a log containing one. */
+  if (!tray.theIconWentWhenItsOwnProcessDied) {
+    const said = JSON.stringify(run.saidOfOwner.map((m) => m.t))
+    globalThis.M22.notes.push(tray.theKernelDestroyedItsWindowsToo
+      ? ('A TRAY ICON OUTLIVED ITS PROCESS WITH ITS WINDOW ALREADY GONE: killing pid '
+        + `${run.desk.pid} drew ${said} out of the kernel, so teardown destroyed the window and `
+        + 'the row still on screen is one the SHELL is holding. src/wm/taskbar.mjs trayRows() '
+        + 'DERIVES the tray from host.frames on every sync, so a remembered row is the only way '
+        + 'this picture exists — which is what ?tray_outlives=1 builds.')
+      : ('A TRAY ICON OUTLIVED ITS PROCESS AND SO DID ITS WINDOW: killing pid '
+        + `${run.desk.pid} drew ${said} out of the kernel — no win-destroy, so `
+        + 'WinMgr.reapPid (src/kernel/wins.mjs, called from teardown in src/kernel/kernel.mjs) '
+        + 'did not run or did not reach this window. It cannot be the fd walk: '
+        + 'spawnChild copies EVERY fd into a child, window fds included, so the description kept '
+        + `refs > 0 and F_WIN.close could not fire. Killing its heirs ${JSON.stringify(run.heirs.live)} `
+        + 'is what released it before that call existed. Constraint 14 says teardown DESTROYS '
+        + 'WINDOWS, as a step of its own.'))
+  }
+  say((tray.ok ? 'ok  ' : 'BAD ') + 'tray: ' + run.icons.before + ' icon(s) -> click opened '
+    + ((run.opened && run.opened.title) || 'NOTHING') + ' -> killed pid ' + run.desk.pid
+    + ' -> ' + run.afterOwner.tray.length + ' icon(s) after '
+    + JSON.stringify(run.saidOfOwner.map((m) => m.t)) + ' -> killed its heirs '
+    + JSON.stringify(run.heirs.live) + ' -> ' + run.icons.after + ' icon(s)')
+}
+
+/* ---- the live desktop ------------------------------------------------------------------------- */
+
+/**
+ * THE WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure. `term` is LAST because it spawns `sh` by syscall.
+ */
+const LIVE_X = 150
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    box: () => ({ x: LIVE_X, y: 20, w: 600, h: 290 }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 330, w: 600, h: Math.max(160, wa.h - 350) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. ADDED rather than substituted, so a
+ *  reader here still learns what the rest of the shell does — and in a second engine this log is
+ *  the only channel there is. */
+const M22_HELP = [
+  `  press ${SWITCH_NEXT.label} to go to the next window and ${SWITCH_PREV.label} to go back;`,
+  `  Alt+1..Alt+${SELECT_SLOTS} pick a taskbar button directly, and every button shows its own`,
+  '  accelerator. Alt+Tab is the browser\'s and is deliberately not offered',
+  '  the start menu has a `Pin <program>` row for every program that opens a window: a pinned',
+  `  button stays on the bar across a reload, because the list is a file (${PINS_PATH})`,
+  '  the notification area has a Task Manager icon; it goes when the desktop process does',
+  '  narrow the browser window until the buttons stop shrinking: the band scrolls, with a',
+  '  chevron at each end, so no running program is ever out of reach',
+  '  `editor <file>` now SAVES: ctrl-S writes the file, ctrl-shift-S is Save As, and the close',
+  '  dialog\'s `y` saves before it closes — the bytes are read back before any of them says so',
+]
+
+async function live () {
+  const { host, shell } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M22,
+    say,
+    label: 'm22',
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M22_HELP),
+  })
+  publish(host, shell)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `aimAt` hands back the VIEWPORT point, which is the only unit `input.performActions` and
+ * `Input.dispatchMouseEvent` both take, and REPORTS the reason rather than throwing across the
+ * evaluate boundary: a thrown error arrives at a driver as `null`.
+ */
+function publish (host, shell) {
+  HOST = host
+  SHELL = shell
+  globalThis.M22.host = host
+  globalThis.M22.shell = shell
+  globalThis.M22.dpr = dpr()
+  globalThis.M22.viewport = { w: window.innerWidth, h: window.innerHeight }
+  globalThis.M22.paths = { home: HOME_DIR, root: ROOT, pins: PINS_PATH, doc: `${ROOT}/${DOC_NAME}` }
+  /* THE CHORD TABLE, PUBLISHED AS DATA. A driver in another engine must not spell "Alt+`": the
+   * label is `src/wm/chords.mjs`'s and a bench script's copy of it is the drift CLAUDE.md's table
+   * exists to stop. */
+  globalThis.M22.chords = {
+    next: { ...SWITCH_NEXT }, prev: { ...SWITCH_PREV },
+    slots: Array.from({ length: SELECT_SLOTS }, (unused, i) => ({ ...slotChord(i + 1) })),
+    blocked: BLOCKED.map((b) => ({ ...b })),
+    actions: { switch: CHORD_SWITCH, select: CHORD_SELECT },
+  }
+  globalThis.M22.aimAt = (what, key) => {
+    try {
+      if (what === 'orb') return aimEl(desktop.querySelector('[data-start]'), 'the orb')
+      if (what === 'band') return aimEl(desktop.querySelector('[data-band]'), 'the band')
+      if (what === 'chevron') {
+        return aimEl(desktop.querySelector(`[data-band-chev="${String(key)}"]`), 'a chevron')
+      }
+      if (what === 'pin') {
+        return aimEl(desktop.querySelector(`[data-pin-btn="${String(key)}"]`), 'a pin button')
+      }
+      if (what === 'tray') {
+        return aimEl(desktop.querySelectorAll('[data-tray-icon]')[Number(key) || 0], 'a tray icon')
+      }
+      if (what === 'popup') {
+        if (!shell) return { error: 'this page has no shell, so there is no popup' }
+        return aimPopupRow(shell, String(key), 'a driver in another engine')
+      }
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+    return { error: `no aim named ${what}; orb, band, chevron, pin, tray and popup are the six` }
+  }
+}
+
+/* ---- the two loads --------------------------------------------------------------------------- */
+
+/** The query string this page reloads itself with: the proofs, load 2, the epoch, and every control
+ *  that was in force — a world that evaporated at the navigation would make load 2 the unmodified
+ *  one and the run green over a control nobody applied. */
+function phase2Url (epoch) {
+  const next = new URLSearchParams({ proofs: '1', phase: '2', epoch })
+  if (CFG.bandClips) next.set('band_clips', '1')
+  if (CFG.saveToWindowFd) next.set('save_to_window_fd', '1')
+  if (CFG.trayOutlives) next.set('tray_outlives', '1')
+  return `${location.pathname}?${next.toString()}`
+}
+
+/**
+ * LOAD 1: BOOT, CLEAR THE PIN FILE, STAGE THE DESKTOP, MAKE THE PIN, AND NAVIGATE.
+ *
+ * THE PIN FILE IS REMOVED FIRST AND IT IS NOT TIDINESS. OPFS outlives a page load, so a second run
+ * would find `editor` already pinned and the gesture would UNPIN it — the same clause, inverted,
+ * with every reading still green. It is removed BEFORE the desktop process starts, because
+ * `publish` reads the file once per publish and the defaults are what a fresh desktop must show.
+ */
+async function loadOne () {
+  say('M22 load 1 of 2 — the pin gesture. Every gesture here is REAL input: a synthesised event is')
+  say('isTrusted === false (175). The page then NAVIGATES, which is what R24 is about.')
+  sessionStorage.removeItem(STASH_KEY)
+  const booted = await bootShell({
+    into: desktop, report: globalThis.M22, say, label: 'm22', taskbar: true, tap: kernelTap,
+  })
+  const { k, host, shell } = booted
+  publish(host, shell)
+  KERNEL = k
+
+  /* THE SESSION'S TREE IS A PRECONDITION AND NOT A HOPE. The pin file, the saved document and the
+   * default save destination are all under `HOME_DIR`, and a volume whose seed did not run has
+   * none — so a run there would report a page of red clauses with the cause three layers down. */
+  const seeded = await statOf(k, HOME_DIR)
+  if (seeded.exit !== 0 || seeded.type !== 'directory') {
+    throw new Error(`${HOME_DIR} is not a directory (stat exit ${seeded.exit}, type `
+      + `${JSON.stringify(seeded.type)}): the session's writable copy of the read-only base is what `
+      + 'the pin list and every save on this page live in. The kernel reported '
+      + `${JSON.stringify(globalThis.M22.seed || null)}`)
+  }
+  const cleared = await runProgram(k, RM, ['rm', '-f', PINS_PATH])
+  const tree = await runProgram(k, MKDIR, ['mkdir', '-p', ROOT])
+  const wrote = await writeLine(k, `${ROOT}/${DOC_NAME}`, DOC_TEXT)
+  say(`staged ${ROOT}: rm ${PINS_LEAF} exit ${cleared.exit}, mkdir exit ${tree.exit}, `
+    + `echo exit ${wrote.exit} for ${echoBytes(DOC_TEXT)} byte(s)`)
+
+  await stageDesktop({
+    booted, into: desktop, report: globalThis.M22, say, label: 'm22',
+    programs: [], help: [], diagnose: false,
+  })
+
+  const stash = await drivePin(k, host, shell)
+  globalThis.M22.load1 = stash
+  say(`pinned ${PIN_ME}: the band now shows [`
+    + stash.after.pinned.map((p) => p.label).join(' ') + '] and '
+    + `${stash.file.counts.bytes} byte(s) are in ${PINS_PATH}`)
+
+  sessionStorage.setItem(STASH_KEY, JSON.stringify(stash))
+  /* THE MARKER THE NAVIGATION HAS TO DESTROY, set LAST so it cannot be set by a load that failed
+   * before the gesture. `window` and not `sessionStorage`: the whole point is that it cannot
+   * survive. */
+  window.__m22mark = stash.epoch
+  globalThis.M22.phase = 'navigating'
+  say('load 1 done; navigating to phase 2 — a pin that needs this page is not a pin that survived')
+  /* `replace` AND NOT `assign`: a history entry nobody can use is a back button that re-runs the
+   * gesture against a pin that is already there. */
+  location.replace(phase2Url(stash.epoch))
+}
+
+/**
+ * LOAD 2: ASSERT THE PIN CAME BACK, AND RUN EVERYTHING ELSE.
+ *
+ * THE ORDER IS FORCED IN TWO PLACES. `tray` is LAST because it kills the desktop process, which
+ * takes the pins, the start menu and the icons with it; `band` is after `save` because the editors
+ * are gone by then and the band's button count is the one the search was run against.
+ */
+async function loadTwo () {
+  const raw = sessionStorage.getItem(STASH_KEY)
+  const load1 = raw ? JSON.parse(raw) : null
+  /* THE RELOAD, AS THREE READINGS. A page loaded straight at `&phase=2` has no stash; one whose
+   * stash is a previous run's has the wrong epoch; one that never navigated still has the marker.
+   * All three are the difference between a proof and a reading of a world that did not happen. */
+  globalThis.M22.reload = {
+    navigated: Boolean(load1),
+    markSurvived: typeof window.__m22mark !== 'undefined',
+    epochMatched: Boolean(load1) && load1.epoch === EPOCH && EPOCH !== '',
+    epoch: EPOCH,
+    stashEpoch: load1 ? load1.epoch : '',
+    navigationType: ((performance.getEntriesByType('navigation') || [])[0] || {}).type || '',
+  }
+  if (!load1 || !globalThis.M22.reload.epochMatched) {
+    throw new Error('phase 2 has no load-1 stash for this run: '
+      + `${JSON.stringify(globalThis.M22.reload)}. The pin gesture happens in load 1, so this URL `
+      + 'cannot be opened on its own — load `?proofs=1` and let the page navigate.')
+  }
+  say('M22 load 2 of 2 — the pin after the reload, then the save, the chord, the band and the tray.')
+  say('dpr ' + dpr() + ', viewport ' + window.innerWidth + 'x' + window.innerHeight + '.')
+  const controls = Object.entries({ band_clips: CFG.bandClips,
+    save_to_window_fd: CFG.saveToWindowFd, tray_outlives: CFG.trayOutlives })
+    .filter(([, on]) => on).map(([name]) => name)
+  if (controls.length) say('CONTROL: ' + controls.join(' '))
+
+  const booted = await bootShell({
+    into: desktop, report: globalThis.M22, say, label: 'm22', taskbar: true, tap: kernelTap,
+  })
+  const { k, host, shell } = booted
+  publish(host, shell)
+  KERNEL = k
+  globalThis.M22.kernelIsolated = true
+  globalThis.M22.controlsInForce = {
+    host: host.report().controls, shell: shell.report().controls,
+  }
+
+  /* THE TRAY CONTROL, ARMED HERE AND NOWHERE ELSE (header note 3). `trayRows` is DERIVED from
+   * `host.frames` every `sync`, so the shipped shell has no withdrawal step to skip — and a control
+   * that turns nothing verifies nothing. This is the defect written where it would live: a shell
+   * that REMEMBERS its rows. The page is the supervisor and this is the shell the page built. */
+  if (CFG.trayOutlives) {
+    const real = shell.trayRows.bind(shell)
+    let remembered = []
+    shell.trayRows = () => {
+      const got = real()
+      if (got.length) remembered = got
+      return got.length ? got : remembered
+    }
+    globalThis.M22.notes.push('tray_outlives: the shell was made to remember its tray rows instead '
+      + 'of deriving them from host.frames, which is the classic tray defect. The shipped shell has '
+      + 'no step to skip, so the world is built here rather than in src/wm/taskbar.mjs.')
+  }
+
+  /* TWO WINDOWS OF ONE PROGRAM, STAGED FIRST: the switch proof needs more than one window to switch
+   * between, and the band proof needs a button that is not a pin. `winopen` is the program whose
+   * window count is an argument, so the number is the spec's and not a repeated spawn. */
+  await stageDesktop({
+    booted, into: desktop, report: globalThis.M22, say, label: 'm22',
+    programs: [{ ...PROGRAMS.winopen, name: 'winopen', count: 2 }],
+    help: [], diagnose: false,
+  })
+
+  /* ---- 1: the pin came back, and launches -------------------------------------------------- */
+  const pinBack = await drivePinBack(k, host, shell)
+  globalThis.M22.pinBack = pinBack
+  proofPins(load1, pinBack)
+
+  /* ---- 2: the save ------------------------------------------------------------------------- */
+  const saveRun = await driveSave(k, host)
+  globalThis.M22.saveRun = saveRun
+  const roRun = await driveRefusedSave(k, host)
+  globalThis.M22.roRun = roRun
+  proofSave(saveRun, roRun)
+
+  /* ---- 3: the chord ------------------------------------------------------------------------ */
+  const switchRun = await driveSwitch(k, host, shell)
+  globalThis.M22.switchRun = switchRun
+  proofSwitch(switchRun)
+
+  /* ---- 4: the band ------------------------------------------------------------------------- */
+  const bandRun = await driveBand(k, host, shell)
+  globalThis.M22.bandRun = bandRun
+  proofBand(bandRun)
+
+  /* ---- 5: the tray ------------------------------------------------------------------------- */
+  /* THE PIDS THE DESKTOP PROCESS ITSELF SPAWNED, handed to the tray proof because they are the
+   * processes that INHERITED its window fd — the editor the pinned button started, and whatever the
+   * tray icon starts. `driveTray` kills the desktop first and then these, and the two waits are two
+   * clauses. */
+  const heirs = [(pinBack.window && pinBack.window.pid) | 0].filter((p) => p > 0)
+  const trayRun = await driveTray(k, host, shell, heirs)
+  globalThis.M22.trayRun = trayRun
+  proofTray(trayRun)
+
+  const proofs = globalThis.M22.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => p && !p.ok).map(([n]) => n)
+  const notDriven = Object.entries(proofs).filter(([, p]) => !p).map(([n]) => n)
+  globalThis.M22.notDriven = notDriven
+  globalThis.M22.verdict = (bad.length ? 'bad: ' + bad.join(', ') : 'ok')
+    + (notDriven.length ? '; not driven: ' + notDriven.join(', ') : '')
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M22.verdict)
+  globalThis.M22.state = 'done'
+  globalThis.M22.phase = 'rendered'
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M22.state = 'done'
+    globalThis.M22.verdict = 'live'
+    await live()
+    return
+  }
+  if (CFG.phase === 1) {
+    /* LOAD 1 DOES NOT REACH A TERMINAL STATE, and that is deliberate: it navigates. A `state` of
+     * `done` here would tell `drive_gestures` the run was over before the proofs existed. */
+    globalThis.M22.phase = 'load-1'
+    await loadOne()
+    return
+  }
+  await loadTwo()
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice (constraint
+ * 301).
+ *
+ * `main()` is called synchronously and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all. */
+if (requireIsolation(globalThis.M22, say, out)) {
+  main().catch((e) => {
+    globalThis.M22.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. */
+    globalThis.M22.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M22.why)
+  })
+}
+</script>
+</body>
+</html>

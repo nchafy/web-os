@@ -194,6 +194,53 @@ class Firefox:
         self.call("browsingContext.navigate",
                   {"context": self.ctx, "url": url, "wait": wait})
 
+    def set_viewport(self, width: int, height: int) -> None:
+        """Resize the VIEWPORT, which is not the same thing as the window `--width` launched with.
+
+        THE SHELL'S OWN LAYOUT IS WHAT THIS IS FOR. The Superbar band only overflows when the
+        desktop is narrower than its buttons, and the gap between "narrower than the content" and
+        "wider than one button" is about ten pixels — so a gate that needs that state has to SEARCH
+        for it rather than launch at a guessed size (`bench/m22-band/probe.py`'s viewport search is
+        the technique, measured at 234 CSS px in Chrome and 232 in Firefox).
+
+        CSS PIXELS, like everything else BiDi takes. Firefox renders at dpr 1 on this machine, so a
+        caller must not reach for a device-px figure measured in Chrome (constraints 264, 297).
+        The ratio is now a caller's to choose, which does not change that rule: `set_dpr` chooses
+        what the CONTEXT reports, and the figure still has to be derived rather than copied.
+        """
+        self.call("browsingContext.setViewport",
+                  {"context": self.ctx,
+                   "viewport": {"width": int(width), "height": int(height)}})
+
+    def set_dpr(self, ratio: float | None) -> None:
+        """Set this context's DEVICE PIXEL RATIO, or `None` to put the engine's own back.
+
+        THIS OVERTURNS "FIREFOX RENDERS AT dpr 1, WHICH IS WHERE A UNIT ERROR HIDES". That sentence
+        is in `CLAUDE.md` and in every Firefox gate in `bench/`, and it is still true of the display
+        — but it is no longer true of the context: Firefox 156's `browsingContext.setViewport` takes
+        `devicePixelRatio`, so a second engine can be driven at a ratio the run CHOSE. Measured by
+        the self-test, which is the only reason this method is claimed rather than hoped for: 2 and
+        1.5 both arrive, the ratio SURVIVES A NAVIGATION, and `None` puts 1 back.
+
+        IT MATTERS BECAUSE THE RATIO IS THIS PROJECT'S MOST EXPENSIVE CLASS OF DEFECT. M11 placed a
+        band at a constant offset, M12 asserted a dpr-2 window count, M16 handed `win_surface` a
+        CSS-px box and M17 dispatched a wheel delta in the wrong unit — four milestones, every
+        expectation green, each one wrong by exactly the ratio. Until now the only engine that could
+        be asked about a ratio other than its own was Chrome, so "a geometry derived from a measured
+        rect survives a second engine" was checkable at ONE ratio per engine.
+
+        A NON-INTEGER IS THE CASE THAT RULES OUT A CLAMP, which is why the self-test asks for 1.5
+        as well as 2: a host that silently rounded to the nearest integer would satisfy a dpr-2
+        reading and answer dpr 1 for every fractional ratio a reader's display actually has.
+
+        `None` IS THE OFF SWITCH and it is not decoration: a ratio outlives a navigation, so a run
+        that set one and did not put it back would hand every later gate in the same session a
+        viewport nobody asked for.
+        """
+        self.call("browsingContext.setViewport",
+                  {"context": self.ctx,
+                   "devicePixelRatio": None if ratio is None else float(ratio)})
+
     def evaluate(self, expression: str, *, raw: bool = False):
         """Evaluate in the page. A JSON string comes back parsed, which is how the pages report.
 
@@ -297,7 +344,7 @@ class Firefox:
 
     @contextlib.contextmanager
     def held(self, *names: str):
-        """Hold modifier keys DOWN across whatever the block does, POINTER ACTIONS INCLUDED.
+        """Hold modifier keys DOWN across whatever the block does, POINTER AND WHEEL ACTIONS INCLUDED.
 
         WHY THIS IS NOT `press(..., ctrl=True)`. That helper opens and closes the modifier inside
         ONE key sequence, so nothing but a key can happen under it. Every modifier-plus-pointer
@@ -313,6 +360,17 @@ class Firefox:
         asserts the next one did not. A modifier that silently did not stick turns a Ctrl-click into
         a plain click — a DIFFERENT gesture that replaces the selection instead of extending it, and
         a gate built on one would report the program at fault for a row that went away.
+
+        AND IT HOLDS OVER A `wheel` SOURCE TOO, which is a SECOND reading and was unmeasured until
+        M23 needed it. A wheel is its own BiDi input type — `self.wheel` names a source of its own,
+        not the pointer's — so "the modifier state is global to the session" was an assumption about
+        a different source. Measured by the self-test: a `wheel` event under this block arrives
+        `ctrlKey === true`, `isTrusted === true`, `deltaMode === 0`, and the next one does not.
+        It matters because Ctrl+wheel is the ONLY wheel gesture in this system that means something
+        other than scrolling — `src/bin/files.mjs` reads it as the view slider (PRD A1), and Windows'
+        own Ctrl+Shift+1..7 cannot reach a program at all (`bytesForKey` drops a Ctrl chord that is
+        not a C0 letter). A dropped modifier there does not fail: it SCROLLS, which is a working
+        gesture for the wrong verb and reads as a view mode that would not change.
 
         THE RELEASE IS IN A `finally` BECAUSE A STUCK MODIFIER POISONS THE REST OF THE SESSION, not
         just the block: every later keystroke would arrive as Ctrl+key, and `input.releaseActions`
@@ -413,6 +471,60 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - smoke test
             bad.append("`held('Control')` did not hold a modifier over a trusted pointer press "
                        "and release it afterwards: wanted [[true,true],[false,true]], got %r"
                        % (mods,))
+
+        # `held` OVER A WHEEL SOURCE, which is `held`'s second claim and a different one: a wheel is
+        # its own BiDi input type, so a modifier that is held over a POINTER press says nothing
+        # about one. Three readings again, and the third is the one that catches a stuck modifier —
+        # a Ctrl+wheel that never released would make every later scroll a view change.
+        #
+        # THE DELTA IS ASSERTED TOO, in the unit this wire uses: `deltaMode === 0` is pixels and the
+        # page receives the CSS figure that was asked for, where a CDP delta is device px and the
+        # event reports `deltaY / devicePixelRatio` (constraint 297). A gate that mixed the two
+        # scrolls by the ratio too far.
+        ff.evaluate("(() => { window.__wheel = []; document.addEventListener('wheel',"
+                    " (e) => { e.preventDefault();"
+                    "   window.__wheel.push([e.ctrlKey, e.isTrusted, e.deltaY, e.deltaMode]) },"
+                    " { passive: false }); return 1 })()")
+        with ff.held("Control"):
+            ff.wheel(40, 40, 120)
+        ff.wheel(40, 40, 120)
+        wheels = ff.evaluate("JSON.stringify(window.__wheel)")
+        print("held     wheel [ctrlKey, isTrusted, deltaY, deltaMode] %s" % (wheels,))
+        if wheels != [[True, True, 120, 0], [False, True, 120, 0]]:
+            bad.append("`held('Control')` did not hold a modifier over a trusted WHEEL and release "
+                       "it afterwards, or the delta did not arrive in CSS px: wanted "
+                       "[[true,true,120,0],[false,true,120,0]], got %r" % (wheels,))
+
+        # `set_viewport` ASSERTED, because a driver method nobody ran is a method that silently
+        # does not work — and the gate that needs it NARROWS until a band overflows, so a no-op
+        # resize would report "no viewport leaves the band overflowing" and blame the shell.
+        ff.set_viewport(420, 500)
+        narrow = ff.evaluate("JSON.stringify([innerWidth, innerHeight, devicePixelRatio])")
+        print("viewport %s after set_viewport(420, 500)" % (narrow,))
+        if narrow[:2] != [420, 500]:
+            bad.append("set_viewport did not resize the viewport: wanted [420, 500], got %r"
+                       % (narrow[:2],))
+
+        # `set_dpr` ASSERTED AT FOUR READINGS, because the claim in its docstring is the one that
+        # overturns a sentence in `CLAUDE.md` and each reading alone passes in a world the others
+        # catch: an integer ratio arrives, a FRACTIONAL one arrives unrounded (a clamp to the
+        # nearest integer would pass the first reading and fail every real display), the ratio
+        # SURVIVES A NAVIGATION — which is what lets a gate choose a ratio before loading the page
+        # it is about — and `None` puts the engine's own back, because a ratio left set would hand
+        # the next thing driven in this session a viewport nobody asked for.
+        ratios = []
+        for ask in (2, 1.5):
+            ff.set_dpr(ask)
+            ratios.append(ff.evaluate("devicePixelRatio"))
+        ff.navigate("data:text/html,<h3 id=y>after</h3>")
+        ratios.append(ff.evaluate("devicePixelRatio"))
+        ff.set_dpr(None)
+        ratios.append(ff.evaluate("devicePixelRatio"))
+        print("dpr      %s after set_dpr(2), set_dpr(1.5), a navigation, and set_dpr(None)"
+              % (ratios,))
+        if ratios != [2, 1.5, 1.5, 1]:
+            bad.append("set_dpr did not choose the context's ratio, keep it across a navigation "
+                       "and release it: wanted [2, 1.5, 1.5, 1], got %r" % (ratios,))
 
         print("firefox %s" % ff.evaluate("navigator.userAgent"))
     if bad:

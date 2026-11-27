@@ -1,0 +1,28 @@
+{
+  "ok": true,
+  "firefox": {
+    "engine": "firefox",
+    "devicePixelRatio": "1",
+    "aProcessStarted": true,
+    "createImageBitmapInTheRealm": "function",
+    "OffscreenCanvasInTheRealm": "function",
+    "cspRefusesEval": "yes: call to eval() blocked by CSP",
+    "settledWhileParkedInASyscall": false,
+    "settledWhileSpinning": false,
+    "awaited": "settled",
+    "awaitLatencyMs": 0.12,
+    "coldDecodeTurns": 5,
+    "pixels": {
+      "w": 16,
+      "h": 16,
+      "error": "",
+      "bytes": 1024,
+      "nonZero": 1024,
+      "maxDelta": 0,
+      "opaquePx": 256,
+      "opaqueExact": 256,
+      "closed": true
+    },
+    "controlsCanTellThemApart": true
+  }
+}

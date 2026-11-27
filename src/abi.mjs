@@ -849,7 +849,40 @@ const INTS = {
    * op, and the second must have drawn.
    */
   DL_CLIP: 7,           // a0..a3 = x, y, w, h. flags & DLC_RESET drops the clip instead.
-  DL_MAX: 7,
+
+  /*
+   * M23'S IMAGE OP, AND IT CARRIES AN FD RATHER THAN PIXELS.
+   *
+   * A RECORD IS 32 BYTES AND AN IMAGE IS NOT — the same wall `DL_TEXT` hit, with a worse answer
+   * available. Continuation records carry 24 bytes each, which is SIX PIXELS: a 32x32 thumbnail
+   * would be 171 records and cost more than one `DL_FILL_RECT` per pixel. So the pixels do not
+   * travel in the batch at all.
+   *
+   * THE FD NAMES A DATA OBJECT, AND THAT IS WHY THE LIFETIME IS NOT A NEW PROBLEM. A `DOBJ_BITMAP`
+   * payload is already kernel-owned and refcounted (constraints 240, 241), so the bytes are
+   * already in the agent that posts the batch and already outlive the process that made them. A
+   * fourth lifetime regime for images would be the defect; this is three calls a program already
+   * has (`dataobj_create`, `dataobj_set`, `win_draw`).
+   *
+   * THE KERNEL VALIDATES AND DOES NOT DECODE. `decodeBitmap` is the whole of its opinion — the
+   * header against the payload length — which is constraint 293's rule for a malformed text run
+   * applied unchanged. It does not know what a PNG is, and `src/bin/` is where a decode belongs
+   * (`bench/m23-blit/`: a process can decode, in an awaited turn and nowhere else).
+   *
+   * a0, a1 = destination x, y in SURFACE px, like every other display-list coordinate and NOT
+   * device px — that is `win_surface`'s unit alone, and a surface is not obliged to be the client
+   * box (constraint 248). a2 = the data-object fd, read through `blitFdOf` so the kernel's reader
+   * and the renderer's are one function.
+   *
+   * THERE IS NO DESTINATION SIZE, and that is a decision rather than an omission. The extent is
+   * the payload's own `BMP_W`/`BMP_H`: a caller that wants a 32x32 thumbnail of a 2048x2048 image
+   * decodes it at 32x32 (`createImageBitmap`'s `resizeWidth`), which is one scale instead of one
+   * per repaint, and sharp on a dpr-2 surface only if the program scaled by the ratio
+   * `WEV_CLIENT` handed it. A `w`/`h` pair here would be a second, blurrier way to say the same
+   * thing and a knob with no caller.
+   */
+  DL_BLIT: 8,           // a0,a1 = dest x,y (TOP-left); a2 = data-object fd
+  DL_MAX: 8,
 
   /** `DL_CLIP`'s flags. ONE BIT, and it is bit 1 rather than bit 0 so that a zeroed flags word is
    *  not a reset: an op built by a caller that forgot to set `flags` sets the rectangle it named,
@@ -952,7 +985,27 @@ const INTS = {
   //: and in a jump list both, and `WEV_ITEM`'s `c` reports WHICH place it was picked from, so a
   //: publisher that shows one row in two places can still tell the two gestures apart.
   WITEM_CONTEXT: 0x40,
-  WITEM_FLAGS_ALL: 0x7f,
+  /**
+   * M22. THE TASKBAR'S OWN STRIP — the fifth place, after the desktop, the start menu, a jump list
+   * and a context menu. A row with this bit is drawn in the bar itself rather than in a popup, so
+   * it is visible with nothing open and a click on it is the reader's first gesture, not their
+   * second.
+   *
+   * WHAT IT IS COMPOSED WITH IS THE WHOLE DESIGN, and it is `WITEM_CONTAINER`'s grammar and not a
+   * new one: a place bit says WHERE, another bit says WHAT, and the pair is the rendering.
+   *
+   *   `WITEM_TRAY` alone              a STATUS icon. Not a launcher: it stands for a process that
+   *                                   is already running, and it goes when that process does.
+   *   `WITEM_TRAY | WITEM_MENU`       a PINNED BUTTON. A launcher — which is exactly what a pinned
+   *                                   Windows 7 program is, a start-menu program a reader moved
+   *                                   into the bar — so it keeps the `WITEM_MENU` route that
+   *                                   already runs one and adds no second way to start a program.
+   *
+   * The two are read through `isTrayRow` and `isPinnedRow` below and nowhere else, because a shell
+   * and a publisher that disagree about which pair means which put a status icon in the band.
+   */
+  WITEM_TRAY: 0x80,
+  WITEM_FLAGS_ALL: 0xff,
 
   /**
    * THE ICON SET, as a closed dense table the PAGE draws and a PROGRAM chooses from.
@@ -1169,7 +1222,7 @@ export const {
   WITEM_HEADER, WIT_ICON, WIT_FLAGS, WIT_LEN, WIT_RESERVED,
   WIN_ITEM_CAP, WITEM_LABEL_MAX,
   WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER, WITEM_DISABLED,
-  WITEM_CONTEXT, WITEM_FLAGS_ALL,
+  WITEM_CONTEXT, WITEM_TRAY, WITEM_FLAGS_ALL,
   WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM, WICON_TERMINAL,
   WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH, WICON_LIMIT,
   DOBJ_TEXT, DOBJ_PATHS, DOBJ_PNG, DOBJ_BITMAP, DOBJ_FMT_MAX,
@@ -1190,7 +1243,8 @@ export const {
   WEV_POINTER, WPTR_DOWN, WPTR_UP, WPTR_MOVE, WPTR_CLICK2, WPTR_CLICK3, WPTR_LEAVE,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED,
   DLOP_BYTES, DL_OP, DL_FLAGS, DL_A0, DL_A1, DL_A2, DL_A3, DL_A4, DL_A5, DL_RESERVED,
-  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_MAX,
+  DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA, DL_CLIP, DL_BLIT,
+  DL_MAX,
   DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_CENTER, DLT_ELLIPSIS, DLC_RESET,
   SURFACE_BUDGET_PX, SURFACE_MAX_PX,
   WIN_CAP_H, WIN_INSET, BLUR_OFF_AT, BLUR_ON_AT,
@@ -1341,6 +1395,17 @@ export const ENODEV = E.ENODEV;
  *  POSIX keeps an unlinked file alive until the last descriptor closes; one name refuses
  *  CONSISTENTLY instead (src/kernel/store.mjs `resolve`). */
 export const ESTALE = E.ESTALE;
+/**
+ * A payload whose BYTES do not say what their own header says: a `DL_BLIT` naming a data object
+ * whose `DOBJ_BITMAP` bytes `decodeBitmap` refuses.
+ *
+ * NOT EINVAL, and the separation is the point. EINVAL on a blit already means "that fd is not a
+ * data object", so one errno for both would pass for a program that blitted a FILE descriptor —
+ * which is the wrong-fd-kind bug, not the short-payload bug, and the two have different fixes.
+ * M3's `truncate` answering ENOENT where it owed EROFS is the precedent (`CLAUDE.md`: assert each
+ * refusal's errno separately).
+ */
+export const EBADMSG = E.EBADMSG;
 
 /** DERIVED rather than written as an index: `ERRNO_NAMES` begins at ESUCCESS = 0 and has 77
  *  entries, and an index off by one is easy to write and hard to see. */
@@ -1708,6 +1773,31 @@ export function pointerAt(ev) {
  */
 export function itemAt(ev) {
   return { index: ev.a | 0, where: ev.c >>> 0 };
+}
+
+/**
+ * M22. IS THIS ROW A TRAY STATUS ICON? `WITEM_TRAY` without `WITEM_MENU`.
+ *
+ * A SEPARATOR IS NEITHER. The bar is a strip and not a column, so there is no line to draw across
+ * it, and a shell that drew one would draw an unlabelled gap a reader can click.
+ */
+export function isTrayRow(flags) {
+  const f = flags >>> 0;
+  if ((f & WITEM_TRAY) === 0 || (f & WITEM_SEPARATOR) !== 0) return false;
+  return (f & WITEM_MENU) === 0;
+}
+
+/**
+ * M22. IS THIS ROW A PINNED TASKBAR BUTTON? `WITEM_TRAY | WITEM_MENU`.
+ *
+ * `isTrayRow` AND THIS ARE EXCLUSIVE BY CONSTRUCTION — one tests `WITEM_MENU` clear and the other
+ * set — and the self-test asserts it over all 256 flag words rather than over a fixture, because
+ * the pair is what keeps a status icon out of the band and a launcher out of the tray.
+ */
+export function isPinnedRow(flags) {
+  const f = flags >>> 0;
+  if ((f & WITEM_SEPARATOR) !== 0) return false;
+  return (f & (WITEM_TRAY | WITEM_MENU)) === (WITEM_TRAY | WITEM_MENU);
 }
 
 /**
@@ -2393,6 +2483,33 @@ export function encodeBitmap(w, h, pixels) {
 }
 
 /**
+ * One `DL_BLIT` op: draw the bitmap `fd`'s payload holds with its top-left at `x`, `y`.
+ *
+ * `x` and `y` are SURFACE px (the op's own docstring says why), and the extent is the payload's.
+ *
+ * A HELPER FOR A ONE-RECORD OP, which `encodeTextRun`'s multi-record case does not justify on its
+ * own. The reason is `blitFdOf` below: "a2 is the fd" is a fact with three readers — the program,
+ * the kernel's validator and the renderer — and spelled three times it is the drift every row of
+ * `CLAUDE.md`'s table exists to stop.
+ */
+export function encodeBlit(fd, x, y) {
+  return {
+    op: DL_BLIT, flags: 0, a0: x | 0, a1: y | 0, a2: fd | 0, a3: 0, a4: 0, a5: 0,
+  };
+}
+
+/**
+ * The data-object fd a decoded `DL_BLIT` names, and the declared INVERSE of `encodeBlit`'s `fd`.
+ *
+ * SIGNED, because `decodeDrawOp` reads a2 with `getInt32` and a negative fd must stay negative:
+ * the kernel refuses it as EBADF, where an unsigned read would turn -1 into 4,294,967,295 and
+ * refuse it as a plausible-looking fd number instead (constraint 225).
+ */
+export function blitFdOf(op) {
+  return op.a2 | 0;
+}
+
+/**
  * The CSS px² a window's frame actually asks the compositor to filter: the sum of the four glass
  * strips' own border boxes.
  *
@@ -2910,7 +3027,7 @@ export function selfTest() {
     fail("pixelColor and cssColor agree, so one of them is wrong about alpha");
   }
   const dlOps = [DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_LINE, DL_TEXT, DL_TEXT_DATA,
-    DL_CLIP];
+    DL_CLIP, DL_BLIT];
   if (new Set(dlOps).size !== dlOps.length) fail("two display-list ops collide");
   if (dlOps.includes(0)) fail("0 is a display-list op: a zeroed buffer would decode as one");
   if (Math.max(...dlOps) !== DL_MAX) fail("DL_MAX is not the largest op");
@@ -3327,7 +3444,7 @@ export function selfTest() {
   if (WIT_RESERVED + 2 !== WITEM_HEADER) fail(`an item header is not ${WITEM_HEADER} bytes`);
   if (WITEM_HEADER % 4 !== 0) fail("an item header that is not 4-byte aligned unaligns the next");
   const itemFlags = [WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_SEPARATOR, WITEM_CONTAINER,
-    WITEM_DISABLED, WITEM_CONTEXT];
+    WITEM_DISABLED, WITEM_CONTEXT, WITEM_TRAY];
   if (new Set(itemFlags).size !== itemFlags.length) fail("two item flags collide");
   for (const bit of itemFlags) {
     if (bit === 0 || (bit & (bit - 1)) !== 0) fail(`item flag ${bit} is not a single bit`);
@@ -3345,8 +3462,27 @@ export function selfTest() {
    * matches, every listed bit is still inside the mask, and `encodeWinItems` then refuses every row
    * carrying that flag — which is a feature that stops working with nothing thrown. A control that
    * narrows the mask to 0x3f and drops `WITEM_CONTEXT` fires this clause and only this clause. */
-  if (itemFlags.length !== 7) {
-    fail(`the item-flag list has ${itemFlags.length} rows, expected 7`);
+  if (itemFlags.length !== 8) {
+    fail(`the item-flag list has ${itemFlags.length} rows, expected 8`);
+  }
+  /* M22's PAIR, OVER THE WHOLE MASK SPACE AND NOT A FIXTURE. `WITEM_TRAY` is a place bit composed
+   * with `WITEM_MENU` to tell a pinned launcher from a status icon, so the two readings MUST be
+   * exclusive for every flag word a publisher can legally send — 256 of them, which is cheap enough
+   * to enumerate and is the only way to catch a predicate that agrees on the fixtures and overlaps
+   * three bits away. A row that read as both would be drawn twice, in the band and in the tray, and
+   * clicking the tray copy would start a second process. */
+  for (let f = 0; f <= WITEM_FLAGS_ALL; f += 1) {
+    if (isTrayRow(f) && isPinnedRow(f)) fail(`flags ${f} reads as both a tray icon and a pin`);
+    if ((f & WITEM_TRAY) === 0 && (isTrayRow(f) || isPinnedRow(f))) {
+      fail(`flags ${f} has no WITEM_TRAY and still reads as a taskbar-strip row`);
+    }
+    if ((f & WITEM_SEPARATOR) !== 0 && (isTrayRow(f) || isPinnedRow(f))) {
+      fail(`flags ${f} is a separator and still reads as a taskbar-strip row`);
+    }
+  }
+  if (!isTrayRow(WITEM_TRAY) || isPinnedRow(WITEM_TRAY)) fail("WITEM_TRAY alone is not a status icon");
+  if (!isPinnedRow(WITEM_TRAY | WITEM_MENU) || isTrayRow(WITEM_TRAY | WITEM_MENU)) {
+    fail("WITEM_TRAY|WITEM_MENU is not a pinned button");
   }
   const icons = [WICON_GENERIC, WICON_FOLDER, WICON_TEXT, WICON_IMAGE, WICON_PROGRAM,
     WICON_TERMINAL, WICON_PAINT, WICON_EDITOR, WICON_FILES, WICON_COMPUTER, WICON_TRASH];
@@ -3454,6 +3590,34 @@ export function selfTest() {
     let threw = false;
     try { encodeBitmap(2, 2, px); } catch { threw = true; }
     if (!threw) fail("encodeBitmap accepted a pixel count that is not w*h*4");
+
+    /* M23: THE HEADER THROUGH A BLIT OP. A blit is the op and the payload TOGETHER — neither says
+     * what gets drawn on its own — so the two are asserted as one statement here, through the wire
+     * a real batch crosses rather than over the objects.
+     *
+     * THE COORDINATES ARE SIGNED, and that is the unit clause with teeth. a0/a1 are SURFACE px, so
+     * a thumbnail in a list scrolled down names a NEGATIVE y, and an unsigned read would put it
+     * 4 billion px below the surface — drawn nowhere, with no error (constraint 225). The fd is
+     * read through `blitFdOf` and never as `a2`, because the kernel's validator and
+     * `src/wm/surface.mjs` are the two readers of that one fact. */
+    const bprobe = new DataView(new ArrayBuffer(DLOP_BYTES));
+    encodeDrawOp(bprobe, 0, encodeBlit(7, -3, -120));
+    const bback = decodeDrawOps(new Uint8Array(bprobe.buffer), DLOP_BYTES)[0];
+    if (bback.op !== DL_BLIT) fail(`a blit op read back as op ${bback.op}`);
+    if (blitFdOf(bback) !== 7) fail(`blitFdOf gave ${blitFdOf(bback)} for fd 7`);
+    if (bback.a0 !== -3 || bback.a1 !== -120) {
+      fail(`a blit's surface-px destination read back as ${bback.a0},${bback.a1}`);
+    }
+    // A NEGATIVE FD STAYS NEGATIVE, so the kernel refuses it as EBADF rather than as fd 4294967295.
+    encodeDrawOp(bprobe, 0, encodeBlit(-1, 0, 0));
+    if (blitFdOf(decodeDrawOp(bprobe, 0)) !== -1) fail("a blit's fd came back unsigned");
+    // AND THE PAYLOAD THAT FD NAMES IS STILL THE PICTURE. The op carries no extent, so a reader
+    // that lost the header would have nothing left to size the blit from.
+    const blitted = decodeBitmap(bmp);
+    if (!blitted || blitted.w !== 2 || blitted.h !== 1) fail("a blit's payload lost its header");
+    if (encodeBlit(7, -3, -120).a3 !== 0 || encodeBlit(7, -3, -120).a5 !== 0) {
+      fail("encodeBlit wrote an argument the op does not define");
+    }
   }
 
   const wmods = [WMOD_SHIFT, WMOD_CTRL, WMOD_ALT];

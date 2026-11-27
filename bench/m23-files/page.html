@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>M23 — the Explorer surface the registered suite does not drive</title>
+<style>body{background:#111;color:#ddd;font:13px/1.5 ui-monospace,Menlo,monospace;margin:16px}
+#desktop{position:relative;height:620px;margin:8px;overflow:hidden}
+.ok{color:#8f8}.bad{color:#f88}</style></head>
+<body>
+<pre id="log">starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M23F = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    phase: '', why: '', rows: [], notes: [],
+  }
+</script>
+<script type="module">
+/**
+ * M23's OWED MEASUREMENT FOR `src/bin/files.mjs`, AND WHY IT IS A BENCH AND NOT A CHECK.
+ *
+ * The six registered checks over this program — m10, m17, m18, m19, m20, m21 — all drive the
+ * DETAILS view, which is what `files` opens in. Everything M23 added to the program is therefore
+ * invisible to them by construction:
+ *
+ *   R26  a thumbnail is drawn in the four icon modes and Tiles and in NO other mode (the PRD scopes
+ *        it to "Medium icons and larger"), so no registered check can reach a `DL_BLIT` at all.
+ *   R27  six of the seven view modes have no registered driver.
+ *   R28  the address strip is a band the registered pages deliberately do not press — `VIEW_TOP / 2`
+ *        is the only point they aim above the viewport and it is in the COLUMN band.
+ *   R31  the search field is reached by Ctrl+F or by a press in the strip, neither of which any
+ *        registered page performs.
+ *
+ * So this page exists to make those four assertable, as a measurement that PRECEDES M23's own
+ * registered check rather than standing in for one — which is the shape `bench/m16-resize/probe.py`
+ * has, and its header says the same thing.
+ *
+ * IT BOOTS A REAL KERNEL AND A REAL `WinHost`, because every one of the four questions is about a
+ * display list that crossed the syscall channel and a pixel the page's own renderer drew. A double
+ * would answer a different question: `Surface.replay` is the only place a `DL_BLIT` becomes a
+ * drawing call, and the kernel's `win_draw` is the only place a blit's data-object fd is resolved.
+ *
+ * `?view=ID` and `?argv=…` ARE THE CONTROLS' ROUTE. Every world this page measures is reached by a
+ * flag on the program, never by a source edit — `--no-thumbs` and `--thumb-no-fallback` are
+ * `src/bin/files.mjs`'s own and are documented in its header.
+ */
+import { WinHost, setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import * as aero from '/src/wm/aero.mjs'
+import {
+  DL_BLIT, DL_CLIP, DL_FILL_RECT, DL_TEXT, DLT_MONO, DLT_CENTER,
+  decodeDrawOps, textOfOps, blitFdOf, pixelColor,
+} from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+import {
+  bootKernel, shutdown as shutdownKernel, spawnProgram, resultOf, until, typeSynthetic,
+} from '/www/pagekernel.mjs'
+/* `place` COMES FROM `www/shell.mjs` AND IS NOT WRITTEN HERE, which is M17's lesson applied: a
+ * page's own copy of "put this frame at that box" is one more thing to drift. It also dispatches
+ * the `keyup` that makes the host report a geometry frame, which a plain `setBox` does not. */
+import { place } from '/www/shell.mjs'
+
+const FILES = '/src/bin/files.mjs'
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+const say = (s) => { out.textContent += s + '\n' }
+const params = new URLSearchParams(location.search)
+
+/* STATED EVEN THOUGH THIS PAGE SETS NONE, because they are MODULE state and another page in this
+ * realm may have left them holding something — the fail-closed spelling every other page here
+ * carries. */
+setSurfaceControls({})
+setHostControls({})
+
+/** The program's own argv, from the query string. The ONE route a world reaches this page. */
+const ARGV = (params.get('argv') || '').split(' ').filter((a) => a !== '')
+/** The directory to open. The session tree is the default, which is what a reader gets. */
+const DIR = params.get('dir') || ''
+
+/** A fixed wait, spelled as the one waiting primitive this project has. */
+const pause = (ms) => until(() => false, ms)
+
+/** Every batch this page has seen per window, so "it repainted" is a reading and not a sleep. */
+const BATCHES = new Map()
+const LAST = new Map()
+/** THE FIELD IS `ops` AND NOT `bytes`. `WinMgr.draw` posts `{t:'win-draw', win, ops}`
+ *  (`src/kernel/wins.mjs`), and a page reading `m.bytes` sees `undefined` — which is a page that
+ *  waits for a batch that has already arrived twice. `www/m18.html` reads the same field. */
+function captureBatch (m) {
+  if (!m || m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+const opsOf = (entry) => {
+  const bytes = LAST.get(entry.id | 0)
+  return bytes && bytes.length ? decodeDrawOps(bytes, bytes.length) : []
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — `FILES_METRICS`'s own docstring
+ *  prescribes it for a driver, and it is what makes every conversion below independent of a
+ *  program state no export can carry. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+function frameByTitle (host, what) {
+  for (const entry of host.frames.values()) {
+    if (entry.win.titleText.includes(what)) return entry
+  }
+  return null
+}
+
+async function surfaced (host, title, ms = 20000) {
+  const got = await until(() => {
+    const e = frameByTitle(host, title)
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : frameByTitle(host, title)
+}
+
+/** Wait for one more batch than the window has now. A gesture's effect is a REPAINT, and a sleep
+ *  would be a guess about how long one takes. */
+async function repainted (entry, ms = 8000) {
+  const was = BATCHES.get(entry.id) || 0
+  return (await until(() => (BATCHES.get(entry.id) || 0) > was, ms)) >= 0
+}
+
+/* ---- WHAT THIS PAGE CAN SEE OF ONE `files` WINDOW ---------------------------------------- */
+
+/** The text runs of the last batch, in order, with where each sits relative to the clip. */
+function textRuns (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) continue
+    runs.push({ at: i, text: got.text, x: ops[i].a0, y: ops[i].a1, flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/**
+ * EVERY BLIT IN THE LAST BATCH, and the SURFACE's own counters beside them.
+ *
+ * THE TWO READINGS ARE NOT THE SAME FACT. The ops are what the PROGRAM sent; `surface.blits` is
+ * what the RENDERER drew, and `blitsUnbacked` is the one signal that tells "the payload channel
+ * dropped it" from "the program drew nothing" — which are the same picture (`src/wm/surface.mjs`
+ * says so). A page that read only the ops would report a thumbnail that never reached a pixel.
+ */
+function blitsOf (entry, ops) {
+  const r = entry.surface.report()
+  return {
+    ops: ops.filter((o) => o.op === DL_BLIT).map((o) => ({ fd: blitFdOf(o), x: o.a0, y: o.a1 })),
+    drawn: r.blits | 0,
+    unbacked: r.blitsUnbacked | 0,
+  }
+}
+
+/** The clip rectangle of the last batch, which is the viewport the program named. */
+const clipOf = (ops) => {
+  const c = ops.find((o) => o.op === DL_CLIP)
+  return c ? { x: c.a0, y: c.a1, w: c.a2, h: c.a3 } : null
+}
+
+/* ---- the boot --------------------------------------------------------------------------- */
+
+if (self.crossOriginIsolated !== true || typeof SharedArrayBuffer !== 'function') {
+  globalThis.M23F.state = 'aborted'
+  globalThis.M23F.why = 'crossOriginIsolated === ' + self.crossOriginIsolated +
+    '; SharedArrayBuffer is ' + typeof SharedArrayBuffer + '. No figures: without a SAB there is ' +
+    'no kernel, so there is no process to draw anything.'
+  out.className = 'bad'
+  say(globalThis.M23F.why)
+} else {
+  main().catch((e) => {
+    globalThis.M23F.state = 'error'
+    globalThis.M23F.why = String((e && e.stack) || e)
+    say(globalThis.M23F.why)
+  })
+}
+
+async function main () {
+  say('M23 — files: thumbnails, view modes, the breadcrumb and search')
+  say('argv: files ' + ARGV.concat(DIR ? [DIR] : []).join(' '))
+  const k = await bootKernel({ label: 'm23f', bench: 1 }, globalThis.M23F, say)
+  k.on(captureBatch)
+  /** EVERY KIND THE KERNEL POSTED, in order, capped. It is the diagnosis a page owes when its own
+   *  "the window never surfaced" is the only thing it can say: the first run of this page reported
+   *  exactly that, and the sequence `win-create win-surface win-draw` is what showed that the
+   *  window HAD been built and this page's own batch reader was looking at the wrong field. */
+  globalThis.M23F.kernelEvents = []
+  k.on((m) => {
+    if (globalThis.M23F.kernelEvents.length < 200) {
+      globalThis.M23F.kernelEvents.push(m && m.t)
+    }
+  })
+  const host = new WinHost({ into: desktop, post: (m) => k.post(m) })
+  k.on((m) => { host.handle(m) })
+  aero.install(desktop)
+  globalThis.M23F.host = host
+
+  let row = null
+  const seen = {}
+  try {
+    globalThis.M23F.phase = 'spawn'
+    const argv = ['files'].concat(ARGV).concat(DIR ? [DIR] : [])
+    const proc = await spawnProgram(k, FILES, argv)
+    const entry = await surfaced(host, 'files')
+    if (!entry) throw new Error('files never surfaced')
+    globalThis.M23F.win = entry.id
+    /* A WINDOW BIG ENOUGH TO HOLD A GRID. The icon modes are the subject and a 420-px-wide window
+     * holds one lane of Extra large icons, which would make `lanes` 1 and the wrap unmeasurable. */
+    place(entry, { x: 10, y: 10, w: 760, h: 520 })
+    await repainted(entry)
+    await pause(250)
+
+    globalThis.M23F.phase = 'read'
+    /* PUBLISHED BEFORE IT IS FILLED, so a driver that reads it at phase 'live' reads the START
+     * state rather than `undefined`. The object is mutated in place from here down. */
+    globalThis.M23F.seen = seen
+    const ops = opsOf(entry)
+    const scale = scaleOf(entry)
+    seen.scale = Math.round(scale * 1000) / 1000
+    seen.dpr = window.devicePixelRatio || 1
+    seen.clip = clipOf(ops)
+    seen.blits = blitsOf(entry, ops)
+    seen.runs = textRuns(ops).map((r) => ({ text: r.text, flags: r.flags, y: r.y }))
+    seen.opCount = ops.length
+    seen.fills = ops.filter((o) => o.op === DL_FILL_RECT).length
+
+    /**
+     * THE THUMBNAIL'S PIXELS, READ BACK OFF THE CANVAS — which is the only reading that says a
+     * blit became a DRAWING and not merely an op.
+     *
+     * THE SAMPLE POINTS COME OUT OF THE OP, not out of arithmetic this page did: `op.a0`/`op.a1`
+     * are the payload's top-left in SURFACE px, and the payload's extent is `thumbFit`'s, so a
+     * point two pixels inside the op's origin is inside the picture whatever the ratio.
+     *
+     * AMBER AND BLUE ARE `www/m10.html`'S OWN CONSTANTS and this page restates them for a reason
+     * that page records: they are `/usr/share/logo.rgba`'s corner and edge, and `pixelColor` is
+     * how a colour becomes what `getImageData` reports (constraint 224). The logo is 16x16 with a
+     * one-pixel amber border and a blue interior, so a sample at +2,+2 of a SCALED-UP blit is in
+     * the amber and the centre is in the blue.
+     */
+    seen.pixels = seen.blits.ops.map((b) => ({
+      fd: b.fd,
+      corner: entry.surface.pixel(b.x + 2, b.y + 2),
+      edge: entry.surface.pixel(b.x + 10, b.y + 10),
+    }))
+
+    /* ---- THE GESTURES, DRIVEN AS REAL INPUT WHERE A GESTURE IS THE SUBJECT ---------------- */
+
+    /**
+     * A SYNTHETIC POINTER IS ALL THIS PAGE CLAIMS. `Input.dispatchMouseEvent` is the driver's and
+     * not a page's, so the press below is a `PointerEvent` this page constructed — which exercises
+     * `WinHost`'s listener and not the browser's own hit testing. `probe.py` drives the SAME
+     * gestures with real input through CDP, and the clause names which it was: a page that called a
+     * synthesised press "a driven click" is the harness dishonesty CLAUDE.md names.
+     */
+    const pressAt = (xCss, yCss, detail = 1) => {
+      const r = entry.surface.el.getBoundingClientRect()
+      for (const type of ['pointerdown', 'pointerup']) {
+        entry.surface.el.dispatchEvent(new PointerEvent(type, {
+          bubbles: true, cancelable: true, pointerId: 1, pointerType: 'mouse',
+          button: 0, buttons: type === 'pointerdown' ? 1 : 0, detail,
+          clientX: r.left + xCss, clientY: r.top + yCss,
+        }))
+      }
+    }
+    globalThis.M23F.pressAt = pressAt
+    globalThis.M23F.entry = entry
+    /* WHAT A DRIVER OUTSIDE THIS PAGE NEEDS TO AIM, published rather than left to be imported
+     * again: the program's own metrics and the directory its window is on. `probe.py` reads
+     * `crumbSegments` through this, so the rectangle it presses is the rectangle the program drew
+     * the label inside — a driver that restated the layout would press its own arithmetic. */
+    globalThis.M23F.metrics = FILES_METRICS
+    /** THE LAST BATCH'S TEXT RUNS, as a function — the one live reading of what a reader can SEE.
+     *  A driver outside this page has no other route to it: the batch is a `Uint8Array` the page
+     *  decoded, and a second decoder in the driver would be a second opinion about one fact. */
+    globalThis.M23F.runsNow = () => textRuns(opsOf(entry)).map((r) => r.text)
+    globalThis.M23F.dir = entry.win.titleText.split(' — ')[1] || DIR
+    globalThis.M23F.phase = 'live'
+
+    // THE PAGE STOPS HERE AND THE DRIVER TAKES OVER. `probe.py` performs the gestures with real
+    // input, reads the account back and scores; a page that performed them itself would be
+    // measuring its own synthetic events (constraint 175).
+    const driven = await until(() => globalThis.M23F.driven === true, 60000)
+    seen.drivenBy = driven < 0 ? 'page' : 'probe'
+    if (driven < 0) {
+      globalThis.M23F.notes.push('no driver arrived within 60 s: the gesture clauses report ' +
+        'NOT MEASURED rather than passing on synthetic input')
+    }
+
+    globalThis.M23F.phase = 'quit'
+    const after = opsOf(entry)
+    seen.afterRuns = textRuns(after).map((r) => ({ text: r.text, flags: r.flags, y: r.y }))
+    seen.afterBlits = blitsOf(entry, after)
+    seen.afterClip = clipOf(after)
+    typeSynthetic(entry.surface.el, 'q')
+    row = await resultOf(k, proc.pid, 30000)
+  } finally {
+    for (const e of [...host.frames.values()]) e.win.destroy()
+    await shutdownKernel(k, globalThis.M23F)
+  }
+
+  globalThis.M23F.seen = seen
+  globalThis.M23F.row = row
+  globalThis.M23F.state = 'done'
+
+  const t = (row && row.thumbs) || {}
+  say('')
+  say('view        ' + (row && row.viewLabel) + '  (' + (row && row.view) + '), ' +
+    (row && row.lanes) + ' across, scrolls ' + (row && row.viewAxis))
+  say('rows        ' + ((row && row.rows) || []).length + ' listed, ' +
+    (row && row.matched) + ' matched, query ' + JSON.stringify((row && row.query) || ''))
+  say('thumbnails  ' + t.ready + ' ready of ' + t.wanted + ' wanted, ' + t.fellBack +
+    ' on the type icon, ' + t.decoded + ' decode(s) in ' + Math.round(t.decodeMs || 0) + ' ms, ' +
+    t.bytes + ' payload bytes, cap ' + t.cap + ', maxSide ' + t.maxSide)
+  say('blits       ' + seen.blits.ops.length + ' op(s), ' + seen.blits.drawn + ' drawn, ' +
+    seen.blits.unbacked + ' UNBACKED')
+  for (const p of seen.pixels) say('  fd ' + p.fd + '  corner ' + p.corner + '  edge ' + p.edge)
+  say('crumbs      ' + ((row && row.crumbs) || []).map((c) => c.label).join(' > '))
+  say('search      ' + (row && row.searches) + ' narrowing(s), ' + (row && row.deepSearches) +
+    ' walk(s); cost ' + JSON.stringify((row && row.searchCost) || {}))
+  say('lstat       ' + (row && row.stats) + ' call(s) in ' +
+    ((row && row.statMs) || 0).toFixed(2) + ' ms  (A10)')
+  say('driven by   ' + seen.drivenBy)
+  for (const note of globalThis.M23F.notes) say('note: ' + note)
+  out.className = seen.blits.unbacked === 0 ? 'ok' : 'bad'
+}
+</script>
+</body>
+</html>

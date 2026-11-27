@@ -23,16 +23,32 @@
 // `WEV_ITEM` carrying `WITEM_CONTEXT`. A DISMISSAL comes back too, as a negative index read by
 // `itemAt`: a program that raised a menu and was never told it closed holds a mode for ever.
 //
+// THAT MENU IS UNREACHABLE ON A REAL DESKTOP, and the paragraph above is the claim it falsifies.
+// `src/wm/winhost.mjs:1320-1325`: a `WROLE_DESKTOP` window is neither surfaced nor text,
+// `#wirePointer` is wired on a SURFACE only, so this process receives no `WEV_POINTER` at all and
+// `raiseMenu` below is never called — the menu over bare desktop is `src/wm/desktop.mjs`'s own,
+// page-side one. The rows, the dismissal handling and the kernel path are correct and exercised by
+// `files` in `www/m20.html`; what is missing is a route from a right press to this process, and
+// nothing in `src/bin/` can add one. Stated rather than left to be rediscovered.
+//
 // WHAT IT DOES NOT DO, stated here rather than discovered: it does not watch the filesystem. There
 // is no inotify in this ABI, so the desktop is re-read when a reader asks for it — the `Refresh`
 // row in the start menu — and not when something changes underneath.
+//
+// M22: THE TASKBAR'S PINS AND THE TRAY'S ONE ICON ARE ROWS TOO, which is the same division at the
+// one piece of chrome that had none. A pinned button is not a row of its own — it is `WITEM_TRAY`
+// set on the program's existing start-menu row (see `PINS_LEAF`) — and the tray's icon is
+// `WITEM_TRAY` alone. The shell cannot pin anything, because it renders rows it was published and
+// decides nothing about what they are (D39), so the pin GESTURE is a start-menu row this process
+// acts on by writing its own list.
 
 import {
   WITEM_LABEL_MAX, WIN_ITEM_CAP,
-  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE,
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EHOSTGONE, ENOENT, EPERM,
+  O_WRONLY, O_CREAT, O_TRUNC,
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_STATE, WEV_ITEM,
   WROLE_DESKTOP, WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_CONTAINER, WITEM_SEPARATOR,
-  WITEM_CONTEXT, WPTR_DOWN, pointerAt, itemAt,
+  WITEM_CONTEXT, WITEM_TRAY, WPTR_DOWN, pointerAt, itemAt,
   WICON_COMPUTER, WICON_FOLDER, WICON_TERMINAL, WICON_TRASH,
   DT_DIR,
 } from "/src/abi.mjs";
@@ -89,6 +105,106 @@ const OPENS_OWN_WINDOW = new Set([
  *  that do their work without a window — a menu that hid programs a reader can run would be a
  *  menu that disagreed with the filesystem. */
 const HIDDEN_FROM_MENU = new Set([NAME]);
+
+/**
+ * M22. WHERE THE TASKBAR'S PIN LIST LIVES: a file in the session's own tree, beside `Desktop`.
+ *
+ * `docs/PRD-SHELL.md` §10.2 asks where persisted shell CONFIGURATION lives and leaves it open, and
+ * this does not close it: the session's tree is the only writable place D40 gives a process, so it
+ * is where the list can go today. There is still no `/etc` and this does not invent one — the
+ * format is a name per line, so a reader can read it with `cat` and fix it with `editor`, and
+ * nothing here parses a dialect.
+ *
+ * A PIN IS NOT A ROW OF ITS OWN. It is `WITEM_TRAY` set on the program's existing `WITEM_MENU` row,
+ * which is what `isPinnedRow` tests for (`src/abi.mjs`). A second row carrying the same label would
+ * put every pinned program in the start menu TWICE — the list is one list under three flags, and
+ * that is the property being kept rather than a saving.
+ *
+ * SO ONLY A PROGRAM WITH A MENU ROW CAN BE PINNED, and only one that draws its own window: the
+ * label is the Superbar's group key, and a row reading `wc (in a terminal)` could never merge with
+ * the window `wc` does not open. `HIDDEN_FROM_MENU` therefore removes a program from the pinnable
+ * set as well, and it is one test rather than two lists.
+ */
+const PINS_LEAF = ".taskbar-pins";
+
+/** The file's mode, and the cap on how much of it is read. A name per line over 4 KiB is not a pin
+ *  list, and reading it whole into a process that holds only integers needs a bound. */
+const PINS_MODE = 0o644;
+const PINS_MAX = 4096;
+
+/** WHAT IS PINNED BEFORE A READER HAS PINNED ANYTHING. R24's complaint is that the bar is EMPTY on
+ *  a fresh desktop, so the answer cannot be an empty default: these two are the file manager and a
+ *  shell, which are the programs the rest of this desktop's rows lead to. Used when the file is
+ *  ABSENT and in no other case — a file that exists and cannot be read is not a fresh desktop.
+ *  Every member MUST be in `OPENS_OWN_WINDOW`, or `publish` drops it with a recorded refusal. */
+const DEFAULT_PINS = Object.freeze(["files", "term"]);
+
+/** The program the tray's one status icon stands for. The icon stands for THIS process — the shell
+ *  is running — and the one verb worth a status icon is show me what else is. */
+const TRAY_PROG = "taskmgr";
+
+/**
+ * The pin list as NAMES in the file's order: `{names, fromFile}`.
+ *
+ * ABSENT IS NOT UNREADABLE. ENOENT means nobody has pinned anything, which is the default; any
+ * other errno means the list exists and this read failed, and rendering THAT as a fresh desktop
+ * would silently re-pin what a reader unpinned. So it comes back empty, with the errno recorded.
+ */
+function readPins(env, path, account) {
+  const got = env.std.readFileText(env, path, PINS_MAX);
+  if (typeof got === "number") {
+    if (got !== -ENOENT) account.refusals.push(`${path}: ${env.std.errnoName(got)}`);
+    return { names: got === -ENOENT ? [...DEFAULT_PINS] : [], fromFile: false };
+  }
+  const names = [];
+  for (const line of env.std.lines(got)) {
+    // `#` COMMENTS AND BLANK LINES, so a reader can turn a pin off without losing the name, and
+    // DEDUPED, because two rows for one program is one button and one orphan.
+    const name = line.split("#")[0].trim();
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return { names, fromFile: true };
+}
+
+/**
+ * Write the pin list. Returns 0, or a negative errno.
+ *
+ * `fsync` IS WHAT MAKES IT SURVIVE A RELOAD (constraint 23). Writes are buffered and only `fsync`,
+ * a snapshot or an idle flush pays for durability — and "a pin survives a reload" is the whole of
+ * R24, so this is the one place in this program that asks for it.
+ */
+function writePins(env, path, names, account) {
+  const fd = env.fs.open(path, O_WRONLY | O_CREAT | O_TRUNC, PINS_MODE);
+  if (fd < 0) {
+    account.refusals.push(`open ${path}: ${env.std.errnoName(fd)}`);
+    return fd;
+  }
+  try {
+    // NO TRAILING NEWLINE ON AN EMPTY LIST: a file holding one blank line and a file holding
+    // nothing must both read back as nothing pinned, and the shorter one says it plainly.
+    const buf = env.std.bytes(names.length ? `${names.join("\n")}\n` : "");
+    const w = env.fs.write(fd, buf);
+    if (w < 0) {
+      account.refusals.push(`write ${path}: ${env.std.errnoName(w)}`);
+      return w;
+    }
+    if (w !== buf.length) {
+      // `env.fs.write` ALREADY CONSUMES SHORT COUNTS, so a short return is a sink that stopped
+      // taking bytes rather than a partial call to finish. `src/bin/cp.mjs` answers EPERM for the
+      // same condition, and a second errno for one failure is two names for one thing.
+      account.refusals.push(`write ${path}: stalled at ${w} of ${buf.length} bytes`);
+      return -EPERM;
+    }
+    const synced = env.fs.fsync(fd);
+    if (synced < 0) {
+      account.refusals.push(`fsync ${path}: ${env.std.errnoName(synced)}`);
+      return synced;
+    }
+  } finally {
+    env.fs.close(fd);
+  }
+  return 0;
+}
 
 /**
  * THE SECONDARY MOUSE BUTTON, as a `WEV_POINTER`'s `c` carries it.
@@ -158,6 +274,13 @@ export function run(env) {
      * desktop folder inside the session's tree from one under the read-only base (D40).
      * `sessionWhy` is "" exactly when the tree is there. */
     deskDir: "", madeDeskDir: false, sessionDir: "", sessionWhy: "",
+    /* M22. THE PINS AS PUBLISHED, where the list came from, and how many times this process wrote
+     * it. `pinsFromFile` is false on a fresh desktop and on an unreadable list alike, which is why
+     * `pins` is reported beside it: the two together tell the default apart from the empty set.
+     * `trayActivations` is separate from `activations` for the menu counters' reason — a tray click
+     * and an icon double-click are two gestures, and one counter over both could not tell them
+     * apart. */
+    pins: [], pinsPath: "", pinsFromFile: false, pinsWritten: 0, trayActivations: 0,
   };
 
   /* THE WINDOW FIRST, THEN THE ROLE. `win_create` carries no role — it has no spare register and
@@ -305,6 +428,19 @@ export function run(env) {
       }
     }
 
+    /* M22. THE PIN LIST, RE-READ PER PUBLISH for `sessionDir`'s reason: it is a file a reader can
+     * change — with this program's own menu, with `editor`, or with `rm` — and a cached copy is the
+     * thing every one of those routes would have to remember to invalidate. */
+    const pinsPath = `${session.dir}/${PINS_LEAF}`;
+    const asked = readPins(env, pinsPath, account);
+    account.pinsPath = pinsPath;
+    account.pinsFromFile = asked.fromFile;
+    account.pins = [];
+
+    /** The programs a pin may name, for the toggle rows below. Empty when `/usr/bin` could not be
+     *  listed, which is the one state in which this program knows of no program at all. */
+    let pinnables = [];
+
     const bin = env.std.listDir(env, BIN_DIR);
     if (typeof bin === "number") {
       account.refusals.push(`${BIN_DIR}: ${env.std.errnoName(bin)}`);
@@ -313,12 +449,25 @@ export function run(env) {
         .filter((e) => e.name !== "." && e.name !== "..")
         .map((e) => e.name)
         .sort();
+      /* A PIN IS HONOURED ONLY FOR A PROGRAM THAT CAN CARRY ONE, and the three tests are the three
+       * reasons a name in the file might not be pinnable: it is not in `/usr/bin` any more, it
+       * opens no window of its own so its label is not a group key, or it has no menu row for the
+       * bit to sit on. A name that fails them is DROPPED AND RECORDED rather than published as a
+       * button that could not merge with anything. */
+      const pinnable = (name) => names.includes(name)
+        && OPENS_OWN_WINDOW.has(name) && !HIDDEN_FROM_MENU.has(name);
+      pinnables = names.filter(pinnable);
+      account.pins = asked.names.filter(pinnable);
+      for (const dropped of asked.names.filter((name) => !pinnable(name))) {
+        account.refusals.push(`pin ${dropped}: not a program in ${BIN_DIR} that opens a window`);
+      }
+      const pinned = new Set(account.pins);
       for (const name of names) {
         if (HIDDEN_FROM_MENU.has(name)) continue;
         const ownWindow = OPENS_OWN_WINDOW.has(name);
         rows.push({
           icon: env.std.iconForPath(`${BIN_DIR}/${name}`, { isProgram: true }),
-          flags: WITEM_MENU,
+          flags: WITEM_MENU | (pinned.has(name) ? WITEM_TRAY : 0),
           label: ownWindow ? name : `${name} (in a terminal)`,
           /* `sh` IS THE ONE PROGRAM A TERMINAL RUNS BY DEFAULT, so a row for it needs no --run:
            * asking the shell to run `sh` would nest a second one inside the first for nothing. */
@@ -342,6 +491,42 @@ export function run(env) {
       run: null,
       refresh: true,
     });
+
+    /**
+     * M22. THE PIN GESTURE, AND IT IS A START MENU ROW BECAUSE THAT IS A ROUTE THAT EXISTS.
+     *
+     * IT WAS WRITTEN AS A `WITEM_CONTEXT` ROW FIRST AND THAT ROW COULD NEVER BE PRESSED.
+     * `src/wm/winhost.mjs:1320-1325` says why in as many words: `#wirePointer` is wired on a
+     * SURFACE, this window has none — the icons are drawn page-side from its rows — so the desktop
+     * process receives no `WEV_POINTER` at all, `raiseMenu` below never fires on a real desktop,
+     * and the menu over bare desktop is `src/wm/desktop.mjs`'s own. Do not move these rows there.
+     *
+     * The three routes that DO reach this process are the three renderings of its published list:
+     * a start-menu row, a desktop icon, and now a tray icon. A pin is a program and not a file, so
+     * the menu is the one it belongs in.
+     *
+     * ONE TOGGLE PER PINNABLE PROGRAM, AND NOT A SUBMENU ON EACH PROGRAM'S OWN ROW: `win_menu` has
+     * no submenu, and nothing in this ABI can raise a menu over a start-menu row — that row is the
+     * shell's DOM and a program never hears it was hovered. So a flat set is the reachable shape,
+     * and every row names its program and says what pressing it will do.
+     *
+     * THE SHELL CANNOT DO THIS ITSELF. It renders rows it was published and decides nothing about
+     * what they are (D39), so a pin has to be a verb of the process that owns the list.
+     */
+    if (pinnables.length) {
+      rows.push({ icon: 0, flags: WITEM_MENU | WITEM_SEPARATOR, label: "", run: null });
+      const pinned = new Set(account.pins);
+      for (const name of pinnables) {
+        rows.push({
+          icon: env.std.iconForPath(`${BIN_DIR}/${name}`, { isProgram: true }),
+          flags: WITEM_MENU,
+          label: `${pinned.has(name) ? "Unpin" : "Pin"} ${name}`,
+          run: null,
+          pin: name,
+        });
+      }
+    }
+
     /* A JUMP LIST FOR THIS WINDOW, so the taskbar has something to show for the desktop — and so
      * one list really does serve three renderings. `term` is the row a reader wants from a
      * right-click on the desktop's own button. */
@@ -350,6 +535,22 @@ export function run(env) {
       flags: WITEM_JUMP,
       label: "Open a terminal",
       run: () => ["term", "--ceiling", String(ceiling)],
+    });
+    /* M22. THE NOTIFICATION AREA'S ONE ICON: `WITEM_TRAY` AND NOTHING ELSE. With `WITEM_MENU` it
+     * would be a PIN and be drawn in the band instead — `isTrayRow` and `isPinnedRow` are
+     * exclusive over the whole mask, and the bit that separates them is this one (`src/abi.mjs`).
+     *
+     * IT IS WITHDRAWN BY THE KERNEL AND NOT BY THIS PROGRAM, which is the whole of R23's hard half.
+     * The row lives on THIS window, so `terminate()` destroys the window (constraint 14), the frame
+     * leaves the page's table, and the tray is rebuilt from what is left — no withdraw call exists
+     * to be skipped, and nothing is asked of a process that is already gone. The
+     * `env.win.items(fd, [])` at the end of `run` is the graceful door, and it is not the one an
+     * icon outliving its process would come through. */
+    rows.push({
+      icon: env.std.iconForPath(`${BIN_DIR}/${TRAY_PROG}`, { isProgram: true }),
+      flags: WITEM_TRAY,
+      label: "Task Manager",
+      run: () => [TRAY_PROG],
     });
 
     /* AND CAPPED, for the same reason the labels are: the list is published whole, so the 65th
@@ -433,6 +634,28 @@ export function run(env) {
     ];
   };
 
+  /**
+   * Pin or unpin one program: rewrite the list, then re-publish. Returns what to say about it.
+   *
+   * THE LIST IS RE-READ RATHER THAN TOGGLED IN MEMORY, so a change made from `editor` or `rm`
+   * between two gestures is not silently reverted by the next pin — the file is the list, and this
+   * program holds no second opinion about it.
+   */
+  const togglePin = (name) => {
+    const path = `${env.std.sessionDir(env).dir}/${PINS_LEAF}`;
+    const have = readPins(env, path, account).names;
+    const next = have.includes(name) ? have.filter((n) => n !== name) : [...have, name];
+    const r = writePins(env, path, next, account);
+    /* RE-PUBLISHED EITHER WAY, AND `publish` RE-READS THE FILE — so a refused write leaves the band
+     * showing what the list still says rather than what the gesture asked for. A pin a reader
+     * cannot persist must not look pinned: that is the live-looking-button defect with a reload
+     * between the two halves of it. */
+    publish();
+    if (r < 0) return `refused ${env.std.errnoName(r)}`;
+    account.pinsWritten += 1;
+    return next.includes(name) ? `pinned ${name}` : `unpinned ${name}`;
+  };
+
   /** The rows of the menu the kernel is HOLDING, and this process's own array of what they mean.
    *  A `WEV_ITEM` carrying `WITEM_CONTEXT` reports an index into THIS list and not into
    *  `published` — they are two lists, and row 2 of one is not row 2 of the other. */
@@ -459,6 +682,9 @@ export function run(env) {
   /** Run one row. `spawn` AND NOT A SHELL: the path is this program's, the argv is this program's,
    *  and there is no string for a shell to re-parse. */
   const launch = (row) => {
+    // A PIN IS NOT A SPAWN: the row's effect is a write and a re-publish, so it is answered here
+    // rather than falling through to a path built out of a label.
+    if (row.pin) return togglePin(row.pin);
     if (row.refresh) {
       publish();
       return "refresh";
@@ -477,7 +703,9 @@ export function run(env) {
   };
 
   publish();
-  env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, ${account.items} rows published\n`);
+  const pinsFrom = account.pinsFromFile ? account.pinsPath : "the default";
+  env.std.say(env, `${NAME}: win ${made.win} on fd ${made.fd}, ${account.items} rows published, `
+    + `${account.pins.length} pinned from ${pinsFrom}\n`);
   env.std.say(env, "double-click an icon, or use the start menu. Ctrl-C here ends the session.\n");
 
   for (;;) {
@@ -553,6 +781,10 @@ export function run(env) {
           continue;
         }
         account.activations += 1;
+        /* M22. `where` AND NOT THE ROW'S FLAGS. A pinned row carries `WITEM_TRAY` too — that bit is
+         * what makes it a pin — and the shell sends `WITEM_MENU` when it launches one
+         * (`Taskbar.launchPin`), so reading the row would count a pinned launch as a tray click. */
+        if (where & WITEM_TRAY) account.trayActivations += 1;
         const row = published[index];
         if (!row) {
           account.refusals.push(`item ${index} is not a row this process published`);
@@ -583,6 +815,7 @@ export function run(env) {
   env.win.destroy(made.fd);
   env.std.say(env, `${NAME}: ${account.why}. ${account.activations} activations, `
     + `${account.launched.length} launched, ${account.menus} menus `
-    + `(${account.menuChoices} picked, ${account.menuDismissals} dismissed)\n`);
+    + `(${account.menuChoices} picked, ${account.menuDismissals} dismissed), `
+    + `${account.pins.length} pinned, ${account.trayActivations} tray clicks\n`);
   return { exit: 0, ...account };
 }

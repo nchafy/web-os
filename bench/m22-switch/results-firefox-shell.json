@@ -1,0 +1,421 @@
+{
+ "url": "http://127.0.0.1:63072/www/index.html",
+ "control": "",
+ "marker": "FFSAVE52676",
+ "clauses": {
+  "theStartMenuPublishedBothSwitchAccelerators": true,
+  "theAcceleratorsAreTheMeasuredOnes": true,
+  "noBlockedChordIsOnScreen": true,
+  "everySlotButtonAnnouncesItsChord": true,
+  "aRealClickOnAPinnedButtonStartedItsProgram": true,
+  "theLaunchedPinMergedIntoItsWindowsButton": true,
+  "theChordArrivedInFirefoxAsATrustedKey": true,
+  "theChordCarriedTheCodeTheTableBindsOn": true,
+  "theChordCarriedExactlyItsModifiers": true,
+  "theChordWasCancelledSoTheHostCannotHaveIt": true,
+  "theForwardChordWasTakenByTheShell": false,
+  "theForwardChordRaisedADifferentWindow": false,
+  "theShiftedChordStillCarriedTheBoundCode": true,
+  "theReverseChordAlsoMovedTheStack": false,
+  "aBareKeyWithNoModifierIsNotTheChord": true,
+  "theBareKeyReachedTheProgramInstead": true,
+  "theSlotChordWasTakenByTheShell": false,
+  "theSlotChordActedOnSlotOne": false,
+  "theEditorOpenedAWindow": true,
+  "theTypedBytesReachedTheEditor": true,
+  "theEditorSaidWhereItWouldSave": true,
+  "theEditorDrewASaveItsReaderCanSee": true,
+  "theSaveWentWhereTheEditorSaidItWould": true,
+  "theBytesAreInTheFileWhenItIsReopened": true,
+  "theBandIsAScrollerAndNotAClip": true,
+  "aRealClickOnTheChevronScrollsTheBand": true,
+  "theBandReachesItsLastButtonWhenItOverflows": true,
+  "theTrayDrewAStatusIcon": true,
+  "aRealClickOnTheTrayIconRanItsVerb": true,
+  "theTrayIconWentWhenItsOwnProcessDied": false,
+  "theKernelDestroyedItsWindowsToo": false,
+  "theKillWasAimedAtOneProcess": true
+ },
+ "boot": {
+  "dpr": 1,
+  "viewport": {
+   "w": 1500,
+   "h": 1000
+  },
+  "deskWin": 1,
+  "deskPid": 1,
+  "deskRows": 49,
+  "buttons": 1,
+  "pins": 1,
+  "pinButtons": [
+   "files"
+  ],
+  "trayIcons": 1,
+  "pids": {
+   "desktop": 1,
+   "term": 2
+  }
+ },
+ "chordTable": {
+  "rows": [
+   {
+    "id": "alt-backquote",
+    "code": "Backquote",
+    "mods": 4,
+    "label": "Alt+`",
+    "action": "switch",
+    "arg": 1
+   },
+   {
+    "id": "alt-shift-backquote",
+    "code": "Backquote",
+    "mods": 5,
+    "label": "Alt+Shift+`",
+    "action": "switch",
+    "arg": -1
+   },
+   {
+    "id": "alt-1",
+    "code": "Digit1",
+    "mods": 4,
+    "label": "Alt+1",
+    "action": "select",
+    "arg": 1
+   },
+   {
+    "id": "alt-2",
+    "code": "Digit2",
+    "mods": 4,
+    "label": "Alt+2",
+    "action": "select",
+    "arg": 2
+   },
+   {
+    "id": "alt-3",
+    "code": "Digit3",
+    "mods": 4,
+    "label": "Alt+3",
+    "action": "select",
+    "arg": 3
+   },
+   {
+    "id": "alt-4",
+    "code": "Digit4",
+    "mods": 4,
+    "label": "Alt+4",
+    "action": "select",
+    "arg": 4
+   },
+   {
+    "id": "alt-5",
+    "code": "Digit5",
+    "mods": 4,
+    "label": "Alt+5",
+    "action": "select",
+    "arg": 5
+   },
+   {
+    "id": "alt-6",
+    "code": "Digit6",
+    "mods": 4,
+    "label": "Alt+6",
+    "action": "select",
+    "arg": 6
+   },
+   {
+    "id": "alt-7",
+    "code": "Digit7",
+    "mods": 4,
+    "label": "Alt+7",
+    "action": "select",
+    "arg": 7
+   },
+   {
+    "id": "alt-8",
+    "code": "Digit8",
+    "mods": 4,
+    "label": "Alt+8",
+    "action": "select",
+    "arg": 8
+   },
+   {
+    "id": "alt-9",
+    "code": "Digit9",
+    "mods": 4,
+    "label": "Alt+9",
+    "action": "select",
+    "arg": 9
+   }
+  ],
+  "blocked": [
+   {
+    "id": "alt-tab",
+    "label": "Alt+Tab",
+    "why": "Chrome host=\"stopped\": the host acts unless the page cancels"
+   },
+   {
+    "id": "alt-shift-tab",
+    "label": "Alt+Shift+Tab",
+    "why": "Chrome host=\"stopped\""
+   },
+   {
+    "id": "f6",
+    "label": "F6",
+    "why": "Chrome host=\"stopped\": focus leaves the page"
+   },
+   {
+    "id": "shift-f6",
+    "label": "Shift+F6",
+    "why": "Chrome free=false, host=\"anyway\": the host acts even when cancelled"
+   }
+  ],
+  "next": "Alt+`",
+  "prev": "Alt+Shift+`",
+  "slots": 9,
+  "switch": "switch",
+  "select": "select"
+ },
+ "pin": {
+  "want": "files",
+  "aim": {
+   "x": 124,
+   "y": 954,
+   "label": "files",
+   "hits": true
+  },
+  "slots": [
+   {
+    "slot": 1,
+    "kind": "group",
+    "key": "files",
+    "accel": "Alt+1",
+    "inView": true
+   },
+   {
+    "slot": 2,
+    "kind": "group",
+    "key": "term",
+    "accel": "Alt+2",
+    "inView": true
+   }
+  ],
+  "pins": 0
+ },
+ "keyDisagrees": {
+  "forward": "`",
+  "reverse": "~",
+  "codeForward": "Backquote",
+  "codeReverse": "Backquote"
+ },
+ "slot": {
+  "label": "Alt+1",
+  "key": "files",
+  "state": "idle"
+ },
+ "save": {
+  "opened": true,
+  "title": "editor \u2014 notes",
+  "path": "/Users/Default/untitled.txt",
+  "tail": "\r\n[saved 11 byte(s) to /Users/Default/untitled.txt]\r\n> ",
+  "reportedPath": "/Users/Default/untitled.txt",
+  "cat": "cat /Users/Default/untitled.txt\r\nFFSAVE52676~$ "
+ },
+ "band": {
+  "width": 340,
+  "tried": [
+   {
+    "w": 620,
+    "clientW": 449,
+    "over": 0
+   },
+   {
+    "w": 612,
+    "clientW": 441,
+    "over": 0
+   },
+   {
+    "w": 604,
+    "clientW": 433,
+    "over": 0
+   },
+   {
+    "w": 596,
+    "clientW": 425,
+    "over": 0
+   },
+   {
+    "w": 588,
+    "clientW": 417,
+    "over": 0
+   },
+   {
+    "w": 580,
+    "clientW": 409,
+    "over": 0
+   },
+   {
+    "w": 572,
+    "clientW": 401,
+    "over": 0
+   },
+   {
+    "w": 564,
+    "clientW": 393,
+    "over": 0
+   },
+   {
+    "w": 556,
+    "clientW": 385,
+    "over": 0
+   },
+   {
+    "w": 548,
+    "clientW": 377,
+    "over": 0
+   },
+   {
+    "w": 540,
+    "clientW": 369,
+    "over": 0
+   },
+   {
+    "w": 532,
+    "clientW": 361,
+    "over": 0
+   },
+   {
+    "w": 524,
+    "clientW": 353,
+    "over": 0
+   },
+   {
+    "w": 516,
+    "clientW": 345,
+    "over": 0
+   },
+   {
+    "w": 508,
+    "clientW": 337,
+    "over": 0
+   },
+   {
+    "w": 500,
+    "clientW": 329,
+    "over": 0
+   },
+   {
+    "w": 492,
+    "clientW": 321,
+    "over": 0
+   },
+   {
+    "w": 484,
+    "clientW": 313,
+    "over": 0
+   },
+   {
+    "w": 476,
+    "clientW": 305,
+    "over": 0
+   },
+   {
+    "w": 468,
+    "clientW": 297,
+    "over": 0
+   },
+   {
+    "w": 460,
+    "clientW": 289,
+    "over": 0
+   },
+   {
+    "w": 452,
+    "clientW": 281,
+    "over": 0
+   },
+   {
+    "w": 444,
+    "clientW": 273,
+    "over": 0
+   },
+   {
+    "w": 436,
+    "clientW": 265,
+    "over": 0
+   },
+   {
+    "w": 428,
+    "clientW": 257,
+    "over": 0
+   },
+   {
+    "w": 420,
+    "clientW": 249,
+    "over": 0
+   },
+   {
+    "w": 412,
+    "clientW": 241,
+    "over": 0
+   },
+   {
+    "w": 404,
+    "clientW": 233,
+    "over": 0
+   },
+   {
+    "w": 396,
+    "clientW": 225,
+    "over": 0
+   },
+   {
+    "w": 388,
+    "clientW": 217,
+    "over": 0
+   },
+   {
+    "w": 380,
+    "clientW": 209,
+    "over": 0
+   },
+   {
+    "w": 372,
+    "clientW": 201,
+    "over": 0
+   },
+   {
+    "w": 364,
+    "clientW": 193,
+    "over": 0
+   },
+   {
+    "w": 356,
+    "clientW": 185,
+    "over": 0
+   },
+   {
+    "w": 348,
+    "clientW": 177,
+    "over": 0
+   },
+   {
+    "w": 340,
+    "clientW": 135,
+    "over": 42
+   }
+  ]
+ },
+ "tray": {
+  "aim": {
+   "x": 1396,
+   "y": 954,
+   "label": "Task Manager",
+   "win": 1,
+   "index": 48,
+   "hits": true
+  },
+  "ownerPid": 1,
+  "iconsAfterKill": 1,
+  "deskFrameStillUp": true
+ }
+}
