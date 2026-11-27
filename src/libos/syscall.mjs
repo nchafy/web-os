@@ -17,6 +17,7 @@ import {
   SYS_lstat, SYS_seek, SYS_mkdir, SYS_unlink, SYS_chmod, SYS_readdir, SYS_readlink,
   SYS_symlink, SYS_rename, SYS_link, SYS_statfs, SYS_ftruncate, SYS_chown,
   SYS_pread, SYS_pwrite, SYS_rmdir, SYS_truncate, SYS_dup, SYS_dup2,
+  SYS_utimes, SYS_realpath,
   SYS_pipe2, SYS_spawn, SYS_waitpid, SYS_kill, SYS_sigaction, SYS_setpgid, SYS_setsid,
   SYS_pty_open, SYS_tty_get, SYS_tty_set, SYS_tty_winsize_get, SYS_tty_winsize_set,
   SYS_poll, SYS_ioctl,
@@ -430,6 +431,34 @@ export function rename(from, to) {
 export function readlink(path) {
   const bytes = pathBytes(path);
   const n = syscall(SYS_readlink, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
+  if (n < 0) return n;
+  return PATH_DEC.decode(new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n)));
+}
+
+/** NANOSECONDS, because that is the unit `stat` reports — so `st.mtimeNs` goes straight back in.
+ *  PASS A BIGINT. `packI64` coerces a Number, but 2^53 ns is 104 days after the epoch, so a Number
+ *  carrying any real timestamp has already lost precision before this function sees it. The inode
+ *  stores milliseconds, so the kernel truncates: see `SYS_utimes` in src/abi.mjs. */
+export function utimes(path, atimeNs, mtimeNs) {
+  const bytes = pathBytes(path);
+  const [alo, ahi] = packI64(atimeNs);
+  const [mlo, mhi] = packI64(mtimeNs);
+  return syscall(SYS_utimes, alo, ahi, mlo, mhi, 0, 0, 0, 0, bytes, 0, bytes.length);
+}
+
+/** `touch`'s case, and the ONE place the ms -> ns factor is written on this side of the ABI. There
+ *  is no `UTIME_NOW` to send: `Date.now()` is the same clock in every agent in this renderer, so a
+ *  value computed here and one the kernel would compute are the same number. */
+export function utimesNow(path) {
+  const ns = BigInt(Date.now()) * 1000000n;
+  return utimes(path, ns, ns);
+}
+
+/** The canonical path, with every symlink resolved — or a negative errno. The kernel answers in the
+ *  byte region exactly as `readlink` does, so the decode is the same. */
+export function realpath(path) {
+  const bytes = pathBytes(path);
+  const n = syscall(SYS_realpath, 0, 0, 0, 0, 0, 0, 0, 0, bytes, 0, bytes.length);
   if (n < 0) return n;
   return PATH_DEC.decode(new Uint8Array(u8.subarray(DATA_OFF, DATA_OFF + n)));
 }

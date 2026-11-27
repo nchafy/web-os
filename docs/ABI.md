@@ -1,37 +1,104 @@
 # The ABI
 
-**71 DESIGNED calls in six groups, and 61 REALISED.** Both numbers are right and they answer
-different questions; this paragraph is the reconciliation M20 owed, and §Two counts below says how
-to re-run either.
+**75 SPECIFIED calls, and 63 REALISED.** Both numbers are right and they answer different
+questions; §Two counts below says how to re-run either, and the identity that ties them together.
 
-The **designed** table is 71: `research/gap-03.md` derived 68, and M10 deleted the two untyped
-`clipboard_*` calls and added five typed `dataobj_*` ones (constraint 240), net +3. That is the
-interface this document specifies, and a change to it is a change to the system's contract.
+**THE FIGURE 71 THIS PARAGRAPH CARRIED UNTIL M21 WAS WRONG, AND IT IS CORRECTED RATHER THAN
+QUIETLY REPLACED.** It was asserted as "the designed table", derived as `research/gap-03.md`'s 68
+plus M10's net +3 (constraint 240) — an arithmetic over a prior document, not a count of this one.
+Hand-enumerating what **this** file actually specifies gives **75**, and 71 does not close under any
+grouping tried. The derivation is now beside the figure so the next reader can repeat it instead of
+inheriting it.
 
-The **realised** surface is `SYS_NAME` in `src/abi.mjs`, and it is **61** as of M20 — 59 at M10, 60
-through M19, and `SYS_win_menu: 60` made it 61. `selfTest()` asserts `SYS_NAME.length === NSYS`,
-that `INTS` declares exactly `NSYS` `SYS_` numbers, and that no two share one — so the realised
-number cannot drift from the code. It can and does drift from the prose above, which is why M21 owes
-a check that compares them (`docs/PLAN-SHELL.md` §M21, `docs/PRD-SHELL.md` §A11). **This
-document names its calls in prose rather than in one table, so no figure quoted here for the
-documented-but-absent set is re-runnable, and none is quoted.** Ten names are reproducibly on the
-wrong side of the gap, each by `SYS_NAME.includes('<name>')` → `false` against a non-zero
-`grep -c <name> docs/ABI.md`: `sigprocmask`, `fcntl`, `realpath`, `clock_gettime`, `env_get`,
-`env_set`, `notify`, `random`, `utimes`, `exec`. `utimes` and `realpath` are M21's rows; the other
-eight are recorded as owed nowhere.
+The **specified** set is the calls this document gives args, a return and an errno set, group by
+group, with the address of each:
+
+| group | address | calls |
+|---|---|---|
+| Process | `:197-205` | 12 |
+| fd | `:209-220` | 14 |
+| path | `:224-230` | 19 |
+| IPC | `:252-258` | 7 |
+| host | `:271-302` | 22 |
+| the menu | `:640` | 1 |
+| | | **75** |
+
+`win_poll`, `clipboard_read` and `clipboard_write` are named in those sections as calls that **DO
+NOT EXIST** and are not counted. That is the interface this document specifies, and a change to it
+is a change to the system's contract.
+
+The **realised** surface is `SYS_NAME` in `src/abi.mjs`, and it is **63** as of M21 — 59 at M10, 60
+through M19, 61 with `SYS_win_menu: 60`, and `SYS_utimes: 61` plus `SYS_realpath: 62` make it 63.
+`selfTest()` asserts `SYS_NAME.length === NSYS`, that `INTS` declares exactly `NSYS` `SYS_` numbers,
+and that no two share one — so the realised number cannot drift from the code. It drifted from the
+prose above for four milestones, which is the drift the identity below exists to stop.
+
+The two sets are not nested, and the two difference sets are **DATA** rather than prose, because a
+count stated as a sentence is the form the 71 came back in.
+
+**DOCUMENTED-BUT-ABSENT — 16 calls**, each specified here and missing from `SYS_NAME`, by this
+document's own two-command criterion (`SYS_NAME.includes('<name>')` → `false` against a non-zero
+`grep -c <name> docs/ABI.md`):
+
+```
+sigprocmask fcntl exec clock_gettime env_get env_set notify random
+mount umount socketpair send recv shutdown shm_create shm_attach
+```
+
+`utimes` and `realpath` were on this list through M20 and are M21's rows; they are now realised and
+are gone from it. **Eight names JOINED it that it never had** — `mount`, `umount`, `socketpair`,
+`send`, `recv`, `shutdown`, `shm_create`, `shm_attach` — not because anything changed, but because
+all eight satisfy the same criterion and the list was short by them. `mount`/`umount` are specified
+at `:230` and called there "the design rather than a gap", which is an explanation of why they are
+absent and not a claim that they are present.
+
+**REALISED-BUT-UNSPECIFIED — 4 calls.** `setsid`, `perform` and `chdir` this document never names at
+all; `win_items` it names at `:652` and `:667` with no args/errno row anywhere, so it is described
+and not specified.
+
+```
+setsid perform chdir win_items
+```
 
 ## Two counts
 
 ```sh
 node -e "import('./src/abi.mjs').then(m => console.log(m.NSYS, m.SYS_NAME.filter(Boolean).length))"
-# → 61 61   the realised surface, and the assertion that the array is dense
+# → 63 63   the realised surface, and the assertion that the array is dense
 ```
+
+**THE IDENTITY IS `specified = realised + documented-but-absent − realised-but-unspecified`**, and
+it is the only form in which the 71-vs-63 drift cannot come back: a call added to this document
+without a number, or given a number without a row here, breaks it. The two sets above are the two
+terms, so the command checks its own inputs rather than trusting them.
+
+```sh
+node -e '
+const A = ["sigprocmask","fcntl","exec","clock_gettime","env_get","env_set","notify","random",
+           "mount","umount","socketpair","send","recv","shutdown","shm_create","shm_attach"];
+const U = ["setsid","perform","chdir","win_items"];
+const doc = require("fs").readFileSync("docs/ABI.md","utf8");
+import("./src/abi.mjs").then(m => {
+  const real = m.SYS_NAME.filter(Boolean);
+  const bad = [ ...A.filter(n => real.includes(n) || !doc.includes(n)),
+                ...U.filter(n => !real.includes(n)) ];
+  console.log(real.length, "+", A.length, "-", U.length, "=", real.length + A.length - U.length,
+              bad.length ? "MISCLASSIFIED: " + bad.join(" ") : "both sets hold");
+});'
+# → 63 + 16 - 4 = 75 both sets hold
+```
+
+**75 is not re-runnable from this document and the per-group table above is why it is still
+honest**: the calls are named in prose, so no grep recovers the set, and the enumeration has to be
+done by hand against six addresses. What the identity gives is the check on that hand count — 75
+closing against three independently obtained numbers is the evidence the enumeration is complete,
+and 71 closes against none of them.
 
 Derived in `research/gap-03.md`, which carries the citation for every borrowed shape. This file is
 the normative statement; the research file is the evidence. Where they disagree, this one is wrong
 and should be corrected here.
 
-Option A does not implement all 71 in v1 — see `../MILESTONES.md` for the subset per milestone. 61
+Option A does not implement all 75 in v1 — see `../MILESTONES.md` for the subset per milestone. 63
 is neither the 34 of the original candidate design nor the ~40 `PLAN.md` §5 costed.
 
 ---
@@ -627,6 +694,78 @@ record names a gesture that did not happen. New stats: `menus`, `refusedMenus`, 
 
 `src/libos/syscall.mjs` has the stub: `winMenu(fd, x, y, items = [])`, which encodes with
 `encodeWinItems` and answers -EINVAL locally on a list the codec refuses.
+
+### The two path calls that were implemented and unreachable, as M21 built them
+
+| call | args | → | errno |
+|---|---|---|---|
+| `utimes` | path in the byte region, a0/a1 atime ns (lo, hi), a2/a3 mtime ns (lo, hi) | 0 | NOENT ROFS ACCES INVAL |
+| `realpath` | path in the byte region | the canonical path in the byte region, its length in r0 | NOENT ACCES LOOP NOSYS OVERFLOW |
+
+`SYS_utimes: 61` and `SYS_realpath: 62` make `NSYS` **63**, with `SYS_NAME[61] === "utimes"` and
+`SYS_NAME[62] === "realpath"`. **NEITHER CALL IS NEW BEHAVIOUR — BOTH WERE A MISSING ROUTE.**
+`src/fs/vfs.mjs` has journalled and replayed `OP.UTIMES` since M2a and carries a full
+symlink-resolving canonicalizer; what did not exist was a syscall number, so no process could reach
+either. This document listed both in §path from the start, which is why they were the two names it
+was most reproducibly wrong about.
+
+**THE TIMES ARE NANOSECONDS, IN TWO REGISTERS EACH, AND A PROGRAM MUST PASS BigInt.** 2^53 ns is
+104 days after the epoch, so a Number has already lost precision by the time any real clock reads it
+— the i64 is not future-proofing. `msOfNs` divides to the millisecond the inode can hold and the
+division **truncates toward zero**, so `stat` answers the truncated value and not the one that was
+set: 1,500,999,999 ns reads back as 1500 ms. `ctime` moves to the VFS's own clock rather than to the
+time that was set, which is POSIX's rule and is what makes a forged mtime still detectable.
+
+**THERE IS NO `UTIME_NOW` AND NONE MUST BE ADDED.** A sentinel would give the kernel a clock the
+caller cannot see and a value it can disagree with the caller about — and "now" is then two answers
+for one call. The factor from milliseconds to nanoseconds is written **once on the process side**, in
+`utimesNow(path)` in `src/libos/syscall.mjs`, which is what `src/bin/touch.mjs` calls. The raw
+`utimes(path, atimeNs, mtimeNs)` is beside it for a caller that has a time of its own.
+
+**FOUR REFUSALS, FOUR ERRNOS, each asserted separately** in `bench/m21-abi/probe.mjs`:
+
+| errno | when |
+|---|---|
+| **-ENOENT** | a path with a missing component |
+| **-EROFS** | a read-only mount. `metaOp` decides it **before the filesystem is asked**, and `SynthFS` refuses a second time on its own — constraint 28's two layers, and both are asserted |
+| **-EACCES** | no write permission on the inode, which is what `VFS.utimes` requires. The credential is **this call's argument**, never stored identity (constraint 29) |
+| **-EINVAL** | a negative time. The filestat time fields are written with `setBigUint64`, so a pre-epoch time would read back as ~1.8e19 ns rather than as the time asked for. **Zero is legal** and is asserted legal |
+
+A `utimes` on a mount with no durable state works and **journals nothing**: `/tmp` is a tmpfs, so the
+time is set and no record is appended. That is the clause that says the journal entry is the VFS's
+own op and not something this handler invented.
+
+**`realpath` RETURNS BYTES, FOR `readlink`'s REASON.** A canonical path has no bound a register can
+carry, so the answer goes in the byte region with its length in r0 and `replyBytes`'s standing
+contract applies — a canonical path past `MAX_INLINE` is **-EOVERFLOW**, the same refusal `readlink`
+gives. A relative path is canonicalized against the **caller's** cwd, which `resolveMount` has
+already applied by the time the canonicalizer sees it, so the canonicalizer's own `cwd` default is
+never consulted.
+
+**`LEXICAL_REALPATH` IN `src/kernel/calls.mjs` IS THE ONE DEFINITION OF WHICH MOUNTS GET THE STRING
+TRANSFORM**, held as DATA — `[FS_PROC, FS_DEV, FS_PROVIDER]` — so adding a generated filesystem is
+adding a row. Those three cannot hold a symlink at all: `SynthFS.stat` throws EIO on a LINK rather
+than following one, and `procfs` publishes a plain file where Linux has a symlink. The lexical arm
+still pays a `stat`, which **checks the assumption rather than trusting it**: a generated filesystem
+that ever grew a symlink answers EIO there instead of letting a wrong path be returned with no error,
+and a missing component becomes the ENOENT POSIX requires and a string transform alone cannot give.
+
+**A MOUNT THAT IS NOT ON THAT LIST AND HAS NO CANONICALIZER OF ITS OWN IS -ENOSYS, NOT ANSWERED
+LEXICALLY.** Today that is `/tmp` alone. `TmpFS` forwards `symlink` to a real VFS, so a lexical
+answer for a path under `/tmp` would be **the wrong path returned with no error** — the one outcome
+worse than a refusal. ENOSYS and not ENOTSUP, because ENOSYS is already this file's answer for an
+operation a kind does not carry (`ftruncate`, `perform`). Closing it is a two-line `realpath`
+forward on `TmpFS`, beside its existing `readlink` forward.
+
+**CROSS-MOUNT TRAVERSAL IS NOT RESOLVED**, which is `resolveMount`'s existing rule and not a new one:
+a symlink on the OPFS volume whose target lands in another mount reaches ENOENT inside the VFS,
+because the walk happens in the filesystem that owns the link. **-ELOOP** is past `MAX_LINKS` (40),
+the VFS's own hop limit.
+
+`src/libos/syscall.mjs` has three stubs: `utimes(path, atimeNs, mtimeNs)` → 0 or -errno,
+`utimesNow(path)` → 0 or -errno, and `realpath(path)` → the canonical path **as a string**, or a
+negative number, which is `readlink`'s shape. All three reach a program through the frozen `env.fs`
+table in `src/libos/process.mjs`; a program must not import `syscall.mjs` itself.
 
 ---
 

@@ -33,7 +33,7 @@ import {
   WEV_KEY, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_POINTER, WEV_STATE, WEV_ITEM,
   WROLE_DESKTOP, WITEM_DESKTOP, WITEM_MENU, WITEM_JUMP, WITEM_CONTAINER, WITEM_SEPARATOR,
   WITEM_CONTEXT, WPTR_DOWN, pointerAt, itemAt,
-  WICON_COMPUTER, WICON_FOLDER, WICON_TERMINAL,
+  WICON_COMPUTER, WICON_FOLDER, WICON_TERMINAL, WICON_TRASH,
   DT_DIR,
 } from "/src/abi.mjs";
 
@@ -225,10 +225,7 @@ export function run(env) {
      * desktop has the same kind: Computer, a user's folder, the Recycle Bin. EVERY ONE OF THEM
      * DOES SOMETHING, which is the rule the caption buttons follow too: a row that opened nothing
      * would be the live-looking-button defect with a label on it. They are what makes a desktop
-     * usable before a reader has put anything in their desktop folder.
-     *
-     * THERE IS NO RECYCLE BIN, and that is why: nothing in this system has a trash. A row for it
-     * would be a drawing of a feature. */
+     * usable before a reader has put anything in their desktop folder. */
     rows.push({
       icon: WICON_COMPUTER,
       flags: WITEM_DESKTOP | WITEM_MENU,
@@ -257,6 +254,19 @@ export function run(env) {
       flags: WITEM_DESKTOP | WITEM_CONTAINER,
       label: leafOf(session.dir),
       run: () => ["files", session.dir],
+    });
+    /* THE RECYCLE BIN IS A LOCATION AND NOT A PROGRAM, so the row names the location and WHERE it
+     * is stays in the one program that puts things there: `files --bin`. A path written here as
+     * well is how the desktop and the file manager come to disagree about where a deleted file
+     * went, which is the same argument that moved `std.sessionDir` out of both of them.
+     *
+     * DESKTOP-ONLY, with no `WITEM_MENU`: Windows 7 does not list it in the start menu, and a
+     * location reached from two places is a location a reader has to be told about twice. */
+    rows.push({
+      icon: WICON_TRASH,
+      flags: WITEM_DESKTOP | WITEM_CONTAINER,
+      label: "Recycle Bin",
+      run: () => ["files", "--bin"],
     });
     rows.push({
       icon: WICON_TERMINAL,

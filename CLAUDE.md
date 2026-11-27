@@ -22,8 +22,8 @@ to start work.
 | # | File | Read it for | Size |
 | --- | --- | --- | --- |
 | 1 | `CONTEXT.md` | What a kernel, process and syscall *are*; why a browser makes this hard; what the other web OSes do; what the predecessor got wrong. **Start here even if you know Unix** — §2 and §4 are project-specific. | 5 min |
-| 2 | `docs/CONSTRAINTS.md` | 308 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
-| 3 | `docs/ABI.md` | The syscall table — **71 calls designed, 61 realised**, and §Two counts is the reconciliation — plus the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
+| 2 | `docs/CONSTRAINTS.md` | 311 numbered constraints. **Normative.** Cite by number in code comments and commit messages. | 10 min |
+| 3 | `docs/ABI.md` | The syscall table — **75 calls specified, 63 realised**, and §Two counts is the reconciliation, with the identity that ties them — plus the SAB layout, errno space, fd inheritance, and the five decisions that carry the design. | 7 min |
 | 4 | `MILESTONES.md` | What is done, what is next, the proof and negative control each milestone owes. | 5 min |
 | 5 | `docs/DECISIONS.md` | 34 decisions, what each rejected, and whether it rests on a measurement or a judgement. **Read before arguing with any of them.** | 12 min |
 | 6 | `PLAN.md` | Why the order is the order; options A/B/C; §9 what critics changed; §10 what is still unknown. | 15 min |
@@ -62,8 +62,8 @@ MILESTONES.md     tracker: status, proofs, negative controls, open experiments
 CLAUDE.md         this file: working rules for the codebase
 README.md         orientation and the one-command start
 docs/
-  CONSTRAINTS.md  308 normative constraints  ← cite these
-  ABI.md          the syscall table: 71 designed, 61 realised, and §Two counts reconciles them
+  CONSTRAINTS.md  311 normative constraints  ← cite these
+  ABI.md          the syscall table: 75 specified, 63 realised, and §Two counts reconciles them
   DECISIONS.md    decision log with evidence class per decision
   GLOSSARY.md     terms
   LEARNING-MODE.md  option D: learning mode, the teaching CPU, device providers
@@ -125,6 +125,20 @@ bench/
                   because a content-fitted `files` window has NO EMPTY PAPER inside its clip
                   (measured: client box 428x122 CSS px, viewBox `{y:22,h:74}`, last row 4 px past
                   it), so the empty-space menu is otherwise unreachable
+  m21-bin/        M21's measurement, TAKEN BEFORE THE BIN WAS DESIGNED. `probe.mjs` enumerates the
+                  whole half-state space of a delete-to-Bin: four candidate origin stores x both
+                  tear orders, torn at EVERY truncation offset and EVERY single-bit flip, replayed
+                  through the real `VFS.applyOp` under fsck's stop-at-first-rejection rule, plus
+                  restore's two orders and the record codec's own fuzz — 26,403 cases in 0.54 s. It
+                  is what made the origin record a SYMLINK (309), found restore's order FORCED (310)
+                  and measured `rename` clobbering an occupied path with no tear at all (311).
+                  `sidecar.mjs` is the file-sidecar format the measurement REJECTED, kept as
+                  evidence; `firefox-bin.py` is the Firefox gate on the LANDING page
+  m21-abi/        `probe.mjs` is `utimes` and `realpath` under node, every refusal asserted
+                  separately; `mutate.py` is two mutants of the ABI's own self-test
+  m21-files/      `probe.mjs` drives `files` against `src/fs/vfs.mjs` ITSELF — the real codecs with a
+                  Map where the blob store would be — because the three facts this milestone turns on
+                  are ones a fake would have to be TRUSTED about (98)
 mockups/
   milestones.html   what is on screen at each milestone (M0-M14, D0-D8)
   learning-mode.html the three learning-page types + the coverage matrix
@@ -258,6 +272,17 @@ www/
                   drawing; `refusals` asserts four errnos separately AND a fifth refusal that must
                   carry no errno key at all. Four query controls: `no_menu_guard`, `silent_dismiss`,
                   `menu_in_surface`, `paste_clobbers`. The bare URL is a live desktop
+  m21.html        M21's four proofs — `bin`, `refuse`, `drag`, `refresh` — 72 expectations over 26
+                  DRIVEN GESTURES ASSERTED TO AN EXACT COUNT. It asks for NO `kind: "drag"`, because
+                  `mouse_drag` passes no `modifiers` and a Ctrl-drag must be press/move/move/release.
+                  `bin` asserts the origin record is a SYMLINK and the Bin's listing is the PAYLOADS
+                  (309, 310); `refuse` asserts EEXIST by name AND that the occupant's bytes survived,
+                  which are two facts; `drag` asserts the program's ASK and the kernel's ANSWER
+                  separately; `refresh` reads the surviving selection by NAME and never by index.
+                  Four query controls, all forwarded to every `files` spawn on argv:
+                  `restore_overwrites`, `move_forced_copy`, `stale_listing`, `paste_clobbers`. It
+                  CLEARS the Bin first, because the Bin accumulates by design and `freeFrom` would
+                  otherwise number the payload `bin-me (2).txt`. The bare URL is a live desktop
   pagekernel.mjs  the page's half of a kernel, as a module: boot (with one retry), shut down,
                   spawn a program by URL, collect its result, and the GESTURE PROTOCOL — the ask,
                   the receipt, and the banner a page paints when nothing is driving it. m7, m8,
@@ -312,6 +337,8 @@ row below rather than restate it.
 | A window's event queue and its record | `WIN_EVENT_CAP` and `WEV_*` + `encodeWinEvent`/`decodeWinEvent`/`keyBytesOf`/`packKeyBytes` in `src/abi.mjs`. The kernel writes the record and the libos reads it, which is the two sides |
 | A text run in a display list | `DL_TEXT` + `DL_TEXT_DATA`, `DLT_*` and `encodeTextRun`/`textOfOps`/`textOpCount` in `src/abi.mjs`. A header plus continuation records, because a record is 32 bytes and a string is not; the two functions are declared inverses and the selfTest asserts the round trip. The kernel validates a run with the SAME codec the renderer draws it with (constraint 293) |
 | `src/bin/files.mjs`'s row geometry | `FILES_METRICS` in that file, exported. `rowMid` is what a driver outside the process reads — `www/m10.html` and `bench/m10-data/shell.py` both restated it until M15 moved the rows and the drift arrived exactly as CLAUDE.md predicted (the wrong file dragged). **M19 added `FOOT_H`**, a new term in `viewBox`/`scrollMax`/`rowsThatFit`/`clientHeightFor` — a driver that ASKS here follows it and one that restated a formula does not |
+| WHERE THE RECYCLE BIN IS, and what an origin record is called | `BIN_NAME = "$Recycle.Bin"`, `ORIGIN_SUFFIX = ".origin"`, `binDirIn(home)` and `originRecordOf(payloadPath)` on `FILES_METRICS` in `src/bin/files.mjs`. `binDirIn` and `originRecordOf` are declared partners: the Bin is `binDirIn(std.HOME_DIR)` and a payload's record is `originRecordOf(payload)`, so a driver outside the process ASKS rather than spelling `$Recycle.Bin` — which `bench/m21-bin/firefox-bin.py` does, through the page. **THE ROW IS HONEST ONLY WHILE ONE PROGRAM NEEDS IT.** `src/bin/desktop.mjs` now needs it too, and it names a LOCATION rather than a path for that reason; the precedent for the move is `std.sessionDir`/`HOME_DIR`, and `src/bin/files.mjs`'s own `BIN_DIR` comment already says the one definition "would have to be in `src/libos/std.mjs`". Until it moves, the Bin icon opens nothing — `MILESTONES.md` §M21 carries the measurement |
+| What a deleted file's ORIGIN RECORD IS | a **SYMLINK** whose target is the origin path, beside the payload in the Bin. NOT a file of bytes and NOT a shared index: `vfs.symlink` stores its target verbatim in ONE journal record and a journal record carries a CRC-32, while an OPFS blob carries NONE (`grep -c "crc\|checksum" src/kernel/store.mjs` → 0) — so a symlink target is integrity-checked and inside `scripts/fsfuzz.py`'s gate and a sidecar is neither. The delete's time is the record's own `t`. `bench/m21-bin/sidecar.mjs` is the file format this REPLACED, kept as evidence — imported by `bench/m21-bin/probe.mjs` to score the design it lost to, and by nothing under `src/` (constraint 309) |
 | The DETAILS view's columns, in both directions | `COLUMNS` (frozen data) + `columnBoxes(wCss)` and `columnAt(xCss, wCss)` on `FILES_METRICS`, in `src/bin/files.mjs`. `columnAt` is the declared inverse of `columnBoxes`, which is what makes a header press sort the column a reader is pointing at — the same pairing `#cellAt`/`#boxFor` make on the desktop. The hit test and the drawing read ONE geometry, so they cannot disagree about which column a pixel is in. `dateText`/`sizeText` are the two cell formatters and `UNKNOWN_CELL` the mark for a statted row with a zero stamp |
 | A display-list op, and how many fit in a call | `DLOP_BYTES`, `DL_*` + `encodeDrawOp`/`decodeDrawOps` and `DL_MAX_OPS` in `src/abi.mjs`. `DL_MAX_OPS` is DERIVED from `MAX_INLINE`, never written |
 | What `0xRRGGBBAA` means | `unpackColor` in `src/abi.mjs`, with `cssColor` for a canvas and `pixelColor` for a pixel read back. The two APIs disagree about alpha and a second copy gets one of them wrong (constraint 224) |
@@ -362,7 +389,7 @@ row below rather than restate it.
 | How a desktop shell is STAGED, and what is on it | `www/shell.mjs` — `PROGRAMS` (url, argv, window count, placement, per program) and `DESKTOP_HELP` are the DATA a milestone adds a row or a line to; `stageDesktop` is the order. `www/index.html` and every milestone page's live mode import it. It was `www/m14.html`'s `bootHost()`/`live()` with a copy on each other page, which is exactly how "the landing page is always up to date with the latest features" became a promise kept by hand: a program that landed in one page's copy was absent from the rest and nothing said so. It also enforces one ordering rule a copy cannot — `term` spawns `sh` by syscall, so a `spawnsChildren` program MUST be last in `programs`, and a bad list throws before the kernel boots |
 | A MENU A PROCESS RAISES | `SYS_win_menu` in `src/abi.mjs`, `HANDLERS.win_menu` in `src/kernel/calls.mjs` and `WinMgr.menu` in `src/kernel/wins.mjs` — and the ROW is `win_items`' row, `encodeWinItems`/`decodeWinItems`, reused verbatim so a menu row and a jump-list row cannot come to disagree. `x`/`y` are SURFACE px and SIGNED, the unit the `WEV_POINTER` that asked for the menu already carried (constraint 223) — device px is `win_surface`'s unit and `win_surface`'s alone. `Window.menu` holds the open menu SEPARATELY from the published `items`, because they are two lists and row 2 of one is not row 2 of the other. **A zero-length region answers -ENOENT and is NOT a withdrawal**, which is the one place this call parts from `win_items`: a menu is transient and there is nothing to withdraw. A process MUST NOT draw its own popup — `.window-body` is `overflow: hidden` (constraint 308) |
 | WHICH LIST AN ACTIVATION INDEXES, and what a dismissal is | `WITEM_CONTEXT` in `src/abi.mjs` (the seventh item flag; `WITEM_FLAGS_ALL` is `0x7f` and `selfTest` asserts it is the OR of the declared flags) + `itemAt(ev)`, and `WinMgr.activateItem` in `src/kernel/wins.mjs` is the one place the bit is read to pick the list. `itemAt` is the THIRD and last signed-field accessor, beside `pointerAt` and `wheelAt` — `WEV_ITEM`'s `a` is read with `getUint32`, so the kernel's `a = -1` arrives as `4294967295` to anything that does not go through it, and constraint 225 is the record of what the first one cost. **A dismissal is `index < 0`, not `=== -1`** (constraint 307), so a second reason to close a menu with nothing chosen is another negative value and not a second comparison at every call site |
-| The 308 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
+| The 311 normative constraints | `docs/CONSTRAINTS.md`. Code cites by number and does not restate the argument |
 
 **Known second copies, not yet removed.** Each is a row this table cannot honestly claim yet:
 `modeString` exists in both `src/fs/vfs.mjs` and `src/bin/ls.mjs`; `joinPath` in both
@@ -395,6 +422,14 @@ agree about the stack — a renamed font in one copy prices a font nothing draws
 column is then wrong with no error anywhere. `bench/m19-advance/probe.py` is the alarm: it reads
 `src/wm/surface.mjs`'s pair by regex at run time and refuses to conclude if either stops being a
 quoted const.
+**M21 ADDED A ROW THAT IS A BROKEN FEATURE RATHER THAN A HAZARD, WHICH IS THE CHEAPEST FORM THIS
+LIST HAS SEEN.** The Bin's location is now a fact two programs need, and the second program does
+**not** hold a copy: `src/bin/desktop.mjs` publishes `["files", "--bin"]` and so names a LOCATION
+rather than restating `$Recycle.Bin`. The cost of refusing the copy is that `files` has no `--bin` —
+`grep -c '"--bin"' src/bin/files.mjs` → 0 — so the Recycle Bin icon opens nothing and
+`bench/m21-bin/firefox-bin.py` scores it RED by name. **Moving `BIN_NAME` and `binDirIn` to
+`src/libos/std.mjs` closes the row AND the defect in one edit**, which is the precedent
+`std.sessionDir`/`HOME_DIR` set and which `src/bin/files.mjs`'s own `BIN_DIR` comment already names.
 
 ## Architecture rules
 
@@ -530,6 +565,26 @@ Do not "fix" these. Each is load-bearing and each has a reason recorded.
   is the reader's own, so a program that timed two presses itself would disagree with every other
   application on their machine; and `event.detail` is meaningful on the UP of a double-click too, so
   a program reading both would open a row twice for one gesture (constraint 300).
+- **A deleted file's origin is a SYMLINK, not a file of bytes, and not an inode flag.** A symlink
+  target rides one journal record and is covered by that record's CRC-32; an OPFS blob carries no
+  integrity field at all, so an origin path held as file data is undetectably corruptible and
+  outside `scripts/fsfuzz.py`'s gate. It also costs two records instead of three. Measured over
+  26,403 torn-journal cases before the Bin was designed (constraint 309, `bench/m21-bin/probe.mjs`).
+- **A restore pre-checks its destination in USERLAND and refuses EEXIST itself.** That is not a
+  redundant guard over a filesystem that would refuse: `vfs.rename` has no `RENAME_NOREPLACE` and
+  over a plain file refuses nothing — it clobbers the occupant and frees its inode in one record.
+  Deleting the pre-check destroys, silently, a file the reader created in the meantime
+  (constraint 311, `--negative restore-overwrites`).
+- **A MOVE's original goes to the Bin and is never `unlink`ed, and a plain drag is a MOVE only
+  inside the session tree.** The kernel reports an effect for a drop that QUEUED and not one that
+  was COLLECTED (constraint 245), so a MOVE source cannot verify the collection — and without a Bin
+  to put the original in, there is no safe move. Ctrl is always a COPY; outside the session tree a
+  plain drag is a COPY too, which is the same rule `www/m10.html`'s committed clause reads from
+  outside.
+- **`realpath` answers -ENOSYS on `/tmp` rather than transforming the string.** `TmpFS` forwards
+  `symlink` to a real VFS, so a lexical answer there would be the wrong path returned with no error
+  — the one outcome worse than a refusal. `LEXICAL_REALPATH` in `src/kernel/calls.mjs` is the one
+  list of mounts that may be answered lexically, and it is DATA.
 
 ## Code conventions
 
@@ -673,6 +728,21 @@ are not geometry assertions — `check_boot`, `check_mount`, `check_filesystem`,
   immediately before the U+E03D `Meta` already used. `button: 2` needed nothing added:
   `Firefox.click(x, y, button=2)` already existed and was verified by RUNNING, not assumed —
   `{button: 2, trusted: True, defaultPrevented: True}` read back off the page.
+  **A MODIFIER SPANNING ANYTHING THAT IS NOT A KEY NEEDS `Firefox.held(*names)` AND NOT
+  `press(..., ctrl=True)`.** `press` opens and closes the modifier inside ONE key sequence, so no
+  pointer action can happen under it, and Ctrl+click — the gesture that EXTENDS a selection instead
+  of replacing it — had no spelling on this wire at all until M21 added the context manager. The
+  keys go down before the block and up in a `finally`:
+  `with ff.held("Control"): ff.click(x, y)` delivers `ctrlKey === true` with `isTrusted === true`,
+  measured by `python3 scripts/bidi.py`'s own self-test. A Ctrl-drag is
+  `with ff.held("Control"): ff.drag(start, end)`. `names` are `KEYS` rows; an unknown one raises
+  `BidiError` listing them.
+  **THE CHROME DRIVER HAS THE SAME SHAPE OF GAP IN THE OTHER DIRECTION**: `scripts/check.py`'s
+  `mouse_drag` passes no `modifiers`, so a Ctrl-drag in Chrome must be spelled
+  press/move/move/release with the modifier on each record — which is why `www/m21.html` asks for no
+  `kind: "drag"` gesture at all. And `scripts/cdp.py`'s `CDP.KEYS` still has no `F5` row, as it had
+  none for `F2` or `Delete`; `www/m21.html` synthesises the key and says in a clause that it did, so
+  what goes unproven in Chrome is the BINDING and not the verb.
 - **The suite drives Chrome only, and that has now cost two milestones.** M4a shipped a window
   that could not be dragged in Firefox (175) and M6 shipped a policy under which no process
   started in Firefox at all (206) — both with every expectation green, both found by a human
@@ -841,7 +911,32 @@ scripts/check.py --negative menu-in-surface   # ...and a process drawing its OWN
                                   # surface, where `overflow: hidden` eats it: 46 / 15, the widest
                                   # control in this suite and honestly so (constraint 308)
 scripts/check.py --negative paste-clobbers    # ...and a paste that overwrites instead of refusing
-                                  # EEXIST: 4 / 57
+                                  # EEXIST: 4 / 57 on m20, and 4 / 68 on m21, where it reaches a DROP
+node bench/m21-bin/probe.mjs        # CAN A DELETE-TO-BIN SURVIVE A TORN JOURNAL? four candidate
+                                  # origin stores x both orders, torn at EVERY truncation offset and
+                                  # EVERY bit flip: 26,403 cases in 0.54 s. It is why the origin
+                                  # record is a SYMLINK (309) and why restore's order is FORCED (310)
+node bench/m21-bin/probe.mjs --control  # ...and three control families, including the INVERTED
+                                  # listing join, which turns `invisible` from 0 to 1,125
+scripts/check.py --only m21         # M21's 72 expectations over four driven proofs, 15.3 s, and 26
+                                  # DRIVEN GESTURES asserted to an exact count
+node --experimental-loader ./bench/m20-verbs/loader.mjs bench/m21-files/probe.mjs
+                                  # ...and the Bin, F5 and the drop target against the REAL
+                                  # src/fs/vfs.mjs: 87 clauses, no fake to be trusted about
+node bench/m21-abi/probe.mjs        # `utimes` and `realpath`, every refusal asserted separately: 34
+python3 bench/m21-abi/mutate.py     # ...and two mutants of the ABI self-test that must fire
+pkill -9 -f "Firefox.app"           # IN A SEPARATE COMMAND. See the warning below the block
+python3 bench/m21-bin/firefox-bin.py  # IF I DELETE SOMETHING BY MISTAKE, CAN I GET IT BACK? the
+                                  # LANDING page in Firefox with real trusted input, and a RELOAD.
+                                  # 8 of 9 green today; `binIcon` is RED because `files` has no
+                                  # `--bin` — MILESTONES.md §M21 carries the one-line fix
+python3 bench/m21-bin/firefox-bin.py --prove-failure  # ...and with Esc instead of Restore, the three
+                                  # restore clauses MUST fire
+scripts/check.py --negative restore-overwrites # a restore that CLOBBERS the reader's file instead of
+                                  # refusing EEXIST by name: 8 / 64
+scripts/check.py --negative move-forced-copy  # ...and a drag that always offers COPY: 7 / 65
+scripts/check.py --negative stale-listing     # ...and an F5 that serves the rows already in hand —
+                                  # `refreshes` still rises, so only the three content clauses turn
 python3 bench/m16-resize/probe.py   # IS A RESIZE GRIP DRIVABLE, and at a dpr the run chose?
 scripts/check.py --negative no-clip          # a scrolled row painting over its own header
 scripts/check.py --negative unclamped-scroll # ...and a list that scrolls past its end

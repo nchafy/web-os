@@ -3280,3 +3280,73 @@ are SwiftShader at 60 Hz, not Aero**, and are quoted only as ratios at equal are
     reversed on a measurement) — so that leg is gone, and a reader auditing this constraint will not
     find it. What remains is the clip, which is structural, plus the fact that a menu must survive
     the release of the button that raised it while `win_menu`'s caller is parked on one reply.
+
+## What M21 measured
+
+309. **A DURABLE FACT A REPAIR NEEDS MUST LIVE WHERE THE INTEGRITY FIELD IS, AND ON THIS VOLUME
+    THAT MEANS A JOURNAL RECORD AND NOT FILE DATA.** A journal record, the superblock and the image
+    each carry a CRC-32 (`src/fs/journal.mjs:10`, `src/fs/superblock.mjs:56`, `src/fs/image.mjs:53`)
+    and **a BLOB CARRIES NONE**: `blobName` is `${ino}.${gen}` and
+    `grep -n "crc\|checksum" src/kernel/store.mjs` returns nothing. So a fact held as a file's bytes
+    is neither detectably corrupt nor reachable by `scripts/fsfuzz.py`'s three-second gate, which
+    runs over `src/fs/` and never touches OPFS.
+    **THE RECYCLE BIN'S ORIGIN RECORD IS A SYMLINK FOR THAT REASON AND NOT FOR TIDINESS.**
+    `vfs.symlink` stores its `target` **verbatim in ONE journal record** and applies no `NAME_MAX`
+    to it, and `readlink` returns it, so the whole origin path is CRC-covered and inside the fuzz
+    gate; the delete's time is the record's own `t`. A delete is then **two** records. A regular-file
+    sidecar costs **three**, is outside both the CRC and the gate, and adds a half-state the symlink
+    does not have — **765 `empty-origin` cases** where the CREATE landed and the COMMIT did not.
+    Measured in `bench/m21-bin/probe.mjs`: four candidate designs × both orders, torn at every
+    truncation offset and every single-bit flip, replayed through the real `VFS.applyOp` under
+    fsck's own stop-at-first-rejection rule, plus restore's two orders and the record codec's own
+    6,153-case fuzz — **26,403 cases in 0.54 s**.
+    **THE DESIGN THAT ENCODES THE ORIGIN INTO THE BIN ENTRY'S FILENAME IS REJECTED, AND IT IS THE
+    ONLY ONE WITH NO HALF-STATE AT ALL** — one record, 1,504 cases, nothing reachable but `complete`
+    and `nothing`. `NAME_MAX = 255` kills it: an escaped byte costs three, so the longest path that
+    is **guaranteed** to fit is 85 bytes, and under `/Users/Default/` the encoded prefix is 21 bytes
+    leaving 234 for a filename. **A filename of 235..255 bytes is LEGAL TODAY and could not be
+    deleted** — `/Users/Default/<255 n's>` is 270 path bytes, encodes to 276, `fits: false`. A verb
+    that refuses on a name the filesystem accepts is a worse bill than a stranded record a sweep
+    reclaims.
+    **SO A RESERVED DIRECTORY PLUS AN ORIGIN RECORD IS ENOUGH AND THE BIN NEEDS NO INODE FLAG**,
+    which is the answer `docs/PLAN-SHELL.md` §M21 named as the assumption and the week-long fallback
+    it would have cost.
+
+310. **A BIN ENTRY POINTING AT ABSENT BYTES IS A LIE A READER CANNOT SEE, SO THE TEAR ORDER IS PART
+    OF THE DESIGN — AND RESTORE'S ORDER IS FORCED WHERE DELETE'S IS A JUDGEMENT.** Both halves of
+    a torn delete are recoverable. `origin-first` leaves `shownUnrestorable: 0` and
+    `strandedOrigin: 1260`; `payload-first` leaves `1125` and `0`
+    (`bench/m21-bin/probe.mjs`, the symlink design, 2,386 cases per order). Neither destroys bytes,
+    so the order is chosen on what a reader is shown: **origin-first's half-state shows them nothing
+    wrong** and is swept by the same readdir join that lists the Bin, while payload-first's shows a
+    row whose Restore must refuse by name. **A RESTORE'S ORDER IS NOT A JUDGEMENT.** The bytes MUST
+    go home FIRST and the origin record MUST be dropped SECOND: the other order left **1,260 of
+    2,017** cases with bytes in the Bin that nothing names, and no later pass can repair that
+    because the one fact needed to repair it is the fact that was lost. That is the **only
+    irreversible half-state** the whole 26,403-case sweep found, and it is in restore and not in
+    delete — which is the opposite of where the design was looking.
+    **THE BIN'S LISTING MUST THEREFORE BE `readdir` OF THE BIN DIRECTORY WITH THE ORIGIN STORE AS A
+    LOOKUP, NEVER THE REVERSE.** `node bench/m21-bin/probe.mjs --control` carries the world where
+    the join is inverted — the `index-driven` family — and `invisible` goes from 0 to **1,125**:
+    bytes a reader can neither see nor reclaim. With the join in the right direction every
+    reachable half-state is nameable by two
+    directory reads: `unreconcilable: 0` in **16,216** cases, which is the "no new filesystem
+    concept" claim as a figure.
+
+311. **`rename(2)` HERE CLOBBERS A PLAIN DESTINATION AND FREES THE OCCUPANT'S INODE, SO A RESTORE
+    ONTO AN OCCUPIED PATH MUST BE PRE-CHECKED IN USERLAND AND REFUSED BY NAME. NO TEAR IS NEEDED
+    FOR THIS ONE.** `vfs.rename` has no `RENAME_NOREPLACE`. It refuses a rename over a directory,
+    over a non-empty directory and on a type mismatch (`src/fs/vfs.mjs:658-667`), and over a plain
+    file it refuses **nothing**: `applyOp`'s RENAME arm deletes the standing entry, decrements
+    `nlink` and frees the inode, in ONE journal record. Measured — `renameRefused: null`,
+    `freedInode: 8`, `clobbered: true`, `needsATear: false`
+    (`bench/m21-bin/probe.mjs` → `verdict.renameReplacesSilently`).
+    So the file a reader created in the meantime is destroyed **silently** by a restore that trusts
+    the filesystem, and the pre-check is `src/bin/files.mjs`'s own `lstat` before the rename,
+    answering **EEXIST** and naming the origin path. This is M20's rename rule
+    (constraint 307's neighbour in that row's table) at a second door, and the reason it is a
+    constraint rather than a comment is that **the probe asserts the clobber is STILL PRESENT**: if
+    the VFS ever grows a refusal, the run says to re-derive the pre-check rather than leaving a dead
+    branch that no longer matches the filesystem under it.
+    `scripts/check.py --negative restore-overwrites` is the world with the pre-check dropped — 8
+    expectations red, 64 intact — and the reader's file is destroyed in it.

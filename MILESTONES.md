@@ -18,7 +18,7 @@ checks is a wish.
 | | Milestone | Est | Actual | Status |
 |---|---|---|---|---|
 | — | Day zero: tree, isolation server, CDP driver | 0.5 | 0.5 | ✅ done |
-| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **58 named negative controls over 23 checks and 857 expectations**; the spine checks landed per milestone |
+| — | Harness: `cdp.py`, `--prove-failure`, spine checks | 2 | 1.2 | ✅ done — `check.py`, registry, **70 named negative controls over 27 checks and 1,094 expectations** (71 registrations — `paste-clobbers` is declared on two checks); the spine checks landed per milestone |
 | M0 | Prove the syscall channel under contention | 1 | 1 | ✅ done — **ACCEPT**, p99 255 µs at N=16 |
 | M0a | Addendum: the same sweep with a real OPFS call in the mix | 0.5 | 0.5 | ✅ done — **the I/O worker is required**, not optional |
 | M0b | Move the OPFS handles to a second kernel-side worker | 1.5 | 0.5 | ✅ done — cheap p99 185 µs at N=16, K=1 |
@@ -49,6 +49,7 @@ checks is a wish.
 | M19 | Details, sort, selection, hover | 3 | — | ✅ done — **ACCEPT**, 60 expectations over 5 driven proofs in one 20.3 s run, 5 controls each moving its own named subset (2/58, 2/58, 3/57, 2/58, 4/56), a Firefox gate with real trusted input and a `--prove-failure` half, **constraint 223 reversed on a measurement** — 500 appended moves drop 247 and tail-replaced drop 0 — and an advance table measured in two engines at three ratios before a byte of it was published (302, 303) |
 | M19a | The session is a WRITABLE COPY of the read-only base, seeded once | — | 0.5 | ✅ done — **ACCEPT**, 44 expectations over 5 proofs and **three kernels against one volume in one page load**, 3 controls each moving its own named subset (19/25, 6/38, 2/42), 21 clauses under node over **six mount worlds** with a `--control` that reseeds a populated volume, a seeded journal replayed at all 7,763 truncations and 1,109 bit flips, and a Firefox gate with real trusted input and a `--prove-failure` half. **Constraint 28 at a new door, which is constraint 306** |
 | M20 | A menu a process can raise, and the mutating verbs | 3 | — | ✅ done — **ACCEPT**, 61 expectations over 5 driven proofs in a 12.7–13.6 s run, **30 driven gestures asserted to an EXACT count**, 4 controls each moving its own named subset (2/59, 3/58, 46/15, 4/57), 99 clauses under node against a fake kernel no gentler than the real one, four errnos asserted BY NAME and separately — EEXIST twice from two different layers, ENOTEMPTY, EROFS — plus a fifth refusal that must carry **no errno key at all**, a Firefox gate with real trusted input over the LANDING page and a `--prove-failure` half, and **constraint 225 promoted to a standing rule, which is constraint 307** |
+| M21 | The Recycle Bin, refresh, and a drop target | 2.5 | — | **PARTIAL — the suite is GREEN and the reader's own route is RED** — 72 expectations over 4 driven proofs in a 15.28 s run, all green, **26 driven gestures asserted to an EXACT count**, 4 controls each moving its own named subset (8/64, 7/65, 4/68, 4/68), 87 clauses under node against the REAL `src/fs/vfs.mjs` and 34 more over the two new syscalls with every refusal asserted separately, and **a 26,403-case half-state measurement taken BEFORE the design** that made the origin record a symlink and found restore's order forced. The Firefox gate on the LANDING page scores **8 of 9 green and the ninth RED BY NAME**: the desktop's Recycle Bin icon opens nothing, because `src/bin/desktop.mjs` publishes `["files", "--bin"]` and `files` has no `--bin` — `grep -c '"--bin"' src/bin/files.mjs` → 0, and at a real prompt `files --bin` → `files: --: unknown`. One line in one file closes it. Constraints **309**, **310** and **311**, and `docs/ABI.md`'s 71 corrected to **75 specified / 63 realised** |
 | — | Icons and fonts, redrawn | 4 | 0.25 | ✅ done — 11 icons as vectors with a coverage self-test, **now CALLED at module load**; the font stack is M11's, referenced and never served. **The new surfaces' CONTRAST is structural, not sampled** — see M14 §What is not done |
 | | **Option A total** | **77.5** | **13.5** | **the window half is complete; M15a and M16 are the file manager's first two rows** |
 | D0 | RV32I interpreter + one real binary | 6 | | ⬜ D |
@@ -4417,6 +4418,10 @@ dies silently with exit 1 and no output. Use `pkill -9 -f "Firefox.app"` in a **
    documented-but-absent calls, each with a re-runnable test. Nothing asserts it. **M21 owes the
    check**, and `docs/PLAN-SHELL.md` §M21 still says "the document claims 71 calls and `SYS_NAME` is
    60": the 60 is stale by one as of this row.
+   **M21 FOUND BOTH FIGURES IN THAT SENTENCE WRONG AND THE CHECK IS STILL OWED.** The document's 71
+   was an arithmetic over `research/gap-03.md` rather than a count of itself; it is **75 specified /
+   63 realised** now, the two difference sets are DATA, and the ten documented-but-absent names were
+   **16**. §M21 §What is NOT done carries what remains unasserted.
 3. **`src/wm/surface.mjs` still does not honour `a5`**, so M19's `DLT_ELLIPSIS` debt is also M20's: a
    long name a reader just typed into a rename field overflows the Date column.
 
@@ -4435,6 +4440,255 @@ back, so a clamp defect on either of those edges is invisible to this suite.
 **`x` AND `y` ARE NOT BOUNDED BY THE KERNEL, DELIBERATELY, AND NOTHING CHECKS THE CONSEQUENCE.** Only
 the page knows where the frame is, so only the page can clamp — but that means a program passing a
 wild point gets a popup somewhere rather than an errno, and no clause asserts where it lands.
+
+## M21 — the Recycle Bin, refresh, and a drop target · PARTIAL · 2.5 days
+
+**Two syscalls, a reserved directory, and a measurement that chose the design.** `SYS_utimes: 61`
+and `SYS_realpath: 62` make `NSYS` **63**; neither is new behaviour — both were **implemented and
+unreachable**, since `src/fs/vfs.mjs` has journalled and replayed `OP.UTIMES` since M2a and carries
+a full symlink-resolving canonicalizer. What was missing was a number. The Bin is
+`/Users/Default/$Recycle.Bin`, a payload keeps its own name, and the origin is a **symlink beside
+it** — which is the measurement's answer and not the plan's. Constraints **309**, **310** and **311**
+carry the three rules it established.
+
+**WHY THIS ROW IS PARTIAL.** `scripts/check.py --only m21` is **72 expectations, all green, 15.28 s**
+and the Firefox gate on the LANDING page is **8 of 9**. The ninth is the one a reader meets first:
+the desktop's **Recycle Bin icon opens nothing**. `src/bin/desktop.mjs:269` publishes the row as
+`["files", "--bin"]` and `src/bin/files.mjs` has no `--bin` — `grep -c '"--bin"' src/bin/files.mjs`
+→ **0** — so the argument falls through to `std.getopt(rest, "")`, which answers `bad: "-" + letter`
+for any long option. Verbatim from the gate, which asked at a real prompt rather than inferring:
+
+    BAD   [binIcon] a real double-click on the desktop's 'Recycle Bin' icon opened no `files` window
+          looking at /Users/Default/$Recycle.Bin … `files` windows on screen:
+          ['files — /Users/Default/m21ff-d64f34']
+    BAD   [binIcon] and the row's own argv at a real prompt says why: `files --bin` ->
+          'files: --: unknown ~$'
+
+**IT IS ONE LINE IN ONE FILE AND NEITHER THE GATE NOR THIS SECTION NEEDS EDITING WHEN IT LANDS.** The
+long-option loop at `src/bin/files.mjs:1041-1054` needs a `--bin` row that calls `ensureBin` and
+opens at `binRoot`; a plain path operand is **not** enough, because `ensureBin` is reached only from
+the delete path, so `files /Users/Default/$Recycle.Bin` before any delete answers ENOENT. The gate
+aims the desktop icon FIRST and falls back to typing the path only after scoring the failure, so
+re-running it is the verification. **The alternative reconciliation is this project's own rule rather
+than a preference**: `BIN_NAME` and `binDirIn` are now a fact TWO programs need, `src/bin/files.mjs`
+holds both, and that file's own comment already says the one definition "would have to be in
+`src/libos/std.mjs`" — the precedent being `std.sessionDir`/`HOME_DIR`, moved there for exactly this.
+Moved, the desktop row becomes `["files", env.std.binDirIn(env.std.HOME_DIR)]` with no flag at all.
+
+### The measurement came first, and this time it chose between four designs rather than two
+
+`bench/m21-bin/probe.mjs` ran **BEFORE** the Bin was designed: four candidate origin stores —
+a symlink, a regular-file sidecar, a shared index, and the origin percent-escaped into the entry's
+filename — × both tear orders, torn at **every** truncation offset and **every** single-bit flip,
+replayed through the real `VFS.applyOp` under fsck's own stop-at-first-rejection rule, plus restore's
+two orders and the record codec's own fuzz. **26,403 cases in 0.54 s**, re-runnable as
+`node bench/m21-bin/probe.mjs`.
+
+| design | records per delete | origin lives in | CRC-covered | inside `fsfuzz.py` | half-states |
+| --- | --- | --- | --- | --- | --- |
+| **symlink** | **2** | the SYMLINK record's `target` | **yes** | **yes** | `dangling` 1,260 |
+| file sidecar | 3 | an OPFS blob | no | no | `dangling` 1,260 **+ `empty-origin` 765** |
+| shared index | 2 | an OPFS blob | no | no | `dangling` 1,260 |
+| origin-in-the-name | 1 | the RENAME record's `toName` | yes | yes | **none** |
+
+**THE DECISIVE FIGURE IS COVERAGE AND NOT COUNT.** A journal record, the superblock and the image
+each carry a CRC-32 (`src/fs/journal.mjs:10`, `src/fs/superblock.mjs:56`, `src/fs/image.mjs:53`) and
+**a blob carries none** — `blobName` is `${ino}.${gen}` and `grep -c "crc\|checksum"
+src/kernel/store.mjs` is **0**. So an origin path held as file data is neither detectably corrupt nor
+reachable by the three-second fuzz gate this plan row named as the arbiter, and the gate would never
+have been asked. `vfs.symlink` stores its target **verbatim in one record** and applies no `NAME_MAX`
+to it, and the delete's time is the record's own `t` — so **a delete is two records and needs no
+sidecar FORMAT at all**.
+
+**THE ONE DESIGN WITH NO HALF-STATE IS THE ONE THAT IS REJECTED, AND `NAME_MAX` IS WHY.** 1,504 cases
+and nothing reachable but `complete` and `nothing` — and `NAME_MAX = 255` kills it anyway. An escaped
+byte costs three, so the longest path **guaranteed** to fit is 85 bytes; under `/Users/Default/` the
+encoded prefix is 21, leaving 234 for a filename. **A filename of 235..255 bytes is legal today and
+could not be deleted**: `/Users/Default/<255 n's>` is 270 path bytes, encodes to 276, `fits: false`.
+A verb that refuses on a name the filesystem accepts is a worse bill than a stranded record a sweep
+reclaims.
+
+**TWO FINDINGS LANDED THAT `docs/PLAN-SHELL.md` §M21 DID NOT ANTICIPATE**, and the row carries both
+as a correction beside it rather than being rewritten:
+
+1. **RESTORE'S ORDER IS FORCED WHERE DELETE'S IS A JUDGEMENT.** Both halves of a torn delete are
+   recoverable — `origin-first` gives `shownUnrestorable: 0 / strandedOrigin: 1260`, `payload-first`
+   gives `1125 / 0` — so the order is chosen on what a reader is *shown*, and origin-first's
+   half-state shows them nothing wrong. A restore is not a judgement: the bytes MUST go home first,
+   because the other order left **1,260 of 2,017** cases with bytes in the Bin that nothing names
+   and the one fact needed to repair that is the fact that was lost. **The only irreversible
+   half-state in the whole sweep, and it is in restore.** Constraint 310.
+2. **`vfs.rename` CLOBBERS AN OCCUPIED PLAIN PATH AND FREES THE OCCUPANT'S INODE, WITH NO TEAR
+   NEEDED AT ALL.** It refuses over a directory, a non-empty directory and a type mismatch
+   (`src/fs/vfs.mjs:658-667`) and over a plain file refuses nothing: `renameRefused: null`,
+   `freedInode: 8`, `clobbered: true`, in one record. So "a restore onto an occupied path refuses by
+   name" is a **userland pre-check** in `src/bin/files.mjs`, and the probe asserts the clobber is
+   **still present** — if the VFS ever grows a refusal, the run says to re-derive the pre-check
+   rather than leaving a dead branch. Constraint 311.
+
+`node bench/m21-bin/probe.mjs --control` carries three control families, all three firing:
+`index-driven` inverts the listing join and turns `invisible` from 0 to **1,125** — bytes a reader
+can neither see nor reclaim, which is condition 4 as a world; `no-crc` and `no-magic` mutate the
+record codec. **`no-magic` WAS RESCOPED RATHER THAN ACCEPTED**: it turned 0 of 6,153 cases of
+`wrongPath`, because the time field and the CRC already reject a zeroed sidecar, so the magic is not
+load-bearing for rejection and the run says so in `rescopedFrom`.
+
+### Four driven proofs, 72 expectations, and 26 gestures counted exactly
+
+`www/m21.html` is a live desktop at its bare URL and the harness at `?proofs=1` (constraint 283).
+`scripts/check.py --only m21` reports **72 expectations**, all green, in **15.28 s** headless at
+dpr 2.
+
+| | proof | clauses | what it asserts |
+| --- | --- | --- | --- |
+| 1 | `bin` | 20 | the fixture clauses FIRST — the tree is the one the proofs mutate and the listing does not scroll, so every rectangle aimed at is at offset 0; the Bin is the directory **the program names**, not one the page spelled; **M20's row menu outside the Bin is byte-identical**, so a prepended row cannot have shifted `check_m20`'s Delete index under it; every deleted row was **binned and none unlinked**; the bytes are in the Bin read by `wc` and `grep` **in separate processes**, with the same payload read for the WRONG text beside it so the comparison is capable of failing; the origin record is a **symlink** and the payload a **regular file**, which is constraint 309 as a reading; the Bin's listing is the **payloads and not the records** (condition 4, the join direction); and the restore is three readings — the program's own pair, the bytes back at the origin path, and **both** Bin paths gone |
+| 2 | `refuse` | 10 | **EEXIST by name** on a restore onto an occupied origin; the refusal **names the path it would have written**; and then the two facts a single "it refused" conflates — **the occupant's own bytes are intact** and **the refused payload is still recoverable, record and all**. Plus Windows 7's own rule for an inapplicable command: a payload with no record gets a **disabled** Restore, read off the SHELL's button with a live row's `disabled === false` beside it, so the clause cannot pass for a menu in which every row is dead. And the pair that makes either half mean anything: **one restore landed and one did not** — a run in which both refused would satisfy the errno clause over a Bin that does not work at all |
+| 3 | `drag` | 20 | both halves of the effect, in both directions, with **the ASK and the ANSWER as separate clauses** — `effectsOffered` is the program's and `effects` is the kernel's, so neither alone can tell a program that asked for a move from a kernel that granted one. Ctrl → COPY with the source still present; plain inside the session tree → MOVE with the source **in the Bin rather than unlinked** and its origin record kept. Plus M10's own reading, that every release landed on the **target's** canvas, and a second drop onto a name the target holds answering **EEXIST** with the target's copy surviving it |
+| 4 | `refresh` | 11 | the directory really changed under the window and **the window had not noticed**; two rows selected by real input; the keysym reached the program and it refreshed **once**; the listing came back fresh; and then three clauses over the selection rather than one — the survivor is still selected **by name**, the lost row is not, and **the row that arrived was not selected in its place**. Names and never indices: index order is what a mutation moves, so a page comparing indices across the re-list would be asserting the defect |
+
+The other **11** are the preamble and the envelope: isolation on the page and in the kernel, no
+kernel error, no process faulted, the ratio the run asked for, the page was really driven, the
+controls the page reports being the ones asked for, the page's own verdict, and COOP/COEP plus the
+document actually served.
+
+**`drive_gestures(env, "M21")` PERFORMS 26 GESTURES AND ASSERTS THE COUNT EXACTLY** — a constant and
+not a floor, because no M21 world stops the drive early. It asks for **no `kind: "drag"`**:
+`mouse_drag` does not pass `modifiers`, so a Ctrl-drag has to be spelled press/move/move/release with
+the modifier on each record. An exact count, because a drive that silently skipped half the gestures
+and left half the clauses unset is the shape of a harness reporting on a page it never touched.
+
+### Four controls, each moving its own named subset, and all four are argv flags
+
+All four are **query-parameter worlds on `www/m21.html?proofs=1`** that the page forwards to **every**
+`files` spawn on argv (`programFlags()`), so none is a served-bytes fixture and each is re-runnable
+from the command line with no source edit. `held_rest` derives every held set from `M21_LABELS`, so a
+label added later is held by default and the first control run that moves it says so.
+
+| `--negative` | what it breaks | moved / held |
+| --- | --- | --- |
+| `restore-overwrites` | drops the occupied-origin pre-check, so the reader's file is destroyed | **8 / 64** |
+| `move-forced-copy` | always offers `DOBJ_EFFECT_COPY`, ignoring the modifier and the tree | **7 / 65** |
+| `stale-listing` | F5 serves the rows already in hand — `refreshes` still rises | **4 / 68** |
+| `paste-clobbers` | M20's control, now reaching a DROP as well as a paste | **4 / 68** (and still 4 / 57 on m20) |
+
+**`stale-listing` IS THE SHARPEST OF THE FOUR AND THAT IS DELIBERATE.** `refreshes` still rises in
+that world, so the clause that the key reached the program holds; only the three content-and-selection
+clauses turn. A control that also killed the key would have proven nothing about the re-list.
+
+### 121 clauses under node, against the REAL filesystem rather than a fake
+
+    node --experimental-loader ./bench/m20-verbs/loader.mjs bench/m21-files/probe.mjs
+    → 87/87 expectations
+    node bench/m21-abi/probe.mjs
+    → 34/34 expectations
+    python3 bench/m21-abi/mutate.py
+    → 2/2 mutant(s) fired the clause they target
+
+**`bench/m21-files/probe.mjs` DRIVES `files` AGAINST `src/fs/vfs.mjs` ITSELF**, with a Map of blob
+bytes where `src/kernel/store.mjs` would be — not tidiness, but constraint 98's rule applied to the
+three things this milestone turns on, each of which a fake would have to be *trusted* about and the
+real thing can be *asked*: that `rename` clobbers a plain destination, that `symlink` stores its
+target verbatim in one op with no `NAME_MAX`, and that `rmdir` answers ENOTEMPTY in its own words. A
+fake that refused on its own would let the restore pre-check be **deleted with every clause still
+green**.
+
+**`bench/m21-abi/probe.mjs` ASSERTS EACH REFUSAL SEPARATELY** — ENOENT, EROFS **at both layers**
+(the kernel's `metaOp` and `SynthFS`'s own, which is constraint 28's two layers), EACCES, and EINVAL
+on a negative time scored once for `atime` and once for `mtime`. **Zero is asserted LEGAL.** It also
+asserts the things a prose contract cannot carry: that a ns timestamp really is outside `Number`'s
+safe range, that sub-millisecond precision truncates toward zero, that `ctime` moves to the op's own
+clock and not to the time that was set, that the journal record is the VFS's **own** `utimes` op and
+replays through `encodeOp`/`decodeOp` to the same times, and that on a tmpfs the call works and
+**journals nothing**.
+
+### The second engine, and the one thing it found that nine green clauses could not
+
+`bench/m21-bin/firefox-bin.py` drives Firefox 156 over `scripts/bidi.py` with real trusted input on
+`www/index.html`, the **bare URL** (constraint 283). It reads only `INDEX`,
+`Surface.prototype.replay`, `FILES_METRICS` and `std.HOME_DIR` — **no `M21.*` global** — so it is
+independent of `www/m21.html` and runs on the product. Nine named clauses: `desktop`, `deleted`,
+`binIcon`, `shown`, `restored`, `bytes`, `keptInBin`, `persists`, `persists-bin`.
+
+**THE QUESTION IT ASKS IS NOT M20'S.** M20 asked whether a reader can change the disk by pointing.
+M21 asks whether a change they did not mean can be **undone**, which is four readings and not one:
+the row leaves the list, the Bin shows it, a Restore puts it back **with its bytes**, and after a
+RELOAD it is still there. Reading three is the one a reader actually trusts, and a name coming back
+is cheap — the restore is a `rename`, so a path that exists again says nothing about whether the bytes
+followed. Each fixture file is written with a **distinct nonce** at a real prompt and the restored
+path is `cat`-ed back with the **other** file's nonce asserted absent, which is what makes the byte
+comparison capable of failing rather than a `length > 0` test wearing its clothes.
+
+**THE DELETE IS A MULTIPLE SELECTION MADE BY A HELD MODIFIER, AND THAT NEEDED A NEW CAPABILITY IN THE
+DRIVER.** `scripts/bidi.py`'s `press(..., ctrl=True)` opens and closes the modifier inside one KEY
+sequence, so no pointer action could happen under it, and Ctrl+press — the gesture that EXTENDS a
+selection instead of replacing it — had **no spelling on this wire at all**. `Firefox.held(*names)`
+is that capability: a context manager that puts the keys down before the block and up in a `finally`,
+measured by `python3 scripts/bidi.py`'s own self-test to deliver `ctrlKey === true` with
+`isTrusted === true`. Additive — nothing existing changed. **Two rows go to the Bin and ONE comes
+back**, which is the shape a Bin is for: a restore that emptied it would pass a one-file gate and be
+wrong.
+
+**THE BIN'S PATH IS NEVER SPELLED IN THE GATE.** `FILES_METRICS.binDirIn(std.HOME_DIR)` is asked for
+it in the page — the program's own arithmetic — because `$Recycle.Bin` written in a driver is the
+second copy `CLAUDE.md`'s `FILES_METRICS` row exists to prevent, and the copy that breaks is always
+the driver's. Exactly two program strings are restated, both as assertions: `RESTORE = "Restore"`
+(the Bin's first menu row, the word a reader looks for) and
+`BINNED_TWO = "deleted 2 of 2: 2 to the Bin"`.
+
+**THE DESKTOP ICON IS LOCATED BY ITS LABEL AND NOT BY ITS INDEX**, because `src/bin/desktop.mjs`
+inserted the Bin row between the session folder and Terminal: every positional index past 2 moved,
+and a driver indexing rows is exactly what that shift breaks. `contextRows()` is unchanged — Windows 7
+has no Bin row in the desktop's right-click menu — so `check_m20`'s menu indices are untouched.
+
+Three controls, each moving a named subset and each in neither-set clauses printed as **unscoped**
+rather than letting silence read as a claim: `esc-not-restore`, `no-ctrl`, `wipe`. `binIcon` is
+deliberately in none of them, and the gate's header says why.
+
+### What is owed, in files no M21 slice owned
+
+1. **`src/bin/files.mjs` NEEDS ONE `--bin` LINE, OR `BIN_NAME`/`binDirIn` NEED TO MOVE TO
+   `src/libos/std.mjs`.** Either closes `binIcon`. Until one lands, the product's Recycle Bin icon
+   opens nothing — §Why this row is PARTIAL above carries the measurement and the two options.
+2. **`src/kernel/tmpfs.mjs` OWES A TWO-LINE `realpath` FORWARD**, beside its existing `readlink`
+   forward. `/tmp` is the only mount that can hold a symlink and has no canonicalizer, so it is the
+   only mount answering `realpath` with **-ENOSYS**, and the refusal is deliberately not a lexical
+   guess — a lexical answer there is the wrong path returned with no error.
+3. **`scripts/cdp.py`'s `KEYS` TABLE HAS NO `F5` ROW**, which is the same gap M20 records for `F2`
+   and `Delete`. `www/m21.html` synthesises the key and **the page measures that rather than
+   claiming it** — `theF5WasSynthesisedAndSaysSo` is a clause — so what is unproven in Chrome is the
+   BINDING and not the verb, and the SELECTION the refresh survives was made with two real clicks.
+   `"F5": (116, "")` in that table is the one line that would close it. Firefox has no such gap.
+4. **`README.md:59` SAYS 298 CONSTRAINTS** and is owed **311**. It was owed 301 by M18, 305 by M19,
+   306 by M19a and 308 by M20, and is still not in any slice's file list. The shortest fix in this
+   repository and the longest-standing.
+
+### What is NOT done
+
+**THE RECONCILIATION IS NOW CORRECT AND STILL NOT CHECKED BY THE SUITE.** `docs/ABI.md` §The ABI
+states **75 specified / 63 realised**, names the 16 documented-but-absent and 4
+realised-but-unspecified calls as DATA, and carries a command that validates both sets and the
+identity `specified = realised + documented-but-absent − realised-but-unspecified` → `63 + 16 - 4 =
+75 both sets hold`. **Nothing in `scripts/check.py` runs it.** The 75 is a hand enumeration over six
+addresses, because this document names its calls in prose rather than in one table, so the identity
+is the only part a machine can own — and it is owned by a copy-paste command rather than a registered
+check. **The `--bin` gap is what that is: a cross-file claim no gate held.**
+
+**`realpath` IS REACHABLE AND NO PROGRAM CALLS IT.** `env.fs.realpath` is on the frozen `FS` table
+and `bench/m21-abi/probe.mjs` asserts the call, but no program in `/usr/bin` uses it, so nothing
+exercises it on the path a reader takes. The breadcrumb M23 owes is its first real caller.
+
+**THE BIN IS NEVER EMPTIED, AND `docs/PRD-SHELL.md` R15 ASKS FOR IT.** Empty is not built: the Bin
+accumulates by design, the proofs clear it as a fixture step, and `src/bin/files.mjs`'s `freeFrom`
+numbers a second payload `bin-me (2).txt` rather than refusing. A run over a dirty Bin is therefore a
+run with different names in it, which is why `www/m21.html` clears the directory before it starts.
+**Date Deleted is on the record and not on a column**: the symlink's own `t` carries it, A11's
+`utimes` makes it settable, and no view shows it.
+
+**NOTHING ASSERTS THE SWEEP THAT RECLAIMS A STRANDED ORIGIN RECORD.** Constraint 310 says
+origin-first's half-state is "swept by the same readdir join that lists the Bin", and
+`nothingWasStranded` asserts the count is zero on a run that never tore — which is an equality over
+nothing. The world it is about is a reload after a crash mid-delete, and this suite has no way to
+produce one in the browser: the probe produces it under node and the page cannot.
 
 ### D0 — RV32I interpreter + one real binary · 4 d
 

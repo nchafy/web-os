@@ -31,6 +31,7 @@ import { errnoOfFsError } from "./store.mjs";
 import {
   DIR, FILE, LINK, NAME_MAX, isAbsolute, joinPath, normalize,
 } from "../fs/vfs.mjs";
+import { FS_PROC, FS_DEV, FS_PROVIDER } from "../fs/mounts.mjs";
 import { ZOMBIE, RUNNING, dropCaps } from "./table.mjs";
 
 /** A handler that will reply later, by calling k.reply() itself. */
@@ -681,6 +682,43 @@ HANDLERS.chown = (p, k) => {
     cred, rel, p.ctl[A0] | 0, p.ctl[A1] | 0));
 };
 
+/** Nanoseconds in a (lo, hi) register pair to the MILLISECONDS an inode stores, or null for a time
+ *  no `stat` could publish.
+ *
+ *  BIGINT THROUGHOUT, unlike `truncate`'s `Number(unpackI64(...))`: a current timestamp is about
+ *  1.76e18 ns, `Number.isSafeInteger` is false of it, and that guard would refuse every real time.
+ *  The division truncates, because `VFS.now()` is milliseconds and sub-millisecond precision has
+ *  nowhere to be stored — so `stat` answers the truncated value, not the one that was set. */
+function msOfNs(lo, hi) {
+  const ns = unpackI64(lo, hi);
+  // A pre-epoch time has no representation: `encodeFilestat` writes the time fields with
+  // `setBigUint64`, so a negative would read back as ~1.8e19 ns rather than as the time asked for.
+  if (ns < 0n) return null;
+  const ms = Number(ns / 1000000n);
+  return Number.isSafeInteger(ms) ? ms : null;
+}
+
+/**
+ * utimes(path, atime_ns, mtime_ns) -> 0. The VFS has journalled and replayed `OP.UTIMES` since M2a;
+ * this is the route to it.
+ *
+ * EACH REFUSAL, SEPARATELY: ENOENT a path with a missing component · EROFS a read-only mount, which
+ * `metaOp` decides before the filesystem is asked, and `SynthFS` refuses a second time on its own
+ * (constraint 28's two layers) · EACCES no write permission on the inode, which is what
+ * `VFS.utimes` requires · EINVAL a time the inode cannot hold.
+ *
+ * There is no `UTIME_NOW` to interpret — see `SYS_utimes` in src/abi.mjs for why "now" is the
+ * caller's value, and `utimesNow` in src/libos/syscall.mjs for the one place it is computed.
+ */
+HANDLERS.utimes = (p, k) => {
+  const path = readPath(p);
+  if (typeof path === "number") return path;
+  const atime = msOfNs(p.ctl[A0], p.ctl[A1]);
+  const mtime = msOfNs(p.ctl[A2], p.ctl[A3]);
+  if (atime === null || mtime === null) return -EINVAL;
+  return metaOp(p, k, path, (fs, rel, cred) => fs.utimes(cred, rel, atime, mtime));
+};
+
 HANDLERS.truncate = (p, k) => {
   const path = readPath(p);
   if (typeof path === "number") return path;
@@ -757,6 +795,50 @@ HANDLERS.readlink = (p, k) => {
   return metaRead(p, k, path, (fs, rel, cred) => {
     const target = fs.readlink(cred, rel);
     return replyBytes(p, new TextEncoder().encode(target));
+  });
+};
+
+/** The mount types whose answer to `realpath` is a STRING TRANSFORM, because they cannot hold a
+ *  symlink at all: `SynthFS.stat` throws EIO on a LINK rather than following one, and `procfs`
+ *  publishes a plain file where Linux has a symlink. DATA, so a new generated filesystem is a row.
+ *
+ *  A MOUNT THAT IS NOT HERE AND HAS NO `realpath` OF ITS OWN IS REFUSED, not answered lexically:
+ *  `TmpFS` forwards `symlink` to a real VFS, so a lexical answer for a path under `/tmp` would be
+ *  the wrong path returned with no error — the one outcome worse than -ENOSYS. ENOSYS and not
+ *  ENOTSUP, because that is already this file's answer for an operation a kind does not carry
+ *  (`ftruncate`, `perform`). */
+const LEXICAL_REALPATH = Object.freeze([FS_PROC, FS_DEV, FS_PROVIDER]);
+
+/**
+ * realpath(path) -> the canonical path in the byte region, length in r0. A byte region and not a
+ * register, for the reason `readlink` uses one.
+ *
+ * EACH REFUSAL, SEPARATELY: ENOENT a missing component · EACCES no execute on a directory in the
+ * walk · ELOOP more than `MAX_LINKS` hops · ENOSYS a mount that can hold a symlink and has no
+ * canonicalizer · EOVERFLOW a canonical path past MAX_INLINE.
+ *
+ * CROSS-MOUNT TRAVERSAL IS NOT RESOLVED, which `resolveMount` already states: a symlink on the OPFS
+ * volume whose target lands in another mount reaches ENOENT inside the VFS, because the walk happens
+ * in the filesystem that owns the link.
+ */
+HANDLERS.realpath = (p, k) => {
+  const path = readPath(p);
+  if (typeof path === "number") return path;
+  return metaRead(p, k, path, (fs, rel, cred, mount) => {
+    // `rel` is already absolute — `resolveMount` made the caller's path absolute against its cwd —
+    // so the canonicalizer's own `cwd` default is never consulted.
+    if (typeof fs.realpath === "function") {
+      return replyBytes(p, new TextEncoder().encode(fs.realpath(cred, rel)));
+    }
+    if (!LEXICAL_REALPATH.includes(mount.type)) return -ENOSYS;
+    /* THE `stat` CHECKS THE ASSUMPTION RATHER THAN TRUSTING IT. It follows the final component, so
+     * a generated filesystem that ever grew a symlink answers EIO here instead of letting the
+     * lexical path be quietly wrong — and it makes a missing component an ENOENT, which POSIX
+     * requires of `realpath` and a string transform alone could not give. */
+    fs.stat(cred, rel);
+    // `rel` starts at the mount's own root, so the mountpoint goes back on; `normalize` collapses
+    // the seam. `joinPath` cannot be used: `rel` is absolute, and joining would discard the prefix.
+    return replyBytes(p, new TextEncoder().encode(normalize(`${mount.path}/${rel}`)));
   });
 };
 

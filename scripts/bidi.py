@@ -33,6 +33,7 @@ THE PROTOCOL, in the three facts that are not obvious:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import pathlib
 import re
@@ -294,6 +295,39 @@ class Firefox:
         self.keys([a for ch in text for a in
                    ({"type": "keyDown", "value": ch}, {"type": "keyUp", "value": ch})])
 
+    @contextlib.contextmanager
+    def held(self, *names: str):
+        """Hold modifier keys DOWN across whatever the block does, POINTER ACTIONS INCLUDED.
+
+        WHY THIS IS NOT `press(..., ctrl=True)`. That helper opens and closes the modifier inside
+        ONE key sequence, so nothing but a key can happen under it. Every modifier-plus-pointer
+        gesture this shell has is therefore unreachable from here: Ctrl+press extends a selection
+        (`src/bin/files.mjs`'s `WMOD_CTRL` branch) and a Ctrl-drag is what reports
+        `DOBJ_EFFECT_COPY` rather than a move. A driver that could not hold a modifier over a press
+        could only drive the unmodified half of M21's row — and the unmodified half is the one whose
+        unit errors this project has already paid for twice in Chrome.
+
+        IT RESTS ON WEBDRIVER'S INPUT STATE OUTLIVING ONE `performActions`, WHICH IS MEASURED AND
+        NOT READ OFF THE SPEC: `python3 scripts/bidi.py` holds Control, clicks, and asserts the
+        `mousedown` arrived with `ctrlKey === true` and `isTrusted === true`, then releases and
+        asserts the next one did not. A modifier that silently did not stick turns a Ctrl-click into
+        a plain click — a DIFFERENT gesture that replaces the selection instead of extending it, and
+        a gate built on one would report the program at fault for a row that went away.
+
+        THE RELEASE IS IN A `finally` BECAUSE A STUCK MODIFIER POISONS THE REST OF THE SESSION, not
+        just the block: every later keystroke would arrive as Ctrl+key, and `input.releaseActions`
+        is the only other thing that would undo it.
+        """
+        unknown = [n for n in names if n not in KEYS]
+        if unknown:
+            raise BidiError("no BiDi key value recorded for %s; KEYS has %s"
+                            % (", ".join(map(repr, unknown)), ", ".join(sorted(KEYS))))
+        self.keys([{"type": "keyDown", "value": KEYS[n]} for n in names])
+        try:
+            yield self
+        finally:
+            self.keys([{"type": "keyUp", "value": KEYS[n]} for n in reversed(names)])
+
     def press(self, name: str, *, alt: bool = False, ctrl: bool = False, shift: bool = False,
               meta: bool = False, times: int = 1) -> None:
         """Press a NAMED key, optionally under modifiers held down across it.
@@ -363,6 +397,23 @@ def main(argv: list[str] | None = None) -> int:  # pragma: no cover - smoke test
         if not all(row[2] for row in seen):
             bad.append("`alt=True` did not reach the page as `altKey`, so Alt+Left is a bare "
                        "Left and the verb is lost: %r" % (seen,))
+        # `held` HOLDS A MODIFIER OVER A POINTER PRESS, which is the claim its docstring rests on.
+        # Three readings in one, because each alone passes in a world the others catch: the press
+        # under the block carries `ctrlKey`, it is still trusted, and the press AFTER the block does
+        # NOT — a modifier that never released is as wrong as one that never arrived, and both look
+        # like a working click.
+        ff.evaluate("(() => { window.__mods = []; document.body.addEventListener('mousedown',"
+                    " (e) => window.__mods.push([e.ctrlKey, e.isTrusted])); return 1 })()")
+        with ff.held("Control"):
+            ff.click(30, 30)
+        ff.click(30, 30)
+        mods = ff.evaluate("JSON.stringify(window.__mods)")
+        print("held     mousedown [ctrlKey, isTrusted] %s" % (mods,))
+        if mods != [[True, True], [False, True]]:
+            bad.append("`held('Control')` did not hold a modifier over a trusted pointer press "
+                       "and release it afterwards: wanted [[true,true],[false,true]], got %r"
+                       % (mods,))
+
         print("firefox %s" % ff.evaluate("navigator.userAgent"))
     if bad:
         for line in bad:

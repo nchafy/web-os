@@ -125,8 +125,9 @@
 // M20: IT MUTATES THE FILESYSTEM, AND IT RAISES A MENU IT DOES NOT DRAW. Six verbs and two menus.
 //
 //   THE SIX VERBS ARE REAL SYSCALLS AND NOTHING ELSE. New folder is `mkdir`, rename is `rename`,
-//   Delete is `unlink` for a file and `rmdir` for a directory, Copy and Cut publish a `DOBJ_PATHS`
-//   object to the ONE clipboard, and Paste reads it back and either copies the bytes or `rename`s
+//   Delete is `unlink` for a file and `rmdir` for a directory — M21 made that the case where there
+//   is no Bin to reach, and the reasoning below is unchanged for it — Copy and Cut publish a
+//   `DOBJ_PATHS` object to the ONE clipboard, and Paste reads it back and either copies the bytes or `rename`s
 //   the inode. Each one is followed by a fresh `readdir` (`reread`), so what the window shows is
 //   what the filesystem now holds rather than what this program believes it did — a listing patched
 //   in place would make a refused `mkdir` indistinguishable from one that worked.
@@ -173,6 +174,71 @@
 //   and `keysymOf` answers 0 for every one of them. A program that waited for a keysym here would
 //   wait for ever. F2 and Delete ARE keysyms, because no byte spells them.
 //
+// M21: A DELETE IS RECOVERABLE, F5 RE-LISTS, AND A DROP LANDS HERE. Four pieces.
+//
+//   THE BIN IS A RESERVED DIRECTORY AND A DELETE LEAVES TWO RECORDS IN IT: the payload, moved by
+//   one `rename`, and an ORIGIN RECORD beside it — a SYMLINK whose target is the absolute path the
+//   payload came from. `bench/m21-bin/probe.mjs` is why it is a symlink and not a file of bytes,
+//   measured over 26,403 torn cases: `vfs.symlink` stores the target verbatim in ONE journal
+//   record, and a journal record carries a CRC-32 (`src/fs/journal.mjs`) while an OPFS blob carries
+//   none (`src/kernel/store.mjs` has no checksum field at all). So an origin path held as a symlink
+//   target has the same integrity field as the rest of the volume and is inside `scripts/fsfuzz.py`'s
+//   three-second gate; the same path held as file data is neither, and a bit-rotted origin would be
+//   undetectable. There is NO NEW FILESYSTEM CONCEPT and no inode flag.
+//
+//   THE PAYLOAD KEEPS ITS OWN NAME, numbered when the Bin already holds one — `freeFrom`, the same
+//   function New folder uses, with the origin record's name RESERVED beside it. A Bin whose rows
+//   were ids would need a name translation in the listing, and a translation is the one place a
+//   file manager can show a reader the wrong file.
+//
+//   THE LISTING IS A `readdir` OF THE BIN WITH THE ORIGIN STORE AS A LOOKUP, NEVER THE REVERSE.
+//   The payload entries ARE the rows and `readlink` answers where each came from; inverting the
+//   join turns 1,125 of the probe's cases from visible to INVISIBLE — bytes a reader can neither
+//   see nor reclaim. An origin record with no payload is therefore not a row: it names nothing a
+//   reader can act on, carries no bytes, and is counted rather than drawn.
+//
+//   THE TWO ORDERS, AND ONLY ONE OF THEM IS A JUDGEMENT. A DELETE writes the origin record first
+//   and moves the bytes second (`origin-first`: 0 unrestorable rows against 1,260 stranded
+//   records; `payload-first` is 1,125 against 0 — both recoverable, and this half-state shows the
+//   reader nothing wrong). A RESTORE IS FORCED THE OTHER WAY: the bytes go home first and the
+//   record is dropped second, because the other order left 1,260 of 2,017 torn cases with bytes in
+//   the Bin that nothing names — and the one fact needed to repair that is the fact that was lost.
+//   It is the only irreversible half-state the whole measurement found, and it is in restore.
+//
+//   A RESTORE ONTO AN OCCUPIED PATH IS REFUSED HERE, BY NAME, BECAUSE THE FILESYSTEM WILL NOT DO
+//   IT. `vfs.rename` has no `RENAME_NOREPLACE`: over a plain file it refuses nothing — `applyOp`'s
+//   RENAME arm deletes the standing entry, decrements nlink and FREES the inode, measured in one
+//   journal record (`renameRefused: null`, `freedInode: 8`, `clobbered: true`). A restore that
+//   trusted the call would destroy a file the reader made in the meantime, silently. The `lstat`
+//   races, which is `commitRename`'s trade written down again rather than hidden.
+//
+//   A DELETE OUTSIDE THE SESSION TREE IS PERMANENT AND SAYS SO. The Bin is `std.HOME_DIR`'s, so a
+//   row on a read-only mount or in `/tmp` has nowhere recoverable to go: a cross-volume Bin would
+//   be a `rename` the filesystem refuses, and a second Bin per mount is a second place to look for
+//   a file. So `/usr/share` still answers EROFS by name and `/tmp` still deletes finally, which is
+//   also what Windows does with a volume that has no Recycle Bin. A delete INSIDE the Bin is
+//   permanent for the same reason: that is where "where did it go" has already been answered.
+//
+//   F5 RE-LISTS AND THE SELECTION SURVIVES FOR THE ROWS THAT SURVIVE. It is `reread`, which M20
+//   already restores a selection BY NAME with — so a selected row that is gone is simply not
+//   re-selected, rather than resurrected or crashed into. An index would be the defect: a mutation
+//   is exactly what moves index order.
+//
+//   A DROP LANDS WHERE THE POINTER IS, AND IT IS ALWAYS A COPY-IN. `WEV_DROP` carries the position
+//   and the OFFER and nothing else — there is no effect field and no negotiation (constraint 240) —
+//   so a target that renamed would be deciding an effect the SOURCE negotiated. The source
+//   completes a move when the kernel tells it the effect was one, which is the division the ABI
+//   already has. A drop on a DIRECTORY ROW lands in that directory; anywhere else in the viewport
+//   lands in the open one.
+//
+//   THE MODIFIER DECIDES THE EFFECT A DRAG OFFERS, AND SO DOES WHERE THE ROW IS. Ctrl forces a
+//   COPY. Without it a row INSIDE THE SESSION TREE offers a MOVE and a row outside it still offers
+//   a COPY — because a MOVE source cannot verify the collection (a queued drop reports its effect
+//   whether or not the target took the bytes, constraint 245), so the original goes TO THE BIN and
+//   not to `unlink`, and the Bin is the session tree's. No Bin, no safe move. That is also why
+//   `files /usr/share` — M10's own source window — still reports COPY for a plain drag: a move off
+//   a read-only mount is not a thing this program could complete.
+//
 // WHAT THIS PROGRAM DOES NOT DO WITH `/dev/advance`: it does not read it. A column's width here is
 // a CSS-px constant, and the table is indexed in SURFACE px — so a column fitted to its widest cell
 // would be a width that moved with the display's ratio, which is the ratio-shaped defect that cost
@@ -189,7 +255,7 @@
 // is the clause the proof asserts. The precedent for a shipped flag whose only job is to put the
 // system into a state a check needs is `cfg.blurBudgetPx` and `scripts/serve.py --no-isolation`.
 //
-// NINE FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
+// TWELVE FLAGS EXIST ONLY TO BREAK THAT, as negative controls a check can re-run rather than source
 // mutations nobody re-runs (the precedent is `scripts/serve.py --no-isolation`):
 //
 //   --no-resurface      ignore `WEV_CLIENT` entirely. The pre-M16 program exactly: a backing store
@@ -225,25 +291,43 @@
 //   --paste-clobbers    let a Paste REPLACE a name that is already here: the move's destination
 //                       pre-check goes and the copy drops `O_EXCL`. The clause asserting the EEXIST
 //                       refusal MUST fail, and this is the one world in which a reader's own file is
-//                       destroyed by a paste that reports success.
+//                       destroyed by a paste that reports success. It reaches a DROP too, because
+//                       `landOne` is one landing reached by two gestures and the decision — may a
+//                       landing replace a file — is one decision.
+//   --bin               open the Bin instead of the session tree. NOT a control and NOT a fixture:
+//                       it is how the desktop's Recycle Bin row launches this program, because the
+//                       row names the LOCATION and where that location is belongs to this file.
+//   --restore-overwrites  let a Restore clobber an occupied origin path: the userland pre-check
+//                       goes and `vfs.rename` frees the occupant's inode, measured. The clause
+//                       asserting the refusal MUST fail, and the reader's own file is destroyed by
+//                       a restore that reports success.
+//   --move-forced-copy  offer `DOBJ_EFFECT_COPY` whatever the modifier and wherever the row is. The
+//                       effect clause MUST fail alone: the gesture still runs, the drop still
+//                       lands, and the source is still there afterwards when it should not be.
+//   --stale-listing     serve the rows already in hand on F5 instead of re-reading the directory.
+//                       The F5 content clause MUST fail alone — the keysym still arrives and is
+//                       still counted, so what moves is what the window SHOWS.
 //
 // None belongs on a prompt. A reader who passes one gets the bug the milestone removed.
 
 import {
-  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EEXIST, EHOSTGONE, DT_DIR,
+  POLLIN, POLLHUP, POLLERR, POLLNVAL, EINTR, EINVAL, EEXIST, ENOTDIR, EHOSTGONE,
+  DT_DIR, DT_LNK,
   NAME_MAX,
   WEV_KEY, WEV_POINTER, WEV_CLOSE, WEV_DESTROYED, WEV_RESIZE, WEV_FOCUS, WEV_DRAG_DONE,
+  WEV_DRAG_ENTER, WEV_DRAG_LEAVE, WEV_DROP,
   WEV_CLIENT, WEV_ITEM, WPTR_DOWN, WPTR_UP, WPTR_CLICK2, WPTR_LEAVE,
   clientBoxAt, keyBytesOf, keysymOf, itemAt,
   WKEY_LEFT, WKEY_UP, WKEY_DOWN, WKEY_HOME, WKEY_END, WKEY_PAGE_UP, WKEY_PAGE_DOWN,
-  WKEY_F2, WKEY_DELETE,
+  WKEY_F2, WKEY_F5, WKEY_DELETE,
   WMOD_ALT, WMOD_CTRL, WMOD_SHIFT,
   WITEM_CONTEXT, WITEM_SEPARATOR, WITEM_DISABLED, WITEM_CONTAINER,
   WICON_GENERIC, WICON_FOLDER, WICON_TRASH,
   WEV_WHEEL, WWHEEL_PAGE, WWHEEL_COALESCED, wheelAt,
   DL_CLEAR, DL_FILL_RECT, DL_STROKE_RECT, DL_CLIP, DL_MAX_OPS,
   DLT_BOLD, DLT_MONO, DLT_RIGHT, DLT_ELLIPSIS, encodeTextRun,
-  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP, DOBJ_EFFECT_COPY, DOBJ_WHERE_CLIPBOARD,
+  DOBJ_PATHS, DOBJ_TEXT, DOBJ_PNG, DOBJ_BITMAP,
+  DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE, DOBJ_WHERE_CLIPBOARD, DOBJ_WHERE_DROP,
   O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, S_IFMT, S_IFDIR, fmtName, fmtsOf,
 } from "/src/abi.mjs";
 
@@ -669,6 +753,9 @@ const V_DELETE = "delete";
 const V_CUT = "cut";
 const V_COPY = "copy";
 const V_PASTE = "paste";
+/** M21. Put a row in the Bin back where its origin record says it came from. A verb of the BIN and
+ *  nowhere else, so it is in no menu a reader meets outside it. */
+const V_RESTORE = "restore";
 
 /** A separator row. The label is ignored (`WITEM_SEPARATOR`) and `verb` is empty, so a report
  *  against one is refused by `runVerb` as well as by the kernel — two refusals over one fact, and
@@ -677,9 +764,67 @@ const MENU_RULE = Object.freeze({
   verb: "", icon: WICON_GENERIC, label: "", flags: WITEM_SEPARATOR,
 });
 
-/** What a newly created folder is called, and the stem `freeName` numbers from. Explorer's own
+/** What a newly created folder is called, and the stem `freeFrom` numbers from. Explorer's own
  *  wording, because a reader who has made one before knows what to look for. */
 const NEW_FOLDER_STEM = "New folder";
+
+/* ---- M21: THE BIN, AND THE TWO RECORDS A DELETE LEAVES ------------------------------------ */
+
+/** THE RESERVED DIRECTORY A DELETE MOVES BYTES INTO, in the session tree. Windows 7's own name for
+ *  it at a volume root, because a reader who has seen `$Recycle.Bin` knows what it is. IT IS NOT
+ *  HIDDEN from a listing: a file manager that hides a directory is the defect M14 removed from the
+ *  other end, and this is the directory "where did it go" is answered in. */
+const BIN_NAME = "$Recycle.Bin";
+
+/** THE ORIGIN RECORD'S NAME: the payload's own name plus this suffix. A SYMLINK, for the measured
+ *  reason in this file's header — one CRC-covered journal record rather than an unchecksummed blob,
+ *  and two records per delete rather than three. */
+const ORIGIN_SUFFIX = ".origin";
+
+/** A path with its trailing slashes gone, so `/a/b/` and `/a/b` are one directory and a comparison
+ *  between two spellings of one place cannot answer no. The ROOT keeps its slash: `""` is not a
+ *  path. Lexical and not `realpath`, which `env.fs` does not carry yet. */
+const dirKey = (path) => {
+  const trimmed = String(path).replace(/\/+$/, "");
+  return trimmed === "" ? "/" : trimmed;
+};
+
+/** Whether `path` is `root` or something under it. THE SEPARATOR IS PART OF THE TEST: a plain
+ *  `startsWith` makes `/Users/Defaults` a child of `/Users/Default`, which would send one reader's
+ *  deletes into another's Bin. */
+const underDir = (path, root) => {
+  const p = dirKey(path);
+  const r = dirKey(root);
+  return p === r || p.startsWith(r === "/" ? "/" : `${r}/`);
+};
+
+/** WHERE THE BIN IS for a session tree rooted at `home` — one definition, exported, because a
+ *  driver outside the process asserts the two records a delete left and must not restate the name
+ *  of the directory they are in. */
+const binDirIn = (home) => `${dirKey(home)}/${BIN_NAME}`;
+
+/** THE ORIGIN RECORD BESIDE A PAYLOAD. `binDirIn`'s declared partner: the pair is what a check
+ *  reads to say a delete left both records, and what a restore reads to say where one goes. */
+const originRecordOf = (payloadPath) => `${payloadPath}${ORIGIN_SUFFIX}`;
+
+/**
+ * A NAME NOTHING IN `taken` HOLDS: `stem`, then `stem (2)` — Explorer's own numbering, and `null`
+ * past a thousand.
+ *
+ * ONE DEFINITION, because New folder and the Bin's payload naming are the same question asked of
+ * two directories. `reserve` is what makes the Bin's answer leave room for the ORIGIN RECORD beside
+ * the payload: a payload called `x` needs `x.origin` free as well, or the next delete of a file
+ * actually named `x.origin` would overwrite a record.
+ */
+const freeFrom = (taken, stem, reserve = null) => {
+  const free = (c) => !taken.has(c) && (reserve === null || !taken.has(reserve(c)));
+  if (free(stem)) return stem;
+  for (let n = 2; n <= 1000; n += 1) {
+    const candidate = `${stem} (${n})`;
+    if (free(candidate)) return candidate;
+  }
+  return null;
+};
 
 /** `NAME_MAX` IS A BYTE COUNT (`src/abi.mjs`), so a length test has to encode. One encoder, built
  *  once: `nameFault` runs on every commit and `new TextEncoder()` per keystroke is an allocation
@@ -782,10 +927,14 @@ export const FILES_METRICS = Object.freeze({
    * PAGE's popup and its metrics belong to the shell. */
   VERBS: Object.freeze({
     OPEN: V_OPEN, NEW_FOLDER: V_NEW_FOLDER, RENAME: V_RENAME, DELETE: V_DELETE,
-    CUT: V_CUT, COPY: V_COPY, PASTE: V_PASTE,
+    CUT: V_CUT, COPY: V_COPY, PASTE: V_PASTE, RESTORE: V_RESTORE,
   }),
   NEW_FOLDER_STEM, nameFault, baseNameOf,
   MENU_ROW_H, MENU_W, MENU_PAD,
+  /* M21. THE BIN'S TWO NAMES AND THE TWO FUNCTIONS THAT BUILD THEM, for `rowTop`'s reason: a check
+   * asserting that a delete left a payload AND an origin record has to name both paths, and a
+   * driver that restated either would assert against a Bin this program does not have. */
+  BIN_NAME, ORIGIN_SUFFIX, binDirIn, originRecordOf, freeFrom,
 });
 
 const PAPER = 0x12161cff;
@@ -883,7 +1032,13 @@ export function run(env) {
   let bandFromRow = false;
   let menuInSurface = false;
   let pasteClobbers = false;
+  let restoreOverwrites = false;
+  let moveForcedCopy = false;
+  let staleListing = false;
   let noDrainMs = 0;
+  /** `--bin`: open the Bin rather than the session tree. Resolved AFTER the options, because
+   *  where the Bin is comes from `binDirIn` and not from the caller. */
+  let openBin = false;
   const rest = [];
   let endOfOptions = false;
   const args = argv.slice(1);
@@ -900,6 +1055,20 @@ export function run(env) {
       if (arg === "--band-from-row") { bandFromRow = true; continue; }
       if (arg === "--menu-in-surface") { menuInSurface = true; continue; }
       if (arg === "--paste-clobbers") { pasteClobbers = true; continue; }
+      if (arg === "--restore-overwrites") { restoreOverwrites = true; continue; }
+      if (arg === "--move-forced-copy") { moveForcedCopy = true; continue; }
+      /* `--bin`: OPEN THE BIN, without the caller naming where it is.
+       *
+       * `src/bin/desktop.mjs` publishes the Recycle Bin row as `["files", "--bin"]` on purpose —
+       * the row names the LOCATION and where that location is stays in the one program that puts
+       * things there, so a path written in the desktop is a second definition of this file's
+       * `binDirIn`. That reasoning is right and the flag was simply never implemented: the desktop
+       * published it, `getopt` refused it as an unknown option, and a real double-click on the
+       * Recycle Bin icon opened nothing. `bench/m21-bin/firefox-bin.py` is what found it, by
+       * clicking the icon a reader clicks — the registered suite stages the Bin directly and so
+       * could not see it. */
+      if (arg === "--bin") { openBin = true; continue; }
+      if (arg === "--stale-listing") { staleListing = true; continue; }
       if (arg === "--no-drain") {
         // Refused, not silently defaulted — `--ceiling`'s rule in src/bin/term.mjs: `Number(x) || d`
         // accepts both `0` and `abc`, and a fixture that silently did not hold is a check that
@@ -929,7 +1098,11 @@ export function run(env) {
    * belongs to the case where nobody named one. */
   const opened = operands[0]
     ? { dir: operands[0], home: false, why: "" }
-    : env.std.sessionDir(env);
+    : openBin
+      /* THE BIN IS NAMED HERE AND NOT BY THE CALLER, which is the whole point of `--bin`. An
+       * explicit operand still wins: a reader who typed a directory meant it (the rule above). */
+      ? { dir: binDirIn(env.std.HOME_DIR), home: false, why: "" }
+      : env.std.sessionDir(env);
   if (opened.why) {
     env.std.warn(env, `${NAME}: no session tree (${opened.why}), opening ${opened.dir}, `
       + "which is the base's own data directory and is READ-ONLY");
@@ -939,6 +1112,19 @@ export function run(env) {
   let dir = opened.dir;
   const history = [];
   const t0 = performance.now();
+  /** THE BIN, AND IT IS THE SESSION TREE'S AND NOT THIS WINDOW'S. `std.HOME_DIR` is where the
+   *  writable copy of the read-only base lives (D40), so it is the one place a `rename` out of a
+   *  reader's own directory can land — a Bin per window would be a second place to look for a file
+   *  and a Bin per mount would be one in a tree the reader never opens. */
+  const binRoot = binDirIn(env.std.HOME_DIR);
+  /** Whether this window is LOOKING AT the Bin, which is what makes Restore a verb and a Delete
+   *  final. Compared on `dirKey`, so an operand with a trailing slash names the same directory a
+   *  double-click does. */
+  const inBin = () => dirKey(dir) === dirKey(binRoot);
+  /** Whether a path may go TO the Bin rather than being removed: inside the session tree, and not
+   *  already in the Bin. The second half is not a detail — a Bin that recycled its own rows would
+   *  be a delete a reader could never finish. */
+  const binnable = (path) => underDir(path, env.std.HOME_DIR) && !underDir(path, binRoot);
   const account = {
     program: NAME, dir, win: 0, fd: 0, rows: [], drags: 0, refusedDrags: 0,
     /* M19a. WHO CHOSE THE DIRECTORY, and why it is not the session's tree when it is not: `dir`
@@ -1011,10 +1197,35 @@ export function run(env) {
     created: [], renamed: [], deleted: [], pasted: [],
     clipboard: null, copies: 0, cuts: 0, pastes: 0,
     renaming: null, renames: 0,
+    /* M21. THE BIN, THE REFRESH, AND BOTH ENDS OF A DRAG.
+     *
+     * `bin.binned` and `bin.restored` ARE THE PAIRS A CHECK READS: each entry names the payload and
+     * the path its origin record carries, so "a delete left the bytes reachable" and "a restore
+     * returned them" are two readings of two different records rather than one counter twice.
+     * `bin.permanent` is the other half of a Delete — a row outside the session tree, which has no
+     * Bin to reach — and `bin.stranded` counts an origin record this program could not take back,
+     * because a record whose payload is not there names nothing a reader can act on.
+     *
+     * `refreshes` AGAINST `refreshKept` is F5's whole clause: the keysym arrived, the directory was
+     * re-read, and the selection survived FOR THE ROWS THAT SURVIVED — `kept` is how many of the
+     * names asked for came back, which is the number a row that is gone must not raise.
+     *
+     * `effectsOffered` is what THIS program asked the kernel for, beside `effects` which is what
+     * the kernel reported back. Two readings, because the modifier decides the first and only the
+     * kernel decides the second (`src/kernel/dataobj.mjs` picks COPY whenever the mask holds it). */
+    bin: {
+      dir: binRoot, binned: [], restored: [], permanent: 0, stranded: 0, strandedRecords: 0,
+      listing: false,
+    },
+    refreshes: 0, refreshKept: 0,
+    dragEnters: 0, dragLeaves: 0, dropsIn: 0,
+    dragOffers: [], dropped: [], dropWhere: [],
+    effectsOffered: [], movedOut: [],
     controls: {
       frozenSurface, cssPxSurface, unclampedScroll,
       stableSortOff, foldersLast, noDirStat, bandFromRow,
       menuInSurface, pasteClobbers,
+      restoreOverwrites, moveForcedCopy, staleListing,
     },
     // A FIXTURE AND NOT A CONTROL (see this file's header), so it is reported apart from them.
     noDrainMs, heldMs: 0,
@@ -1055,6 +1266,9 @@ export function run(env) {
   const reportRows = () => rows.map((r) => ({
     name: r.name, format: kindOf(r), dir: r.dir, size: r.size, mtimeMs: r.mtimeMs,
     statted: r.statted,
+    // M21. `""` outside the Bin and for a payload with no record: the two are told apart by
+    // `bin.listing`, which says whether the lookup was paid at all.
+    origin: r.origin || "",
     cells: Object.fromEntries(COLUMNS.map((c) => [c.key, cellOf(r, c.key)])),
   }));
 
@@ -1064,8 +1278,24 @@ export function run(env) {
     // The directory with exactly one trailing slash, so a child path is `base + name` and the
     // root does not become `//name`.
     const base = path.endsWith("/") ? path : `${path}/`;
+    /* M21. THE BIN'S LISTING IS THIS `readdir` WITH THE ORIGIN STORE AS A LOOKUP, and the join runs
+     * in exactly that direction (this file's header): the PAYLOAD entries are the rows, and
+     * `readlink` is asked once per row for where it came from. An ORIGIN RECORD IS NOT A ROW — it
+     * is a symlink carrying a path, it has no bytes, and a reader cannot restore it — so it is
+     * filtered out and counted. A record with no payload is counted as STRANDED, which is the
+     * half-state an interrupted delete leaves and the one that shows a reader nothing wrong. */
+    const bin = dirKey(path) === dirKey(binRoot);
+    const present = bin ? new Set(entries.map((e) => e.name)) : null;
+    const isRecord = (e) => bin && e.type === DT_LNK && e.name.endsWith(ORIGIN_SUFFIX);
+    // SET IN ONE PLACE FOR BOTH ANSWERS, so the count cannot outlive the listing it describes: a
+    // window that walked out of the Bin reports no stranded records rather than the last figure.
+    account.bin.strandedRecords = bin
+      ? entries.filter((e) => isRecord(e)
+        && !present.has(e.name.slice(0, -ORIGIN_SUFFIX.length))).length
+      : 0;
+    account.bin.listing = bin;
     const built = entries
-      .filter((e) => e.name !== "." && e.name !== "..")
+      .filter((e) => e.name !== "." && e.name !== ".." && !isRecord(e))
       .map((e) => {
         const isDir = e.type === DT_DIR;
         const format = isDir ? 0 : env.std.formatForPath(e.name);
@@ -1111,10 +1341,17 @@ export function run(env) {
             mtimeMs = Number(st.mtimeNs / 1000000n);
           }
         }
-        return {
-          name: e.name, dir: isDir, format, exec, size, mtimeMs, statted,
-          path: `${base}${e.name}`,
-        };
+        const path = `${base}${e.name}`;
+        /* M21. WHERE THIS ROW CAME FROM, read by `readlink` of the record beside it — the LOOKUP
+         * half of the Bin's join, paid once per row and only in the Bin. `""` is a payload whose
+         * origin record is not there: a row a reader can see and drag out of the Bin by hand, and
+         * cannot Restore, which `restoreOne` refuses by name rather than guessing a destination. */
+        let origin = "";
+        if (bin) {
+          const target = env.fs.readlink(originRecordOf(path));
+          if (typeof target === "string") origin = target;
+        }
+        return { name: e.name, dir: isDir, format, exec, size, mtimeMs, statted, path, origin };
       });
     return sortRows(built, order);
   };
@@ -1159,6 +1396,14 @@ export function run(env) {
    *  because a resize re-reads them. */
   let press = null;
   let dragging = false;
+  /** THE ROW A LIVE DRAG PUBLISHED, or null — `{name, path}`. It outlives the gesture's samples
+   *  because the RECEIPT is what acts on it: a MOVE is completed by the source when the kernel
+   *  reports the effect, which is several events after the press that chose the row. */
+  let dragged = null;
+  /** THE LAST DROP THIS WINDOW TOOK, or null — `{into, landed}`. Only the RECEIPT reads it, and only
+   *  for the one case where the source and the target are this same window: whether the original may
+   *  go depends on whether the landing happened and where. */
+  let lastDrop = null;
   /**
    * THE SELECTION, AS A SET OF ROW INDICES, AND ITS ANCHOR.
    *
@@ -1510,8 +1755,13 @@ export function run(env) {
     const ops = [{ op: DL_CLEAR, a0: PAPER }];
     /* THE CLIP DECIDES WHETHER THERE IS A LIST AT ALL, so it is built before the account is
      * written: no viewport means no rows drawn, and reporting rows nobody drew is the harness
-     * dishonesty CLAUDE.md names. */
-    const clip = clipOp();
+     * dishonesty CLAUDE.md names.
+     *
+     * NAMED `clipRect` AND NOT `clip`, WHICH IS A FIX AND NOT A TIDY. It was `clip`, and it SHADOWED
+     * this program's clipboard record of the same name one scope out — so `clip.intent === V_CUT`
+     * below read a field off the viewport rectangle, was never true, and a cut row was never
+     * dimmed. The two spellings differ by a word; the two meanings do not. */
+    const clipRect = clipOp();
     const { first, last } = visible();
     const cols = columnBoxes(clientW);
 
@@ -1533,7 +1783,7 @@ export function run(env) {
      *
      * THE SELECTION COUNT IS A SEPARATE RUN so neither reading can be mistaken for the other by
      * something matching text — and `N selected` matches neither of that page's two regexes. */
-    const drawn = clip ? Math.max(0, last - first + 1) : 0;
+    const drawn = clipRect ? Math.max(0, last - first + 1) : 0;
     const place = maxScroll() > 0 && drawn > 0
       ? `${first + 1}-${last + 1} of ${rows.length}`
       : `${rows.length} item${rows.length === 1 ? "" : "s"}`;
@@ -1576,11 +1826,11 @@ export function run(env) {
     /* FROM HERE DOWN THE LIST IS CLIPPED. No reset follows it: `Surface.replay` resets the clip at
      * the top of every batch (`src/abi.mjs`'s `DL_CLIP` docstring), so a clip is batch-scoped and a
      * trailing `DLC_RESET` would be a second definition of that rule. */
-    if (clip) ops.push(clip);
+    if (clipRect) ops.push(clipRect);
 
     // NO CLIP, NO ROWS: `first - 1` is an empty range, and it is the ONE place that decision is
     // taken — a row drawn outside a viewport this program could not name would paint the header.
-    const lastDrawn = clip ? last : first - 1;
+    const lastDrawn = clipRect ? last : first - 1;
     let shown = 0;
     let capped = 0;
     for (let i = first; i <= lastDrawn; i += 1) {
@@ -2005,9 +2255,12 @@ export function run(env) {
 
   /* ---- M20: THE SIX VERBS, EVERY ONE OF THEM A SYSCALL ------------------------------------- */
 
-  /** A child of the open directory, by name. `dir` with exactly one trailing slash, which is
-   *  `buildRows`' own rule: the root must not produce `//name`. */
-  const childPath = (name) => `${dir.endsWith("/") ? dir : `${dir}/`}${name}`;
+  /** A child of `base`, by name: exactly one trailing slash, which is `buildRows`' own rule — the
+   *  root must not produce `//name`. `base` is a parameter because a DROP may land in a directory
+   *  ROW rather than in the open directory. */
+  const childIn = (base, name) => `${base.endsWith("/") ? base : `${base}/`}${name}`;
+  /** A child of the open directory, by name. */
+  const childPath = (name) => childIn(dir, name);
 
   /**
    * RE-READ THIS DIRECTORY, KEEPING THE SORT AND THE READER'S PLACE IN IT.
@@ -2067,18 +2320,137 @@ export function run(env) {
     return focus >= 0 && focus < rows.length ? [focus] : [];
   };
 
-  /** A name nothing in this listing has. `New folder`, then `New folder (2)` — Explorer's own
-   *  numbering. THE SET IS THIS LISTING'S, so a name created under the window since the last read is
-   *  not seen and `mkdir` answers EEXIST: a guess from a stale listing must be refused by name
-   *  rather than retried, because the retry loop cannot tell a collision from a full disk. */
-  const freeName = (stem) => {
-    const taken = new Set(rows.map((r) => r.name));
-    if (!taken.has(stem)) return stem;
-    for (let n = 2; n <= 1000; n += 1) {
-      const candidate = `${stem} (${n})`;
-      if (!taken.has(candidate)) return candidate;
+  /** A name nothing in this listing has — `freeFrom` over the rows in hand. THE SET IS THIS
+   *  LISTING'S, so a name created under the window since the last read is not seen and `mkdir`
+   *  answers EEXIST: a guess from a stale listing must be refused by name rather than retried,
+   *  because the retry loop cannot tell a collision from a full disk. */
+  const freeName = (stem) => freeFrom(new Set(rows.map((r) => r.name)), stem);
+
+  /* ---- M21: THE BIN'S FOUR OPERATIONS ------------------------------------------------------- */
+
+  /**
+   * THE BIN EXISTS, OR THE ERRNO THAT SAYS WHY NOT. Made on the first delete that needs it and not
+   * at startup: a window that created a directory in a reader's tree merely by being opened would
+   * put a row on the desktop nobody asked for.
+   *
+   * A NON-DIRECTORY AT THE PATH IS ENOTDIR AND NOT AN `mkdir` — `mkdir` would answer EEXIST, which
+   * reads as "the Bin is there" and is the opposite of what a reader needs to be told.
+   */
+  const ensureBin = () => {
+    const st = env.fs.lstat(binRoot);
+    if (typeof st !== "number") {
+      return (st.mode & S_IFMT) === S_IFDIR ? 0 : -ENOTDIR;
     }
-    return null;
+    const rc = env.fs.mkdir(binRoot, 0o700);
+    return rc < 0 && rc !== -EEXIST ? rc : 0;
+  };
+
+  /** Every name the Bin holds, payloads AND origin records, or a negative errno. READ ONCE PER
+   *  GESTURE and grown locally as each name is taken: a delete of five rows must not pay five
+   *  `readdir`s, and two rows of one name in one gesture must not pick the same payload name. */
+  const binTaken = () => {
+    const entries = env.std.listDir(env, binRoot);
+    if (typeof entries === "number") return entries;
+    return new Set(entries.map((e) => e.name));
+  };
+
+  /**
+   * MOVE ONE ROW INTO THE BIN. Answers the payload's name, or `""` with the refusal already named.
+   *
+   * THE ORIGIN RECORD IS WRITTEN FIRST AND THE BYTES MOVE SECOND, which is a JUDGEMENT and is the
+   * only one of the two orders that is: both are recoverable, measured, and this one's half-state
+   * is a record naming a file that is still where the reader left it — nothing on screen is wrong
+   * and nothing is unreachable. The other order's half-state is a Bin row whose Restore has to
+   * refuse by name (`bench/m21-bin/probe.mjs`: 1,260 stranded records against 1,125 unrestorable
+   * rows).
+   *
+   * THE RECORD IS TAKEN BACK WHEN THE RENAME IS REFUSED, and that is an ERROR PATH rather than a
+   * tear: the call answered in front of us, so a record for a payload that never moved is garbage
+   * this process can still name. A TORN delete cannot reach here, and what it leaves is counted.
+   *
+   * AND IT IS THE RECORD THAT CLAIMS THE NAME, which is what makes two `files` windows deleting one
+   * name at the same moment safe without a lock: `taken` is a listing read before the gesture, so
+   * both may choose `x` — and `symlink` is `O_EXCL`-shaped, so the second one is refused EEXIST
+   * BEFORE any bytes move. Payload-first would have the two `rename`s race over one destination,
+   * which `vfs.rename` resolves by clobbering.
+   */
+  const binOne = (row, taken) => {
+    const name = freeFrom(taken, row.name, (c) => `${c}${ORIGIN_SUFFIX}`);
+    if (name === null) {
+      refuse(row.name, "the Bin already holds 1000 rows of this name");
+      return "";
+    }
+    const payload = `${binRoot}/${name}`;
+    const record = originRecordOf(payload);
+    const link = env.fs.symlink(row.path, record);
+    if (link < 0) {
+      refuse(row.name, `symlink ${record}: ${env.std.errnoName(link)}`, link);
+      return "";
+    }
+    const rc = env.fs.rename(row.path, payload);
+    if (rc < 0) {
+      if (env.fs.unlink(record) < 0) account.bin.stranded += 1;
+      refuse(row.name, `rename into the Bin: ${env.std.errnoName(rc)}`, rc);
+      return "";
+    }
+    taken.add(name);
+    taken.add(name + ORIGIN_SUFFIX);
+    account.bin.binned.push({ name, from: row.path, payload });
+    return name;
+  };
+
+  /**
+   * PUT ONE BIN ROW BACK WHERE ITS RECORD SAYS IT CAME FROM.
+   *
+   * THE ORDER IS FORCED AND IT IS THE OPPOSITE OF THE DELETE'S: the bytes go home FIRST and the
+   * record is dropped SECOND. The other order left 1,260 of 2,017 torn cases with bytes in the Bin
+   * that nothing names, and the fact needed to repair that is the fact that was lost — the only
+   * irreversible half-state the measurement found.
+   *
+   * THE OCCUPIED-PATH REFUSAL IS THIS PROGRAM'S BECAUSE THE FILESYSTEM HAS NONE. `vfs.rename` has
+   * no `RENAME_NOREPLACE` and over a plain file refuses nothing: `applyOp`'s RENAME arm deletes the
+   * standing entry, decrements nlink and FREES the inode, in one journal record. So the `lstat` is
+   * the only test there is, and it races — the same trade `commitRename` states, and the lesser
+   * fault against destroying a file the reader made in the meantime.
+   */
+  const restoreOne = (row) => {
+    const record = originRecordOf(row.path);
+    const origin = env.fs.readlink(record);
+    if (typeof origin !== "string") {
+      refuse(row.name, `readlink ${record}: ${env.std.errnoName(origin)}`, origin);
+      return false;
+    }
+    /* `--restore-overwrites` IS EXACTLY THIS TEST GONE, which is the one world in which a restore
+     * destroys a file a reader created after the delete. */
+    if (!restoreOverwrites && typeof env.fs.lstat(origin) !== "number") {
+      refuse(row.name, `${origin} is already here; a restore does not replace a file`, EEXIST);
+      return false;
+    }
+    const rc = env.fs.rename(row.path, origin);
+    if (rc < 0) {
+      refuse(row.name, `rename to ${origin}: ${env.std.errnoName(rc)}`, rc);
+      return false;
+    }
+    // THE RECORD GOES SECOND AND ITS REFUSAL IS NOT THE RESTORE'S. The bytes are home; a record
+    // left behind names a path that is occupied by the file it describes, which `buildRows` counts
+    // as stranded and no row is drawn for.
+    if (env.fs.unlink(record) < 0) account.bin.stranded += 1;
+    account.bin.restored.push({ name: row.name, to: origin });
+    return true;
+  };
+
+  /** ONE PATH INTO THE BIN, with the directory ensured and its names read for this call alone —
+   *  the single-row form the drag's own MOVE completion needs, where there is no selection and no
+   *  listing to read from. `deleteSelection` reads the names ONCE for a whole set instead, which is
+   *  the only reason that loop does not come through here. */
+  const binPathOnce = (name, path) => {
+    const ready = ensureBin();
+    if (ready < 0) return refuse(binRoot, `mkdir: ${env.std.errnoName(ready)}`, ready);
+    const taken = binTaken();
+    if (typeof taken === "number") {
+      return refuse(binRoot, `readdir: ${env.std.errnoName(taken)}`, taken);
+    }
+    return binOne({ name, path }, taken) !== "";
   };
 
   /** NEW FOLDER: one `mkdir`, then a fresh `readdir` — so the row a reader sees came back out of
@@ -2167,36 +2539,120 @@ export function run(env) {
   };
 
   /**
-   * DELETE: `unlink` for a file, `rmdir` for a directory, one call per target row.
+   * DELETE: TO THE BIN where there is one, and `unlink`/`rmdir` where there is not.
    *
-   * A NON-EMPTY DIRECTORY IS REFUSED AND NOT EMPTIED. `rmdir` answers ENOTEMPTY and that is the
-   * answer the reader gets: recursing on a folder somebody selected by accident is the worst
-   * outcome available here, and a recursive delete is a different verb with a different
-   * confirmation. M21's Recycle Bin is where "where did it go" gets an answer; until then this is
-   * final, and the message says so.
+   * WHICH IT IS, IS THE PATH'S AND NOT THE READER'S. A row inside the session tree goes to the Bin
+   * — a folder with things in it included, because a `rename` relocates a whole subtree in one call
+   * and nothing is destroyed, so M20's "recursing on a folder somebody selected by accident is the
+   * worst outcome available" no longer describes what happens. A row OUTSIDE it is removed: the Bin
+   * is `std.HOME_DIR`'s, a cross-volume `rename` is not a thing the filesystem does, and a second
+   * Bin per mount would be a second place to look for a file. So `/usr/share` still answers EROFS
+   * by name and `/tmp` is still final — and a non-empty folder there still answers ENOTEMPTY,
+   * because that is `rmdir` speaking.
+   *
+   * A ROW ALREADY IN THE BIN IS REMOVED, which is Windows' rule and is how a reader empties it:
+   * select the rows and press Delete. The Bin recycling its own rows would be a delete nobody could
+   * ever finish.
    *
    * THE WHOLE SET IS ATTEMPTED AND EVERY OUTCOME IS NAMED, rather than stopping at the first
-   * refusal: five selected files of which one is a non-empty folder must delete four and say which
-   * one they would not.
+   * refusal: five selected files of which one is refused must delete four and say which one they
+   * would not. A BIN THAT CANNOT BE REACHED IS SAID ONCE and the rest of the set is left alone — a
+   * delete that silently became permanent because a `mkdir` failed is the worst reading available.
    */
   const deleteSelection = () => {
     const targets = targetRows();
     if (targets.length === 0) {
       return refuse("no row is selected", "press a row or use the arrow keys first");
     }
+    let taken = null;
+    let binWhy = "";
     let gone = 0;
+    let binned = 0;
     for (const i of targets) {
       const row = rows[i];
+      if (binnable(row.path)) {
+        if (binWhy) continue;
+        if (taken === null) {
+          const made = ensureBin();
+          if (made < 0) {
+            binWhy = env.std.errnoName(made);
+            refuse(binRoot, `mkdir: ${binWhy}`, made);
+            continue;
+          }
+          const names = binTaken();
+          if (typeof names === "number") {
+            binWhy = env.std.errnoName(names);
+            refuse(binRoot, `readdir: ${binWhy}`, names);
+            continue;
+          }
+          taken = names;
+        }
+        if (binOne(row, taken) === "") continue;
+        gone += 1;
+        binned += 1;
+        account.deleted.push(row.name);
+        continue;
+      }
       const rc = row.dir ? env.fs.rmdir(row.path) : env.fs.unlink(row.path);
       if (rc < 0) {
         refuse(row.name, `${row.dir ? "rmdir" : "unlink"}: ${env.std.errnoName(rc)}`, rc);
         continue;
       }
       gone += 1;
+      account.bin.permanent += 1;
       account.deleted.push(row.name);
     }
-    env.std.say(env, `${NAME}: deleted ${gone} of ${targets.length}, permanently\n`);
+    env.std.say(env, `${NAME}: deleted ${gone} of ${targets.length}: ${binned} to the Bin, `
+      + `${gone - binned} permanently\n`);
     reread([]);
+    return true;
+  };
+
+  /**
+   * RESTORE: every target row back to the path its origin record names.
+   *
+   * A VERB OF THE BIN AND NOWHERE ELSE, refused by name elsewhere rather than absent: a row menu
+   * outside the Bin does not carry it, and a report against one that did would be acting on a list
+   * this window never published.
+   */
+  const restoreSelection = () => {
+    if (!inBin()) {
+      return refuse("restore", `is a verb of ${binRoot}, and this window is looking at ${dir}`);
+    }
+    const targets = targetRows();
+    if (targets.length === 0) {
+      return refuse("no row is selected", "press a row or use the arrow keys first");
+    }
+    let back = 0;
+    for (const i of targets) if (restoreOne(rows[i])) back += 1;
+    env.std.say(env, `${NAME}: restored ${back} of ${targets.length}\n`);
+    reread([]);
+    return true;
+  };
+
+  /**
+   * F5: RE-LIST, AND THE SELECTION SURVIVES FOR THE ROWS THAT SURVIVE.
+   *
+   * IT IS `reread`, which already restores a selection BY NAME — and by name rather than by index
+   * is the whole of the clause: index order is exactly what a mutation under the window moves, so a
+   * restored index would highlight whatever landed in the slot. A name that is gone is simply not
+   * re-selected: it must not resurrect a row and must not be indexed into a shorter list.
+   *
+   * `--stale-listing` SERVES THE ROWS ALREADY IN HAND. The keysym still arrives and is still
+   * counted, so what the control moves is what the window SHOWS and not whether F5 was delivered.
+   */
+  const refresh = () => {
+    account.refreshes += 1;
+    const wanted = [...sel].filter((i) => i < rows.length).map((i) => rows[i].name);
+    if (staleListing) {
+      account.refreshKept = wanted.length;
+      env.std.say(env, `${NAME}: --stale-listing, serving the ${rows.length} row(s) in hand\n`);
+      return true;
+    }
+    if (!reread(wanted)) return false;
+    account.refreshKept = sel.size;
+    env.std.say(env, `${NAME}: re-listed ${dir}, ${rows.length} row(s), ${sel.size} of `
+      + `${wanted.length} selected row(s) survived\n`);
     return true;
   };
 
@@ -2253,13 +2709,13 @@ export function run(env) {
   };
 
   /**
-   * PASTE: read the clipboard's path list and bring each entry here — `rename` for a cut, bytes for
-   * a copy.
+   * BRING ONE PATH INTO `into`: a `rename` for a move, the bytes for a copy. Answers the name it
+   * landed under, or `""` with the refusal already named.
    *
-   * THE PATHS COME OUT OF THE KERNEL'S OBJECT AND NOT OUT OF `clip`. The local record says only what
-   * the INTENT was; reading the list from this program's own copy would paste a stale selection
-   * after another process replaced the clipboard, and `clip copy /some/file` at a prompt must paste
-   * here.
+   * ONE DEFINITION, BECAUSE A PASTE AND A DROP ARE THE SAME LANDING REACHED BY TWO GESTURES. Two
+   * copies is how one of them comes to replace a file the other refuses to — and `--paste-clobbers`
+   * reaches both for the same reason: whether a landing may destroy a file the reader can see is
+   * ONE decision.
    *
    * AN OCCUPIED NAME IS REFUSED, AND THE TWO HALVES REFUSE DIFFERENTLY. A copy opens with
    * `O_CREAT | O_EXCL` and the KERNEL answers EEXIST, with no window between a test and a create. A
@@ -2272,6 +2728,70 @@ export function run(env) {
    *
    * THE MODE TRAVELS WITH A COPY. `/usr/bin` holds 32 executables and a pasted program that lost
    * its execute bit is a program that no longer runs, which nothing on screen would explain.
+   */
+  const landOne = (from, into, { moving, gesture }) => {
+    const name = baseNameOf(from);
+    const to = childIn(into, name);
+    if (to === from) {
+      refuse(name, "is already in this directory");
+      return "";
+    }
+    /* `--paste-clobbers` REMOVES THIS AND THE `O_EXCL` BELOW, which is one control over one
+     * decision: whether a landing may destroy a file the reader can see. */
+    if (!pasteClobbers && typeof env.fs.lstat(to) !== "number") {
+      refuse(name, `is already here; ${gesture} does not replace a file`, EEXIST);
+      return "";
+    }
+    const st = env.fs.lstat(from);
+    if (typeof st === "number") {
+      refuse(name, `lstat: ${env.std.errnoName(st)}`, st);
+      return "";
+    }
+    if (moving) {
+      const rc = env.fs.rename(from, to);
+      if (rc < 0) {
+        refuse(name, `rename: ${env.std.errnoName(rc)}`, rc);
+        return "";
+      }
+      return name;
+    }
+    if ((st.mode & S_IFMT) === S_IFDIR) {
+      refuse(name, "is a directory, and copying one is not a verb this window has; cut it to move it");
+      return "";
+    }
+    const body = readFile(env, from);
+    if (typeof body === "number") {
+      refuse(name, `read: ${env.std.errnoName(body)}`, body);
+      return "";
+    }
+    const flags = O_WRONLY | O_CREAT | (pasteClobbers ? 0 : O_EXCL);
+    const fd = env.fs.open(to, flags, st.mode & 0o777);
+    if (fd < 0) {
+      refuse(name, `open: ${env.std.errnoName(fd)}`, fd);
+      return "";
+    }
+    // `env.fs.write` IS LAYER 2 AND CONSUMES SHORT COUNTS (`src/libos/syscall.mjs`), so a 300 KiB
+    // file is one call here and several on the channel.
+    const wrote = env.fs.write(fd, body);
+    env.fs.close(fd);
+    if (wrote < 0) {
+      refuse(name, `write: ${env.std.errnoName(wrote)}`, wrote);
+      return "";
+    }
+    return name;
+  };
+
+  /**
+   * PASTE: read the clipboard's path list and bring each entry here — `rename` for a cut, bytes for
+   * a copy.
+   *
+   * THE PATHS COME OUT OF THE KERNEL'S OBJECT AND NOT OUT OF `clip`. The local record says only what
+   * the INTENT was; reading the list from this program's own copy would paste a stale selection
+   * after another process replaced the clipboard, and `clip copy /some/file` at a prompt must paste
+   * here.
+   *
+   * WHAT ONE PATH'S LANDING IS, is `landOne` — the same function a DROP lands through, so the two
+   * gestures cannot come to disagree about an occupied name.
    *
    * A CUT IS SPENT BY THE PASTE THAT MOVES IT. The source is gone, so a second paste of the same
    * list would refuse ENOENT once per row; clearing the intent leaves the clipboard holding paths
@@ -2301,56 +2821,8 @@ export function run(env) {
     const moving = !!clip && clip.intent === V_CUT;
     const landed = [];
     for (const from of list) {
-      const name = baseNameOf(from);
-      const to = childPath(name);
-      if (to === from) {
-        refuse(name, "is already in this directory");
-        continue;
-      }
-      /* `--paste-clobbers` REMOVES THIS AND THE `O_EXCL` BELOW, which is one control over one
-       * decision: whether a paste may destroy a file the reader can see. */
-      if (!pasteClobbers && typeof env.fs.lstat(to) !== "number") {
-        refuse(name, "is already here; a paste does not replace a file", EEXIST);
-        continue;
-      }
-      const st = env.fs.lstat(from);
-      if (typeof st === "number") {
-        refuse(name, `lstat: ${env.std.errnoName(st)}`, st);
-        continue;
-      }
-      if (moving) {
-        const rc = env.fs.rename(from, to);
-        if (rc < 0) {
-          refuse(name, `rename: ${env.std.errnoName(rc)}`, rc);
-          continue;
-        }
-        landed.push(name);
-        continue;
-      }
-      if ((st.mode & S_IFMT) === S_IFDIR) {
-        refuse(name, "is a directory, and copying one is not a verb this window has; cut it to move it");
-        continue;
-      }
-      const body = readFile(env, from);
-      if (typeof body === "number") {
-        refuse(name, `read: ${env.std.errnoName(body)}`, body);
-        continue;
-      }
-      const flags = O_WRONLY | O_CREAT | (pasteClobbers ? 0 : O_EXCL);
-      const fd = env.fs.open(to, flags, st.mode & 0o777);
-      if (fd < 0) {
-        refuse(name, `open: ${env.std.errnoName(fd)}`, fd);
-        continue;
-      }
-      // `env.fs.write` IS LAYER 2 AND CONSUMES SHORT COUNTS (`src/libos/syscall.mjs`), so a 300 KiB
-      // file is one call here and several on the channel.
-      const wrote = env.fs.write(fd, body);
-      env.fs.close(fd);
-      if (wrote < 0) {
-        refuse(name, `write: ${env.std.errnoName(wrote)}`, wrote);
-        continue;
-      }
-      landed.push(name);
+      const name = landOne(from, dir, { moving, gesture: "a paste" });
+      if (name !== "") landed.push(name);
     }
     account.pastes += 1;
     for (const name of landed) account.pasted.push({ name, moved: moving });
@@ -2374,6 +2846,7 @@ export function run(env) {
     if (verb === V_CUT) return toClipboard(V_CUT);
     if (verb === V_COPY) return toClipboard(V_COPY);
     if (verb === V_PASTE) return paste();
+    if (verb === V_RESTORE) return restoreSelection();
     return refuse(String(verb) || "a separator", "is not a verb this window has");
   };
 
@@ -2405,7 +2878,19 @@ export function run(env) {
   const rowMenuFor = (i) => {
     const row = rows[i];
     const count = sel.size > 0 ? sel.size : 1;
+    /* M21. RESTORE IS A ROW OF THE BIN'S MENU AND OF NO OTHER, which is why it is prepended here
+     * rather than carried disabled everywhere: a command that cannot apply in any directory but
+     * one is noise, and `src/bin/desktop.mjs`'s rule for a row a reader cannot use is that it is
+     * not published. It is DISABLED for a payload whose origin record is gone — there is no
+     * destination to name, and a live row that refused would be a reader told nothing until after
+     * they pressed it. */
+    const restore = inBin()
+      ? [{ verb: V_RESTORE, icon: WICON_TRASH,
+        label: count > 1 ? `Restore ${count} items` : "Restore",
+        flags: row.origin ? 0 : WITEM_DISABLED }, MENU_RULE]
+      : [];
     return [
+      ...restore,
       /* THE ROW'S OWN ICON COMES FROM `std.iconForPath`, which is userland's ONE table of which
        * picture a file gets (`src/libos/std.mjs`) — the same one the desktop's rows read, so a
        * `.txt` in this menu and a `.txt` on the desktop are the same drawing. */
@@ -2417,6 +2902,10 @@ export function run(env) {
       { verb: V_CUT, icon: WICON_GENERIC, label: "Cut" },
       { verb: V_COPY, icon: WICON_GENERIC, label: "Copy" },
       MENU_RULE,
+      /* M21. THE LABEL IS STILL `Delete` WHERE THE DELETE IS FINAL, which is Windows' own wording:
+       * the word does not change, the confirmation does — and this window has no dialog to carry
+       * one. What a reader is told instead is where the bytes went, after the fact and by name, on
+       * the line `deleteSelection` prints. */
       { verb: V_DELETE, icon: WICON_TRASH,
         label: count > 1 ? `Delete ${count} items` : "Delete" },
       /* RENAME IS DISABLED FOR A MULTIPLE SELECTION, because there is one text box and `rename`
@@ -2482,12 +2971,35 @@ export function run(env) {
   env.std.say(env, "click a column header to sort, again to reverse. shift or ctrl extend the "
     + "selection; drag from empty space to band-select.\n");
   env.std.say(env, "right-click for a menu. F2 renames, Delete removes, ctrl-N makes a folder, "
-    + "ctrl-X/C/V cut, copy and paste. a delete is permanent until the Bin exists.\n");
+    + "ctrl-X/C/V cut, copy and paste. F5 re-lists and keeps the selection.\n");
+  env.std.say(env, `a delete inside ${env.std.HOME_DIR} goes to ${binRoot}, where Restore puts it `
+    + "back; anywhere else it is permanent. drop files on this window to copy them in; "
+    + "ctrl-drag out copies, a plain drag out moves.\n");
+
+  /**
+   * WHAT EFFECT A DRAG OF `row` OFFERS, under the modifiers the gesture is being made with.
+   *
+   * CTRL FORCES A COPY, which is Windows' own binding and the only explicit one a reader has here.
+   * Without it a row INSIDE THE SESSION TREE offers a MOVE and a row outside it still offers a
+   * COPY, and that asymmetry is the Bin's: the kernel reports an effect for a drop that QUEUED and
+   * not for one the target COLLECTED (constraint 245), so a MOVE source cannot verify the
+   * collection — the original goes TO THE BIN rather than to `unlink`, and the Bin is the session
+   * tree's. No Bin, no safe move. It is also why `files /usr/share` reports COPY for a plain drag:
+   * a move off a read-only mount is not a thing this program could complete, and offering one would
+   * be a promise the receipt cannot keep.
+   *
+   * A MOVE IS OFFERED ALONE AND NEVER AS `COPY | MOVE`, because the kernel picks COPY whenever the
+   * mask holds it (`src/kernel/dataobj.mjs`): a mask with both is a copy with extra words.
+   */
+  const effectFor = (row, mods) => {
+    if (moveForcedCopy || (mods & WMOD_CTRL)) return DOBJ_EFFECT_COPY;
+    return binnable(row.path) ? DOBJ_EFFECT_MOVE : DOBJ_EFFECT_COPY;
+  };
 
   /** Publish one row as a drag. The object's fd is CLOSED immediately and on purpose: the session
    *  holds the kernel's own reference, so the payload outlives this program's handle on it — and
    *  outlives this program (constraint 241). */
-  const startDrag = (i) => {
+  const startDrag = (i, mods = 0) => {
     const row = rows[i];
     /* A DIRECTORY AND AN UNKNOWN FORMAT ARE REFUSED HERE, by name and counted: there are no bytes
      * to offer for either, and a drag that published a path under TEXT would be the guess a typed
@@ -2525,13 +3037,20 @@ export function run(env) {
         const b = env.data.set(made2.fd, row.format, body);
         if (b < 0) { account.refusedDrags += 1; return b; }
       }
-      const r = env.data.drag(made2.fd, made.fd, DOBJ_EFFECT_COPY);
+      const effect = effectFor(row, mods);
+      const r = env.data.drag(made2.fd, made.fd, effect);
       if (r < 0) {
         account.refusedDrags += 1;
         return r;
       }
       account.drags += 1;
       account.drops.push({ row: i, name: row.name, offered: granted.map(fmtName) });
+      /* M21. WHAT WAS OFFERED, AND WHAT IS STILL OWED. `effectsOffered` is this program's ASK and
+       * `effects` is the kernel's answer, which are two different facts: the mask decides the
+       * first and only the kernel decides the second. `dragged` is what the receipt acts on — a
+       * MOVE completes by removing this path, so the path has to outlive the gesture's samples. */
+      account.effectsOffered.push({ row: i, name: row.name, effect });
+      dragged = { name: row.name, path: row.path };
       // THE TITLE IS THE ONLY TEXT THIS WINDOW HAS, so it is what says which file is moving.
       env.win.setTitle(made.fd, `${NAME} — dragging ${row.name}`);
       return 0;
@@ -2842,7 +3361,11 @@ export function run(env) {
             || Math.abs(at.y - press.y) >= DRAG_THRESHOLD_CSS_PX;
           if (!far) continue;
           dragging = true;
-          const began = startDrag(press.row);
+          /* THE MODIFIERS ARE READ FROM THE MOVE THAT CROSSED THE THRESHOLD and not from the press:
+           * a reader who presses, then holds Ctrl, then drags has asked for a copy, and Windows
+           * reads the modifier at the same moment. The record carries them already
+           * (`modifierBits`), so there is nothing to track. */
+          const began = startDrag(press.row, ev.mods);
           if (began < 0 && account.why) break;
           continue;
         }
@@ -2851,12 +3374,139 @@ export function run(env) {
         if (setLit(rowUnder(at.y))) repaint = true;
         continue;
       }
+      /* M21. A DRAG ARRIVED OVER THIS WINDOW. THE OFFER COMES WITH THE ENTER, so a target can say
+       * whether it could take the drop before the drop and before any bytes exist — which is what
+       * a format tag is for, and `src/bin/imgview.mjs` reads it the same way.
+       *
+       * NOTHING IS DRAWN FOR IT, and that is the absence of a DRAG_OVER rather than an omission: a
+       * list view's feedback is the row the pointer is over, and an ENTER carries ONE position
+       * (constraint 243). A highlight placed from it would sit under the pointer's first sample for
+       * the whole gesture and tell the reader the wrong row. */
+      if (ev.type === WEV_DRAG_ENTER) {
+        account.dragEnters += 1;
+        account.dragOffers.push({ at: "enter", formats: fmtsOf(ev.c).map(fmtName) });
+        continue;
+      }
+      if (ev.type === WEV_DRAG_LEAVE) {
+        account.dragLeaves += 1;
+        continue;
+      }
+      /**
+       * M21. A DROP, AND IT IS ALWAYS A COPY-IN.
+       *
+       * `WEV_DROP` CARRIES THE POSITION AND THE OFFER AND NO EFFECT, and there is no negotiation in
+       * this ABI (constraint 240) — so a target that `rename`d would be deciding an effect the
+       * SOURCE negotiated. The source completes a move when the kernel tells it the effect was one,
+       * which is the division the ABI already has and the one place it can be made.
+       *
+       * WHERE IT LANDS IS TAKEN ONCE, FROM `rowUnder` ALONE: a DIRECTORY row under the pointer
+       * takes it, and everything else in the window — a file row, a gap, the header, the status
+       * strip — lands in the open directory. That is the same arbitration the press takes for the
+       * drag and the band, for the same reason: a gesture re-decided downstream is a gesture that
+       * writes a file somewhere the reader was not pointing.
+       */
+      if (ev.type === WEV_DROP) {
+        account.dropsIn += 1;
+        // SURFACE PIXELS INTO CSS PIXELS. `WinHost.#dropPointAt` hands a SURFACED window surface
+        // px, which is `WEV_POINTER`'s unit and not the client box's (constraint 248).
+        const i = rowUnder(ev.b / S);
+        const into = i >= 0 && rows[i].dir ? rows[i].path : dir;
+        /* THIS WINDOW'S OWN DRAG, DROPPED BACK IN THE DIRECTORY IT CAME FROM, IS NOT A LANDING —
+         * AND IT IS NOT A REFUSAL EITHER. A drag's own window is a legitimate target, so the kernel
+         * delivers the drop (`src/kernel/dataobj.mjs`), and a gesture that began on a row here and
+         * ended over the list it began in arrives with every path already in `dir`. `landOne` would
+         * refuse once PER PATH for a reader who has made no choice at all, and the re-read behind it
+         * would cost a listing of a directory nothing changed. Saying so once and doing nothing is
+         * the answer; `WEV_DRAG_DONE` reads the same fact for the other half of the same gesture.
+         *
+         * A DROP ON A DIRECTORY ROW OF THIS SAME WINDOW IS STILL A MOVE-IN, which is why the test is
+         * `into === dir` and not "was this our drag". */
+        if (dragged && into === dir) {
+          lastDrop = { into, landed: 0 };
+          account.dropWhere.push({ into, row: i, landed: 0, of: 0, self: true });
+          env.std.say(env, `${NAME}: a drop of this window's own drag, back where it came from\n`);
+          continue;
+        }
+        const opened = env.data.open(DOBJ_WHERE_DROP, made.fd);
+        if (typeof opened === "number") {
+          refuse("a drop", `dataobj_open: ${env.std.errnoName(opened)}`, opened);
+          continue;
+        }
+        let list = [];
+        try {
+          const offered = fmtsOf(opened.offer);
+          account.dragOffers.push({ at: "drop", formats: offered.map(fmtName) });
+          if (!offered.includes(DOBJ_PATHS)) {
+            refuse("a drop", `offered ${offered.map(fmtName).join(", ")} and no path list`);
+            continue;
+          }
+          const got = env.data.get(opened.fd, DOBJ_PATHS);
+          if (typeof got === "number") {
+            refuse("a drop", `dataobj_get paths: ${env.std.errnoName(got)}`, got);
+            continue;
+          }
+          list = env.std.text(got).split("\0").filter((p) => p !== "");
+        } finally {
+          // THE FD IS THE REFERENCE: closing it is what returns the payload's bytes to the budget
+          // (constraint 241).
+          env.fs.close(opened.fd);
+        }
+        if (list.length === 0) {
+          refuse("a drop", "carried an empty path list");
+          continue;
+        }
+        const landed = [];
+        for (const from of list) {
+          const name = landOne(from, into, { moving: false, gesture: "a drop" });
+          if (name !== "") landed.push(name);
+        }
+        lastDrop = { into, landed: landed.length };
+        account.dropWhere.push({ into, row: i, landed: landed.length, of: list.length });
+        for (const name of landed) account.dropped.push({ name, into });
+        env.std.say(env, `${NAME}: a drop landed ${landed.length} of ${list.length} in ${into}\n`);
+        /* THE RE-READ IS PAID WHATEVER LANDED, which is `reread`'s own argument: a listing patched
+         * in place would make a refused landing indistinguishable from one that worked. A drop into
+         * a SUBDIRECTORY selects nothing here, because what it changed is not in this listing. */
+        if (reread(into === dir ? landed : [])) repaint = true;
+        continue;
+      }
       if (ev.type === WEV_DRAG_DONE) {
         /* THE SOURCE'S RECEIPT. A COPY source can ignore it; a MOVE source cannot, because effect
-         * 0 means the bytes went nowhere and the original must stay. This program only ever offers
-         * COPY, so what it does with it is report it. */
+         * 0 means the bytes went nowhere and the original must stay. */
         account.effects.push({ effect: ev.a, target: ev.b });
         env.win.setTitle(made.fd, `${NAME} — ${dir}`);
+        const moved = dragged;
+        dragged = null;
+        if ((ev.a | 0) !== DOBJ_EFFECT_MOVE || !moved) continue;
+        /* M21. A MOVE IS COMPLETED HERE, BY THE SOURCE, AND INTO THE BIN RATHER THAN BY `unlink`.
+         *
+         * THE RECEIPT SAYS THE DROP WAS DELIVERED AND NOT THAT IT WAS COLLECTED. The kernel reports
+         * an effect for an event that QUEUED (`src/kernel/dataobj.mjs`), and a target may still
+         * have refused the landing by name — an occupied destination, a format it cannot read. So
+         * an `unlink` here would destroy a file on the strength of a receipt that does not say what
+         * this program needs it to say, and the Bin is exactly the answer to that: the bytes leave
+         * the reader's directory, as a move must, and are one Restore away if nobody took them.
+         *
+         * A DROP ON THIS WINDOW'S OWN WINDOW MOVES NOTHING UNLESS IT LANDED SOMEWHERE ELSE. `b` is
+         * the target winid, so the one case where the source and the target are the same process is
+         * nameable — and it is TWO cases, not one: a gesture that ended over the list it began in
+         * landed nothing (the branch in `WEV_DROP` says so), while one that ended on a DIRECTORY ROW
+         * of this same list really did bring the file in, which is Explorer's commonest move. So the
+         * test is what the drop DID and not where it went, read from `lastDrop`: removing the
+         * original on the strength of a landing that did not happen is the defect, and leaving it on
+         * the strength of one that did turns a reader's move into a copy. */
+        const ownWindow = (ev.b | 0) === made.win;
+        const landedElsewhere = !!lastDrop && lastDrop.landed > 0 && lastDrop.into !== dir;
+        lastDrop = null;
+        if (ownWindow && !landedElsewhere) {
+          refuse(moved.name, "was dropped on its own window, so there is nothing to move");
+          continue;
+        }
+        if (binPathOnce(moved.name, moved.path)) {
+          account.movedOut.push(moved.name);
+          env.std.say(env, `${NAME}: ${moved.name} moved out; the original is in the Bin\n`);
+          if (reread([])) repaint = true;
+        }
         continue;
       }
       /**
@@ -2955,6 +3605,13 @@ export function run(env) {
           }
           if (sym === WKEY_DELETE) {
             if (runVerb(V_DELETE, focus)) repaint = true;
+            continue;
+          }
+          /* M21's KEYSYM. F5 re-lists, which is Windows' binding, and it is NOT a verb of `runVerb`:
+           * no menu row runs it, so the one thing that function buys — a key and a row that cannot
+           * come to mean different things — has nothing to hold here. */
+          if (sym === WKEY_F5) {
+            if (refresh()) repaint = true;
             continue;
           }
           /* ALT+LEFT IS BACK, AND IT IS TESTED BEFORE THE BARE KEYSYM. The modifier changes the
@@ -3063,5 +3720,17 @@ export function run(env) {
     + `${account.created.length} created, ${account.renames} renamed, `
     + `${account.deleted.length} deleted, ${account.copies} copy and ${account.cuts} cut to the `
     + `clipboard, ${account.pastes} paste(s) landing ${account.pasted.length} file(s)\n`);
+  /* M21: THE BIN, THE REFRESH AND BOTH ENDS OF A DRAG, ON THEIR OWN LINE. `binned` against
+   * `permanent` is which delete a reader got; `restored` against the refusals on the line above is
+   * whether a Restore found its destination free; `refreshKept` is the half of F5 that is a clause.
+   * `stranded` is the record this process could not take back, which is a fact about the Bin's
+   * contents and not about the gesture that left it. */
+  env.std.say(env, `${NAME}: ${account.bin.binned.length} to ${binRoot}, `
+    + `${account.bin.permanent} permanently, ${account.bin.restored.length} restored, `
+    + `${account.bin.stranded} record(s) stranded by this process and `
+    + `${account.bin.strandedRecords} standing in the Bin; ${account.refreshes} F5 keeping `
+    + `${account.refreshKept} selected row(s); ${account.dropsIn} drop(s) in from `
+    + `${account.dragEnters} enter(s) landing ${account.dropped.length} file(s), `
+    + `${account.movedOut.length} moved out\n`);
   return { exit: 0, ...account };
 }

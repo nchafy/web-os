@@ -561,7 +561,7 @@ is asserted, which is the safe default and reversible.
 
 ---
 
-### M21 — the Recycle Bin, refresh, and a drop target · 2.5 d
+### M21 — the Recycle Bin, refresh, and a drop target · 2.5 d · DONE
 
 **Closes.** R15, R18, R19, A11.
 
@@ -588,6 +588,43 @@ MUST fail. `move-forced-copy` ignores the modifier: the effect clause MUST fail 
 — no new filesystem concept. If a sidecar cannot survive a torn journal, `scripts/fsfuzz.py` says so
 in three seconds, and the Bin becomes a real inode flag, which is a week and a constraint rather than
 two days.
+
+> **CORRECTION, from the measurement. The assumption HELD, and the fallback was not needed — but
+> three of this row's statements were wrong and are corrected rather than edited away.**
+> `bench/m21-bin/probe.mjs` is the measurement, 26,403 cases in 0.54 s, and constraints **309**,
+> **310** and **311** carry what it established. M21 stayed 2.5 d.
+>
+> 1. **A RESERVED DIRECTORY PLUS AN ORIGIN RECORD IS ENOUGH AND THE BIN NEEDS NO INODE FLAG** — but
+>    only because the origin record is a **SYMLINK** and not the "sidecar" this row said. A symlink
+>    target rides ONE journal record, is covered by that record's CRC-32, and is inside
+>    `scripts/fsfuzz.py`'s gate; a sidecar held as file data is an OPFS blob, and **a blob carries no
+>    integrity field at all** (`grep -n "crc\|checksum" src/kernel/store.mjs` → nothing). So a
+>    bit-rotted origin path would be undetectable and unfuzzable, and the fuzz gate this row named
+>    as the arbiter would never have been asked. It also costs three records instead of two and adds
+>    a half-state the symlink does not have (765 `empty-origin` cases). Constraint **309**.
+> 2. **THE ORDER MATTERS AND RESTORE'S IS FORCED, WHICH THIS ROW DID NOT ANTICIPATE.** A delete's
+>    order is a judgement — both half-states are recoverable — but a restore MUST move the bytes
+>    home before dropping the origin record. The other order left **1,260 of 2,017** cases with
+>    bytes in the Bin that nothing names, and the one fact needed to repair that is the fact that was
+>    lost. It is the only irreversible half-state in the whole sweep, and it is in restore and not in
+>    delete. Constraint **310**.
+> 3. **"A RESTORE ONTO AN OCCUPIED PATH REFUSES BY NAME" MUST BE A USERLAND PRE-CHECK, AND NO TEAR
+>    IS INVOLVED.** `vfs.rename` has no `RENAME_NOREPLACE`: over a plain file it refuses nothing and
+>    `applyOp`'s RENAME arm clobbers the occupant and frees its inode in one record
+>    (`renameRefused: null`, `freedInode: 8`, `clobbered: true`). A restore that trusted the
+>    filesystem would destroy, silently, a file the reader created in the meantime. Constraint
+>    **311**.
+>
+> **THE ABI FIGURES IN THIS ROW'S §ABI WERE BOTH STALE AND ARE NOW RE-DERIVED.** "The document claims
+> 71 calls and `SYS_NAME` is 60" was wrong on both sides: `SYS_NAME` was 61 after M20 and is **63**
+> after this row, and `docs/ABI.md`'s own 71 was an arithmetic over `research/gap-03.md` rather than
+> a count of itself — the true figure is **75 SPECIFIED**. `docs/ABI.md` §The ABI now states both,
+> names the 16 documented-but-absent calls and the 4 realised-but-unspecified ones as DATA, and
+> carries the identity `specified = realised + documented-but-absent − realised-but-unspecified`
+> with a command that checks its own inputs. **Eight names joined the absent list that the document
+> never had** — `mount`, `umount`, `socketpair`, `send`, `recv`, `shutdown`, `shm_create`,
+> `shm_attach` — because all eight satisfy the document's own criterion and the list was short by
+> them.
 
 ---
 

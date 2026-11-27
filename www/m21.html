@@ -1,0 +1,1981 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>web-os M21 — the Recycle Bin, refresh, and a drop target</title>
+<style>
+/* STRUCTURAL ONLY. The Aero skin comes from `src/wm/aero.mjs`, as M11's through M20's pages do it. */
+body { background:#0a0e14; color:#dde; font:13px/1.5 ui-monospace,Menlo,monospace; margin:0 }
+/* FIXED HEIGHT, for M13's measured reason: this log grows as the proofs run, and a growing <pre>
+   moves the desktop — and every window on it — out from under every rect the page publishes. */
+#log { margin:8px; white-space:pre-wrap; height:132px; overflow:auto }
+.ok { color:#8f8 } .bad { color:#f88 }
+/* TALL ENOUGH FOR TWO WINDOWS SIDE BY SIDE, which the drag proof needs: `WinHost.#frameAt`
+   hit-tests the release, so a target overlapped by the source takes no drop. */
+#desktop { position:relative; height:540px; margin:8px; overflow:hidden }
+</style>
+</head>
+<body>
+<pre id="log">M21 starting…</pre>
+<div id="desktop"></div>
+<script>
+  globalThis.M21 = {
+    state: 'starting', isolated: self.crossOriginIsolated === true,
+    proofs: {}, errors: [], faults: [], notes: [], phase: '',
+    fetches: { kernels: 0, fetches: 0, retries: 0, timeouts: 0, transport: 0 },
+    bootRetries: 0,
+  }
+</script>
+<script type="module">
+/**
+ * M21's page: THE RECYCLE BIN, F5, AND A `files` WINDOW THAT IS A DROP TARGET.
+ *
+ * THE PRODUCT IS AT THE BARE URL and `?proofs=1` is the harness (constraint 283). The proofs stage
+ * fixture windows and then block in `gestureAsker`, which looks exactly like a broken product.
+ *
+ *   PROOF 1  bin: A DELETE LEAVES THE BYTES REACHABLE FROM THE BIN, AND A RESTORE RETURNS THEM —
+ *            COMPARED AS BYTES AND NOT AS A ROW THAT REAPPEARED (plan §M21). Two driven deletes
+ *            leave two payloads and two ORIGIN RECORDS; `stat` says each record is a SYMBOLIC LINK,
+ *            which is the measurement's decisive condition (`bench/m21-bin/probe.mjs`: a journal
+ *            record carries a CRC-32 and an OPFS blob carries none); the Bin's own listing is the
+ *            payloads and NOT the records, which is condition 4's join direction; and a driven
+ *            Restore puts one back, re-read byte for byte through `wc` and `grep` out of separate
+ *            processes
+ *   PROOF 2  refuse: A RESTORE ONTO AN OCCUPIED PATH REFUSES BY NAME, ERRNO ASSERTED. The origin
+ *            path is re-created with DIFFERENT BYTES between the delete and the restore, which is
+ *            the only world the refusal is about — `vfs.rename` has no `RENAME_NOREPLACE` and over
+ *            a plain file frees the occupant's inode (measured), so the pre-check is userland's and
+ *            `--restore-overwrites` is the world where a reader's own file is destroyed by a
+ *            restore that reports success. A payload with NO record gets a DISABLED Restore row,
+ *            read off the shell's own button
+ *   PROOF 3  drag: A CROSS-WINDOW DRAG WITH CTRL HELD REPORTS `DOBJ_EFFECT_COPY` WITH THE SOURCE
+ *            STILL PRESENT, and a PLAIN drag between two session-tree windows reports
+ *            `DOBJ_EFFECT_MOVE` with the source gone AND IN THE BIN with its record. Both halves,
+ *            because the shipped rule diverges from the row's wording and the divergence is the
+ *            Bin's: a MOVE source cannot verify the collection (constraint 245), so the original
+ *            goes to the Bin rather than to `unlink` — no Bin, no safe move. A THIRD drag onto a
+ *            name the target already holds is refused EEXIST, which is `--paste-clobbers` reaching
+ *            a DROP. `www/m10.html` is the precedent for driving it as a REAL mouse
+ *   PROOF 4  refresh: F5 RE-LISTS AND THE SELECTION SURVIVES FOR THE ROWS THAT SURVIVE. Two rows
+ *            are selected with REAL clicks, then the directory is changed UNDER the window by
+ *            separate processes — one selected row removed, one new row added — and F5 shows the
+ *            new row, loses the old one, and keeps the selection for the survivor alone
+ *
+ * EVERY POINTER GESTURE HERE IS REAL INPUT and the page drives none of it: a synthesised
+ * `PointerEvent` is `isTrusted === false` (constraint 175).
+ *
+ * THE TREE IS IN THE SESSION'S OWN WRITABLE COPY (`std.HOME_DIR`, D40) and NOT in `/tmp`, which is
+ * where M20's page put its fixture. That is forced rather than chosen: the Bin is
+ * `FILES_METRICS.binDirIn(HOME_DIR)` and `src/bin/files.mjs` bins only a path UNDER that tree — a
+ * cross-volume `rename` is not a thing the filesystem does, so a `/tmp` delete is permanent and
+ * every clause below would be about the world M21 does not change.
+ *
+ * WHAT THIS PAGE CANNOT PROVE, stated rather than quietly skipped:
+ *
+ *   1. F5 IS SYNTHESISED, AND THE PAGE SAYS SO AND MEASURES IT. `scripts/cdp.py`'s `KEYS` table has
+ *      no row for `F5`, so `page.press('F5')` raises `no virtual key code recorded` — the same gap
+ *      M20's page records for `F2` and `Delete`. The keysym MAPPING is `src/wm/winhost.mjs`'s
+ *      `KEYSYM_BY_KEY` and is M18's subject, already driven with trusted input for the arrows; what
+ *      a synthesised key cannot prove here is the BINDING, not the verb. So the page dispatches one
+ *      `KeyboardEvent` with `key: 'F5'`, asserts `host.keyCounts().synthetic` rose by exactly one
+ *      and `trusted` did not, and the SELECTION it survives was made with real clicks.
+ *      `"F5": (116, "")` in that table is the one line that would close it, in a file this slice
+ *      does not own.
+ *   2. THE BIN'S DESKTOP ICON OPENS NOTHING, AND IT IS MEASURED AND NOT REASONED. A double-click on
+ *      it on this page's own live desktop left the shell at **2 taskbar buttons before and 2
+ *      after**, with the window titles `["Desktop", "files — /Users/Default", "Terminal"]`
+ *      unchanged and no error or fault anywhere. `src/bin/desktop.mjs` publishes the row as
+ *      `["files", "--bin"]` and `src/bin/files.mjs` has no `--bin` in its long-option loop, so
+ *      `std.getopt` answers `bad: "--"` and the program exits 2 with a usage complaint to stdout
+ *      before any window opens — which from a reader's side is a live-looking icon that does
+ *      nothing. A bare path operand is NOT a substitute: `ensureBin` is reached only from the
+ *      delete path, so `files /Users/Default/$Recycle.Bin` answers ENOENT on a session that has
+ *      deleted nothing, which is why this page's own Bin window is opened AFTER its deletes. The
+ *      finding is pushed to `globalThis.M21.notes` and printed in the help rather than routed
+ *      around; the fix is one line in a file this slice does not own.
+ */
+import { setHostControls } from '/src/wm/winhost.mjs'
+import { setSurfaceControls } from '/src/wm/surface.mjs'
+import {
+  DL_CLIP, DL_TEXT, DLT_RIGHT, DLT_MONO, WITEM_CONTEXT,
+  DOBJ_EFFECT_COPY, DOBJ_EFFECT_MOVE, decodeDrawOps, textOfOps,
+} from '/src/abi.mjs'
+import { FILES_METRICS } from '/src/bin/files.mjs'
+/* THE SESSION TREE'S ROOT, IMPORTED AND NEVER WRITTEN. `www/shell.mjs` already imports this same
+ * binding for `seedState`, which is the precedent: a page may import `src/libos/std.mjs` because it
+ * is pure userland convention, and `/Users/Default` spelled here would be the second copy that
+ * makes a delete land somewhere the Bin is not. */
+import { HOME_DIR } from '/src/libos/std.mjs'
+import {
+  spawnProgram, resultOf, ask as askKernel, until, gestureAsker, typeSynthetic,
+} from '/www/pagekernel.mjs'
+import {
+  bootShell, stageDesktop, place, requireIsolation, PROGRAMS, DESKTOP_HELP,
+} from '/www/shell.mjs'
+
+const out = document.getElementById('log')
+const desktop = document.getElementById('desktop')
+/** AND IT SCROLLS TO THE NEWEST LINE, which the other pages' copies of this function do not.
+ *  The log is a FIXED-HEIGHT box for M13's reason — a growing `<pre>` moves the desktop and every
+ *  rect the page publishes with it — so the lines a reader most needs are the ones that have just
+ *  scrolled out of it. MEASURED: the first Firefox render of this page showed the `sayState` block
+ *  and NONE of the help, including the line saying the desktop's Bin icon opens nothing. In a
+ *  second engine this log is the only channel there is (CLAUDE.md), and a screenshot cannot scroll. */
+const say = (s) => {
+  out.textContent += s + '\n'
+  out.scrollTop = out.scrollHeight
+}
+const params = new URLSearchParams(location.search)
+
+/** A FIXED WAIT, spelled as the one waiting primitive this project has: `until` over a predicate
+ *  that never holds returns -1 after `ms`. */
+const pause = (ms) => until(() => false, ms)
+
+const CFG = {
+  /** THE HARNESS IS THE OPT-IN. The bare URL is the desktop (constraint 283). */
+  proofs: params.get('proofs') === '1',
+  /* `src/bin/files.mjs`'S OWN DECLARED FLAGS, passed on argv where every fixture is spawned. M17's
+   * precedent and its reason: the worlds they select live inside the program, so a boot cfg could
+   * not reach them and a flag nobody consumed would be a green run over an unmodified world. */
+  restoreOverwrites: params.get('restore_overwrites') === '1',
+  moveForcedCopy: params.get('move_forced_copy') === '1',
+  staleListing: params.get('stale_listing') === '1',
+  pasteClobbers: params.get('paste_clobbers') === '1',
+}
+globalThis.M21.config = CFG
+
+/* THE PAGE-SIDE CONTROLS, SET IN FULL AND ON BOTH PATHS. They are MODULE state, so a page that sets
+ * none still has to say none: otherwise the other two are left holding whatever the last page in
+ * this realm asked for. M21 adds no page-side control of its own — all four of its worlds live
+ * inside `src/bin/files.mjs` — so "none, and said so" is the whole of this call. */
+setSurfaceControls({})
+setHostControls({})
+
+const FILES = '/src/bin/files.mjs'
+const SH = '/src/bin/sh.mjs'
+const LS = '/src/bin/ls.mjs'
+const STAT = '/src/bin/stat.mjs'
+const WC = '/src/bin/wc.mjs'
+const GREP = '/src/bin/grep.mjs'
+const MKDIR = '/src/bin/mkdir.mjs'
+const TOUCH = '/src/bin/touch.mjs'
+const RM = '/src/bin/rm.mjs'
+
+/**
+ * THE TREE THE PROOFS MUTATE, IN THE SESSION'S OWN WRITABLE COPY.
+ *
+ * `HOME_DIR` IS THE MOUNT AND IT IS NOT A PREFERENCE. `src/bin/files.mjs`'s `binnable` is
+ * `underDir(path, std.HOME_DIR) && !underDir(path, binRoot)`, so a row anywhere else is deleted
+ * FINALLY and no Bin clause below would have a subject. M20's page used `/tmp` for the opposite
+ * reason — it wanted the permanent case — and the two fixtures are deliberately in different trees.
+ *
+ * `BIN` COMES FROM `FILES_METRICS.binDirIn` AND IS NEVER SPELLED HERE. The program exports that
+ * function for exactly this: a page that wrote `$Recycle.Bin` would be the second copy, and a drift
+ * in it arrives as a check asserting about a directory the program does not use.
+ *
+ * BOTH THE TREE AND THE BIN ARE REMOVED FIRST. OPFS outlives a page load and the Bin ACCUMULATES by
+ * design, so a run over whatever the last one left would count payloads nobody chose — and
+ * `freeFrom` would number the second run's payload `bin-me (2).txt`, which no clause here names.
+ */
+const ROOT = `${HOME_DIR}/m21`
+const BIN = FILES_METRICS.binDirIn(HOME_DIR)
+/** The drag's SOURCE and TARGET directories. Two of them, because a drop into the directory the
+ *  drag began in lands nothing by design (`WEV_DROP`'s `into === dir` branch) and is refused by
+ *  name — so a one-directory fixture could not reach either effect clause. */
+const SRC = `${ROOT}/src`
+const DST = `${ROOT}/dst`
+/** F5's own directory, so the rows that appear and vanish under the window cannot disturb a Bin
+ *  clause or a drag clause. */
+const F5D = `${ROOT}/f5`
+
+/** The row deleted, found in the Bin, and restored. Its bytes are the proof. */
+const BIN_ME = 'bin-me.txt'
+/** The row deleted and then BLOCKED: the origin path is re-created with different bytes before the
+ *  restore, which is the only state the EEXIST refusal is about. */
+const TAKEN_BACK = 'taken-back.txt'
+/**
+ * A THIRD ROW DELETED AND NEVER RESTORED, AND IT IS A CONTROL-SCOPING FIXTURE RATHER THAN A SPARE.
+ *
+ * `rows[].origin` is `readlink`'s answer and the account carries it at EXIT, so a record's target
+ * can only be read off a payload that is still a row then. Reading it off `TAKEN_BACK` worked and
+ * MEASURED WRONG: under `--restore-overwrites` that restore lands, the row leaves, and
+ * `theRecordNamesTheOrigin` went red in proof 1 — a control for a userland pre-check turning a
+ * clause about a symlink's target, in a different proof. This row is restored in NO world, so the
+ * reading is the same in all of them.
+ */
+const STAYS = 'stays-binned.txt'
+/** A PAYLOAD WITH NO ORIGIN RECORD, made by `touch`ing it straight into the Bin. It is the mirror
+ *  of a stranded record: a row a reader can see, cannot restore, and whose Restore row is therefore
+ *  published DISABLED. Made with `touch` rather than by removing a record, so no clause rests on
+ *  `rm` being able to unlink a symlink. */
+const ORPHAN = 'orphan.txt'
+/** The Ctrl-dragged row: COPY, and it must still be in `SRC` afterwards. */
+const CTRL_ME = 'ctrl-me.txt'
+/** The plain-dragged row: MOVE, and it must be GONE from `SRC` and present in the Bin. */
+const MOVE_ME = 'move-me.txt'
+/** ONE ROW THE TARGET ALREADY HOLDS, AND IT IS NOT DECORATION. `src/bin/files.mjs` REFUSES an
+ *  empty directory named on the command line and exits — "the only honest place for the message is
+ *  stdout and the only honest outcome is an exit", because there is no window yet to say it in — so
+ *  a drop target staged empty never surfaces at all. Measured: the first run of this page died with
+ *  `the files window on .../dst never surfaced`. Nothing below drags or asserts this row; it exists
+ *  so the target is a window. */
+const DST_FILLER = 'already-here.txt'
+/** F5's three rows: one selected row that survives, one selected row that does not, and one that
+ *  arrives while the window is not looking. */
+const KEEP_SEL = 'keep-me.txt'
+const GONE_SEL = 'gone-me.txt'
+const NEW_ROW = 'new-row.txt'
+
+/**
+ * THE BYTES EACH FIXTURE FILE HOLDS, WRITTEN BY `echo` THROUGH A REAL SHELL REDIRECTION.
+ *
+ * THE PAGE CANNOT READ A FILE — it holds no fd and makes no syscall — so "the same bytes came back"
+ * has to be read through programs, and the only ones that answer in a RESULT ROW are `wc` (a byte
+ * count) and `grep` (a status and a match count). So the page WRITES the bytes rather than copying
+ * someone else's, and `fileIs` below closes the three readings into one arithmetic. M20's page
+ * states it in full at its own `MARKER`.
+ *
+ * EVERY STRING IS A DIFFERENT LENGTH AS WELL AS DIFFERENT BYTES, so a count alone discriminates and
+ * the grep is not load-bearing on its own.
+ */
+const BIN_TEXT = 'M21-BIN-AND-BACK'
+const BACK_TEXT = 'M21-BLOCKED-RESTORE-PAYLOAD'
+/** What OCCUPIES the origin path while the restore is attempted. It is what must still be there
+ *  afterwards: `--restore-overwrites` is the world where these bytes are destroyed. */
+const OCCUPIED_TEXT = 'M21-THE-READERS-OWN-FILE-MADE-AFTER-THE-DELETE'
+const STAYS_TEXT = 'M21-BINNED-AND-LEFT-THERE'
+const CTRL_TEXT = 'M21-COPIED-BY-A-CTRL-DRAG'
+/**
+ * WHAT THE SOURCE IS REWRITTEN TO BETWEEN THE FIRST DROP AND THE SECOND, AND IT IS WHAT MAKES THE
+ * OCCUPIED-NAME CLAUSE DISCRIMINATE.
+ *
+ * MEASURED, AND THE FIRST VERSION OF THIS PAGE GOT IT WRONG. Dragging the same row twice with the
+ * same bytes left `theTargetsCopySurvivedTheSecondDrop` GREEN under `--paste-clobbers`: the second
+ * drop really did replace the target's file, and the replacement was byte-identical — so a clause
+ * claiming "the reader's copy survived" was an assertion over a constant, which inverts and fires
+ * and verifies nothing (CLAUDE.md on `--prove-failure`). `landOne` re-reads the source path at DROP
+ * time, so rewriting it here is what makes a clobber visible as bytes.
+ */
+const CTRL2_TEXT = 'M21-THE-SOURCE-WAS-REWRITTEN-BEFORE-THE-SECOND-DROP'
+const MOVE_TEXT = 'M21-MOVED-BY-A-PLAIN-DRAG-INTO-THE-BIN'
+const FILLER_TEXT = 'M21-ALREADY-IN-THE-TARGET'
+const KEEP_TEXT = 'M21-STILL-SELECTED-AFTER-F5'
+const GONE_TEXT = 'M21-SELECTED-AND-THEN-REMOVED'
+
+/** `echo` adds the newline unless `-n`, so a file is one byte longer than the string it was given
+ *  (`src/bin/echo.mjs`). ONE FUNCTION, because five clauses need the figure. */
+const echoBytes = (text) => text.length + 1
+
+/** The rows each window opens on, in the order `SORT_DEFAULT` puts them: directories first, then
+ *  names ascending. WRITTEN OUT rather than sorted here, which is M19's rule — a page that computed
+ *  the order would be a second copy of `compareRows`, and a second comparator agrees with the first
+ *  about every bug it shares. */
+const ROOT_ROWS = Object.freeze([DST, F5D, SRC].map((p) => p.slice(ROOT.length + 1))
+  .concat([BIN_ME, STAYS, TAKEN_BACK]))
+const BIN_ROWS = Object.freeze([BIN_ME, ORPHAN, STAYS, TAKEN_BACK])
+const SRC_ROWS = Object.freeze([CTRL_ME, MOVE_ME])
+const DST_ROWS = Object.freeze([DST_FILLER])
+const F5_ROWS_BEFORE = Object.freeze([GONE_SEL, KEEP_SEL])
+const F5_ROWS_AFTER = Object.freeze([KEEP_SEL, NEW_ROW])
+
+/**
+ * THE TWO ROW MENUS, AS LABELS AND AS INDICES.
+ *
+ * `LABELS` is what the POPUP draws: separators are not `.shell-row` elements, so they are absent
+ * here. `INDEX` is what `WEV_ITEM` reports, and separators ARE counted in it — the shell indexes the
+ * array it was handed and the kernel validates the index against the same array.
+ *
+ * OUTSIDE THE BIN THE ROW MENU IS BYTE-IDENTICAL TO M20's, which is a clause and not a remark: a
+ * milestone that added a row to every row menu would have moved `check_m20`'s `ROW_MENU_ROWS`
+ * silently. INSIDE the Bin, `Restore` and a separator are PREPENDED, so Restore is item 0 and every
+ * other index shifts by two.
+ */
+const ROW_MENU_LABELS = Object.freeze(['Open', 'Cut', 'Copy', 'Delete', 'Rename'])
+const BIN_MENU_LABELS = Object.freeze(['Restore', 'Open', 'Cut', 'Copy', 'Delete', 'Rename'])
+const ROW_MENU_INDEX = Object.freeze({
+  // Open, ─, Cut, Copy, ─, Delete, Rename
+  Open: 0, Cut: 2, Copy: 3, Delete: 5, Rename: 6,
+})
+const BIN_MENU_INDEX = Object.freeze({
+  // Restore, ─, Open, ─, Cut, Copy, ─, Delete, Rename
+  Restore: 0, Open: 2, Cut: 4, Copy: 5, Delete: 7, Rename: 8,
+})
+/** How many rows each menu hands the kernel, separators included — which is what `win_menu` returns
+ *  and what `win-state` publishes as a window's `menu`. */
+const ROW_MENU_ROWS = 7
+const BIN_MENU_ROWS = 9
+
+/** Chrome's own modifier bitmask, which `Input.dispatchMouseEvent` and `Input.dispatchKeyEvent` both
+ *  take: Alt 1, Ctrl 2, Meta 4, Shift 8 (`scripts/cdp.py`). M18's and M19's pages name the same
+ *  numbers; a page that sent `ctrlKey: true` instead would be describing a synthesised event. */
+const CHROME_MOD_CTRL = 2
+
+/**
+ * THE WINDOW BOXES, CSS px, and the two side-by-side ones are the drag proof's whole fixture.
+ *
+ * `WinHost.#dragRelease` HIT-TESTS THE RELEASE with `#frameAt`, so a target the source OVERLAPS
+ * takes no drop — and a press on a file row RAISES the source, which is exactly how M10's fixture
+ * came to drop back onto its own window and fail five clauses about the receiver with nothing wrong
+ * in the product. So the two are disjoint by construction and `dropUnder` below reads back which
+ * element the point really found.
+ *
+ * AT THE TOP-LEFT, which is M18's, M19's and M20's corner and is here for its MEASURED reason: a
+ * dispatched mouse event carries a VIEWPORT coordinate, so a point past `innerWidth`/`innerHeight`
+ * reaches nothing at all and every clause goes red with nothing saying why. `onScreen` is the guard.
+ *
+ * TALL ENOUGH THAT THE LIST DOES NOT SCROLL AND THERE IS STILL EMPTY SPACE UNDER THE LAST ROW: every
+ * rectangle below is located at `scroll === 0`, and an empty-space menu must be raised INSIDE the
+ * clipped viewport.
+ */
+const ONE_BOX = { x: 20, y: 10, w: 520, h: 300 }
+const SRC_BOX = { x: 20, y: 10, w: 400, h: 250 }
+const DST_BOX = { x: 460, y: 10, w: 400, h: 250 }
+
+globalThis.M21.proofs = { bin: null, refuse: null, drag: null, refresh: null }
+
+const ask = gestureAsker(globalThis.M21)
+
+/** The host and the shell, once there are any. Published for a driver in another engine. */
+let HOST = null
+let SHELL = null
+
+/** winid -> the last display-list batch the kernel sent for it, as bytes. THE PAGE'S OWN
+ *  INSTRUMENT, M16's: a `Surface` keeps counts and pixels, not ops, so the only way to read back
+ *  WHICH ROWS a program drew is to keep the batch the kernel announced. */
+const LAST_BATCH = new Map()
+/** How many batches each window has had, so a step can wait for a REPAINT rather than a timer. */
+const BATCHES = new Map()
+
+/** The device-pixel ratio, read where it is true. THE DPR AXIS IS THE CHECK'S: a run is loaded at
+ *  whatever ratio the harness asked for and this page measures what it was given, so an emulation
+ *  that silently failed is visible as a ratio that is not the one asked for (constraint 264). */
+const dpr = () => window.devicePixelRatio || 1
+
+/** One listener, installed by both paths BEFORE the host's — `kernelBoot` calls its listeners in
+ *  order, so a listener added first sees every batch the host is about to replay. */
+function captureBatch (m) {
+  if (m.t !== 'win-draw') return
+  const id = m.win | 0
+  LAST_BATCH.set(id, m.ops instanceof Uint8Array ? m.ops : new Uint8Array(m.ops || 0))
+  BATCHES.set(id, (BATCHES.get(id) || 0) + 1)
+}
+
+/* ---- reading a list back out of the display list -------------------------------------------- */
+
+/** The ops of one window's last batch. */
+function opsOf (entry) {
+  const bytes = LAST_BATCH.get(entry.id)
+  if (!bytes || !bytes.length) return []
+  return decodeDrawOps(bytes, bytes.length)
+}
+
+/** Every text run in a batch, through the ABI's own codec. `textOfOps` is the declared inverse of
+ *  the `encodeTextRun` the program drew with, so these are the program's own strings and not a
+ *  second opinion about the encoding (constraint 293). */
+function textRuns (ops) {
+  const runs = []
+  for (let i = 0; i < ops.length; i += 1) {
+    if (ops[i].op !== DL_TEXT) continue
+    const got = textOfOps(ops, i)
+    if (!got) { runs.push({ text: null, at: i, x: 0, y: 0, flags: 0 }); continue }
+    runs.push({ text: got.text, at: i, x: ops[i].a0, y: ops[i].a1, flags: ops[i].flags })
+    i += got.records - 1
+  }
+  return runs
+}
+
+/** THE ROW NAMES, IN LAYOUT ORDER, AS THE PROGRAM DREW THEM. Structural and not positional, which is
+ *  M19's reason it works at any ratio: after the clip, left-aligned and NOT monospaced names the
+ *  rows exactly, with no coordinate in the test. The `DLT_MONO` exclusion is M20's — an open rename
+ *  field draws its draft monospaced, and without it the draft would read as a row name. */
+function namesOf (entry) {
+  const ops = opsOf(entry)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  if (clipAt < 0) return []
+  return textRuns(ops)
+    .filter((r) => r.at > clipAt && typeof r.text === 'string'
+      && (r.flags & DLT_RIGHT) === 0 && (r.flags & DLT_MONO) === 0)
+    .sort((a, b) => a.y - b.y)
+    .map((r) => r.text)
+}
+
+/** The status strip's position statement, which is the program's own word for whether its list
+ *  scrolls at all: `N items` when `scrollMax` is 0 and `a-b of N` when it is not. It is the ONLY
+ *  `DLT_RIGHT` run AHEAD of the clip. */
+const ITEMS_RE = /^(\d+) items?$/
+function positionLine (entry) {
+  const ops = opsOf(entry)
+  const clipAt = ops.findIndex((op) => op.op === DL_CLIP)
+  for (const run of textRuns(ops)) {
+    if (typeof run.text !== 'string') continue
+    if (clipAt >= 0 && run.at > clipAt) break
+    if ((run.flags & DLT_RIGHT) !== 0) return run.text
+  }
+  return ''
+}
+
+/** Surface pixels per CSS pixel, MEASURED off the canvas — which is what `FILES_METRICS`'s own
+ *  docstring prescribes for a driver. */
+const scaleOf = (entry) => entry.surface.w / entry.surface.extent().cssW
+
+/** THE CLIENT WIDTH THE PROGRAM IS LAYING OUT IN, CSS px, read out of its own `DL_CLIP`. `viewBox`
+ *  spans the whole client width, so the clip op carries that width in surface px and dividing by the
+ *  measured scale returns the program's own number. */
+function clientWidthOf (entry) {
+  const ops = opsOf(entry)
+  const clip = ops.find((op) => op.op === DL_CLIP)
+  if (clip) return clip.a2 / scaleOf(entry)
+  return entry.surface.extent().cssW
+}
+
+/** EVERYTHING THIS PAGE CAN SEE OF ONE `files` WINDOW, in one object. Every row is NAMED and never
+ *  numbered across a gesture: a verb inserts and removes rows, so an index taken before one names a
+ *  different file after it. */
+function listState (entry) {
+  return {
+    title: entry.win.titleText,
+    names: namesOf(entry),
+    position: positionLine(entry),
+    wCss: Math.round(clientWidthOf(entry) * 100) / 100,
+    scale: Math.round(scaleOf(entry) * 1000) / 1000,
+    batches: BATCHES.get(entry.id) || 0,
+  }
+}
+
+/* ---- aiming real input ---------------------------------------------------------------------- */
+
+/** THE VIEWPORT BOUND, as ONE test every aim applies. `Input.dispatchMouseEvent` takes a VIEWPORT
+ *  coordinate, so a point past `innerWidth` is delivered to nothing — no error, no event, and a page
+ *  that waited for a repaint simply reports a red clause. That is what the first run of M18's page
+ *  did, eleven times. A harness MUST fail when it cannot reach what it was pointed at. */
+function onScreen (at, what, where = '') {
+  if (!at) throw new Error(`${what}: there is no measurable rect to aim at`)
+  if (at.x < 0 || at.y < 0 || at.x >= window.innerWidth || at.y >= window.innerHeight) {
+    throw new Error(`${what} is at client ${at.x},${at.y}, outside a `
+      + `${window.innerWidth}x${window.innerHeight} viewport — a dispatched mouse event carries a `
+      + `VIEWPORT coordinate, so nothing would receive it.${where ? ` ${where}` : ''}`)
+  }
+  return at
+}
+
+/** A POINT INSIDE THE WINDOW'S CLIENT AREA, in VIEWPORT coordinates. NO SCALE IS INVOLVED AND THAT
+ *  IS DELIBERATE: `FILES_METRICS`'s docstring states it — "a driver working in page coordinates
+ *  needs no scale at all, because the canvas's CSS box IS the client area these are measured in". */
+function viewportPoint (entry, xCss, yCss, what) {
+  const r = entry.surface.el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the files surface has no measurable rect to aim ${what} at`)
+  }
+  return onScreen({ x: Math.round(r.left + xCss), y: Math.round(r.top + yCss) }, what,
+    `The frame is at ${Math.round(r.left)},${Math.round(r.top)} `
+    + `${Math.round(r.width)}x${Math.round(r.height)}`)
+}
+
+/** Where the row named `name` is, aimed at the middle of it. BY NAME, because a verb reorders the
+ *  list: the index is looked up in the state the page has just read, and a name that is not in it is
+ *  a THROW rather than an aim at row -1. */
+function pointAtRow (entry, state, name) {
+  const i = state.names.indexOf(name)
+  if (i < 0) throw new Error(`no row named ${name} in [${state.names.join(' ')}]`)
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, FILES_METRICS.rowMid(i, 0), `row ${name}`)
+}
+
+/**
+ * A POINT ON EMPTY SPACE AT THE BOTTOM OF THE CLIPPED VIEWPORT.
+ *
+ * BOTH BOUNDS ARE THE PROGRAM'S OWN. `rowTop(n)` is past the last row and `viewBox` is the rectangle
+ * the hit test is bounded by (`inViewport`), so a point between them finds no row AND is inside the
+ * viewport — which is exactly the arbitration's "press that found none", and the only press that
+ * raises the empty-space menu or lands a drop in the OPEN directory rather than on a row.
+ */
+const MENU_INSET = 6
+function pointLowOnEmptySpace (entry, state, what) {
+  const box = FILES_METRICS.viewBox(state.wCss, entry.surface.extent().cssH)
+  const afterLast = FILES_METRICS.rowTop(state.names.length, 0)
+  const yCss = box.y + box.h - MENU_INSET
+  if (!(afterLast <= yCss)) {
+    throw new Error(`there is no empty space at the bottom of the viewport: row `
+      + `${state.names.length} would start at ${afterLast} CSS px and the aim is ${yCss}. The `
+      + 'window is too short, so the gesture would land on a ROW')
+  }
+  const r = entry.surface.el.getBoundingClientRect()
+  return viewportPoint(entry, r.width / 2, yCss, what)
+}
+
+/**
+ * AIM AT ONE ROW OF THE SHELL'S POPUP, BY ITS LABEL — and read back the index the shell will report.
+ *
+ * `dataset.contextIndex` is `Taskbar.openContextMenu`'s own statement of which row this button is,
+ * so the page aims by the thing a reader sees and asserts against the number the shell will send. A
+ * page that computed the index itself would be a second copy of that `forEach`, separators and all.
+ *
+ * A LABEL THAT IS NOT THERE EXACTLY ONCE IS A THROW, with the whole popup printed. A driver that
+ * clicked whichever row came first would run a verb nobody chose, and `Restore` against
+ * `Restore 3 items` is precisely the pair that differs by a selection.
+ */
+function aimPopupRow (shell, label, what) {
+  const rows = [...shell.popup.querySelectorAll('.shell-row')]
+  const labels = rows.map((el) => (el.querySelector('.shell-label') || {}).textContent || '')
+  const hits = rows.filter((el, i) => labels[i] === label)
+  if (hits.length !== 1) {
+    throw new Error(`the popup has ${hits.length} row(s) labelled ${JSON.stringify(label)} among `
+      + `[${labels.join(' | ')}] — ${what}`)
+  }
+  const el = hits[0]
+  const r = el.getBoundingClientRect()
+  if (!(r.width > 0) || !(r.height > 0)) {
+    throw new Error(`the popup row ${JSON.stringify(label)} has no measurable rect — ${what}`)
+  }
+  return {
+    label,
+    index: Number(el.dataset.contextIndex),
+    disabled: el.disabled === true,
+    at: onScreen({ x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) },
+      `the popup row ${JSON.stringify(label)}`),
+  }
+}
+
+/** WHICH ELEMENT A DROP POINT REALLY FINDS, as a word. M10's own reading, and it is here for the
+ *  same reason: what decides where a release lands is the hit test and not a rectangle this page
+ *  computed, so a fixture whose windows came to overlap says which frame it found instead of failing
+ *  the clauses about the receiver. */
+function elementAt (entry, at) {
+  const el = document.elementFromPoint(at.x, at.y)
+  if (!el) return 'nothing'
+  if (entry && el === entry.surface.el) return 'the target canvas'
+  const frame = el.closest ? el.closest('.window') : null
+  const h2 = frame ? frame.querySelector('h2') : null
+  return frame ? `window:${((h2 || {}).textContent || '').trim()}`
+    : String(el.className || el.tagName)
+}
+
+/* ---- driving ------------------------------------------------------------------------------- */
+
+/**
+ * ASK FOR A GESTURE AND WAIT FOR WHAT IT WAS FOR.
+ *
+ * `wait` IS THE GESTURE'S OWN CONSEQUENCE AND NOT A TIMEOUT NOBODY TUNED, which is M19's rule and
+ * M20's four kinds:
+ *
+ *   'repaint'  a new display-list batch on `entry`. Every verb that CHANGED something repaints,
+ *              because each one ends in `reread`.
+ *   'menu'     the shell's popup is a CONTEXT menu with rows in it. A menu raise repaints only
+ *              incidentally — `raiseMenu` answers false — so waiting for a batch would be waiting
+ *              for a side effect.
+ *   'settle'   nothing observable is owed: a REFUSED verb draws nothing, and the record still has
+ *              to cross the kernel and be drained by a program parked in `poll` with a 200 ms
+ *              period. It is also what every step of a DRAG uses, because a press and a move owe
+ *              no repaint at all.
+ *   a function a predicate of the page's own.
+ */
+async function gesture (entry, spec, { wait = 'repaint', ms = 6000 } = {}) {
+  const had = BATCHES.get(entry.id) || 0
+  await ask(spec)
+  if (wait === 'settle') { await pause(400); return -1 }
+  if (wait === 'repaint') {
+    return Math.round(await until(() => (BATCHES.get(entry.id) || 0) > had, ms))
+  }
+  if (wait === 'menu') {
+    return Math.round(await until(() => {
+      const r = SHELL.report()
+      return r.popupKind === 'context' && r.popupRows.length > 0
+    }, ms))
+  }
+  return Math.round(await until(wait, ms))
+}
+
+const winState = async (k) => (await askKernel(k, 'win-state'))
+
+/** One window as the KERNEL holds it, by winid — among its rows `menu`, which is this ABI's only
+ *  pull route to "a menu is open on this window". */
+async function kernelWin (k, id) {
+  const st = await winState(k)
+  return ((st.windows || []).find((w) => w.id === id)) || null
+}
+
+/** The kernel's own menu arithmetic, as one row. `badItems` is the one that must NOT move — a report
+ *  against a menu the kernel has already closed lands there. */
+async function kernelMenus (k) {
+  const st = await winState(k)
+  const w = st.wins || {}
+  return {
+    menus: w.menus | 0, refusedMenus: w.refusedMenus | 0, menuDismissals: w.menuDismissals | 0,
+    itemActivations: w.itemActivations | 0, badItems: w.badItems | 0,
+    droppedItems: w.droppedItems | 0,
+  }
+}
+
+/** The kernel's drag and data-object arithmetic, as one row. `dropsLost` is the one that must not
+ *  move: a drop the kernel could not queue is a gesture with no effect and no error. */
+async function kernelDrags (k) {
+  const st = await askKernel(k, 'data-state')
+  const d = st.data || {}
+  return {
+    drags: d.drags | 0, enters: d.enters | 0, leaves: d.leaves | 0, drops: d.drops | 0,
+    dropsLost: d.dropsLost | 0, bytes: d.bytes | 0, pending: (d.pending || []).length,
+  }
+}
+
+/** The host counters M21 reads, as one row. */
+function hostCounts (host) {
+  const r = host.report()
+  return {
+    pointers: r.pointers | 0, rightPresses: r.rightPresses | 0, contextmenus: r.contextmenus | 0,
+    menus: r.menus | 0, menuChoices: r.menuChoices | 0, menuDismisses: r.menuDismisses | 0,
+    menusUnrendered: r.menusUnrendered | 0,
+    drags: r.drags | 0, dragAts: r.dragAts | 0, dragDrops: r.dragDrops | 0,
+    dragTargets: r.dragTargets | 0,
+    keys: { ...host.keyCounts() },
+  }
+}
+
+/** The shell's own, beside them. */
+function shellCounts (shell) {
+  const r = shell.report()
+  return {
+    contextOpens: r.contextOpens | 0, contextClicks: r.contextClicks | 0,
+    contextDismissals: r.contextDismissals | 0,
+    popupKind: r.popupKind, popupRows: [...r.popupRows],
+  }
+}
+
+/** THE WINDOW UNDER TEST GOES TO THE TOP, because a pointer gesture is delivered by DOM hit-testing
+ *  and a frame above it would take it. The kernel owns the order (constraint 226), so this asks
+ *  rather than restyling. */
+async function raise (k, entry) {
+  HOST.post({ t: 'win-raise', win: entry.id })
+  return until(async () => {
+    const st = await winState(k)
+    const stack = (st.wins || {}).stack || []
+    return stack[stack.length - 1] === entry.id
+  }, 5000)
+}
+
+/** WAIT UNTIL THE PAGE HAS STOPPED REPORTING GEOMETRY. A `win-geom` arriving mid-sequence would
+ *  resurface the window under the aim, and `Surface.pointAt` differences a stale box into every
+ *  point it posts. `geoms` is the host's own count of posts, so this reads the subject. */
+async function geomsSettled (host, quietMs = 300, ms = 8000) {
+  let last = -1
+  const t0 = performance.now()
+  for (;;) {
+    const now = host.report().geoms
+    if (now === last) return performance.now() - t0
+    last = now
+    await pause(quietMs)
+    if (performance.now() - t0 > ms) return -1
+  }
+}
+
+/** Wait for a window whose title contains `title`, with a SURFACE and at least one batch in it: an
+ *  entry with no surface is a frame whose canvas has not been built, and reading its ops would read
+ *  nothing. `skip` is the set of ids that were already there — every window on this page is called
+ *  `files`, so a new one is told from an old one by exclusion and never by title alone. */
+async function surfaced (host, title, skip = null, ms = 20000) {
+  const find = () => {
+    for (const entry of host.frames.values()) {
+      if (skip && skip.has(entry.id)) continue
+      if (entry.win.titleText.includes(title)) return entry
+    }
+    return null
+  }
+  const got = await until(() => {
+    const e = find()
+    return Boolean(e && e.surface && (BATCHES.get(e.id) || 0) > 0)
+  }, ms)
+  return got < 0 ? null : find()
+}
+
+/* ---- the fixture ---------------------------------------------------------------------------- */
+
+/** Run one program to completion and return its result row. */
+async function runProgram (k, url, argv) {
+  const row = await spawnProgram(k, url, argv)
+  return { pid: row.pid, ...(await resultOf(k, row.pid, 20000)) }
+}
+
+/** One `/proc`-free reading of a path: `stat`'s own row, or a row that says it is not there. `type`
+ *  is the whole reason this is used rather than a listing — "the origin record is a SYMBOLIC LINK"
+ *  has no other reading, and `src/bin/stat.mjs` defaults to `lstat` precisely so it can answer it. */
+async function statOf (k, path) {
+  const row = await runProgram(k, STAT, ['stat', path])
+  const got = (row.rows || [])[0] || null
+  return { path, exit: row.exit, ino: got ? got.ino : '', type: got ? got.type : '' }
+}
+
+/** `ls` as a FRESH `readdir`, by its own count — out of a SECOND PROCESS, so it cannot be a
+ *  program's belief about its own call. */
+async function listCount (k, path) {
+  const row = await runProgram(k, LS, ['ls', path])
+  return { path, exit: row.exit, listed: row.listed | 0 }
+}
+
+/**
+ * WHETHER A PATH HOLDS EXACTLY `text` PLUS A NEWLINE, AS THREE READINGS AND ONE ARITHMETIC.
+ *
+ * `wc -c` gives the byte count, `grep -c` the matching lines and `grep -c -v` the non-matching
+ * ones. A file of `text.length + 1` bytes whose every line contains `text` and which has exactly one
+ * line IS `text\n`. That is the arithmetic, and it is written here once because six clauses rest on
+ * it — M20's page states the same thing at its own `MARKER` and compared two files with it.
+ *
+ * THE PATTERN IS A FIXED STRING (constraint 138) and the STATUS is part of the reading: `grep`
+ * answers 1 for a file it read and did not match, which is what makes "these are NOT the bytes" a
+ * measurement rather than an absence.
+ */
+async function fileIs (k, path, text) {
+  const n = await runProgram(k, WC, ['wc', '-c', path])
+  const hit = await runProgram(k, GREP, ['grep', '-c', text, path])
+  const miss = await runProgram(k, GREP, ['grep', '-c', '-v', text, path])
+  return {
+    path, text,
+    exit: n.exit, bytes: ((n.total || {}).bytes) | 0, want: echoBytes(text),
+    matched: hit.matched | 0, matchExit: hit.exit,
+    unmatched: miss.matched | 0, missExit: miss.exit,
+  }
+}
+
+/** The verdict `fileIs` was taken for: all three readings agree that the file is exactly those
+ *  bytes. One function, so a clause cannot pass on two of the three. */
+const isExactly = (r) => Boolean(r) && r.exit === 0 && r.bytes === r.want
+  && r.matched === 1 && r.matchExit === 0 && r.unmatched === 0 && r.missExit === 1
+
+/** Write one line into a file through a REAL SHELL REDIRECTION. The path carries no glob character,
+ *  so `expandOne` does no matching and the target is the word (`src/bin/sh.mjs`). */
+async function writeLine (k, path, text) {
+  const row = await runProgram(k, SH, ['sh', '-c', `echo ${text} > ${path}`])
+  return { path, text, exit: row.exit }
+}
+
+/**
+ * BUILD THE TREE, THROUGH ORDINARY PROGRAMS AND NOTHING PRIVILEGED.
+ *
+ * THE BIN GOES FIRST AND IT IS NOT TIDINESS. The Bin accumulates by design and OPFS outlives a page
+ * load, so a second run would find `bin-me.txt` already taken and `freeFrom` would name the payload
+ * `bin-me (2).txt` — a name no clause here asserts, over bytes no clause here wrote.
+ */
+async function makeTree (k) {
+  const binGone = await runProgram(k, RM, ['rm', '-r', '-f', BIN])
+  const gone = await runProgram(k, RM, ['rm', '-r', '-f', ROOT])
+  const md = await runProgram(k, MKDIR, ['mkdir', '-p', ROOT, SRC, DST, F5D])
+  const wrote = []
+  for (const [path, text] of [
+    [`${ROOT}/${BIN_ME}`, BIN_TEXT],
+    [`${ROOT}/${TAKEN_BACK}`, BACK_TEXT],
+    [`${ROOT}/${STAYS}`, STAYS_TEXT],
+    [`${SRC}/${CTRL_ME}`, CTRL_TEXT],
+    [`${SRC}/${MOVE_ME}`, MOVE_TEXT],
+    [`${DST}/${DST_FILLER}`, FILLER_TEXT],
+    [`${F5D}/${KEEP_SEL}`, KEEP_TEXT],
+    [`${F5D}/${GONE_SEL}`, GONE_TEXT],
+  ]) {
+    wrote.push((await writeLine(k, path, text)).exit)
+  }
+  return {
+    root: ROOT, bin: BIN,
+    binRm: binGone.exit, rootRm: gone.exit, mkdir: md.exit, echoes: wrote,
+    rows: ROOT_ROWS.length,
+  }
+}
+
+/** Quit a program by giving its window a synthesised `q`, and collect the account it returns.
+ *
+ *  A SYNTHESISED KEY AND IT SAYS SO. This is the page tearing its own fixture down, not a gesture
+ *  under test: `q` is how `src/bin/files.mjs` exits, and `WinHost` counts synthetic keys apart from
+ *  trusted ones for exactly this reason. */
+async function quitAndReport (k, entry, pid) {
+  entry.surface.el.focus()
+  typeSynthetic(entry.surface.el, 'q')
+  return resultOf(k, pid, 20000)
+}
+
+/** THE M21 FIELDS OF A `files` ACCOUNT, with a shape for a program that never reached them. A
+ *  refusal path returns an account too, and defaulting rather than letting a clause dereference
+ *  `undefined` is what makes such a run report FAILED CLAUSES over a stated exit code instead of a
+ *  thrown page — the difference between a proof that failed and a harness that broke. */
+function accountOf (row) {
+  const bin = row.bin || {}
+  return {
+    exit: row.exit,
+    why: row.why || '',
+    dir: String(row.dir || ''),
+    rows: (row.rows || []).map((r) => ({
+      name: String(r.name), dir: r.dir === true, origin: String(r.origin || ''),
+    })),
+    menus: row.menus | 0,
+    refusedMenus: row.refusedMenus | 0,
+    dismissals: row.dismissals | 0,
+    chosen: [...(row.chosen || [])],
+    menuRows: [...(row.menuRows || [])],
+    created: [...(row.created || [])],
+    deleted: [...(row.deleted || [])],
+    /* M21's OWN ROWS. `bin.binned` and `bin.restored` are PAIRS — the payload and the path its
+     * origin record carries — so "the bytes are reachable" and "they went home" are two readings of
+     * two records rather than one counter read twice. */
+    bin: {
+      dir: String(bin.dir || ''),
+      binned: (bin.binned || []).map((b) => ({
+        name: String(b.name), from: String(b.from), payload: String(b.payload),
+      })),
+      restored: (bin.restored || []).map((b) => ({ name: String(b.name), to: String(b.to) })),
+      permanent: bin.permanent | 0,
+      stranded: bin.stranded | 0,
+      strandedRecords: bin.strandedRecords | 0,
+      listing: bin.listing === true,
+    },
+    refreshes: row.refreshes | 0,
+    refreshKept: row.refreshKept | 0,
+    dragEnters: row.dragEnters | 0,
+    dragLeaves: row.dragLeaves | 0,
+    dropsIn: row.dropsIn | 0,
+    dragOffers: (row.dragOffers || []).map((d) => ({ at: String(d.at), formats: [...d.formats] })),
+    dropped: (row.dropped || []).map((d) => ({ name: String(d.name), into: String(d.into) })),
+    dropWhere: (row.dropWhere || []).map((d) => ({ ...d })),
+    effectsOffered: (row.effectsOffered || []).map((e) => ({
+      row: e.row | 0, name: String(e.name), effect: e.effect | 0,
+    })),
+    effects: (row.effects || []).map((e) => ({ effect: e.effect | 0, target: e.target | 0 })),
+    movedOut: [...(row.movedOut || [])],
+    drags: row.drags | 0,
+    refusedDrags: row.refusedDrags | 0,
+    selected: [...(row.selected || [])],
+    selects: row.selects | 0,
+    keysyms: row.keysyms | 0,
+    /* THE REFUSALS, WHOLE. `errno` is PRESENT ONLY WHERE THE KERNEL NAMED ONE, so the entries are
+     * copied rather than normalised: a defaulted `errno: ''` would make "it refused with an errno"
+     * pass for a refusal that had none, which is a distinction M20 rests a clause on. */
+    refusals: (row.refusals || []).map((r) => ({ ...r })),
+    refused: row.refused | 0,
+    refusalWhy: String(row.refusalWhy || ''),
+    relists: row.relists | 0,
+    scroll: Number(row.scroll || 0),
+    scrollMax: Number(row.scrollMax || 0),
+    dpr: Number(row.dpr || 1),
+    controls: { ...(row.controls || {}) },
+  }
+}
+
+const sameSet = (a, b) => a.length === b.length && a.every((v, i) => v === b[i])
+/** A refusal entry by what it was asked about. The whole LIST is kept in the evidence, so a clause
+ *  that fails is diagnosed from the refusals the program really recorded. */
+const refusalFor = (account, what) =>
+  (account.refusals || []).find((r) => r.what === what) || null
+/** The NAMES a program had selected when it exited, which is what "the selection survived" is an
+ *  assertion about. `account.selected` is INDICES into `account.rows`, and an index is exactly what
+ *  a mutation under the window moves — so the page converts once, here, and never compares indices
+ *  across a re-list. */
+const selectedNames = (account) => account.selected
+  .filter((i) => i >= 0 && i < account.rows.length)
+  .map((i) => account.rows[i].name)
+
+/** The program flags the four argv controls select, as `src/bin/files.mjs` spells them. ONE list,
+ *  read by EVERY spawn: a control a page applied to one fixture and not another is a page running
+ *  two different worlds at once. */
+function programFlags () {
+  const flags = []
+  if (CFG.restoreOverwrites) flags.push('--restore-overwrites')
+  if (CFG.moveForcedCopy) flags.push('--move-forced-copy')
+  if (CFG.staleListing) flags.push('--stale-listing')
+  if (CFG.pasteClobbers) flags.push('--paste-clobbers')
+  return flags
+}
+
+/** Open one `files` window on `dir`, raise it, put it where the proofs aim and wait for the geometry
+ *  to stop moving. ONE definition, because this page opens five of them and a window placed by one
+ *  spelling and not another is a window whose rects nothing agrees about. */
+async function openFiles (k, host, dir, box) {
+  const known = new Set(host.frames.keys())
+  const argv = ['files', ...programFlags(), dir]
+  const spawned = await spawnProgram(k, FILES, argv)
+  const entry = await surfaced(host, 'files', known)
+  if (!entry) throw new Error(`the files window on ${dir} never surfaced`)
+  await raise(k, entry)
+  const staged = BATCHES.get(entry.id) || 0
+  place(entry, box)
+  await until(() => (BATCHES.get(entry.id) || 0) > staged, 5000)
+  await geomsSettled(host)
+  return { entry, pid: spawned.pid, argv, dir }
+}
+
+/** Raise the row menu on `name` and hand back the popup's labels, the kernel's view of it, and an
+ *  aim per label the caller asked for. ONE definition, because four gestures below need it and the
+ *  aims MUST be taken while the popup is open — it is gone the moment a row is clicked. */
+async function rowMenu (k, host, shell, win, name, labels) {
+  const state = listState(win.entry)
+  const at = pointAtRow(win.entry, state, name)
+  await gesture(win.entry, { kind: 'rightclick', name: `right-click-${name}`, at },
+    { wait: 'menu' })
+  const open = {
+    name, at, state,
+    shell: shellCounts(shell), host: hostCounts(host),
+    kernel: await kernelMenus(k),
+    win: await kernelWin(k, win.entry.id),
+  }
+  open.aims = {}
+  for (const label of labels) open.aims[label] = aimPopupRow(shell, label, `the menu on ${name}`)
+  return open
+}
+
+/* ---- window A: the two deletes --------------------------------------------------------------- */
+
+/**
+ * TWO DRIVEN DELETES IN THE SESSION TREE, WHICH IS WHAT PUTS BYTES IN THE BIN.
+ *
+ * BOTH GO THROUGH THE MENU and neither through the Delete key, for M20's measured reason:
+ * `scripts/cdp.py`'s `KEYS` table has no virtual key code for `Delete`, so the key route is
+ * undrivable here. Both run the SAME `runVerb` — which is why that function exists — so what goes
+ * unproven is the BINDING and not the verb.
+ *
+ * AND THE ROW MENU OUTSIDE THE BIN IS ASSERTED BYTE-IDENTICAL TO M20's, which is a clause rather
+ * than a remark: a milestone that added a row to every row menu would have moved `check_m20`'s
+ * `ROW_MENU_ROWS` and `EMPTY_MENU_ROWS` under it, silently.
+ */
+async function driveDeletes (k, host, shell) {
+  const win = await openFiles(k, host, ROOT, ONE_BOX)
+  const start = listState(win.entry)
+
+  const first = await rowMenu(k, host, shell, win, BIN_ME, ['Delete'])
+  await gesture(win.entry, { kind: 'click', name: `click-delete-${BIN_ME}`,
+    at: first.aims.Delete.at })
+  const afterFirst = listState(win.entry)
+
+  const second = await rowMenu(k, host, shell, win, TAKEN_BACK, ['Delete'])
+  await gesture(win.entry, { kind: 'click', name: `click-delete-${TAKEN_BACK}`,
+    at: second.aims.Delete.at })
+  const afterSecond = listState(win.entry)
+
+  const third = await rowMenu(k, host, shell, win, STAYS, ['Delete'])
+  await gesture(win.entry, { kind: 'click', name: `click-delete-${STAYS}`,
+    at: third.aims.Delete.at })
+  const afterThird = listState(win.entry)
+
+  const account = accountOf(await quitAndReport(k, win.entry, win.pid))
+  return {
+    ...win, win: win.entry.id, start, first, second, third,
+    afterFirst, afterSecond, afterThird, account,
+  }
+}
+
+/* ---- window B: the Bin ----------------------------------------------------------------------- */
+
+/**
+ * THE BIN, AS A WINDOW — one Restore that lands, one that is refused, and one row that cannot be.
+ *
+ * IT IS OPENED WITH A PATH OPERAND AND NOT WITH A FLAG. `src/bin/files.mjs` has no `--bin` in its
+ * long-option loop, so the Bin location `src/bin/desktop.mjs` publishes opens nothing (this page's
+ * header, note 2). The path works HERE only because `driveDeletes` ran first and `ensureBin` made
+ * the directory — which is itself the reason the flag is needed: `ensureBin` is reached from the
+ * delete path alone.
+ */
+async function driveBin (k, host, shell) {
+  const win = await openFiles(k, host, BIN, ONE_BOX)
+  const start = listState(win.entry)
+
+  /* THE RESTORE THAT LANDS. Its menu is the one the `Restore`-is-prepended clauses are read off:
+   * the labels, the index, the kernel's own row count, and the fact that the row is NOT disabled. */
+  const live = await rowMenu(k, host, shell, win, BIN_ME, BIN_MENU_LABELS)
+  await gesture(win.entry, { kind: 'click', name: `click-restore-${BIN_ME}`,
+    at: live.aims.Restore.at })
+  const afterRestore = listState(win.entry)
+
+  /* THE RESTORE THAT IS REFUSED, onto a path something else now holds. `restoreSelection` re-reads
+   * whatever happened, so a repaint is owed either way — which is what makes the refusal readable
+   * as a row that did NOT leave rather than as a window that did not answer. */
+  const blocked = await rowMenu(k, host, shell, win, TAKEN_BACK, ['Restore'])
+  await gesture(win.entry, { kind: 'click', name: `click-restore-${TAKEN_BACK}`,
+    at: blocked.aims.Restore.at })
+  const afterRefusal = listState(win.entry)
+
+  /* AND THE PAYLOAD WITH NO RECORD, whose Restore row is published DISABLED — `WITEM_DISABLED` on
+   * the program's side and `button.disabled` on the shell's, so this reads the second. Dismissed
+   * with Esc rather than clicked: a disabled row has no verb to run, and clicking one would be
+   * asking the kernel to accept a report it refuses into `badItems`. */
+  const orphan = await rowMenu(k, host, shell, win, ORPHAN, ['Restore'])
+  await gesture(win.entry, { kind: 'key', name: 'press-escape-on-the-orphans-menu', key: 'Escape' },
+    { wait: 'settle' })
+  const afterEscape = listState(win.entry)
+
+  const account = accountOf(await quitAndReport(k, win.entry, win.pid))
+  return {
+    ...win, win: win.entry.id, start, live, blocked, orphan,
+    afterRestore, afterRefusal, afterEscape, account,
+  }
+}
+
+/* ---- windows C and D: the drag --------------------------------------------------------------- */
+
+/**
+ * THREE REAL DRAGS BETWEEN TWO `files` WINDOWS, BOTH INSIDE THE SESSION TREE.
+ *
+ * `press`/`move`/`move`/`release` AND NOT A SINGLE `drag` KIND, and the reason is a measurement in
+ * `scripts/check.py`: `mouse_drag` dispatches its own four events and does NOT pass `modifiers`,
+ * while the `press`, `move` and `release` kinds each read `modifiers` and hand it to
+ * `Input.dispatchMouseEvent`. A Ctrl-drag asked for as `kind: 'drag'` would arrive with no Ctrl at
+ * all, which is the gesture the proof is about becoming a different gesture with every clause green.
+ *
+ * THE MODIFIER IS READ FROM THE MOVE THAT CROSSED THE THRESHOLD and not from the press
+ * (`src/bin/files.mjs`), so it is held for all four — which is also what a hand does.
+ *
+ * TWO MOVES AND NOT ONE. The first crosses the 3 CSS px threshold and is what makes the program call
+ * `data.drag`; the kernel's `win-drag` then reaches the page and `WinHost.#dragMove` begins posting
+ * `drag-at`. A single move would start the session and never report a position in it, so the release
+ * would be the first the kernel heard of where the pointer was.
+ */
+async function driveDrag (k, host, shell) {
+  const src = await openFiles(k, host, SRC, SRC_BOX)
+  const dst = await openFiles(k, host, DST, DST_BOX)
+  /* THE SOURCE GOES BACK ON TOP, because opening the target raised it: a press is delivered by DOM
+   * hit-testing, and the boxes are disjoint so nothing is hidden — but the stack is what decides a
+   * tie and a page should not depend on one. */
+  await raise(k, src.entry)
+  await geomsSettled(host)
+
+  const before = { src: listState(src.entry), dst: listState(dst.entry) }
+  const drags = []
+
+  /** One whole drag, with every reading taken at the moment it is true. `modifiers` is the gesture's
+   *  and `wantSrcRepaint` says whether the SOURCE owes one — a MOVE completes by binning the
+   *  original and re-reading, a COPY draws nothing at all on the source side. */
+  const oneDrag = async (name, label, modifiers, { wantSrcRepaint }) => {
+    const srcState = listState(src.entry)
+    const dstState = listState(dst.entry)
+    const from = pointAtRow(src.entry, srcState, name)
+    const to = pointLowOnEmptySpace(dst.entry, dstState, `the drop point for ${name}`)
+    const mid = onScreen({
+      x: Math.round((from.x + to.x) / 2), y: Math.round((from.y + to.y) / 2),
+    }, `the mid-drag point for ${name}`)
+    const row = {
+      label, name, modifiers, from, to, mid,
+      dropUnder: elementAt(dst.entry, to),
+      srcBefore: srcState, dstBefore: dstState,
+      kernelBefore: await kernelDrags(k),
+      hostBefore: hostCounts(host),
+    }
+    const hadDst = BATCHES.get(dst.entry.id) || 0
+    const hadSrc = BATCHES.get(src.entry.id) || 0
+    const hadDrags = host.report().drags | 0
+
+    await gesture(src.entry, { kind: 'press', name: `press-${label}`, at: from, modifiers },
+      { wait: 'settle' })
+    /* THE FIRST MOVE IS WHAT STARTS THE SESSION, so the wait is on the KERNEL having started one and
+     * not on a timer: `host.report().drags` rises when `win-drag` arrives, which is the page
+     * learning that `data.drag` was granted. A fixed pause here would be a drag whose session may or
+     * may not have begun before the next sample. */
+    await gesture(src.entry, { kind: 'move', name: `drag-out-${label}`, at: mid, modifiers },
+      { wait: () => (host.report().drags | 0) > hadDrags, ms: 10000 })
+    row.sessionBegan = (host.report().drags | 0) > hadDrags
+    await gesture(src.entry, { kind: 'move', name: `drag-over-the-target-${label}`, at: to,
+      modifiers }, { wait: 'settle' })
+    row.midGesture = { host: hostCounts(host), kernel: await kernelDrags(k) }
+    /* THE RELEASE, AND THE WAIT IS THE TARGET'S REPAINT. `WEV_DROP` always ends in `reread`,
+     * whatever landed — which is `reread`'s own argument: a listing patched in place would make a
+     * refused landing indistinguishable from one that worked — so the target owes a batch even for
+     * the drop that is refused. */
+    await gesture(src.entry, { kind: 'release', name: `drop-${label}`, at: to, modifiers },
+      { wait: () => (BATCHES.get(dst.entry.id) || 0) > hadDst, ms: 15000 })
+    row.targetRepainted = (BATCHES.get(dst.entry.id) || 0) > hadDst
+    if (wantSrcRepaint) {
+      /* AND THE SOURCE'S, WHICH ONLY A COMPLETED MOVE OWES. `WEV_DRAG_DONE` bins the original and
+       * re-reads; under `--move-forced-copy` the effect is a COPY and nothing is owed, so the wait
+       * is bounded and its result is RECORDED rather than thrown — a control must not turn a clause
+       * into a broken harness. */
+      row.sourceRepaintedMs = Math.round(
+        await until(() => (BATCHES.get(src.entry.id) || 0) > hadSrc, 15000))
+    } else {
+      await pause(600)
+      row.sourceRepaintedMs = null
+    }
+    row.srcAfter = listState(src.entry)
+    row.dstAfter = listState(dst.entry)
+    row.kernelAfter = await kernelDrags(k)
+    row.hostAfter = hostCounts(host)
+    drags.push(row)
+    return row
+  }
+
+  /* D1. CTRL HELD: the row's plan sentence, and the only one of the three the plan states. */
+  await oneDrag(CTRL_ME, 'ctrl-copy', CHROME_MOD_CTRL, { wantSrcRepaint: false })
+  /* THE COPY'S TWO READINGS, TAKEN HERE AND NOT AT THE END, because the source is about to be
+   * rewritten: "the source is still present with its bytes" is a statement about the moment after
+   * the COPY and not about the fixture the next gesture needs. */
+  const copyFs = {
+    source: await fileIs(k, `${SRC}/${CTRL_ME}`, CTRL_TEXT),
+    landed: await fileIs(k, `${DST}/${CTRL_ME}`, CTRL_TEXT),
+  }
+  /* AND THE SOURCE IS GIVEN DIFFERENT BYTES, which is the fixture for the clause below rather than
+   * a mutation under test — see `CTRL2_TEXT` for the measurement that forced it. */
+  const rewrote = await writeLine(k, `${SRC}/${CTRL_ME}`, CTRL2_TEXT)
+  /* D2. THE SAME ROW AGAIN, ONTO A NAME THE TARGET NOW HOLDS: `landOne`'s EEXIST, reached by a DROP
+   * rather than by a paste. `--paste-clobbers` is the world where this lands and the target's own
+   * copy is destroyed, and before this gesture existed that control reached no drop at all. */
+  await oneDrag(CTRL_ME, 'ctrl-copy-onto-an-occupied-name', CHROME_MOD_CTRL,
+    { wantSrcRepaint: false })
+  /* D3. NO MODIFIER, AND BOTH WINDOWS ARE INSIDE THE SESSION TREE: a MOVE, completed by the SOURCE
+   * into the Bin. It is LAST because it is the gesture that changes the source's listing. */
+  await oneDrag(MOVE_ME, 'plain-move', 0, { wantSrcRepaint: true })
+
+  const srcAccount = accountOf(await quitAndReport(k, src.entry, src.pid))
+  const dstAccount = accountOf(await quitAndReport(k, dst.entry, dst.pid))
+  return {
+    srcWin: src.entry.id, dstWin: dst.entry.id, srcPid: src.pid, dstPid: dst.pid,
+    srcArgv: src.argv, dstArgv: dst.argv, before, drags, srcAccount, dstAccount,
+    copyFs, rewrote: { exit: rewrote.exit, text: CTRL2_TEXT },
+  }
+}
+
+/* ---- window E: F5 ---------------------------------------------------------------------------- */
+
+/** ONE SYNTHESISED KEY, BY NAME, INTO A SURFACE. `typeSynthetic` dispatches one event PER CHARACTER,
+ *  so `'F5'` through it would be an `F` and a `5`. The surface's own `keydown` listener is what turns
+ *  a key with no bytes into a keysym (`src/wm/winhost.mjs`), and it counts `isTrusted` apart — which
+ *  is what lets this page assert that this key was synthetic and the clicks around it were not. */
+function synthKey (el, key) {
+  el.focus()
+  el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }))
+}
+
+/**
+ * F5: THE SELECTION IS MADE WITH REAL CLICKS, THE DIRECTORY CHANGES UNDER THE WINDOW, AND THE KEY
+ * IS SYNTHESISED AND SAID SO.
+ *
+ * THE MUTATION IS THREE FACTS AND NOT ONE, because the plan's sentence is two halves: a SELECTED row
+ * is removed (so "for the rows that survive" has a row that does not), a row is added (so "re-lists"
+ * has something to show), and the other selected row is left alone (so there is a survivor to keep).
+ * It is done by SEPARATE PROCESSES — `rm` and `touch` — so nothing in the window could have known.
+ *
+ * `--stale-listing` SERVES THE ROWS IN HAND, and this page MEASURES which clauses that turns rather
+ * than predicting it: the slice contract says "the content clause fails alone", and a stale listing
+ * also makes `refreshKept` the number of names ASKED for instead of the number that came back. The
+ * four clauses below are separate so the run can say which.
+ */
+async function driveRefresh (k, host) {
+  const win = await openFiles(k, host, F5D, ONE_BOX)
+  const start = listState(win.entry)
+
+  /* THE SELECTION, BY REAL INPUT. A plain click replaces the set and a Ctrl+click toggles one row
+   * and moves the anchor (`src/bin/files.mjs`, M19), so two gestures select two rows. */
+  const keepAt = pointAtRow(win.entry, start, KEEP_SEL)
+  await gesture(win.entry, { kind: 'click', name: `click-${KEEP_SEL}`, at: keepAt })
+  const picked = listState(win.entry)
+  const goneAt = pointAtRow(win.entry, picked, GONE_SEL)
+  await gesture(win.entry, { kind: 'click', name: `ctrl-click-${GONE_SEL}`, at: goneAt,
+    modifiers: CHROME_MOD_CTRL })
+  const selected = listState(win.entry)
+
+  /* THE DIRECTORY CHANGES UNDER THE WINDOW. Nothing repaints: `files` is parked in `poll` and holds
+   * no watch, which is the whole reason F5 exists. */
+  const removed = await runProgram(k, RM, ['rm', '-f', `${F5D}/${GONE_SEL}`])
+  const added = await runProgram(k, TOUCH, ['touch', `${F5D}/${NEW_ROW}`])
+  await pause(300)
+  const stale = listState(win.entry)
+
+  const keysBefore = { ...host.keyCounts() }
+  const had = BATCHES.get(win.entry.id) || 0
+  synthKey(win.entry.surface.el, 'F5')
+  const refreshedMs = Math.round(
+    await until(() => (BATCHES.get(win.entry.id) || 0) > had, 10000))
+  const keysAfter = { ...host.keyCounts() }
+  const refreshed = listState(win.entry)
+
+  const account = accountOf(await quitAndReport(k, win.entry, win.pid))
+  return {
+    ...win,
+    win: win.entry.id,
+    start, picked, selected, stale, refreshed, refreshedMs,
+    keysBefore, keysAfter,
+    mutation: {
+      removed: { exit: removed.exit, files: removed.files | 0 },
+      added: { exit: added.exit, created: [...(added.created || [])],
+        stamped: [...(added.stamped || [])] },
+    },
+    account,
+  }
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 1: THE BIN — a delete leaves the bytes reachable, and a restore returns them.
+
+   `docs/PLAN-SHELL.md` §M21: "A delete leaves the bytes reachable from the Bin and a restore
+   returns them." The slice contract sharpens it: "compared as BYTES, not as a row that reappeared."
+
+   SO THE READING IS NEVER A ROW. Every byte figure here comes out of `wc` and `grep` in separate
+   processes, through `fileIs`'s three readings and the arithmetic stated there — and the comparison
+   is shown CAPABLE OF FAILING against the same payload read for the WRONG text, because a grep that
+   matched everything would satisfy the clause over any two files at all.
+
+   AND THE FOUR CONDITIONS THE MEASUREMENT FORCES ARE ASSERTED, not assumed:
+
+     1. THE ORIGIN RECORD IS A SYMLINK. `stat` defaults to `lstat`, so it answers `symbolic link`
+        for the record and `regular file` for the payload. That is the condition that decided the
+        design: a symlink target is ONE journal record and a journal record carries a CRC-32
+        (`src/fs/journal.mjs`), while an OPFS blob carries none (`src/kernel/store.mjs`).
+     2. A DELETE IS TWO RECORDS AND NOT THREE, which the pair of paths per `bin.binned` entry says.
+     4. THE LISTING IS THE PAYLOADS AND NOT THE RECORDS. The Bin window's own rows are read off its
+        DISPLAY LIST, and a record among them would be the inverted join the probe measures as 1,125
+        rows a reader can neither see nor reclaim.
+
+   Condition 3 — restore's forced order — is not a clause here and cannot be: it is a claim about a
+   TORN half-state, which only `bench/m21-bin/probe.mjs` can produce. The page asserts the outcome
+   that order buys and names the probe for the order itself.
+   -------------------------------------------------------------------------------------------- */
+function proofBin (del, binRun, fs) {
+  const bin = {
+    binned: del.account.bin.binned,
+    restored: binRun.account.bin.restored,
+    binDir: del.account.bin.dir,
+    deleted: del.account.deleted,
+    permanent: del.account.bin.permanent,
+    strandedRecords: binRun.account.bin.strandedRecords,
+    /* NOT A `listing` KEY HERE, DELIBERATELY: `theBinSaysItPaidTheLookup` reads that flag off the
+     * account and is the CLAUSE about it, and a second bare boolean in this evidence object is a key
+     * a check enumerating booleans would score as a clause of its own. The clause names are the
+     * `the*` ones; every other key is a figure. */
+    rows: binRun.account.rows,
+    openingRows: del.start.names,
+    binRows: binRun.start.names,
+    afterRestore: binRun.afterRestore.names,
+    menu: {
+      labels: binRun.live.shell.popupRows,
+      index: binRun.live.aims.Restore.index,
+      disabled: binRun.live.aims.Restore.disabled,
+      rows: binRun.live.win && binRun.live.win.menu,
+      outsideLabels: del.first.shell.popupRows,
+      outsideRows: del.first.win && del.first.win.menu,
+      outsideIndex: del.first.aims.Delete.index,
+    },
+    fs,
+  }
+
+  /* THE FIXTURE CLAUSES FIRST, because every clause below is vacuous without them: the tree this
+   * page built, and a list that does not scroll — every rectangle above is located at offset 0. */
+  bin.theTreeIsTheFixture = sameSet(del.start.names, ROOT_ROWS)
+  bin.theListDoesNotScroll = ITEMS_RE.test(del.start.position)
+    && del.account.scroll === 0 && del.account.scrollMax === 0
+  /* AND THE BIN IS THE ONE THE PROGRAM EXPORTS. `binDirIn(HOME_DIR)` is this page's only spelling of
+   * it and the program's own `bin.dir` is the other reading, so a drift in either is visible rather
+   * than being two copies that agree about the wrong directory. */
+  bin.theBinIsWhereTheProgramSaysItIs = del.account.bin.dir === BIN
+
+  /* THE ROW MENU OUTSIDE THE BIN IS STILL M20's, EXACTLY. Five labels in seven records, and Delete
+   * at index 5 — so `check_m20`'s own constants are unmoved by this milestone. */
+  bin.theRowMenuOutsideTheBinIsUnchanged = sameSet(del.first.shell.popupRows, ROW_MENU_LABELS)
+    && bin.menu.outsideRows === ROW_MENU_ROWS
+    && bin.menu.outsideIndex === ROW_MENU_INDEX.Delete
+
+  /* THE DELETE PUT ALL THREE ROWS IN THE BIN AND REMOVED NONE. `bin.permanent` is the count of rows
+   * `unlink`/`rmdir` took, so a zero there is what says the session tree reached the Bin at all —
+   * and `deleted` carrying every name is M20's own clause, unchanged by M21: `sameSet` over it in
+   * DELETE ORDER is what a check reads to say the verb removed the rows it was pointed at. */
+  bin.everyRowWentToTheBin = del.account.bin.binned.length === 3
+    && del.account.bin.permanent === 0
+    && sameSet(del.account.deleted, [BIN_ME, TAKEN_BACK, STAYS])
+  /* AND THE PAIR OF PATHS IS WHAT A DELETE LEFT: the payload under its own name, in the Bin, naming
+   * where it came from. `freeFrom` numbers a collision, so the UNNUMBERED name is also the evidence
+   * that the Bin was empty when the run started — which `makeTree` removes it to guarantee. */
+  const binnedFirst = del.account.bin.binned[0] || {}
+  bin.thePayloadKeptItsOwnName = binnedFirst.name === BIN_ME
+    && binnedFirst.from === `${ROOT}/${BIN_ME}`
+    && binnedFirst.payload === `${BIN}/${BIN_ME}`
+
+  /* THE BYTES ARE REACHABLE FROM THE BIN, AS BYTES. The row is gone from where the reader left it
+   * and the payload in the Bin reads back as exactly what was written. */
+  bin.theOriginalIsGoneFromItsDirectory = fs.afterDelete.source.exit !== 0
+  bin.theBytesAreInTheBin = isExactly(fs.afterDelete.payload)
+  /* AND THE COMPARISON CAN FAIL. The same three readings over the same payload for the WRONG text:
+   * a check that reports success must be shown capable of failing, and `grep -c` matching everything
+   * would satisfy the clause above over any two files at all. */
+  bin.theByteComparisonCanFail = !isExactly(fs.afterDelete.payloadWrongText)
+    && fs.afterDelete.payloadWrongText.matched === 0
+    && fs.afterDelete.payloadWrongText.matchExit === 1
+
+  /* CONDITION 1: THE ORIGIN RECORD IS A SYMBOLIC LINK, and the payload beside it is a regular file.
+   * That is the measurement's decisive figure as a type, read by `lstat` out of a separate process —
+   * the same path held as FILE DATA would be an OPFS blob with no integrity field anywhere. */
+  bin.theOriginRecordIsASymlink = fs.afterDelete.record.exit === 0
+    && fs.afterDelete.record.type === 'symbolic link'
+  bin.thePayloadIsARegularFile = fs.afterDelete.payloadStat.exit === 0
+    && fs.afterDelete.payloadStat.type === 'regular file'
+  /* AND THE RECORD NAMES WHERE THE ROW CAME FROM, read by `readlink` in the PROGRAM. `rows[].origin`
+   * is the Bin's listing join paid per row, which is the only route a page has to a link's target.
+   *
+   * IT IS READ OFF `STAYS` AND NOT OFF EITHER RESTORED ROW, for the reason stated at that constant:
+   * the account is the program's state at EXIT, so a row that any world restores is not there to be
+   * read — and reading it off `TAKEN_BACK` made `--restore-overwrites` turn a clause in this proof. */
+  const binRow = binRun.account.rows.find((r) => r.name === BIN_ME) || null
+  const staysRow = binRun.account.rows.find((r) => r.name === STAYS) || null
+  bin.theRecordNamesTheOrigin = Boolean(staysRow) && staysRow.origin === `${ROOT}/${STAYS}`
+  bin.theRestoredRowIsNoLongerInTheBin = binRow === null
+
+  /* CONDITION 4: THE LISTING IS A `readdir` OF THE BIN, PAYLOADS ONLY. The records are symlinks
+   * ending in `ORIGIN_SUFFIX` and are counted rather than drawn — a record among the rows would be
+   * a row naming nothing a reader can act on, and the INVERTED join is the control the probe scores
+   * as `invisible: 1,125`. */
+  bin.theBinListsPayloadsAndNotRecords = sameSet(binRun.start.names, BIN_ROWS)
+    && !binRun.start.names.some((n) => n.endsWith(FILES_METRICS.ORIGIN_SUFFIX))
+  bin.theBinSaysItPaidTheLookup = binRun.account.bin.listing === true
+  /* AND NO RECORD IS STRANDED. A record whose payload is not there is the half-state an interrupted
+   * delete leaves, and this run tore nothing — so a non-zero here would mean a delete this page
+   * drove did not finish. */
+  bin.nothingWasStranded = binRun.account.bin.strandedRecords === 0
+    && del.account.bin.stranded === 0 && binRun.account.bin.stranded === 0
+
+  /* THE RESTORE RETURNED THE BYTES. Three readings and all three are needed: the program's own pair,
+   * the bytes back at the origin path, and BOTH Bin records gone — a restore that copied would leave
+   * the payload behind, and one that moved the payload and left the record would leave a row the
+   * listing counts as stranded. */
+  /* HOW MANY RESTORES LANDED IS `refuse`'s CLAUSE AND DELIBERATELY NOT THIS ONE. This says the
+   * program named THIS restore — which row went where — and `oneRestoreLandedAndOneDidNot` owns the
+   * count. Folding the two made `--restore-overwrites`, a control about a userland pre-check, turn a
+   * clause about the bytes coming home. */
+  const back = binRun.account.bin.restored[0] || {}
+  bin.theProgramNamedTheRestore = back.name === BIN_ME && back.to === `${ROOT}/${BIN_ME}`
+  bin.theBytesCameHome = isExactly(fs.afterRestore.source)
+  bin.theBinHeldNeitherRecordAfterwards = fs.afterRestore.payload.exit !== 0
+    && fs.afterRestore.record.exit !== 0
+  /* AND THE WINDOW SHOWS IT, which is the "not a row that reappeared" half read from the other side:
+   * the clause above is the bytes and this is the drawing, and the proof rests on the first. */
+  bin.theBinsListingLostTheRow = !binRun.afterRestore.names.includes(BIN_ME)
+
+  bin.ok = bin.theTreeIsTheFixture && bin.theListDoesNotScroll
+    && bin.theBinIsWhereTheProgramSaysItIs && bin.theRowMenuOutsideTheBinIsUnchanged
+    && bin.everyRowWentToTheBin && bin.thePayloadKeptItsOwnName
+    && bin.theOriginalIsGoneFromItsDirectory && bin.theBytesAreInTheBin
+    && bin.theByteComparisonCanFail
+    && bin.theOriginRecordIsASymlink && bin.thePayloadIsARegularFile
+    && bin.theRecordNamesTheOrigin && bin.theRestoredRowIsNoLongerInTheBin
+    && bin.theBinListsPayloadsAndNotRecords && bin.theBinSaysItPaidTheLookup
+    && bin.nothingWasStranded
+    && bin.theProgramNamedTheRestore && bin.theBytesCameHome
+    && bin.theBinHeldNeitherRecordAfterwards && bin.theBinsListingLostTheRow
+  globalThis.M21.proofs.bin = { ok: bin.ok, evidence: bin }
+  say((bin.ok ? 'ok  ' : 'BAD ') + 'bin: ' + del.account.bin.binned.length + ' row(s) binned as ['
+    + del.account.bin.binned.map((b) => b.name).join(' ') + ']; the Bin listed ['
+    + binRun.start.names.join(' ') + ']; the record is a '
+    + (fs.afterDelete.record.type || 'NOTHING') + ' and ' + STAYS + '\'s names '
+    + ((staysRow && staysRow.origin) || 'NOTHING') + '; ' + fs.afterDelete.payload.bytes
+    + ' byte(s) in the Bin came home as ' + fs.afterRestore.source.bytes + ' of '
+    + fs.afterRestore.source.want)
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 2: THE REFUSAL — a restore onto an occupied path refuses BY NAME, with its errno.
+
+   `docs/PLAN-SHELL.md` §M21: "A restore onto an occupied path refuses by name." And the errno is
+   asserted separately, because a single "it refused" passes for a refusal for the wrong reason —
+   M3's `truncate` answered ENOENT where it owed EROFS.
+
+   THE REFUSAL IS USERLAND'S AND THAT IS THE WHOLE POINT. `vfs.rename` has no `RENAME_NOREPLACE`:
+   over a plain file it refuses NOTHING — `applyOp`'s RENAME arm deletes the standing entry,
+   decrements nlink and FREES the inode, measured at one journal record
+   (`bench/m21-bin/probe.mjs`: `renameRefused: null`, `freedInode: 8`, `clobbered: true`). So the
+   `lstat` in `restoreOne` is the only test there is, and `--restore-overwrites` is that test gone.
+
+   WHICH IS WHY THE OCCUPANT'S BYTES ARE A CLAUSE. "It refused" and "the reader's file is still
+   there" are two facts, and the control destroys the second: a clause that only read the errno would
+   stay green over a world in which the file a reader made after the delete is gone.
+   -------------------------------------------------------------------------------------------- */
+function proofRefuse (binRun, fs) {
+  const refuse = {
+    refusals: binRun.account.refusals,
+    refusalWhy: binRun.account.refusalWhy,
+    chosen: binRun.account.chosen,
+    restored: binRun.account.bin.restored,
+    orphanAim: binRun.orphan.aims.Restore,
+    liveAim: binRun.live.aims.Restore,
+    dismissals: binRun.account.dismissals,
+    controls: binRun.account.controls,
+    fs,
+  }
+
+  /* THE ERRNO, BY NAME. `restoreOne` refuses on the ROW's name with `EEXIST`, which is the same
+   * errno M20's rename and paste refusals carry and arrives from a THIRD mechanism: a `rename` has
+   * no exclusive flag at all, so this one is neither the kernel's `O_EXCL` nor a destination
+   * pre-check on a copy — it is a `lstat` before a call that would have clobbered. */
+  const blocked = refusalFor(binRun.account, TAKEN_BACK)
+  refuse.theOccupiedRestoreSaysEEXIST = Boolean(blocked) && blocked.errno === 'EEXIST'
+  /* AND THE REFUSAL NAMES THE PATH IT WOULD HAVE WRITTEN, which is what makes it a refusal a reader
+   * can act on: the row's name says WHICH row and the reason says WHERE it would have gone. */
+  refuse.theRefusalNamesTheOriginPath = Boolean(blocked)
+    && String(blocked.why || '').includes(`${ROOT}/${TAKEN_BACK}`)
+
+  /* THE READER'S OWN FILE IS UNTOUCHED, as BYTES. These are the bytes written AFTER the delete, so
+   * finding the Bin's payload here instead would be the restore having clobbered them — which is
+   * exactly what `--restore-overwrites` does. */
+  refuse.theOccupantsBytesAreIntact = isExactly(fs.occupant)
+  /* AND THE PAYLOAD IS STILL IN THE BIN, with its record: a refused restore must leave the row
+   * recoverable, not consume it. Both paths, because a payload without a record is a row whose
+   * Restore has nowhere to aim. */
+  refuse.thePayloadIsStillRecoverable = isExactly(fs.blockedPayload)
+    && fs.blockedRecord.exit === 0 && fs.blockedRecord.type === 'symbolic link'
+  refuse.theBinKeptTheRow = binRun.afterRefusal.names.includes(TAKEN_BACK)
+
+  /* AND A PAYLOAD WITH NO ORIGIN RECORD GETS A DISABLED Restore ROW. `WITEM_DISABLED` on the
+   * program's side and `button.disabled` on the shell's, so this reads the second — and the LIVE
+   * row's `disabled === false` beside it is what stops the clause passing for a menu in which every
+   * row is dead. Windows 7's own rule for an inapplicable command, and this project's for a caption
+   * button: a live-looking row that silently does nothing is the defect. */
+  refuse.theOrphansRestoreIsDisabled = binRun.orphan.aims.Restore.disabled === true
+    && binRun.live.aims.Restore.disabled === false
+  refuse.theOrphanHasNoOrigin = (binRun.account.rows.find((r) => r.name === ORPHAN) || {})
+    .origin === ''
+  /* AND Esc OVER THAT MENU WAS REPORTED. The disabled row is not clicked — there is no verb to run
+   * and the kernel would refuse the report into `badItems` — so the menu is closed the other way,
+   * and the dismissal reaching the program is what says the window parked in `poll` woke. */
+  refuse.theOrphansMenuWasDismissed = binRun.account.dismissals === 1
+
+  /* ONE VERB WAS REFUSED AND THE OTHER LANDED, which is the pair that makes either mean anything: a
+   * run in which both Restores refused would satisfy the errno clause with a Bin that does not work
+   * at all. `chosen` is the program's own list of the verbs the driven rows ran. */
+  refuse.oneRestoreLandedAndOneDidNot = sameSet(binRun.account.chosen,
+    [FILES_METRICS.VERBS.RESTORE, FILES_METRICS.VERBS.RESTORE])
+    && binRun.account.bin.restored.length === 1
+  /* AND THE SET OF REFUSALS IS EXACTLY THAT ONE. A clause naming one refusal passes for a program
+   * that also refused things nobody asked about, which in a file manager means verbs a reader
+   * pressed and did not get. */
+  refuse.nothingElseWasRefused = binRun.account.refusals.length === 1
+
+  refuse.ok = refuse.theOccupiedRestoreSaysEEXIST && refuse.theRefusalNamesTheOriginPath
+    && refuse.theOccupantsBytesAreIntact && refuse.thePayloadIsStillRecoverable
+    && refuse.theBinKeptTheRow
+    && refuse.theOrphansRestoreIsDisabled && refuse.theOrphanHasNoOrigin
+    && refuse.theOrphansMenuWasDismissed
+    && refuse.oneRestoreLandedAndOneDidNot && refuse.nothingElseWasRefused
+  globalThis.M21.proofs.refuse = { ok: refuse.ok, evidence: refuse }
+  say((refuse.ok ? 'ok  ' : 'BAD ') + 'refuse: '
+    + binRun.account.refusals.map((r) => `${r.what}=${r.errno || 'no errno'}`).join(', ')
+    + '; the occupant still reads ' + fs.occupant.bytes + ' of ' + fs.occupant.want
+    + ' byte(s); the orphan\'s Restore row is '
+    + (binRun.orphan.aims.Restore.disabled ? 'DISABLED' : 'LIVE')
+    + ' and the live one is ' + (binRun.live.aims.Restore.disabled ? 'DISABLED' : 'LIVE'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 3: THE DRAG — Ctrl reports COPY with the source still present, and a plain drag MOVES.
+
+   `docs/PLAN-SHELL.md` §M21: "A cross-window drag with Ctrl held reports `DOBJ_EFFECT_COPY` with
+   the source still present."
+
+   AND THE OTHER HALF DIVERGES FROM THE ROW'S WORDING, WHICH IS WHY IT IS ASSERTED HERE. The row
+   says "without it, a move"; what shipped is "Ctrl → COPY; otherwise MOVE iff the row is inside the
+   session tree, else COPY" — because a MOVE source cannot verify the COLLECTION. The kernel reports
+   an effect for a drop that QUEUED and not for one a target took (constraint 245), so the original
+   goes TO THE BIN rather than to `unlink`, and the Bin is the session tree's: no Bin, no safe move.
+   `www/m10.html` drags out of `/usr/share` with no modifier and its committed clause asserts COPY,
+   which is the same rule seen from outside the session tree.
+
+   SO BOTH WINDOWS HERE ARE INSIDE THE SESSION TREE, which is what makes the MOVE half reachable at
+   all, and the two offers are read in BOTH DIRECTIONS: `effectsOffered` is this program's ASK and
+   `effects` is the kernel's ANSWER. Only the kernel decides the second (`src/kernel/dataobj.mjs`
+   picks COPY whenever the mask holds it), so a clause on one alone cannot tell a program that asked
+   for a move from a kernel that granted one.
+   -------------------------------------------------------------------------------------------- */
+function proofDrag (run, fs) {
+  /* THE THIRD DRAG IS THE ONLY ONE WHOSE OWN ROW IS READ: the first two are asserted through the
+   * accounts and through `fs`, and the MOVE's is where the kernel's end-of-run drag arithmetic and
+   * the source's post-move listing are. The first two are destructured so the index of the third is
+   * a name and not a 2. */
+  const [, , move] = run.drags
+  const src = run.srcAccount
+  const dst = run.dstAccount
+  const drag = {
+    offered: src.effectsOffered,
+    answered: src.effects,
+    movedOut: src.movedOut,
+    binned: src.bin.binned,
+    dropped: dst.dropped,
+    dropWhere: dst.dropWhere,
+    dragOffers: dst.dragOffers,
+    enters: dst.dragEnters,
+    leaves: dst.dragLeaves,
+    dropsIn: dst.dropsIn,
+    refusals: dst.refusals,
+    srcRefusals: src.refusals,
+    effects: { COPY: DOBJ_EFFECT_COPY, MOVE: DOBJ_EFFECT_MOVE },
+    drops: run.drags.map((d) => ({
+      label: d.label, dropUnder: d.dropUnder, sessionBegan: d.sessionBegan,
+      targetRepainted: d.targetRepainted, sourceRepaintedMs: d.sourceRepaintedMs,
+      kernel: d.kernelAfter, srcAfter: d.srcAfter.names, dstAfter: d.dstAfter.names,
+    })),
+    fs,
+  }
+
+  /* THE FIXTURE CLAUSES. Two windows, each on its own directory, and the drop point really was over
+   * the TARGET's canvas — M10's own reading, and the one that stopped five clauses about a receiver
+   * failing because a raised source had grown over the point. */
+  drag.theTwoWindowsAreTheFixture = sameSet(run.before.src.names, SRC_ROWS)
+    && sameSet(run.before.dst.names, DST_ROWS)
+  drag.everyDropLandedOnTheTarget = run.drags.length === 3
+    && run.drags.every((d) => d.dropUnder === 'the target canvas')
+  drag.everyGestureBeganAKernelSession = run.drags.every((d) => d.sessionBegan === true)
+    && src.drags === 3 && src.refusedDrags === 0
+  /* AND THE KERNEL DELIVERED THREE DROPS AND LOST NONE. `dropsLost` is a drop the kernel could not
+   * queue, which is a gesture with no effect and no error anywhere (constraint 245's own case). */
+  drag.theKernelDeliveredEveryDrop = move.kernelAfter.drops === 3
+    && move.kernelAfter.dropsLost === 0 && move.kernelAfter.drags === 3
+  /* AND THE TARGET WAS ENTERED AND TOLD WHAT WAS ON OFFER BEFORE ANY DROP. The offer rides the
+   * ENTER, which is what lets a target know it could take a drop before any bytes exist. */
+  drag.theTargetWasEnteredWithAnOffer = dst.dragEnters >= 3
+    && dst.dragOffers.filter((o) => o.at === 'enter').length >= 3
+    && dst.dragOffers.every((o) => o.formats.includes('paths'))
+
+  /* ---- CTRL HELD: COPY, AND THE SOURCE IS STILL THERE ------------------------------------- */
+  const offeredCopy = src.effectsOffered.find((e) => e.name === CTRL_ME) || null
+  drag.ctrlOfferedACopy = Boolean(offeredCopy) && offeredCopy.effect === DOBJ_EFFECT_COPY
+  drag.theKernelAnsweredCopy = Boolean(src.effects[0]) && src.effects[0].effect === DOBJ_EFFECT_COPY
+    && src.effects[0].target === run.dstWin
+  /* READ IMMEDIATELY AFTER THE COPY AND NOT AT THE END, because the source is rewritten between the
+   * two drops for the clause three below. The `stat` at the end is the other half: the file is still
+   * there, whatever its bytes now are. */
+  drag.theCopysSourceIsStillPresent = isExactly(run.copyFs.source)
+    && fs.afterDrags.ctrlSource.exit === 0
+  drag.theCopyLandedInTheTarget = isExactly(run.copyFs.landed)
+    && dst.dropped.some((d) => d.name === CTRL_ME && d.into === DST)
+  /* AND NOTHING WAS BINNED FOR IT. A COPY source ignores the receipt, so a `bin.binned` entry for
+   * this row would be a copy that also removed the original. */
+  drag.theCopyBinnedNothing = !src.bin.binned.some((b) => b.name === CTRL_ME)
+    && !src.movedOut.includes(CTRL_ME)
+
+  /* ---- THE SAME ROW AGAIN, ONTO A NAME THE TARGET HOLDS: EEXIST, FROM A DROP --------------- */
+  const dropRefusal = refusalFor(dst, CTRL_ME)
+  drag.theSecondDropSaysEEXIST = Boolean(dropRefusal) && dropRefusal.errno === 'EEXIST'
+  /* THE TARGET'S OWN `dropWhere` ROW FOR THE SECOND DROP: one entry per drop in gesture order, so
+   * `[1]` is this one, and `landed: 0` of `of: 1` is the refusal seen as arithmetic rather than as
+   * the absence of a `dropped` entry. */
+  drag.theSecondDropLandedNothing = dst.dropsIn === 3
+    && dst.dropped.filter((d) => d.name === CTRL_ME).length === 1
+    && (dst.dropWhere[1] || {}).landed === 0 && (dst.dropWhere[1] || {}).of === 1
+  /* AND THE TARGET'S OWN COPY IS STILL THE FIRST DROP'S, byte for byte, WHILE THE SOURCE IS NOT.
+   * Both conjuncts: the source was rewritten before the second drop precisely so that a clobber is
+   * visible as DIFFERENT bytes — without that, `--paste-clobbers` replaced the file with an
+   * identical copy and this clause stayed green over the world it names (`CTRL2_TEXT`). */
+  drag.theTargetsCopySurvivedTheSecondDrop = isExactly(fs.afterDrags.ctrlLanded)
+    && isExactly(fs.afterDrags.ctrlSourceRewritten)
+    && run.rewrote.exit === 0
+
+  /* ---- NO MODIFIER, INSIDE THE SESSION TREE: A MOVE, COMPLETED INTO THE BIN --------------- */
+  const offeredMove = src.effectsOffered.find((e) => e.name === MOVE_ME) || null
+  drag.thePlainDragOfferedAMove = Boolean(offeredMove)
+    && offeredMove.effect === DOBJ_EFFECT_MOVE
+  drag.theKernelAnsweredMove = Boolean(src.effects[2])
+    && src.effects[2].effect === DOBJ_EFFECT_MOVE && src.effects[2].target === run.dstWin
+  drag.theMovesSourceIsGone = fs.afterDrags.moveSource.exit !== 0
+  drag.theMoveLandedInTheTarget = isExactly(fs.afterDrags.moveLanded)
+    && dst.dropped.some((d) => d.name === MOVE_ME && d.into === DST)
+  /* AND THE ORIGINAL IS IN THE BIN WITH ITS RECORD, which is the whole reason the source may offer
+   * a MOVE at all: the receipt says the drop was DELIVERED and not that it was collected, so an
+   * `unlink` here would destroy a file on the strength of a fact the kernel does not report. */
+  const movedBin = src.bin.binned.find((b) => b.name === MOVE_ME) || null
+  drag.theMovedOriginalIsInTheBin = src.movedOut.includes(MOVE_ME)
+    && Boolean(movedBin) && movedBin.from === `${SRC}/${MOVE_ME}`
+    && isExactly(fs.afterDrags.moveBinned)
+  drag.theMovedOriginalKeptItsRecord = fs.afterDrags.moveRecord.exit === 0
+    && fs.afterDrags.moveRecord.type === 'symbolic link'
+  /* AND THE SOURCE WINDOW SHOWS IT GONE. The drawing is not the proof — the two clauses above are —
+   * but a row the filesystem has lost and the window still draws is a listing patched in place. */
+  drag.theSourceWindowLostTheRow = !move.srcAfter.names.includes(MOVE_ME)
+    && move.srcAfter.names.includes(CTRL_ME)
+
+  drag.ok = drag.theTwoWindowsAreTheFixture && drag.everyDropLandedOnTheTarget
+    && drag.everyGestureBeganAKernelSession && drag.theKernelDeliveredEveryDrop
+    && drag.theTargetWasEnteredWithAnOffer
+    && drag.ctrlOfferedACopy && drag.theKernelAnsweredCopy
+    && drag.theCopysSourceIsStillPresent && drag.theCopyLandedInTheTarget
+    && drag.theCopyBinnedNothing
+    && drag.theSecondDropSaysEEXIST && drag.theSecondDropLandedNothing
+    && drag.theTargetsCopySurvivedTheSecondDrop
+    && drag.thePlainDragOfferedAMove && drag.theKernelAnsweredMove
+    && drag.theMovesSourceIsGone && drag.theMoveLandedInTheTarget
+    && drag.theMovedOriginalIsInTheBin && drag.theMovedOriginalKeptItsRecord
+    && drag.theSourceWindowLostTheRow
+  globalThis.M21.proofs.drag = { ok: drag.ok, evidence: drag }
+  say((drag.ok ? 'ok  ' : 'BAD ') + 'drag: offered ['
+    + src.effectsOffered.map((e) => `${e.name}=${e.effect}`).join(' ') + '], the kernel answered ['
+    + src.effects.map((e) => e.effect).join(' ') + '] (COPY=' + DOBJ_EFFECT_COPY + ' MOVE='
+    + DOBJ_EFFECT_MOVE + '); ' + CTRL_ME + ' is still in src='
+    + (fs.afterDrags.ctrlSource.exit === 0) + ' and the target\'s copy reads '
+    + fs.afterDrags.ctrlLanded.bytes + ' of ' + fs.afterDrags.ctrlLanded.want
+    + ', ' + MOVE_ME + ' is in src=' + (fs.afterDrags.moveSource.exit === 0) + ' and in the Bin as ['
+    + src.bin.binned.map((b) => b.name).join(' ') + ']; the second drop said '
+    + ((dropRefusal && dropRefusal.errno) || 'NOTHING'))
+}
+
+/* --------------------------------------------------------------------------------------------
+   PROOF 4: F5 — it re-lists, and the selection survives for the rows that survive.
+
+   `docs/PLAN-SHELL.md` §M21: "F5 re-lists and the selection survives for the rows that survive."
+
+   THE SELECTION IS READ AS NAMES AND NEVER AS INDICES, which is the clause rather than a
+   convenience: `reread` restores a selection BY NAME precisely because index order is what a
+   mutation moves, so a page comparing indices across the re-list would be asserting the defect.
+
+   THE KEY IS SYNTHESISED AND THE PAGE MEASURES THAT IT WAS. `scripts/cdp.py`'s `KEYS` table has no
+   `F5`, so the clause below asserts that `synthetic` rose by exactly one and `trusted` did not —
+   the honest reading of a key this harness cannot send, and the same gap M20 records for F2 and
+   Delete. The SELECTION it survives was made with two real clicks, which is the part that matters.
+   -------------------------------------------------------------------------------------------- */
+function proofRefresh (run) {
+  const a = run.account
+  const refresh = {
+    before: run.selected.names,
+    stale: run.stale.names,
+    after: run.refreshed.names,
+    selectedNames: selectedNames(a),
+    selected: a.selected,
+    rows: a.rows.map((r) => r.name),
+    refreshes: a.refreshes,
+    refreshKept: a.refreshKept,
+    keysyms: a.keysyms,
+    selects: a.selects,
+    refreshedMs: run.refreshedMs,
+    keys: { before: run.keysBefore, after: run.keysAfter },
+    mutation: run.mutation,
+    refusals: a.refusals,
+    controls: a.controls,
+  }
+
+  /* THE FIXTURE, AND THE MUTATION REALLY HAPPENED. `rm` reports what it removed and `touch` reports
+   * what it CREATED as against what it merely stamped — the two arrays are disjoint by contract
+   * (`src/bin/touch.mjs`), which is what lets this clause tell a created row from a touched one. */
+  refresh.theTwoRowsAreTheFixture = sameSet(run.start.names, F5_ROWS_BEFORE)
+  refresh.theDirectoryChangedUnderTheWindow = run.mutation.removed.exit === 0
+    && run.mutation.added.exit === 0
+    && sameSet(run.mutation.added.created, [`${F5D}/${NEW_ROW}`])
+    && run.mutation.added.stamped.length === 0
+  /* AND THE WINDOW HAD NOT NOTICED. `files` holds no watch and is parked in `poll`, which is the
+   * whole reason F5 exists: a listing that had already refreshed itself would make the clause below
+   * pass over a gesture nobody needed. */
+  refresh.theWindowShowedTheStaleRows = sameSet(run.stale.names, F5_ROWS_BEFORE)
+
+  /* TWO ROWS WERE SELECTED BY REAL INPUT. `selects` counts the selection changes the program made,
+   * so two clicks are two — and a Ctrl+click that was delivered as a PLAIN click would have replaced
+   * the set rather than adding to it, which is visible in the names below and not here. */
+  refresh.twoRowsWereSelectedByRealInput = a.selects >= 2
+  /* AND THE KEY WAS THE ONE SYNTHETIC EVENT IN THE RUN. `trusted` must not move: the two clicks are
+   * POINTER events and the only other key this window gets is the `q` that quits it, which is sent
+   * after the account is read. */
+  refresh.theF5WasSynthesisedAndSaysSo =
+    run.keysAfter.synthetic === run.keysBefore.synthetic + 1
+    && run.keysAfter.trusted === run.keysBefore.trusted
+  /* AND IT ARRIVED AS A KEYSYM. `keysymOf` answers 0 for every byte key, so a program that received
+   * `F5` as bytes would count no keysym at all — this window is given no arrow and no F2, so one
+   * keysym is exactly the F5. */
+  refresh.theKeysymReachedTheProgram = a.keysyms === 1 && a.refreshes === 1
+    && run.refreshedMs >= 0
+
+  /* THE LISTING CAME BACK FRESH: the new row is there and the removed one is not. Read off the
+   * DISPLAY LIST, which is what a reader sees — `--stale-listing` serves the rows already in hand,
+   * and this is the clause that measures it. */
+  refresh.theListingCameBackFresh = sameSet(run.refreshed.names, F5_ROWS_AFTER)
+
+  /* AND THE SELECTION SURVIVED FOR THE ROW THAT SURVIVED — by NAME, out of the program's own
+   * account. Two clauses and not one: that the survivor is still selected, and that the row which is
+   * gone was not re-selected. A single clause over the set would pass for a program that selected
+   * nothing at all. */
+  refresh.theSurvivorIsStillSelected = sameSet(selectedNames(a), [KEEP_SEL])
+  refresh.theLostRowWasNotReselected = a.refreshKept === 1
+    && !selectedNames(a).includes(GONE_SEL)
+  /* AND NOTHING WAS RESURRECTED. A selection restored by INDEX would highlight whatever landed in
+   * the slot — which here is `new-row.txt`, a row the reader never touched — so the name NOT being
+   * in the set is the reading that separates the two implementations. */
+  refresh.theNewRowIsNotSelected = !selectedNames(a).includes(NEW_ROW)
+  /* AND F5 REFUSED NOTHING. `refresh` is not a `runVerb` verb and no menu row runs it, so there is
+   * nothing for it to have declined; a refusal here would be a re-read that failed. */
+  refresh.theRefreshRefusedNothing = a.refusals.length === 0
+
+  refresh.ok = refresh.theTwoRowsAreTheFixture && refresh.theDirectoryChangedUnderTheWindow
+    && refresh.theWindowShowedTheStaleRows && refresh.twoRowsWereSelectedByRealInput
+    && refresh.theF5WasSynthesisedAndSaysSo && refresh.theKeysymReachedTheProgram
+    && refresh.theListingCameBackFresh && refresh.theSurvivorIsStillSelected
+    && refresh.theLostRowWasNotReselected && refresh.theNewRowIsNotSelected
+    && refresh.theRefreshRefusedNothing
+  globalThis.M21.proofs.refresh = { ok: refresh.ok, evidence: refresh }
+  say((refresh.ok ? 'ok  ' : 'BAD ') + 'refresh: [' + run.stale.names.join(' ') + '] -> ['
+    + run.refreshed.names.join(' ') + '] after ' + a.refreshes + ' F5; ' + a.refreshKept
+    + ' of the selected row(s) survived as [' + selectedNames(a).join(' ') + ']; keys synthetic '
+    + run.keysBefore.synthetic + '->' + run.keysAfter.synthetic + ', trusted '
+    + run.keysBefore.trusted + '->' + run.keysAfter.trusted)
+}
+
+/* ---- the filesystem readings ---------------------------------------------------------------- */
+
+/** EVERY READING THE BIN PROOFS ARE ASSERTED ON, TAKEN THE MOMENT EACH IS TRUE. None of these can
+ *  be taken at the end: a restore moves the payload, so what is in the Bin has to be read while it
+ *  is there. Each comes out of a SEPARATE PROCESS — `wc`, `grep`, `stat`, `ls` — so none is a
+ *  program's belief about its own call. */
+async function readAfterDelete (k) {
+  return {
+    source: await statOf(k, `${ROOT}/${BIN_ME}`),
+    payload: await fileIs(k, `${BIN}/${BIN_ME}`, BIN_TEXT),
+    /* THE SAME PAYLOAD READ FOR THE WRONG TEXT, which is this comparison's own negative control. */
+    payloadWrongText: await fileIs(k, `${BIN}/${BIN_ME}`, OCCUPIED_TEXT),
+    payloadStat: await statOf(k, `${BIN}/${BIN_ME}`),
+    record: await statOf(k, FILES_METRICS.originRecordOf(`${BIN}/${BIN_ME}`)),
+    binList: await listCount(k, BIN),
+  }
+}
+
+async function readAfterRestore (k) {
+  return {
+    source: await fileIs(k, `${ROOT}/${BIN_ME}`, BIN_TEXT),
+    payload: await statOf(k, `${BIN}/${BIN_ME}`),
+    record: await statOf(k, FILES_METRICS.originRecordOf(`${BIN}/${BIN_ME}`)),
+  }
+}
+
+async function readAfterDrags (k) {
+  const binned = `${BIN}/${MOVE_ME}`
+  return {
+    ctrlSource: await statOf(k, `${SRC}/${CTRL_ME}`),
+    /* THE SOURCE'S REWRITTEN BYTES, which are NOT the target's: that difference is what makes
+     * `theTargetsCopySurvivedTheSecondDrop` a reading rather than an assertion over a constant. */
+    ctrlSourceRewritten: await fileIs(k, `${SRC}/${CTRL_ME}`, CTRL2_TEXT),
+    ctrlLanded: await fileIs(k, `${DST}/${CTRL_ME}`, CTRL_TEXT),
+    moveSource: await statOf(k, `${SRC}/${MOVE_ME}`),
+    moveLanded: await fileIs(k, `${DST}/${MOVE_ME}`, MOVE_TEXT),
+    moveBinned: await fileIs(k, binned, MOVE_TEXT),
+    moveRecord: await statOf(k, FILES_METRICS.originRecordOf(binned)),
+  }
+}
+
+/* ---- the live desktop ---------------------------------------------------------------------- */
+
+/**
+ * THE TWO WINDOWS THE LIVE DESKTOP OPENS, as specs `www/shell.mjs` stages.
+ *
+ * `files` TAKES NO OPERAND, which is D40's answer: the program resolves `std.sessionDir` for itself
+ * — the session's WRITABLE copy of the read-only base — so every verb this milestone adds is
+ * reachable from the window a reader is handed, and so is the Bin the deletes go to.
+ *
+ * CLEAR OF THE ICON COLUMN, because the shared staging runs the `desktop` process and that process
+ * publishes rows: a window at the desktop's left edge sits on top of the icons, which is constraint
+ * 289's own failure. `term` is LAST because it spawns `sh` by syscall.
+ */
+const LIVE_X = 120
+const LIVE_PROGRAMS = [
+  {
+    ...PROGRAMS.files,
+    name: 'files',
+    box: () => ({ x: LIVE_X, y: 20, w: 620, h: 300 }),
+  },
+  {
+    ...PROGRAMS.term,
+    box: (wa) => ({ x: LIVE_X, y: 340, w: 620, h: Math.max(160, wa.h - 360) }),
+  },
+]
+
+/** WHAT THIS MILESTONE ADDED, appended to the shared help. ADDED rather than substituted, so a
+ *  reader here still learns what the rest of the shell does — and in a second engine this log is the
+ *  only channel there is. */
+const M21_HELP = [
+  '  a Delete inside the session tree now goes to the Recycle Bin, not away: the bytes move',
+  '  and a symlink beside them records where they came from',
+  `  type \`files ${BIN}\` at the prompt to open it,`,
+  '  then right-click a row for Restore — the Bin is the one place that verb exists',
+  '  a restore onto a path something else now holds refuses by name, and says which path',
+  '  F5 re-lists, and a row you had selected stays selected if it is still there',
+  '  drag a file row onto another `files` window to copy it in; a plain drag inside the',
+  '  session tree MOVES it, and the original goes to the Bin rather than being unlinked',
+  '  THE DESKTOP\'S Recycle Bin ICON OPENS NOTHING YET: `src/bin/desktop.mjs` publishes it as',
+  '  `files --bin` and `src/bin/files.mjs` has no such option, so the spawn exits with a usage',
+  '  complaint. Use the prompt until that flag lands.',
+]
+
+/** THE ONE DEFECT A READER OF THIS DESKTOP MEETS, stated where a driver reads it as well as where a
+ *  reader does. See this page's header, note 2, for the measurement. */
+const BIN_ICON_NOTE = 'the desktop\'s Recycle Bin icon opens nothing: src/bin/desktop.mjs '
+  + 'publishes it as `files --bin` and src/bin/files.mjs has no such option, so std.getopt answers '
+  + 'bad: "--" and the program exits 2 with a usage complaint and no window. Measured on this page: '
+  + 'a double-click left the shell at 2 taskbar buttons before and 2 after, with no error or fault. '
+  + `Until the flag lands, \`files ${BIN}\` at the prompt is the route.`
+
+async function live () {
+  globalThis.M21.notes.push(BIN_ICON_NOTE)
+  const { host, shell } = await stageDesktop({
+    into: desktop,
+    report: globalThis.M21,
+    say,
+    label: 'm21',
+    tap: captureBatch,
+    programs: LIVE_PROGRAMS,
+    help: DESKTOP_HELP.concat(M21_HELP),
+  })
+  publish(host, shell)
+}
+
+/**
+ * WHAT THIS PAGE PUBLISHES FOR A DRIVER THAT IS NOT THIS PAGE, whichever path built the host.
+ *
+ * `LAST_BATCH` is module-private and the proofs read it directly, so a driver in ANOTHER ENGINE has
+ * no other route to which rows a program drew. The precedent is `FILES_METRICS` and the lesson is in
+ * CLAUDE.md: a bench script's excuse for restating a program's geometry was that it sits outside the
+ * process and cannot import the module, which was "true of the PROCESS and false of the page it
+ * drives".
+ *
+ * `aimAt` hands back the VIEWPORT point, which is the only unit `input.performActions` and
+ * `Input.dispatchMouseEvent` both take, and REPORTS the reason rather than throwing across the
+ * evaluate boundary: a thrown error arrives at a driver as `null`.
+ */
+function publish (host, shell) {
+  HOST = host
+  SHELL = shell
+  globalThis.M21.host = host
+  globalThis.M21.shell = shell
+  globalThis.M21.dpr = dpr()
+  globalThis.M21.viewport = { w: window.innerWidth, h: window.innerHeight }
+  /* THE TWO PATHS THIS MILESTONE IS ABOUT, PUBLISHED AS DATA. A driver in another engine must not
+   * spell `$Recycle.Bin`: the name is `FILES_METRICS.BIN_NAME` and the directory is `binDirIn`, and
+   * a bench script's copy of either is the drift CLAUDE.md's table exists to stop. */
+  globalThis.M21.paths = { home: HOME_DIR, root: ROOT, bin: BIN, src: SRC, dst: DST, f5: F5D }
+  const frameOf = (what) => {
+    for (const entry of host.frames.values()) {
+      if (entry.win.titleText.includes(String(what))) return entry
+    }
+    return null
+  }
+  globalThis.M21.listState = (what) => {
+    const entry = frameOf(what)
+    return entry && entry.surface ? listState(entry) : null
+  }
+  globalThis.M21.aimAt = (what, kind, key) => {
+    const entry = frameOf(what)
+    if (!entry || !entry.surface) return { error: `no surfaced window named ${what}` }
+    try {
+      const state = listState(entry)
+      if (kind === 'row') return pointAtRow(entry, state, String(key))
+      if (kind === 'empty') return pointLowOnEmptySpace(entry, state, 'a driver in another engine')
+      if (kind === 'popup') {
+        if (!shell) return { error: 'this page has no shell, so there is no popup' }
+        return aimPopupRow(shell, String(key), 'a driver in another engine')
+      }
+    } catch (e) {
+      return { error: String((e && e.message) || e) }
+    }
+    return { error: `no aim named ${kind}; row, empty and popup are the three` }
+  }
+}
+
+async function main () {
+  if (!CFG.proofs) {
+    globalThis.M21.state = 'done'
+    globalThis.M21.verdict = 'live'
+    await live()
+    return
+  }
+
+  const controls = programFlags()
+  say('M21 — the Recycle Bin, refresh, and a drop target.'
+    + (controls.length ? ' CONTROL: ' + controls.join(' ') : ''))
+  say('dpr ' + dpr() + ', viewport ' + window.innerWidth + 'x' + window.innerHeight + '.')
+  say('Every right-click, popup click, selection click and DRAG below is REAL input, performed by')
+  say('something that is not this page: a synthesised event is isTrusted === false (175). The one')
+  say('synthetic key is F5, which scripts/cdp.py cannot send — the page measures that it was')
+  say('synthetic rather than claiming it was not. Every byte figure comes out of wc and grep.')
+
+  /* THE PROOFS PATH STAGES A TASKBAR, which M19's did not. `WinHost.#menu` hands its rows to
+   * `this.shell.openContextMenu` and a host with no shell reports the DISMISSAL instead — so the
+   * shell is the renderer under test here, not scenery. No `desktop` PROCESS is staged: the start
+   * menu and the icons are its rows and no clause reads them. */
+  const { k, host, shell } = await bootShell({
+    into: desktop, report: globalThis.M21, say, label: 'm21', tap: captureBatch, taskbar: true,
+  })
+  publish(host, shell)
+  globalThis.M21.kernelIsolated = true
+  globalThis.M21.controlsInForce = host.report().controls
+
+  /* THE SESSION'S TREE IS A PRECONDITION AND NOT A HOPE. Every clause on this page is about a path
+   * under `HOME_DIR`, and a volume whose seed did not run has none — so a run there would report a
+   * page of red clauses with the cause three layers down. `bootShell` already published the kernel's
+   * own seed report; this is the reading that refuses. */
+  const seeded = await statOf(k, HOME_DIR)
+  if (seeded.exit !== 0 || seeded.type !== 'directory') {
+    throw new Error(`${HOME_DIR} is not a directory (stat exit ${seeded.exit}, type `
+      + `${JSON.stringify(seeded.type)}): the session's writable copy of the read-only base is what `
+      + 'the Bin lives in, so every clause on this page would be about a tree that is not there. '
+      + `The kernel reported ${JSON.stringify(globalThis.M21.seed || null)}`)
+  }
+
+  globalThis.M21.tree = await makeTree(k)
+  const t = globalThis.M21.tree
+  say('staged ' + ROOT + ' and cleared ' + BIN + ': rm exits ' + t.binRm + ',' + t.rootRm
+    + ', mkdir exit ' + t.mkdir + ', echo exits ' + t.echoes.join(',') + ' for ' + t.rows
+    + ' opening row(s)')
+
+  /* ---- 1 and 2: the Bin -------------------------------------------------------------------- */
+  const del = await driveDeletes(k, host, shell)
+  globalThis.M21.deletes = del
+  const afterDelete = await readAfterDelete(k)
+
+  /* THE TWO THINGS THAT MUST HAPPEN BETWEEN THE DELETE AND THE RESTORE, and both are the FIXTURE
+   * for a clause rather than tidying. The origin path is re-created with DIFFERENT bytes, which is
+   * the only world an occupied-path refusal is about; and a payload is `touch`ed straight into the
+   * Bin with no record beside it, which is the row whose Restore must be published disabled. */
+  const occupied = await writeLine(k, `${ROOT}/${TAKEN_BACK}`, OCCUPIED_TEXT)
+  const orphaned = await runProgram(k, TOUCH, ['touch', `${BIN}/${ORPHAN}`])
+  globalThis.M21.between = {
+    occupied: { exit: occupied.exit }, orphaned: { exit: orphaned.exit,
+      created: [...(orphaned.created || [])] },
+  }
+  say('between: re-created ' + ROOT + '/' + TAKEN_BACK + ' with other bytes (exit '
+    + occupied.exit + ') and touched a record-less payload into the Bin (exit '
+    + orphaned.exit + ')')
+
+  const binRun = await driveBin(k, host, shell)
+  globalThis.M21.binRun = binRun
+  const afterRestore = await readAfterRestore(k)
+  const refuseFs = {
+    occupant: await fileIs(k, `${ROOT}/${TAKEN_BACK}`, OCCUPIED_TEXT),
+    blockedPayload: await fileIs(k, `${BIN}/${TAKEN_BACK}`, BACK_TEXT),
+    blockedRecord: await statOf(k, FILES_METRICS.originRecordOf(`${BIN}/${TAKEN_BACK}`)),
+  }
+
+  proofBin(del, binRun, { afterDelete, afterRestore })
+  proofRefuse(binRun, refuseFs)
+
+  /* ---- 3: the drag ------------------------------------------------------------------------- */
+  const dragRun = await driveDrag(k, host, shell)
+  globalThis.M21.dragRun = dragRun
+  const afterDrags = await readAfterDrags(k)
+  proofDrag(dragRun, { afterDrags })
+
+  /* ---- 4: F5 ------------------------------------------------------------------------------- */
+  const refreshRun = await driveRefresh(k, host)
+  globalThis.M21.refreshRun = refreshRun
+  proofRefresh(refreshRun)
+
+  globalThis.M21.fs = { afterDelete, afterRestore, refuse: refuseFs, afterDrags }
+
+  const proofs = globalThis.M21.proofs
+  const bad = Object.entries(proofs).filter(([, p]) => p && !p.ok).map(([n]) => n)
+  const notDriven = Object.entries(proofs).filter(([, p]) => !p).map(([n]) => n)
+  globalThis.M21.notDriven = notDriven
+  globalThis.M21.verdict = (bad.length ? 'bad: ' + bad.join(', ') : 'ok')
+    + (notDriven.length ? '; not driven: ' + notDriven.join(', ') : '')
+  out.className = bad.length ? 'bad' : 'ok'
+  say('')
+  say('verdict ' + globalThis.M21.verdict)
+  globalThis.M21.state = 'done'
+  globalThis.M21.phase = 'rendered'
+}
+/* THE ENTRY POINT RUNS AT THE BOTTOM OF THIS MODULE, and that is not a style choice (constraint
+ * 301).
+ *
+ * `main()` is called synchronously, and on the BARE URL it reaches `live()` before the first
+ * `await` — so an entry point above `LIVE_PROGRAMS` hands `stageDesktop` an object literal that
+ * reads that `const` while it is still in its temporal dead zone:
+ * `Cannot access 'LIVE_PROGRAMS' before initialization`, in BOTH engines. That is M17's bill, paid
+ * once: the registered suite loads `?proofs=1`, whose branch of `main()` touches nothing live until
+ * long after the module has evaluated, so the thing a reader opens was the one path with no check
+ * on it at all. */
+if (requireIsolation(globalThis.M21, say, out)) {
+  main().catch((e) => {
+    globalThis.M21.state = 'error'
+    /* THE MESSAGE AND THE STACK, in that order, because `e.stack` ALONE LOSES THE MESSAGE IN
+     * FIREFOX: V8 prefixes its stack with "TypeError: ...", SpiderMonkey does not. */
+    globalThis.M21.why = String(e && e.message ? `${e.message}\n${e.stack || ''}`
+      : (e && e.stack) || e)
+    out.className = 'bad'
+    say(globalThis.M21.why)
+  })
+}
+</script>
+</body>
+</html>

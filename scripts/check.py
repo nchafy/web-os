@@ -904,6 +904,23 @@ class Control:
     #: the kernel owes a second paste never arrives and a reader's own file is overwritten by a
     #: paste that reports success.
     PASTE_CLOBBERS = "paste-clobbers"
+    #: M21's first: `src/bin/files.mjs` drops the occupied-origin pre-check before a Restore's
+    #: `rename`. `vfs.rename` has no `RENAME_NOREPLACE` and over a plain file refuses NOTHING — it
+    #: deletes the standing entry, decrements nlink and FREES the inode in one journal record
+    #: (`bench/m21-bin/probe.mjs`: `renameRefused: null`, `freedInode: 8`, `clobbered: true`) — so
+    #: the `lstat` this control removes is the only test there is, and the world is a reader's own
+    #: file destroyed by a restore that reports success. `docs/PLAN-SHELL.md` §M21's first control.
+    RESTORE_OVERWRITES = "restore-overwrites"
+    #: M21's second: the drag offers `DOBJ_EFFECT_COPY` whatever the modifier is and wherever the
+    #: row is, so the EFFECT stops being a function of the gesture. `docs/PLAN-SHELL.md` §M21's
+    #: second control, and it must move the MOVE half alone — the Ctrl half asks for a copy either
+    #: way, which is what makes the pair of clauses a pair.
+    MOVE_FORCED_COPY = "move-forced-copy"
+    #: M21's third: F5 serves the rows already in hand instead of re-reading the directory. The
+    #: keysym still arrives and `refreshes` still rises, which is the whole design of this world: a
+    #: refresh that COUNTS and does not re-list is indistinguishable from a working one except by
+    #: content. `docs/PLAN-SHELL.md` §M21's third control.
+    STALE_LISTING = "stale-listing"
     ONCE = "once"
 
 
@@ -980,6 +997,9 @@ CONTROL_RUNS = {
     Control.SILENT_DISMISS: ("silent-dismiss",),
     Control.MENU_IN_SURFACE: ("menu-in-surface",),
     Control.PASTE_CLOBBERS: ("paste-clobbers",),
+    Control.RESTORE_OVERWRITES: ("restore-overwrites",),
+    Control.MOVE_FORCED_COPY: ("move-forced-copy",),
+    Control.STALE_LISTING: ("stale-listing",),
 }
 
 
@@ -6872,6 +6892,373 @@ _PASTE_CLOBBERS_FAILS = (
 )
 
 
+# ======================================================================================
+# m21 (§M21). THE RECYCLE BIN, F5, AND A `files` WINDOW THAT IS A DROP TARGET.
+#
+# FOUR DRIVEN PROOFS over five `files` windows, 26 gestures, and every byte figure out of `wc` and
+# `grep` in separate processes. `docs/PLAN-SHELL.md` §M21 is the specification.
+#
+# ALL FOUR WORLDS ARE ARGV FLAGS ON `src/bin/files.mjs` and none is a served-bytes fixture or a
+# page-side switch: the behaviours they remove live INSIDE the program, so a boot cfg could not
+# reach them. `www/m21.html`'s `programFlags()` passes whatever the query string asked for to every
+# `files` spawn, which is why one parameter reaches five processes.
+#
+# AND THE PAGE SETS THE HOST'S AND THE SURFACE'S CONTROLS TO NOTHING, EXPLICITLY. They are MODULE
+# state, so a page that set none without saying so would be running under whatever the last page in
+# this realm asked for — `controlsInForce` is read BACK for that reason, as M20's check does it.
+# ======================================================================================
+
+#: How long the driver waits for www/m21.html to reach a terminal state.
+#:
+#: WHAT IS IN IT: a kernel boot, the shell, a four-directory fixture built by real programs, FIVE
+#: `files` processes, 26 driven gestures — twelve of which are the four steps of three drags and
+#: wait only on a 400 ms `settle`, because a press and a move owe no repaint — and every filesystem
+#: reading taken through its own `ls`/`stat`/`wc`/`grep` process, run to completion.
+#: MEASURED by `scripts/check.py --only m21` at 15.43 s headless at dpr 2 on Chrome 158, for a run
+#: whose every clause holds, and at 15.00-15.45 s in each of the four control worlds. The margin is
+#: ~23x and deliberately so: the one thing a smaller number buys is a BROKEN run on a slower
+#: machine.
+M21_TIMEOUT = 360.0
+
+#: (label, the page's boolean, the evidence keys a failure prints). Proof 1: the Bin itself.
+#:
+#: THE FOUR CONDITIONS `bench/m21-bin/probe.mjs` FORCES ARE FOUR SEPARATE CLAUSES, because the
+#: measurement's verdict — a reserved directory plus a sidecar is enough, and the Bin needs no inode
+#: flag — holds only under them. The decisive one is the record being a SYMLINK: a symlink target is
+#: one journal record and a journal record carries a CRC-32 (`src/fs/journal.mjs`), while an OPFS
+#: blob carries none (`src/kernel/store.mjs`), so a sidecar held as file data is neither
+#: integrity-checked nor inside `scripts/fsfuzz.py`'s three-second gate.
+#:
+#: CONDITION 3 — restore's FORCED order — is deliberately not a clause here. It is a claim about a
+#: torn half-state, which only the probe can produce; what this proof asserts is the outcome that
+#: order buys, and the probe is named for the order itself.
+_M21_BIN = (
+    # THE FIXTURE CLAUSES FIRST: every reading below is vacuous without the tree this page built
+    # and a list that does not scroll — every rectangle it aims at is located at offset 0.
+    ("the tree the proofs mutate is the fixture", "theTreeIsTheFixture", ("openingRows",)),
+    ("and the listing does not scroll", "theListDoesNotScroll", ("openingRows",)),
+    # AND THE BIN IS THE PROGRAM'S OWN. The page spells it `FILES_METRICS.binDirIn(HOME_DIR)` once
+    # and reads `account.bin.dir` as the other half, so a drift is visible rather than being two
+    # copies agreeing about the wrong directory.
+    ("and the Bin is the directory the program names", "theBinIsWhereTheProgramSaysItIs",
+     ("binDir",)),
+    # M20'S OWN CONSTANTS, UNMOVED. A milestone that prepended a row to EVERY row menu would have
+    # shifted `check_m20`'s `ROW_MENU_ROWS` and its Delete index under it, silently.
+    ("and the row menu outside the Bin is still M20's", "theRowMenuOutsideTheBinIsUnchanged",
+     ("menu",)),
+    ("every deleted row went to the Bin and none was unlinked", "everyRowWentToTheBin",
+     ("binned", "permanent", "deleted")),
+    ("and the payload kept its own name, under the path it came from", "thePayloadKeptItsOwnName",
+     ("binned",)),
+    # THE BYTES, AND NOT A ROW THAT MOVED. `wc` and `grep` in separate processes, so none of these
+    # is the program's belief about its own call.
+    ("the original is gone from the directory it was in", "theOriginalIsGoneFromItsDirectory",
+     ("fs",)),
+    ("and the bytes are in the Bin, read by wc and grep", "theBytesAreInTheBin", ("fs",)),
+    # THE COMPARISON'S OWN NEGATIVE CONTROL, INSIDE THE PAGE: the same payload read for the WRONG
+    # text. A `grep -c` matching everything would satisfy the clause above over any two files.
+    ("and that byte comparison is capable of failing", "theByteComparisonCanFail", ("fs",)),
+    ("the origin record is a symbolic link", "theOriginRecordIsASymlink", ("fs",)),
+    ("and the payload beside it is a regular file", "thePayloadIsARegularFile", ("fs",)),
+    ("and the record names where the row came from", "theRecordNamesTheOrigin", ("rows",)),
+    ("and a restored row is no longer one of the Bin's", "theRestoredRowIsNoLongerInTheBin",
+     ("rows",)),
+    # CONDITION 4: THE JOIN DIRECTION. A record among the rows is a row naming nothing a reader can
+    # act on, and the INVERTED join is the world the probe scores as `invisible: 1,125` — bytes a
+    # reader can neither see nor reclaim.
+    ("the Bin's listing is the payloads and not the records", "theBinListsPayloadsAndNotRecords",
+     ("binRows",)),
+    ("and the program says it paid the origin lookup per row", "theBinSaysItPaidTheLookup",
+     ("rows",)),
+    ("and no record was stranded without its payload", "nothingWasStranded",
+     ("strandedRecords",)),
+    # THE RESTORE. Three readings and all three are owed: the program's own pair, the bytes back at
+    # the origin path, and BOTH Bin paths gone — a restore that copied would leave the payload, and
+    # one that moved the payload and left the record would leave a row the listing calls stranded.
+    ("the program named the restore, row and destination", "theProgramNamedTheRestore",
+     ("restored",)),
+    ("and the bytes came home, byte for byte", "theBytesCameHome", ("fs",)),
+    ("and the Bin held neither the payload nor the record afterwards",
+     "theBinHeldNeitherRecordAfterwards", ("fs",)),
+    ("and the Bin's window lost the row", "theBinsListingLostTheRow", ("afterRestore",)),
+)
+
+#: Proof 2: THE REFUSAL, AND ITS ERRNO SEPARATELY. A single "it refused" passes for a refusal for
+#: the wrong reason — M3's `truncate` answered ENOENT where it owed EROFS.
+#:
+#: THE REFUSAL IS USERLAND'S AND THAT IS THE SUBJECT. `vfs.rename` has no `RENAME_NOREPLACE`: over
+#: a plain file it refuses nothing and frees the occupant's inode in one journal record
+#: (`bench/m21-bin/probe.mjs`), so `restoreOne`'s `lstat` is the only test and
+#: `--restore-overwrites` is that test gone. WHICH IS WHY THE OCCUPANT'S BYTES ARE THEIR OWN
+#: CLAUSE: "it refused" and "the reader's file is still there" are two facts, and the control
+#: destroys the second.
+_M21_REFUSE = (
+    ("a restore onto an occupied origin says EEXIST", "theOccupiedRestoreSaysEEXIST",
+     ("refusals",)),
+    ("and the refusal names the path it would have written", "theRefusalNamesTheOriginPath",
+     ("refusalWhy",)),
+    ("and the occupant's own bytes are intact", "theOccupantsBytesAreIntact", ("fs",)),
+    ("and the refused payload is still recoverable, record and all",
+     "thePayloadIsStillRecoverable", ("fs",)),
+    ("and the Bin kept the row", "theBinKeptTheRow", ("refusals",)),
+    # WINDOWS 7'S OWN RULE FOR AN INAPPLICABLE COMMAND, read off the SHELL's button rather than the
+    # program's flag, with the live row's `disabled === false` beside it so the clause cannot pass
+    # for a menu in which every row is dead.
+    ("a payload with no record gets a disabled Restore", "theOrphansRestoreIsDisabled",
+     ("orphanAim", "liveAim")),
+    ("and that payload's origin reads as nothing", "theOrphanHasNoOrigin", ("orphanAim",)),
+    ("and Esc over that menu was reported to the program", "theOrphansMenuWasDismissed",
+     ("dismissals",)),
+    # THE PAIR THAT MAKES EITHER HALF MEAN ANYTHING: a run in which BOTH restores refused would
+    # satisfy the errno clause with a Bin that does not work at all.
+    ("one restore landed and one did not", "oneRestoreLandedAndOneDidNot",
+     ("chosen", "restored")),
+    ("and the set of refusals is exactly that one", "nothingElseWasRefused", ("refusals",)),
+)
+
+#: Proof 3: THE DRAG, BOTH HALVES AND IN BOTH DIRECTIONS.
+#:
+#: THE SHIPPED RULE DIVERGES FROM THE PLAN ROW'S WORDING, and the divergence is asserted rather
+#: than reconciled: "Ctrl → COPY; otherwise MOVE iff the row is inside the session tree, else
+#: COPY". The reason is the Bin — the kernel reports an effect for a drop that QUEUED and not one
+#: that was COLLECTED (constraint 245), so a MOVE source cannot verify the collection and its
+#: original goes TO THE BIN rather than to `unlink`. No Bin, no safe move. `www/m10.html` drags out
+#: of `/usr/share` with no modifier and its committed clause asserts COPY, which is the same rule
+#: seen from outside the session tree.
+#:
+#: SO THE OFFER AND THE ANSWER ARE TWO CLAUSES PER HALF. `effectsOffered` is this program's ASK and
+#: `effects` is the kernel's ANSWER — only the kernel decides the second — so a clause on one alone
+#: cannot tell a program that asked for a move from a kernel that granted one.
+_M21_DRAG = (
+    ("two windows on two directories are the fixture", "theTwoWindowsAreTheFixture", ("drops",)),
+    # M10'S OWN READING, and the one that once explained five clauses about a receiver at once: what
+    # decides where a release lands is the DOM hit test, so a source frame grown over the point
+    # takes the drop itself.
+    ("and every release landed on the target's canvas", "everyDropLandedOnTheTarget", ("drops",)),
+    ("and every gesture began a kernel drag session", "everyGestureBeganAKernelSession",
+     ("drops",)),
+    ("and the kernel delivered every drop and lost none", "theKernelDeliveredEveryDrop",
+     ("drops",)),
+    ("and the target was entered with an offer before any drop", "theTargetWasEnteredWithAnOffer",
+     ("enters", "dragOffers")),
+    ("Ctrl held offered a COPY", "ctrlOfferedACopy", ("offered", "effects")),
+    ("and the kernel answered COPY to the source", "theKernelAnsweredCopy",
+     ("answered", "effects")),
+    ("and the copy's source is still present", "theCopysSourceIsStillPresent", ("fs",)),
+    ("and the copy landed in the target, byte for byte", "theCopyLandedInTheTarget", ("dropped",)),
+    ("and the copy binned nothing", "theCopyBinnedNothing", ("binned", "movedOut")),
+    ("a second drop onto a name the target holds says EEXIST", "theSecondDropSaysEEXIST",
+     ("refusals",)),
+    ("and that drop landed nothing", "theSecondDropLandedNothing", ("dropWhere", "dropsIn")),
+    # BOTH CONJUNCTS, AND THE SECOND IS WHY THE PAGE REWRITES THE SOURCE MID-RUN: without it,
+    # `--paste-clobbers` replaced the target's file with an identical copy and this clause stayed
+    # green over the world it is named for.
+    ("and the target's own copy survived it, while the source's bytes had changed",
+     "theTargetsCopySurvivedTheSecondDrop", ("fs",)),
+    ("a plain drag inside the session tree offered a MOVE", "thePlainDragOfferedAMove",
+     ("offered", "effects")),
+    ("and the kernel answered MOVE to the source", "theKernelAnsweredMove",
+     ("answered", "effects")),
+    ("and the move's source is gone", "theMovesSourceIsGone", ("fs",)),
+    ("and the move landed in the target, byte for byte", "theMoveLandedInTheTarget", ("dropped",)),
+    ("and the moved original is in the Bin rather than unlinked", "theMovedOriginalIsInTheBin",
+     ("binned", "movedOut")),
+    ("and it kept its origin record", "theMovedOriginalKeptItsRecord", ("fs",)),
+    ("and the source window lost that row and no other", "theSourceWindowLostTheRow", ("drops",)),
+)
+
+#: Proof 4: F5. THE SELECTION IS READ AS NAMES AND NEVER AS INDICES, which is a clause rather than a
+#: convenience: index order is what a mutation moves, so a page comparing indices across the re-list
+#: would be asserting the defect.
+#:
+#: AND THE KEY IS SYNTHESISED, WHICH THE PAGE MEASURES RATHER THAN CLAIMS. `scripts/cdp.py`'s `KEYS`
+#: table has no row for `F5` — the same gap M20 records for `F2` and `Delete` — so what goes unproven
+#: here is the BINDING and not the verb, and the SELECTION the refresh survives was made with two
+#: real clicks. `"F5": (116, "")` in that table is the one line that would close it.
+_M21_REFRESH = (
+    ("two rows are the fixture", "theTwoRowsAreTheFixture", ("before",)),
+    ("and the directory really changed under the window", "theDirectoryChangedUnderTheWindow",
+     ("mutation",)),
+    ("and the window had not noticed", "theWindowShowedTheStaleRows", ("stale",)),
+    ("two rows were selected by real input", "twoRowsWereSelectedByRealInput", ("selects",)),
+    ("and the F5 was synthetic, which the page measures rather than claims",
+     "theF5WasSynthesisedAndSaysSo", ("keys",)),
+    ("and it reached the program as a keysym, which refreshed once",
+     "theKeysymReachedTheProgram", ("keysyms", "refreshes", "refreshedMs")),
+    ("the listing came back fresh", "theListingCameBackFresh", ("stale", "after")),
+    # TWO CLAUSES AND NOT ONE OVER THE SET: a single clause would pass for a program that selected
+    # nothing at all.
+    ("and the row that survived is still selected, by name", "theSurvivorIsStillSelected",
+     ("selectedNames", "refreshKept")),
+    ("and the row that went is not", "theLostRowWasNotReselected",
+     ("selectedNames", "refreshKept")),
+    # AND NOTHING WAS RESURRECTED. A selection restored by INDEX would highlight whatever landed in
+    # the slot, which here is a row the reader never touched.
+    ("and the row that arrived was not selected in its place", "theNewRowIsNotSelected",
+     ("selectedNames", "after")),
+    ("and the refresh refused nothing", "theRefreshRefusedNothing", ("refusals",)),
+)
+
+#: proof name -> its clause table, in the order the page runs them. Read by the body and by the
+#: label inventory, so a clause added to one reaches the other.
+_M21_PROOFS = (("bin", _M21_BIN), ("refuse", _M21_REFUSE), ("drag", _M21_DRAG),
+               ("refresh", _M21_REFRESH))
+
+M21_LABELS = (
+    "page isolated",
+    "kernel isolated",
+    "the kernel raised no error",
+    "no process faulted",
+    "the page rendered at the ratio the run asked for",
+    "the page was really driven",
+    "the controls the page reports are the ones asked for",
+) + tuple(label for _, table in _M21_PROOFS for label, _, _ in table) + (
+    "the page's own verdict is ok",
+    "document COOP",
+    "document COEP",
+    "served m21.html",
+)
+
+M21_DOCUMENT = "/www/m21.html?proofs=1"
+
+M21_READY = ("(() => { const M = globalThis.M21 || {}; const s = M.state; "
+             "return (s === 'done' || s === 'aborted' || s === 'error' || M.want) ? 1 : 0 })()")
+
+READ_M21 = """(() => {
+  const M = globalThis.M21 || {}
+  const P = M.proofs || {}
+  const one = (x) => (x === null || x === undefined
+    ? null : { ok: x.ok === true, evidence: x.evidence || {} })
+  return {
+    state: String(M.state || ''),
+    why: String(M.why || ''),
+    phase: String(M.phase || ''),
+    verdict: String(M.verdict || ''),
+    isolated: M.isolated === true,
+    kernelIsolated: M.kernelIsolated === true,
+    dpr: Number(window.devicePixelRatio || 0),
+    cfg: M.config || {},
+    controls: M.controlsInForce || {},
+    gestures: (M.gestureLog || []).length,
+    errors: (M.errors || []).map(String),
+    faults: (M.faults || []).map((f) => String(f && f.why)),
+    notes: (M.notes || []).map(String),
+    tree: M.tree || {},
+    paths: M.paths || {},
+    notDriven: (M.notDriven || []).map(String),
+    bin: one(P.bin),
+    refuse: one(P.refuse),
+    drag: one(P.drag),
+    refresh: one(P.refresh),
+  }
+})()"""
+
+M21_SHAPE = {
+    "state": str, "why": str, "phase": str, "verdict": str,
+    "isolated": bool, "kernelIsolated": bool, "dpr": (int, float),
+    "cfg": dict, "controls": dict, "gestures": int,
+    "errors": list, "faults": list, "notes": list, "tree": dict, "paths": dict,
+    "notDriven": list,
+    "bin": (dict, type(None)),
+    "refuse": (dict, type(None)),
+    "drag": (dict, type(None)),
+    "refresh": (dict, type(None)),
+}
+
+#: How many gestures www/m21.html asks for, asserted as a CONSTANT rather than a floor. Six in the
+#: deletes (three right presses, three popup clicks), six in the Bin (three right presses, two
+#: popup clicks, one Esc), TWELVE in the drags — press, move, move, release, three times, because
+#: `mouse_drag` passes no `modifiers` and a Ctrl-drag therefore cannot be one `drag` gesture — and
+#: two selection clicks before the F5.
+#:
+#: NOT A FLOOR, FOR M20'S REASON: a `>=` would be green for a drive that died halfway, which is the
+#: failure a control world is otherwise indistinguishable from. None of M21's four worlds stops the
+#: drive early — every flag changes what a verb DOES and not whether a row can be picked — so one
+#: constant serves all five phases, and a world that did stop early is red here.
+M21_GESTURES = 26
+
+#: What DROPPING THE OCCUPIED-ORIGIN PRE-CHECK must break: proof 2's refusal, the occupant's bytes,
+#: and the two counts that say the refusal happened at all.
+#:
+#: SEVEN CLAUSES, AND THE SET IS SCOPED RATHER THAN CONVENIENT. The refusal's errno and its message
+#: go because there is no refusal; `theOccupantsBytesAreIntact` goes because the clobber is the
+#: harm, and it is the clause that separates "it refused" from "the reader's file is still there";
+#: `thePayloadIsStillRecoverable` and `theBinKeptTheRow` go because the restore CONSUMED a row that
+#: should have stayed; and `oneRestoreLandedAndOneDidNot` plus `nothingElseWasRefused` go because
+#: two landed and none was refused.
+#:
+#: PROOF 1 HOLDS ENTIRELY, which is what keeps this control about the pre-check rather than about
+#: the Bin. That took one fixture decision in the page and it is recorded there: `theRecordNamesTheOrigin`
+#: reads its `readlink` answer off a THIRD deleted row that no world restores, because the account is
+#: the program's state at EXIT and a row this control restores is not there to be read.
+_RESTORE_OVERWRITES_FAILS = (
+    "a restore onto an occupied origin says EEXIST",
+    "and the refusal names the path it would have written",
+    "and the occupant's own bytes are intact",
+    "and the refused payload is still recoverable, record and all",
+    "and the Bin kept the row",
+    "one restore landed and one did not",
+    "and the set of refusals is exactly that one",
+    "the page's own verdict is ok",
+)
+
+#: What IGNORING THE MODIFIER must break: the MOVE half of proof 3, alone.
+#:
+#: THE CTRL HALF HOLDS BY CONSTRUCTION, and that is the point of the pair: this world offers COPY
+#: for every row, which is what the Ctrl drag asked for anyway. So the five clauses about the copy
+#: are untouched and the six about the move go — the offer, the kernel's answer, the source that
+#: should have gone, the Bin entry it should have gone to, that entry's record, and the row the
+#: source window should have lost.
+#:
+#: `and the move landed in the target, byte for byte` HOLDS, deliberately. A COPY lands the same
+#: bytes under the same name, so the DESTINATION is right in this world and only the SOURCE's fate
+#: is wrong — which is exactly why the landing and the source are separate clauses.
+_MOVE_FORCED_COPY_FAILS = (
+    "a plain drag inside the session tree offered a MOVE",
+    "and the kernel answered MOVE to the source",
+    "and the move's source is gone",
+    "and the moved original is in the Bin rather than unlinked",
+    "and it kept its origin record",
+    "and the source window lost that row and no other",
+    "the page's own verdict is ok",
+)
+
+#: What SERVING THE ROWS ALREADY IN HAND must break: the CONTENT of the refresh, and the selection
+#: arithmetic that depends on it.
+#:
+#: THE KEY STILL ARRIVES AND `refreshes` STILL RISES, which is this world's whole design and the
+#: reason three clauses move rather than six: `theF5WasSynthesisedAndSaysSo` and
+#: `theKeysymReachedTheProgram` are about the KEY reaching the program and are untouched, so a
+#: refresh that counts and does not re-list is told apart from one that never happened. A control
+#: that stopped the keysym would have turned both and separated nothing.
+#:
+#: AND THE SELECTION CLAUSES MOVE WITH THE CONTENT, which is not double-counting: `refreshKept` is
+#: how many of the selected rows the re-read FOUND, and over a stale listing the row that is gone is
+#: still in hand — so the survivor is not the only one selected and the lost row is still highlighted.
+#: `theNewRowIsNotSelected` HOLDS, because a row this world never read cannot be selected by it.
+_STALE_LISTING_FAILS = (
+    "the listing came back fresh",
+    "and the row that survived is still selected, by name",
+    "and the row that went is not",
+    "the page's own verdict is ok",
+)
+
+#: What LETTING A PASTE CLOBBER must break IN M21: the EEXIST a DROP owes, what that drop landed,
+#: and the target's bytes.
+#:
+#: THE SAME FLAG, A SECOND GESTURE. `--paste-clobbers` drops the destination pre-check and the
+#: copy's `O_EXCL`, and M20 reaches it through the Paste verb; M21 reaches it through `landOne`,
+#: which is the ONE function a Paste and a DROP share. So this control scores the same program
+#: behaviour from the other entry point, and that is why it is declared on both checks rather than
+#: being re-named here.
+_M21_PASTE_CLOBBERS_FAILS = (
+    "a second drop onto a name the target holds says EEXIST",
+    "and that drop landed nothing",
+    "and the target's own copy survived it, while the source's bytes had changed",
+    "the page's own verdict is ok",
+)
+
+
 CONTROLS: Dict[str, NegativeControl] = {
     "no-isolation": NegativeControl(
         name="no-isolation",
@@ -6992,6 +7379,19 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "with the right labels in it and satisfy every geometry clause on proof 2 "
                 "(constraint 40). UNMEASURABLE rather than FAIL, because a FAIL would claim a "
                 "verb was run and the filesystem came back wrong.",
+        ), "m21": Expect(
+            UNMEASURABLE,
+            why="the same mechanism: without COOP/COEP there is no SAB, so no kernel boots, no "
+                "process runs, no window is framed and nothing receives a right press or a drag. "
+                "There is also no FILESYSTEM and therefore no SESSION TREE — the writable copy of "
+                "the read-only base is what the Bin lives in (D40) — so the Bin directory, the "
+                "payloads, the origin symlinks and the four-directory fixture do not exist at "
+                "all. THE SHELL IS THE SHARPEST CASE HERE, as it is for m20: its popup is plain "
+                "DOM, so a page with no kernel could draw a Restore row and satisfy a clause that "
+                "only read labels (constraint 40) — which is why every byte figure on this page "
+                "comes out of `wc` and `grep` in separate processes. UNMEASURABLE rather than "
+                "FAIL, because a FAIL would claim a row was deleted, found in the Bin and "
+                "restored with the wrong bytes.",
         ), "m19a": Expect(
             UNMEASURABLE,
             why="the same mechanism, and for this check it takes the whole subject away: without "
@@ -8989,6 +9389,118 @@ CONTROLS: Dict[str, NegativeControl] = {
                 "run's refusal set by one",
             failed=_PASTE_CLOBBERS_FAILS,
             held=held_rest(M20_LABELS, _PASTE_CLOBBERS_FAILS),
+        ), "m21": Expect(
+            Outcome.FAIL,
+            why="the same flag reached through a DROP rather than through the Paste verb: "
+                "`landOne` is the one function the two gestures share, so a drop onto a name the "
+                "target already holds answers no EEXIST and overwrites the target's copy",
+            failed=_M21_PASTE_CLOBBERS_FAILS,
+            held=held_rest(M21_LABELS, _M21_PASTE_CLOBBERS_FAILS),
+        )},
+    ),
+    "restore-overwrites": NegativeControl(
+        name="restore-overwrites",
+        why="restore_overwrites=1: `src/bin/files.mjs` drops the occupied-origin pre-check before "
+            "a Restore's `rename`, through that program's own declared `--restore-overwrites` "
+            "flag. `docs/PLAN-SHELL.md` §M21's first control.\n"
+            "THE FILESYSTEM WILL NOT DO THIS FOR THE PROGRAM, measured rather than assumed. "
+            "`vfs.rename` has no `RENAME_NOREPLACE`: it refuses a rename over a DIRECTORY, over a "
+            "non-empty directory and over a type mismatch, and over a plain file it refuses "
+            "NOTHING — `applyOp`'s RENAME arm deletes the standing entry, decrements nlink and "
+            "FREES the inode, in one journal record (`bench/m21-bin/probe.mjs`: "
+            "`renameRefused: null`, `freedInode: 8`, `clobbered: true`, with no tear needed at "
+            "all). So the `lstat` this flag removes is the only test there is, and the probe "
+            "asserts the clobber is still present — if the VFS ever grows a refusal, that run "
+            "says to re-derive the pre-check.\n"
+            "WHAT MUST BREAK: proof 2's refusal and the two things that make a refusal mean "
+            "something. The errno and the message go because nothing refused; the OCCUPANT'S "
+            "BYTES go because the clobber is the harm — a clause that only read the errno would "
+            "stay green over a world in which the file a reader made after the delete is gone; "
+            "and the payload's recoverability, the Bin's row, the landed/refused pair and the "
+            "refusal count go with them.\n"
+            "WHAT MUST HOLD: proof 1 entirely, which is what keeps this control about the "
+            "pre-check and not about the Bin. One fixture decision in `www/m21.html` buys that "
+            "and is recorded where it is made: the `readlink` reading is taken off a THIRD "
+            "deleted row no world restores, because the account is the program's state at EXIT "
+            "and a row this control restores is not there to be read.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("restore_overwrites", "1"),),
+        expects={"m21": Expect(
+            Outcome.FAIL,
+            why="a restore with no pre-check answers no EEXIST, destroys the bytes a reader wrote "
+                "at the origin path after the delete, and consumes a Bin row that should have "
+                "stayed",
+            failed=_RESTORE_OVERWRITES_FAILS,
+            held=held_rest(M21_LABELS, _RESTORE_OVERWRITES_FAILS),
+        )},
+    ),
+    "move-forced-copy": NegativeControl(
+        name="move-forced-copy",
+        why="move_forced_copy=1: `src/bin/files.mjs` offers `DOBJ_EFFECT_COPY` whatever the "
+            "modifier is and wherever the row is, through that program's own declared "
+            "`--move-forced-copy` flag. `docs/PLAN-SHELL.md` §M21's second control, and the plan "
+            "requires it to move the effect clause ALONE.\n"
+            "THE SHIPPED RULE IS NOT THE ROW'S WORDING, AND THE DIVERGENCE IS WHAT THIS CONTROL "
+            "SCORES. The row says 'Ctrl held reports COPY; without it, a move'; what shipped is "
+            "'Ctrl → COPY; otherwise MOVE iff the row is inside the session tree, else COPY', "
+            "because a MOVE source cannot verify the COLLECTION — the kernel reports an effect for "
+            "a drop that QUEUED and not one that was taken (constraint 245) — so the original goes "
+            "TO THE BIN rather than to `unlink`. No Bin, no safe move, which is why this control "
+            "belongs to the milestone that built one. Plain-drag-is-a-MOVE everywhere would also "
+            "have turned `www/m10.html`'s committed COPY clause red, since that page drags out of "
+            "`/usr/share` with no modifier.\n"
+            "WHAT MUST BREAK: the MOVE half of proof 3, and nothing else. SIX clauses — the "
+            "offer, the kernel's answer, the source that should have gone, the Bin entry it should "
+            "have gone to, that entry's symlink, and the row the source window should have lost.\n"
+            "WHAT MUST HOLD: the Ctrl half, BY CONSTRUCTION, which is the point of asserting the "
+            "two as a pair — this world offers a copy for every row, which is what the Ctrl drag "
+            "asked for anyway. And `and the move landed in the target, byte for byte` holds too: a "
+            "COPY lands the same bytes under the same name, so the DESTINATION is right here and "
+            "only the source's fate is wrong, which is exactly why the landing and the source are "
+            "separate clauses.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("move_forced_copy", "1"),),
+        expects={"m21": Expect(
+            Outcome.FAIL,
+            why="a drag whose effect is not a function of the gesture offers COPY for a plain "
+                "drag inside the session tree, so the source stays, nothing is binned and the "
+                "source window keeps the row",
+            failed=_MOVE_FORCED_COPY_FAILS,
+            held=held_rest(M21_LABELS, _MOVE_FORCED_COPY_FAILS),
+        )},
+    ),
+    "stale-listing": NegativeControl(
+        name="stale-listing",
+        why="stale_listing=1: F5 serves the rows already in hand instead of re-reading the "
+            "directory, through `src/bin/files.mjs`'s own declared `--stale-listing` flag. "
+            "`docs/PLAN-SHELL.md` §M21's third control, and the plan requires it to move the F5 "
+            "CONTENT clause alone.\n"
+            "THE KEY STILL ARRIVES AND `refreshes` STILL RISES, which is the whole design of this "
+            "world rather than a limitation of it: a refresh that COUNTS and does not re-list is "
+            "indistinguishable from a working one except by CONTENT. So "
+            "`theF5WasSynthesisedAndSaysSo` and `theKeysymReachedTheProgram` are untouched — a "
+            "control that stopped the keysym would have turned both and separated nothing.\n"
+            "WHAT MUST BREAK: the content, and the selection arithmetic that rests on it. THREE "
+            "clauses, and the two selection ones are not double-counting: `refreshKept` is how "
+            "many of the selected rows the re-read FOUND, and over a stale listing the row that "
+            "is gone is still in hand — so the survivor is not the only row selected and the lost "
+            "row is still highlighted. A reader is looking at a selection over a file that no "
+            "longer exists.\n"
+            "AND `and the row that arrived was not selected in its place` HOLDS, which is what "
+            "says the selection is restored by NAME and not by index: a row this world never read "
+            "cannot be selected by it, so that clause's own subject is the fresh path and is "
+            "scored there.",
+        serve_kwargs={},
+        fixture=None,
+        query=(("stale_listing", "1"),),
+        expects={"m21": Expect(
+            Outcome.FAIL,
+            why="an F5 that re-draws the rows in hand shows neither the row that arrived nor the "
+                "absence of the row that went, and keeps a selection over a file that is gone",
+            failed=_STALE_LISTING_FAILS,
+            held=held_rest(M21_LABELS, _STALE_LISTING_FAILS),
         )},
     ),
 }
@@ -16917,6 +17429,222 @@ def check_m20(env: Env) -> None:
     env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
     env.expect_that("served m20.html", env.served_matches_disk(env.document),
                     "the m20.html served does not match www/m20.html on disk")
+
+
+# ======================================================================================
+# m21. The Recycle Bin, F5, and a `files` window that is a drop target.
+# ======================================================================================
+
+
+def _m21_record(env: Env, got: Dict[str, Any], proof: str,
+                table: Tuple[Tuple[str, str, Tuple[str, ...]], ...]) -> None:
+    """One expectation per clause the page publishes for one proof.
+
+    ONE PER CLAUSE AND NOT ONE PER PROOF, because all four controls name SINGLE clauses INSIDE a
+    proof and two of them name clauses in the same one: `move-forced-copy` must turn six of proof
+    3's twenty and `paste-clobbers` must turn three others of the same twenty, and neither may
+    touch the other's. A check recording "proof 3 passed" could not tell a program that asked for
+    a move from a kernel that granted one, and a control satisfied by any failure verifies nothing.
+
+    EVERY PROOF ON THIS PAGE IS DRIVEN IN EVERY WORLD, which is the difference from `_m20_record`.
+    M21's four flags change what a verb DOES and not whether a row can be picked, so no world comes
+    back with a null proof and no control has to name a 'not driven' subset. `notDriven` rides
+    every failure anyway: a null proof would make this record a page of red clauses, and the
+    cheapest way to see why is the page's own list of what it never ran.
+    """
+    evidence = (got[proof] or {}).get("evidence") or {}
+    for label, clause, keys in table:
+        env.expect_that(label, evidence.get(clause) is True,
+                        {"proof": proof, "clause": clause, "notDriven": got["notDriven"],
+                         **{key: evidence.get(key) for key in keys}})
+
+
+@check(
+    name="m21",
+    milestone="m21",
+    controls=(Control.INVERT, Control.NO_ISOLATION, Control.RESTORE_OVERWRITES,
+              Control.MOVE_FORCED_COPY, Control.STALE_LISTING, Control.PASTE_CLOBBERS),
+    labels=M21_LABELS,
+    requires_isolation=True,
+    root=Root.REPO,
+    document=M21_DOCUMENT,
+    ready_expr=M21_READY,
+    ready_what="globalThis.M21 reaching done/aborted/error, or asking for its first gesture "
+               "(www/m21.html?proofs=1)",
+    ready_timeout=420.0,
+    refusal_expr="globalThis.M21 && globalThis.M21.state",
+    refusal_want="aborted",
+    note="THE RECYCLE BIN, F5, AND A `files` WINDOW THAT IS A DROP TARGET — four driven proofs "
+         "over FIVE `files` windows and 26 gestures, in the session's own writable copy of the "
+         "read-only base (D40) rather than in `/tmp`. That tree is forced and not chosen: "
+         "`binnable` is `underDir(path, HOME_DIR) && !underDir(path, binRoot)`, so a `/tmp` delete "
+         "is PERMANENT and every Bin clause would be about the world M21 does not change "
+         "(docs/PLAN-SHELL.md §M21).\n"
+         "THE BIN IS A RESERVED DIRECTORY PLUS A SIDECAR AND NEEDS NO INODE FLAG, which is the "
+         "plan row's assumption and was MEASURED before the design: `bench/m21-bin/probe.mjs` "
+         "replays four candidate designs x both orders, torn at every truncation offset and every "
+         "single-bit flip, 26,403 cases in 0.55 s. Four of its conditions are clauses here and the "
+         "decisive one is that the origin record is a SYMLINK: a symlink target is ONE journal "
+         "record and a journal record carries a CRC-32 (`src/fs/journal.mjs`), while an OPFS blob "
+         "carries NONE (`src/kernel/store.mjs`) — so a sidecar held as file data is neither "
+         "integrity-checked nor inside `scripts/fsfuzz.py`'s three-second gate. `stat` answering "
+         "`symbolic link` for the record and `regular file` for the payload is that condition read "
+         "as a type, out of a separate process.\n"
+         "EVERY BYTE FIGURE COMES OUT OF `wc` AND `grep`, NEVER OFF A ROW THAT REAPPEARED. Every "
+         "reading arrives as a separate `ls`/`stat`/`wc`/`grep` process's RESULT ROW, because the "
+         "page holds no fd and makes no syscall — and the comparison is shown CAPABLE OF FAILING "
+         "against the same "
+         "payload read for the WRONG text, since a `grep -c` matching everything would satisfy the "
+         "clause over any two files at all.\n"
+         "THE DRAG'S SHIPPED RULE DIVERGES FROM THE PLAN ROW AND BOTH HALVES ARE ASSERTED. The row "
+         "says 'Ctrl held reports COPY; without it, a move'; what shipped is 'Ctrl → COPY; "
+         "otherwise MOVE iff the row is inside the session tree, else COPY', because the kernel "
+         "reports an effect for a drop that QUEUED and not one that was COLLECTED (constraint 245) "
+         "— so a MOVE source cannot verify the collection and its original goes TO THE BIN rather "
+         "than to `unlink`. No Bin, no safe move. Plain-drag-is-a-MOVE everywhere would also have "
+         "turned `www/m10.html`'s committed COPY clause red, which is the same rule seen from "
+         "OUTSIDE the session tree. The offer and the ANSWER are separate clauses per half, "
+         "because only the kernel decides the second.\n"
+         "THE DRAGS ARE FOUR GESTURES EACH AND NOT ONE `drag`, measured against the driver rather "
+         "than preferred: `mouse_drag` passes no `modifiers`, so a Ctrl-drag has to be "
+         "press/move/move/release. That is why 26 and not 17.\n"
+         "F5 IS SYNTHESISED, AND THE PAGE MEASURES THAT IT WAS RATHER THAN CLAIMING OTHERWISE. "
+         "`scripts/cdp.py`'s `KEYS` table has no row for `F5` — the same gap M20 records for `F2` "
+         "and `Delete` — so the page dispatches one `KeyboardEvent`, asserts `synthetic` rose by "
+         "exactly one and `trusted` did not, and the SELECTION the refresh survives was made with "
+         "two REAL clicks. What goes unproven is the BINDING, not the verb; `\"F5\": (116, \"\")` "
+         "in that table is the one line that would close it.\n"
+         "EACH REFUSAL'S ERRNO IS A SEPARATE EXPECTATION, and EEXIST arrives here from a THIRD "
+         "mechanism beside M20's two: not the kernel's `O_EXCL` and not a copy's destination "
+         "pre-check, but an `lstat` before a `rename` that would otherwise have CLOBBERED. "
+         "`vfs.rename` has no `RENAME_NOREPLACE` — over a plain file it deletes the standing entry "
+         "and FREES the inode in one journal record, measured — so the pre-check is userland's and "
+         "`restore-overwrites` is the world where a reader's own file is destroyed by a restore "
+         "that reports success.\n"
+         "ALL FOUR CONTROLS ARE ARGV FLAGS ON `src/bin/files.mjs` AND NONE IS A SERVED-BYTES "
+         "FIXTURE, so every world is re-runnable from the command line with no source edit; "
+         "`programFlags()` is why one query parameter reaches five processes. The page sets the "
+         "HOST's and the SURFACE's controls to {} explicitly and the check reads `controlsInForce` "
+         "back, because those are MODULE state and a switch another page in this realm left "
+         "holding is a world nobody asked for.\n"
+         "negative controls: --negative restore-overwrites drops the occupied-origin pre-check and "
+         "turns proof 2's refusal, the OCCUPANT'S BYTES, the payload's recoverability and the two "
+         "counts — seven — while proof 1 holds entirely, which one fixture decision in the page "
+         "buys and which that page records. --negative move-forced-copy ignores the modifier and "
+         "turns the MOVE half ALONE, six clauses; the Ctrl half holds by construction and so does "
+         "`the move landed in the target`, because a COPY lands the same bytes under the same name "
+         "and only the source's fate is wrong. --negative stale-listing serves the rows in hand "
+         "and turns THREE: the content and the two selection readings, while the keysym clauses "
+         "hold — a refresh that counts and does not re-list is told apart from one that never "
+         "happened. --negative paste-clobbers is M20's flag reached through a DROP instead of "
+         "through Paste (`landOne` is the one function they share) and turns three. --negative "
+         "no-isolation must come out BROKEN: no SAB, no kernel, no filesystem, so there is no "
+         "session tree for a Bin to live in.\n"
+         "MEASURED SUBSETS, one run each at dpr 2: 8 red / 64 intact for restore-overwrites, "
+         "7 / 65 for move-forced-copy, 4 / 68 for stale-listing, 4 / 68 for paste-clobbers. Each "
+         "count includes `the page's own verdict is ok`, which moves with any clause.",
+)
+def check_m21(env: Env) -> None:
+    performed = drive_gestures(env, "M21", timeout=M21_TIMEOUT)
+    got = env.read(READ_M21, M21_SHAPE)
+    if got["state"] == "error":
+        env.unmeasurable(
+            "www/m21.html reported state 'error' before producing proofs: %s. Nothing below was "
+            "measured.%s" % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] == "aborted":
+        env.unmeasurable(
+            "www/m21.html aborted: %s. Without cross-origin isolation the kernel's SAB is not "
+            "constructible, so no process runs, no window is framed, no filesystem is mounted and "
+            "the session's writable copy of the read-only base — which is the tree the Bin lives "
+            "in — is never seeded.%s"
+            % (got["why"] or "no reason given", _page_blame(got)))
+    if got["state"] != "done":
+        env.unmeasurable("www/m21.html never reached a terminal state (state=%r, phase=%r)%s"
+                         % (got["state"], got["phase"], _page_blame(got)))
+
+    env.expect("page isolated", got["isolated"], True)
+    env.expect("kernel isolated", got["kernelIsolated"], True)
+    env.expect_that("the kernel raised no error", not got["errors"],
+                    {"errors": got["errors"][:4]})
+    # THE FIXTURE IS BUILT BY REAL PROGRAMS — `rm -r` twice, `mkdir -p`, and `echo` through a shell
+    # redirection per row — and read back by one process per reading, including the `touch` that
+    # plants a payload with no origin record and the `rm` that changes a directory under a live
+    # window while it is parked in `poll`. A process
+    # that faulted during its own init reads downstream as "the call returned nothing", and a
+    # swallowed failure is a defect (CLAUDE.md, harness honesty).
+    env.expect_that("no process faulted", not got["faults"],
+                    {"faults": got["faults"][:4]})
+    # THE RATIO, because every aim on this page is a VIEWPORT point computed from a CSS-px
+    # rectangle and converted through SURFACE px and back. A figure labelled with a ratio it was
+    # not taken at is what cost M11, M12 and M16 a milestone each (constraints 264, 297).
+    env.expect_that("the page rendered at the ratio the run asked for",
+                    abs(float(got["dpr"]) - VIEWPORT_SCALE) < 1e-6,
+                    {"devicePixelRatio": got["dpr"], "viewportScale": VIEWPORT_SCALE})
+    # AND IT WAS REALLY DRIVEN, TO THE EXACT COUNT. Every right press, popup click, selection
+    # click, press/move/release of the three drags and the Esc below is input this driver
+    # dispatched; a page that finished without asking would have measured a Bin nobody filled and
+    # still produced row names.
+    #
+    # A CONSTANT AND NOT A FLOOR, which is M20's reason and holds for all five phases here: none of
+    # M21's worlds stops the drive early, so a run that stopped is red rather than green with a
+    # smaller number.
+    env.expect_that("the page was really driven",
+                    performed == M21_GESTURES and got["gestures"] == performed,
+                    {"performed": performed, "want": M21_GESTURES,
+                     "pageLogged": got["gestures"], "phase": got["phase"],
+                     "notDriven": got["notDriven"]})
+    # AND THE WORLD IS THE ONE ASKED FOR, from BOTH sides. All four program flags travel on argv
+    # into five processes and nothing page-side holds them, so they are checked against the
+    # DOCUMENT; `controlsInForce` is the HOST's own report of the module state it is running under,
+    # and every key of it must be off — this page adds no page-side control, so "none, and said so"
+    # is what it has to be able to prove.
+    #
+    # `bool(live)` IS WHAT STOPS THAT HALF BEING VACUOUS, and it is not belt-and-braces: a page
+    # that published no `controlsInForce` at all reads back as `{}` here, and "no key is truthy"
+    # holds over an empty table. `setHostControls` returns a five-key record of booleans and
+    # `host.report().controls` spreads the geometry and surface tables in beside it, so a non-empty
+    # dict is the host really answering.
+    cfg = got["cfg"] or {}
+    live = got["controls"] or {}
+    env.expect_that(
+        "the controls the page reports are the ones asked for",
+        bool(cfg.get("proofs")) and bool(live)
+        and not [key for key, value in live.items() if value]
+        and bool(cfg.get("restoreOverwrites")) == ("restore_overwrites=1" in env.document)
+        and bool(cfg.get("moveForcedCopy")) == ("move_forced_copy=1" in env.document)
+        and bool(cfg.get("staleListing")) == ("stale_listing=1" in env.document)
+        and bool(cfg.get("pasteClobbers")) == ("paste_clobbers=1" in env.document),
+        {"asked": cfg, "inForce": live, "document": env.document,
+         "tree": got["tree"], "paths": got["paths"]})
+
+    for proof, table in _M21_PROOFS:
+        _m21_record(env, got, proof, table)
+
+    # THE PAGE'S OWN NOTES RIDE THIS FAILURE, M18's through M20's precedent: a diagnosis naming the
+    # one fact that explains several red clauses at once, with its address, is cheaper than a
+    # reader rediscovering it from four evidence blocks. The verdict is the EXACT string, so the
+    # `; not driven: ...` suffix a null proof would add is a failure here rather than a pass with a
+    # footnote.
+    #
+    # AND THE NOTES ARE NOT EMPTY ON THE LIVE PATH, deliberately: this page pushes its own measured
+    # finding about the desktop's Bin icon there. On the proofs path they are the page's running
+    # commentary, and reading them here is how a red clause arrives with the page's own account of
+    # why.
+    env.expect_that("the page's own verdict is ok", got["verdict"] == "ok",
+                    {"verdict": got["verdict"], "notDriven": got["notDriven"],
+                     "notes": got["notes"]})
+
+    # AN ARTIFACT AND NOT AN ASSERTION. A Bin with the bytes in it and one with a dangling row are
+    # the same picture, and a drag that moved and one that copied differ by a row in a window
+    # nobody is looking at — every clause above reads a byte count, a counter, an inode type or a
+    # process's result row rather than this PNG (constraint 40).
+    env.shoot("m21-bin")
+
+    served = env.request(env.document)
+    env.expect("document COOP", served.headers.get("Cross-Origin-Opener-Policy"), "same-origin")
+    env.expect("document COEP", served.headers.get("Cross-Origin-Embedder-Policy"), "require-corp")
+    env.expect_that("served m21.html", env.served_matches_disk(env.document),
+                    "the m21.html served does not match www/m21.html on disk")
 
 
 _STATUS_PROBE = Check(name="status-probe", func=lambda env: None, milestone="-", controls=(),

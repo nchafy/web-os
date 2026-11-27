@@ -1,11 +1,7 @@
-// `touch`: create a file if it is not there.
+// `touch`: set a file's access and modification times to now, and create it if it is not there.
 //
-// WHAT THIS DOES NOT DO, stated rather than discovered: it does not update a timestamp on a file
-// that already exists. There is no `utimes` in this ABI (`src/abi.mjs`'s path group has `mkdir`
-// through `statfs` and no time-setting call), so the half of `touch` that sets mtime cannot be
-// written yet — and a program that silently did nothing for the common case would be worse than
-// one that says so. `-c` is accepted because "do not create" is the one behaviour that IS
-// expressible.
+// `-c` does not create, and the absence of a file is then not an error — the one behaviour that
+// does not need a clock.
 //
 // The contract this program is written against is in src/bin/true.mjs.
 
@@ -26,18 +22,35 @@ export function run(env) {
   }
   let status = 0;
   const created = [];
+  const stamped = [];
   for (const path of operands) {
     const st = env.fs.stat(path);
-    if (typeof st !== "number") continue;      // it exists; there is no mtime to set
-    if (flags.c) continue;                      // -c: do not create
-    const fd = env.fs.open(path, O_WRONLY | O_CREAT, DEFAULT_MODE);
-    if (fd < 0) {
-      if (fd === -EEXIST) continue;
-      status = std.complainErrno(env, NAME, path, fd);
+    if (typeof st === "number") {
+      if (flags.c) continue;
+      const fd = env.fs.open(path, O_WRONLY | O_CREAT, DEFAULT_MODE);
+      if (fd < 0 && fd !== -EEXIST) {
+        status = std.complainErrno(env, NAME, path, fd);
+        continue;
+      }
+      if (fd >= 0) {
+        env.fs.close(fd);
+        created.push(path);
+        /* A CREATE ALREADY CARRIES THE TIME. `OP.CREATE` stamps the inode from the filesystem's
+         * own clock (`src/fs/vfs.mjs`), so a `utimes` here would journal a second record for a
+         * time the file already holds. */
+        continue;
+      }
+      // -EEXIST: it arrived between the stat and the open, so this is the existing-file case.
+    }
+    /* `utimesNow` AND NOT `utimes(path, Date.now() * 1e6, ...)`: the ms -> ns factor has one
+     * definition on this side of the ABI (src/libos/syscall.mjs), and the value must be a BigInt
+     * because 2^53 ns is 104 days after the epoch. */
+    const r = env.fs.utimesNow(path);
+    if (r < 0) {
+      status = std.complainErrno(env, NAME, path, r);
       continue;
     }
-    env.fs.close(fd);
-    created.push(path);
+    stamped.push(path);
   }
-  return { exit: status, created };
+  return { exit: status, created, stamped };
 }

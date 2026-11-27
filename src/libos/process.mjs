@@ -12,7 +12,7 @@ import {
   observeHeartbeat, barrierArrive, barrierDepart, barrierCounters,
   open, close, read, pread, pwrite, readAll, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, linkAt, rename,
-  readlink, readdir, statfs, dup, dup2, chdir,
+  readlink, realpath, readdir, statfs, dup, dup2, chdir, utimes, utimesNow,
   pipe2, spawn, waitpid, kill, sigaction, setpgid, setsid, getpgid, getppid, exit,
   nanosleep,
   ptyOpen, ttyGet, ttySet, ttyWinsizeGet, ttyWinsizeSet, tcGetPgrp, tcSetPgrp, poll,
@@ -34,7 +34,7 @@ import { lockdown } from "./lockdown.mjs";
 const FS = Object.freeze({
   open, close, read, pread, pwrite, readAll, write, fsync, ftruncate, truncate, seek,
   fstat, stat, lstat, mkdir, rmdir, unlink, chmod, chown, symlink, link: linkAt,
-  rename, readlink, readdir, statfs, dup, dup2, chdir,
+  rename, readlink, realpath, readdir, statfs, dup, dup2, chdir, utimes, utimesNow,
 });
 
 /** M4's process and IPC calls, on `env.proc`. `spawn` + `pipe2` + `setpgid` is the whole of process

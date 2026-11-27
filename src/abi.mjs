@@ -186,7 +186,28 @@ const INTS = {
   // `win_items` already defines, so there is one definition of a row and one of its flags, and
   // activation comes back as `WEV_ITEM` on the fd the process is already parked on.
   SYS_win_menu: 60,
-  NSYS: 61,
+  // M21. TWO CALLS THAT WERE ALREADY IMPLEMENTED AND UNREACHABLE. `src/fs/vfs.mjs` journals and
+  // replays `OP.UTIMES` and carries a full symlink-resolving `realpath`, and docs/ABI.md's path
+  // group has listed both since M3 — so these numbers expose what exists rather than adding an
+  // interface, and a second implementation of either would be the defect.
+  //
+  // THE TIMES ARE NANOSECONDS, as (lo, hi) pairs: a0/a1 atime, a2/a3 mtime. That is the unit
+  // `encodeFilestat` publishes, so a caller round-trips `stat`'s own field with no conversion. The
+  // INODE's resolution is milliseconds (`VFS.now`), so the kernel truncates and `stat` answers the
+  // truncated value; an ABI in milliseconds would be a second unit for one fact.
+  //
+  // THERE IS NO `UTIME_NOW` SENTINEL, and the reason is measured rather than chosen: `Date.now()`
+  // is the same clock in every agent in this renderer (see G_DEADLINE_LO), and a process already
+  // reads it inside its own realm — `src/libos/syscall.mjs` calls it, and M6's strip does not take
+  // `Date` (`src/libos/lockdown.mjs` TARGETS). So "now" is a value the caller computes, which
+  // leaves the kernel no sentinel to interpret and no way to disagree with the caller about when
+  // now was.
+  SYS_utimes: 61,
+  // `realpath` answers in the BYTE REGION with the length in r0, exactly as `readlink` does and for
+  // the same reason: a path is not an integer, and a process may hold only integers (constraint 15)
+  // plus whatever it copies out of its own byte region.
+  SYS_realpath: 62,
+  NSYS: 63,
 
   // STATUS. 1 is a deliberate hole: docs/ABI.md decision 1 pins "sets STATUS=2" for the
   // interrupt case, and renumbering a published value is worse than a gap.
@@ -1103,6 +1124,7 @@ export const {
   SYS_win_raise,
   SYS_dataobj_create, SYS_dataobj_set, SYS_dataobj_get, SYS_dataobj_offer, SYS_dataobj_open,
   SYS_win_items, SYS_win_menu,
+  SYS_utimes, SYS_realpath,
   NSYS,
   O_RDONLY, O_WRONLY, O_RDWR, O_ACCMODE, O_CREAT, O_EXCL, O_TRUNC, O_APPEND,
   O_DIRECTORY, O_NOFOLLOW, SEEK_SET, SEEK_CUR, SEEK_END, NAME_MAX,
@@ -1235,6 +1257,7 @@ export const SYS_NAME = Object.freeze([
   "win_create", "win_destroy", "win_set", "win_surface", "win_draw", "win_raise",
   "dataobj_create", "dataobj_set", "dataobj_get", "dataobj_offer", "dataobj_open",
   "win_items", "win_menu",
+  "utimes", "realpath",
 ]);
 
 // The WASI preview1 errno enum, dense 0..76, in its published order. Generated mechanically from
@@ -2487,6 +2510,18 @@ export function selfTest() {
     fail("two syscall numbers collide: one call would dispatch to the other's handler");
   }
   if (SYS_win_menu !== SYS_NAME.indexOf("win_menu")) fail("SYS_win_menu is not win_menu's number");
+  /* THE NAME ITSELF, which the loop above cannot pin. That loop asserts the two sides AGREE, so a
+   * call renamed on both sides passes it — and a name is published: `/dev/trace` and
+   * `/proc/<pid>/status` render `SYS_NAME[nr]`, and docs/ABI.md names its calls in prose. */
+  if (SYS_utimes !== SYS_NAME.indexOf("utimes")) fail("SYS_utimes is not utimes's number");
+  if (SYS_realpath !== SYS_NAME.indexOf("realpath")) fail("SYS_realpath is not realpath's number");
+  /* A RATCHET, NOT A SECOND COPY OF THE COUNT. Syscall numbers are append-only (see INTS), so NSYS
+   * may only grow; a run where it shrank means a published number is about to be reused for a
+   * different call, and every program built against the old table would dispatch somewhere else
+   * with nothing thrown. None of the clauses above can see that — they check the table against
+   * itself, and a table with a call removed is internally consistent. Raising the floor is a
+   * one-line reviewable diff, which is `scripts/check_floors.json`'s discipline. */
+  if (NSYS < 63) fail(`NSYS is ${NSYS}, below the 63 calls already published: a number was reused`);
   if (ERRNO_NAMES.length !== 77) fail(`errno table has ${ERRNO_NAMES.length} rows, not 77`);
   if (new Set(ERRNO_NAMES).size !== 77) fail("errno names are not unique");
   if (ERRNO_NAMES.some((n) => !n)) fail("errno table has a hole");
